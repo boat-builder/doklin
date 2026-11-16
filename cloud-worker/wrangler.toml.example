@@ -35,7 +35,8 @@ routes = [{ pattern = "notes.example.com", custom_domain = true }]
 binding = "DATA"                          # the worker reads env.DATA — leave as is
 bucket_name = "doklin-notes-example-com"
 
-# The database beside the bucket: people, presence and file leases.
+# The database beside the bucket: people, presence, file leases, the plan
+# and what was spent today.
 # `wrangler d1 create` prints the id; `wrangler d1 info
 # <name>` prints it again if the create output has scrolled away. The worker
 # migrates its own schema, so there is no migrations directory to apply.
@@ -43,3 +44,16 @@ bucket_name = "doklin-notes-example-com"
 binding = "DB"                            # the worker reads env.DB — leave as is
 database_name = "doklin-notes-example-com"
 database_id = "<from wrangler d1 create>"
+
+# The worker's loop catchers: a person's device, or an agent's machine, past
+# its block's requests a minute is told 429 and slows down. Counted per
+# credential. The app's setup prompt and the update script write the same
+# two blocks.
+[[ratelimits]]
+name = "DEVICE_LIMIT"
+namespace_id = "1001"
+simple = { limit = 600, period = 60 }
+[[ratelimits]]
+name = "AGENT_LIMIT"
+namespace_id = "1002"
+simple = { limit = 120, period = 60 }

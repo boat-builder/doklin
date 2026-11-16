@@ -14,6 +14,13 @@ export interface Env {
    *  without one, which still answers the probe (`d1: null`, schema.ts) so
    *  setup can catch it; nobody can sign in to it. */
   DB?: D1Database;
+  /** The loop catchers — `[[ratelimits]]` in wrangler.toml, keyed by token
+   *  id: a person's device (`DEVICE_LIMIT`) and an agent's machine
+   *  (`AGENT_LIMIT`), checked on every authenticated request (api.ts).
+   *  Optional: a deployment without one is not checked, and neither are the
+   *  tests or the harness. */
+  DEVICE_LIMIT?: RateLimit;
+  AGENT_LIMIT?: RateLimit;
   /** Never bound: the worker sets it on the `Env` it hands a space's routes
    *  (spaces.ts). `DATA` is then that space's part of the bucket and `whole`
    *  the bucket itself. Absent for the shared workspace. */

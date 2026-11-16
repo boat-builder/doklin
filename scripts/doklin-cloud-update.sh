@@ -16,7 +16,8 @@
 #
 # It is a code-only redeploy: the R2 bucket, the D1 database, the OWNER_TOKEN
 # secret and the domain routing all survive a same-name deploy, so nothing in
-# this file is secret, and nothing else on the account is touched.
+# this file is secret, and nothing else on the account is touched. The
+# worker's own rate-limit bindings are written with the rest of its config.
 #
 # The one thing it will not do is guess. Deploying under a name that doesn't
 # exist CREATES a second worker rather than updating yours, so the worker, its
@@ -303,6 +304,9 @@ else
   routes="workers_dev = true"
 fi
 
+# The two [[ratelimits]] blocks are the worker's loop catchers (DEVICE_LIMIT,
+# AGENT_LIMIT): the same numbers as the setup prompt's wrangler.toml
+# (src/cloudPrompts.ts) — the test holds the two together.
 cat > wrangler.toml <<TOML
 name = "$WORKER"
 main = "doklin-cloud-worker.js"
@@ -316,6 +320,14 @@ bucket_name = "$BUCKET"
 binding = "DB"
 database_name = "$DATABASE"
 database_id = "$DATABASE_ID"
+[[ratelimits]]
+name = "DEVICE_LIMIT"
+namespace_id = "1001"
+simple = { limit = 600, period = 60 }
+[[ratelimits]]
+name = "AGENT_LIMIT"
+namespace_id = "1002"
+simple = { limit = 120, period = 60 }
 TOML
 
 say ""

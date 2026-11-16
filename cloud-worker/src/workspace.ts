@@ -8,7 +8,7 @@
 
 import { readWorkspace, type WorkspaceRecord } from "./bucket";
 import type { Env } from "./env";
-import { MANIFEST_KEY, blobKey, validPath } from "./layout";
+import { MANIFEST_KEY, blobKey, syncs, validPath } from "./layout";
 import type { Manifest, ManifestFile, PublicEntry } from "./manifest";
 import { spaceOf } from "./spaces";
 import { MANIFEST_VERSION } from "./version";
@@ -43,7 +43,9 @@ const optText = (v: unknown): string | undefined => (typeof v === "string" ? v :
 /**
  * The manifest as the reader trusts it. Every PUT was shape-checked, but a
  * page must never 500 on someone else's bytes: anything unreadable simply
- * reads as absent.
+ * reads as absent. So does a file outside `syncs` (layout.ts), and a page of
+ * one, should a stored manifest still list it: nothing public, and nothing an
+ * agent reads, is ever anything but a document.
  */
 function readManifest(v: unknown): Manifest {
   const manifest: Manifest = { version: MANIFEST_VERSION, seq: 0, files: {}, tombstones: {}, public: {} };
@@ -52,7 +54,7 @@ function readManifest(v: unknown): Manifest {
   manifest.seq = num(v.seq);
   if (isObject(v.files)) {
     for (const [fid, f] of Object.entries(v.files)) {
-      if (!isObject(f) || !validPath(f.path) || typeof f.hash !== "string") continue;
+      if (!isObject(f) || !validPath(f.path) || !syncs(f.path) || typeof f.hash !== "string") continue;
       manifest.files[fid] = {
         path: f.path,
         rev: num(f.rev),
@@ -74,7 +76,7 @@ function readManifest(v: unknown): Manifest {
         by: typeof e.by === "string" ? e.by : "",
         at: num(e.at),
       };
-      if (e.kind === "file" && typeof e.file === "string" && validPath(e.path)) {
+      if (e.kind === "file" && typeof e.file === "string" && validPath(e.path) && syncs(e.path)) {
         map[slug] = { kind: "file", file: e.file, path: e.path, ...common };
       } else if (e.kind === "dir" && typeof e.path === "string" && (e.path === "" || validPath(e.path))) {
         map[slug] = { kind: "dir", path: e.path, ...common };

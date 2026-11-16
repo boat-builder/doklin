@@ -10,7 +10,7 @@
 //   GET /<slug>/raw              the html rendition verbatim, sandboxed (what the framed page loads)
 //   GET /<dirSlug>               a published folder: its table of contents
 //   GET /<dirSlug>/<rel/path>    a note inside it (`.md` dropped, segments percent-encoded), its
-//                                rendition at …/raw, or an image / PDF / html file by exact path
+//                                rendition at …/raw, or an html document by exact path
 //   GET /og.png                  the site's static Open Graph image
 //   GET /__web/<tag>/mermaid.js  the standalone mermaid module (immutable, content-tagged)
 //   GET /__web/fonts/<file>      the font files the app bundles (theme.ts)
@@ -21,7 +21,7 @@
 import { spaceAt } from "./addresses";
 import type { Env } from "./env";
 import { RESERVED_SLUGS, SLUG_RE, validPath } from "./layout";
-import { dirTitle, fileResponse, notePage, rawRendition, tocPage } from "./pages";
+import { dirTitle, htmlFile, notePage, rawRendition, tocPage } from "./pages";
 import { PublicMap, nestedUrl, type DirPage, type Page } from "./publicMap";
 import {
   appleTouchIcon,
@@ -210,7 +210,7 @@ async function pageResponse(
   if (rest.length === 0) return tocPage(ws, dir, { url, pagePath: own });
 
   // Inside the folder: a note (its extension dropped), its rendition at
-  // …/raw, or a file by its exact path.
+  // …/raw, or an html document by its exact path.
   const wantRaw = rest.length >= 2 && rest[rest.length - 1] === "raw";
   const inner = wantRaw ? rest.slice(0, -1) : rest;
   const relPath = inner.join("/");
@@ -229,5 +229,5 @@ async function pageResponse(
   }
   if (wantRaw) return notFoundPage();
   const exact = ws.fileAt(full);
-  return exact ? fileResponse(ws, exact) : notFoundPage();
+  return exact ? htmlFile(ws, exact) : notFoundPage();
 }

@@ -6,7 +6,7 @@ worker renders synced blobs on request. See also [cloud.md](cloud.md).
 
 ## The map
 
-- A file entry holds the fileId (a rename carries the page) and a `path` snapshot (a deleted-and-recreated file at that path re-binds). A folder entry (`""` = whole workspace) publishes every note under it — no membership list; the engine re-points it when all its files moved to one new prefix in one cycle.
+- A file entry holds the fileId (a rename carries the page) and a `path` snapshot (a deleted-and-recreated file at that path re-binds). It names a document's file — its markdown, else its html: a page of anything else is refused (`syncs`, `layout.ts`), so a picture or a PDF is never a page. A folder entry (`""` = whole workspace) publishes every note under it — no membership list; the engine re-points it when all its files moved to one new prefix in one cycle.
 - An entry outlives its file: 404 while gone, back when the file is; stopping is explicit. `root: true` whose file is gone → `/` serves the landing page.
 - Offline publishing: the engine queues `public_ops` in its state and `fold_public` folds them into the next won CAS (re-point renames, re-bind dead entries, apply ops, re-point folders).
 - Slug grammar `^[a-z0-9][a-z0-9-]{2,63}$` and reserved words live in `layout.ts`, `manifest.rs`, `src/cloud.ts`; the random-slug alphabet (8 of `abcdefghjkmnpqrstuvwxyz23456789`) in `manifest.rs` and `agentPages.ts`. **Change all.** Custom slugs are checked against the manifest locally; two devices racing one slug: the loser gets a suffix.
@@ -17,9 +17,9 @@ worker renders synced blobs on request. See also [cloud.md](cloud.md).
 
 ## Addresses
 
-- `/<slug>`; inside a folder `/<dirSlug>/<rel>` (markdown extension dropped, segments percent-encoded, case-insensitive). Non-markdown files serve by exact path only if image, PDF or html; else 404. A subfolder is not a page.
+- `/<slug>`; inside a folder `/<dirSlug>/<rel>` (markdown extension dropped, segments percent-encoded, case-insensitive). An html document serves by its exact path; nothing else does — a workspace holds only documents, so there is no picture or PDF to serve. A subfolder is not a page.
 - A note can answer on its own slug and inside a published folder at once. `PublicMap.urlFor` prefers the folder the page was reached through, then the file's own slug, then the closest published folder (deepest first).
-- `<stem>.html` beside a note is its rendition: framed by default, `?v=md` the markdown, `/raw` verbatim. html and svg serve under `Content-Security-Policy: sandbox allow-scripts allow-popups`.
+- `<stem>.html` beside a note is its rendition: framed by default, `?v=md` the markdown, `/raw` verbatim. html serves under `Content-Security-Policy: sandbox allow-scripts allow-popups`.
 
 ## Rendering (`cloud-worker/src/`)
 
@@ -28,8 +28,8 @@ worker renders synced blobs on request. See also [cloud.md](cloud.md).
 - Comment markers stripped; thread bodies never leave the sidecar. From `<stem>.meta.jsonl` only table widths are used, under the app's table identity (`tableSignature` in `render.ts` ⇄ `src/tableWidths.ts`, byte-compatible).
 - The frontmatter block is left off the page (`splitFrontmatter`, `src/frontmatter.ts`): only the body is rendered.
 - ```` ```svg ```` drawings are drawn by the worker through the app's `sanitizeDrawing` (ids namespaced `dg<n>-` per page), so they show with scripts off; one that doesn't parse stays a code block. ```` ```mermaid ```` stays a code block until the hydrator draws it with the app's `mermaidConfig` + `finishMermaidSvg` (re-exported by `cloud-worker/web/mermaid-entry.ts`).
-- Links: relative targets resolve against the note's folder (`..` can't escape the workspace). Public target → its URL (`urlFor` order); unpublished → plain text; relative image → `<img>` if reachable, else alt text; other schemes, anchors, absolute paths untouched.
-- A note over 4 MB is refused. The manifest is read tolerantly: unknown fields never break a page.
+- Links: relative targets resolve against the note's folder (`..` can't escape the workspace). Public target → its URL (`urlFor` order); unpublished → plain text; a relative image → its alt text (pictures stay on their device); other schemes, anchors, absolute paths — images on the web included — untouched.
+- A note over 4 MB is refused. The manifest is read tolerantly: unknown fields never break a page, and a file outside `syncs`, or a page of one, reads as absent.
 - Every page: `<meta name="robots" content="noindex">` + `x-robots-tag`. No access codes, web editor or web comments. OG image is one static PNG.
 
 ## Cache

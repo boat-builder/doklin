@@ -5,13 +5,20 @@
 // shared object read and rewritten would lose one of two beats landing
 // together — and it rides `POST /api/poll`, so it costs no request of its own.
 //
+// A beat says how long it holds (`ttl`): a device that polls every 15 s says
+// a minute and a half, one that polls every few minutes says longer, so a
+// device left idle stays listed as around instead of dropping out between
+// two polls. The worker holds it to between `PRESENCE_TTL_MS` and
+// `MAX_PRESENCE_TTL_MS` (layout.ts), and the row says when it lapses
+// (`until`).
+//
 // A lease is the same beat read one step further. A beat that names a path
 // claims that document: the upsert of `leases` succeeds when nobody holds it,
 // when it is already this Mac's (a renewal), or when the holder has lapsed —
 // and changes nothing otherwise. A beat that names another path, or none,
 // lets go of what this Mac held. So acquiring, renewing and releasing cost no
 // request of their own either, and a lease lives exactly as long as the beats
-// that carry it: `until` is the presence TTL from the last one.
+// that carry it: its `until` is the beat's own.
 //
 // Advisory, always. Nothing that writes the manifest reads a lease; it changes
 // what an editor does with a document, never whether a write lands.
@@ -25,16 +32,18 @@
 // open in a space is told only to the people in that space: to everyone else
 // they are here, and that is all. The poll's own batch also answers which
 // spaces the caller is in (spaces.ts), which is how a Mac learns it was added
-// to one, or taken out.
+// to one, or taken out — and the domain's `limits` (limits.ts), so the
+// numbers a device paces itself by cost no request of their own.
 //
-// No reaper. A read filters by the TTL, and a beat sweeps the rows that have
+// No reaper. A read filters by `until`, and a beat sweeps the rows that have
 // lapsed in the same batch it writes in — so the tables hold the devices that
 // are here and the documents they have open, plus whatever quit without saying
-// so in the last minute and a half.
+// so inside its last beat's ttl.
 
 import type { Auth } from "./auth";
 import type { Env } from "./env";
-import { PRESENCE_TTL_MS } from "./layout";
+import { MAX_PRESENCE_TTL_MS, PRESENCE_TTL_MS } from "./layout";
+import { limitsFrom, limitsReads, type Limits } from "./limits";
 import { withDb } from "./schema";
 import { spacesStatement, toSpace, type Space, type SpaceRow } from "./spaces";
 
@@ -59,25 +68,28 @@ export type LeaseEntry = {
 };
 
 /** What the poll answers beside the etag. When the database cannot say, the
- *  poll answers `presence: {}`, `leases: null` and `spaces: null` — and an
- *  editor reads a null exactly as "nobody holds anything". */
-export type Here = { presence: PresenceMap; leases: LeaseEntry[]; spaces: Space[] };
+ *  poll answers `presence: {}`, `leases: null`, `spaces: null` and the Free
+ *  limits with no `fleetToday` — and an editor reads a null exactly as
+ *  "nobody holds anything". */
+export type Here = { presence: PresenceMap; leases: LeaseEntry[]; spaces: Space[]; limits: Limits };
 
 /** What a beat says: here (editing `path` in `space`, when set — which claims
- *  it, and `take` claims it from whoever holds it), or leaving. */
+ *  it, and `take` claims it from whoever holds it) for `ttl` ms, or leaving. */
 export type Beat =
-  | { kind: "here"; name: string; space: string; path: string | null; take: boolean }
+  | { kind: "here"; name: string; space: string; path: string | null; take: boolean; ttl: number }
   | { kind: "leave" };
+
+/** How long a beat holds: the `ttl` it asked for, inside the two bounds, or
+ *  the shortest when it asked for none. */
+export const beatTtl = (raw: unknown): number =>
+  typeof raw === "number" && Number.isFinite(raw)
+    ? Math.round(Math.min(Math.max(raw, PRESENCE_TTL_MS), MAX_PRESENCE_TTL_MS))
+    : PRESENCE_TTL_MS;
 
 /** `last_seen_at` moves at most this often per person — a write on every beat
  *  would be 19,200 rows a day for ten Macs, for a column the People list
  *  shows to the hour. */
 export const LAST_SEEN_GRAIN_MS = 60 * 60 * 1000;
-
-/** How long a beat holds a lease. The beat that renews it is the presence
- *  beat, so it lapses with the presence that carries it: one lost beat is
- *  survivable and two are not. */
-export const LEASE_TTL_MS = PRESENCE_TTL_MS;
 
 /** The key a path is leased under. Lowercased in JavaScript, not by SQLite's
  *  `lower()`, which folds ASCII only. */
@@ -108,11 +120,11 @@ const SEEN = `space_id = '' OR space_id IN ${MINE}`;
 const PRESENCE_SQL = `SELECT device_id, member_id, device_name, ts,
        CASE WHEN ${SEEN} THEN space_id END AS space_id,
        CASE WHEN ${SEEN} THEN path END AS path
-  FROM presence WHERE ts > ?2`;
+  FROM presence WHERE until > ?2`;
 const LEASES_SQL = `SELECT space_id, path, device_id, member_id, device_name, until
   FROM leases WHERE until > ?2 AND (${SEEN}) ORDER BY space_id, path`;
 
-function toHere(presenceRows: PresenceRow[], leaseRows: LeaseRow[], spaces: Space[]): Here {
+function toHere(presenceRows: PresenceRow[], leaseRows: LeaseRow[], spaces: Space[], limits: Limits): Here {
   const presence: PresenceMap = {};
   for (const r of presenceRows) {
     presence[r.device_id] = {
@@ -130,26 +142,29 @@ function toHere(presenceRows: PresenceRow[], leaseRows: LeaseRow[], spaces: Spac
     name: r.device_name,
     until: Number(r.until),
   }));
-  return { presence, leases, spaces };
+  return { presence, leases, spaces, limits };
 }
 
-/** The three reads every poll ends on, and what they come to. */
+/** The reads every poll ends on, and what their results — the last of a
+ *  batch, as many as there were reads — come to. */
 const reads = (db: D1Database, auth: Auth, now: number): D1PreparedStatement[] => [
-  db.prepare(PRESENCE_SQL).bind(auth.memberId, now - PRESENCE_TTL_MS),
+  db.prepare(PRESENCE_SQL).bind(auth.memberId, now),
   db.prepare(LEASES_SQL).bind(auth.memberId, now),
   spacesStatement(db, auth),
+  ...limitsReads(db, now),
 ];
 const answer = (results: D1Result[]): Here => {
-  const [presence, leases, spaces] = results.slice(-3);
+  const [presence, leases, spaces, ...limits] = results;
   return toHere(
     (presence?.results ?? []) as PresenceRow[],
     (leases?.results ?? []) as LeaseRow[],
     ((spaces?.results ?? []) as SpaceRow[]).map(toSpace),
+    limitsFrom(limits),
   );
 };
 
-/** Everyone whose last beat is inside the TTL, what they hold, and the spaces
- *  the caller is in. Reads only — the idle poll. */
+/** Everyone whose last beat still holds, what they hold, the spaces the
+ *  caller is in, and the domain's limits. Reads only — the idle poll. */
 export async function readHere(env: Env, auth: Auth, now = Date.now()): Promise<Here | null> {
   return withDb(env, async (db) => answer(await db.batch(reads(db, auth, now))));
 }
@@ -157,10 +172,11 @@ export async function readHere(env: Env, auth: Auth, now = Date.now()): Promise<
 /**
  * Record a beat and answer who is here and what they hold, in one round trip.
  *
- * The batch, for a beat that names a path: the caller's presence row, the
- * person's `last_seen_at` when it is more than an hour old, the release of
- * whatever else this Mac held, the claim on this path, the sweeps of lapsed
- * presence and lapsed leases, and the reads the poll answers with.
+ * The batch, for a beat that names a path: the caller's presence row, held
+ * for the beat's ttl, the person's `last_seen_at` when it is more than an
+ * hour old, the release of whatever else this Mac held, the claim on this
+ * path for the same ttl, the sweeps of lapsed presence and lapsed leases, and
+ * the reads the poll answers with.
  * A beat with no path releases everything this Mac held instead of claiming;
  * a leave removes its presence and its leases outright. `rows written` is one
  * per beat, one more while a document is open, one an hour per person, plus
@@ -193,7 +209,7 @@ export async function recordBeat(
               )
               .bind(deviceId, beat.space, leaseKey(beat.path)),
             // Free, lapsed, or already this Mac's: the row becomes this Mac's
-            // until the TTL from now. Anyone else's, live: the WHERE is false
+            // for the beat's ttl. Anyone else's, live: the WHERE is false
             // and nothing changes — the read below says who has it. `take`
             // drops that WHERE, which is the whole of taking over. The space
             // and the member are the ones the presence upsert above resolved.
@@ -207,7 +223,7 @@ export async function recordBeat(
                    device_name = excluded.device_name, until = excluded.until` +
                   (beat.take ? "" : `\n                 WHERE leases.device_id = excluded.device_id OR leases.until <= ?5`),
               )
-              .bind(...[leaseKey(beat.path), deviceId, beat.name, now + LEASE_TTL_MS, ...(beat.take ? [] : [now])]),
+              .bind(...[leaseKey(beat.path), deviceId, beat.name, now + beat.ttl, ...(beat.take ? [] : [now])]),
           ];
     const write =
       beat.kind === "leave"
@@ -215,17 +231,18 @@ export async function recordBeat(
         : [
             db
               .prepare(
-                `INSERT INTO presence (device_id, member_id, device_name, space_id, path, ts)
+                `INSERT INTO presence (device_id, member_id, device_name, space_id, path, ts, until)
                  SELECT ?2, ?1, ?3,
                         CASE WHEN ?4 = '' OR ?4 IN ${MINE} THEN ?4 ELSE '' END,
                         CASE WHEN ?4 = '' OR ?4 IN ${MINE} THEN ?5 END,
-                        ?6
+                        ?6, ?7
                   WHERE true
                  ON CONFLICT(device_id) DO UPDATE SET
                    member_id = excluded.member_id, device_name = excluded.device_name,
-                   space_id = excluded.space_id, path = excluded.path, ts = excluded.ts`,
+                   space_id = excluded.space_id, path = excluded.path, ts = excluded.ts,
+                   until = excluded.until`,
               )
-              .bind(auth.memberId, deviceId, beat.name, beat.space, beat.path, now),
+              .bind(auth.memberId, deviceId, beat.name, beat.space, beat.path, now, now + beat.ttl),
             // "Last seen" is the beat's to move, never `authenticate`'s — and
             // only when the stored one is stale.
             db
@@ -236,13 +253,14 @@ export async function recordBeat(
               )
               .bind(now, deviceId, LAST_SEEN_GRAIN_MS),
           ];
+    const asked = reads(db, auth, now);
     const results = await db.batch([
       ...write,
       ...leasing,
-      db.prepare("DELETE FROM presence WHERE ts <= ?").bind(now - PRESENCE_TTL_MS),
+      db.prepare("DELETE FROM presence WHERE until <= ?").bind(now),
       db.prepare("DELETE FROM leases WHERE until <= ?").bind(now),
-      ...reads(db, auth, now),
+      ...asked,
     ]);
-    return answer(results);
+    return answer(results.slice(-asked.length));
   });
 }

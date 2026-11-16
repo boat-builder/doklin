@@ -3,12 +3,12 @@
 // manifest) — so the renderer tests in run.mjs and the browser harness in
 // verify-harness/serve-worker.mjs walk the same site.
 //
-//   Home.md                          the root page; links to public, unpublished and external targets
+//   Home.md                          the root page; links to public, unpublished and external
+//                                    targets, and pictures, which are their alt text
 //   Projects/plan.md + plan.html     a note with an html rendition (the MD/HTML pill)
 //   Projects/status.md               a note inside the published folder that links out of it
 //   Projects/Roadmap/…               notes a folder deeper — one opens with a frontmatter
-//                                    block, one with a plain rule — and a file that is no page
-//   Projects/assets/pic.png          a picture a note shows, inside the published folder
+//                                    block, one with a plain rule
 //   Ideas.md                         a note outside the folder, linked with ../
 //   Sizes.md + Sizes.meta.jsonl      a table with stored column widths
 //   Comments.md + Comments.meta.jsonl  comment markers in the text, bodies in the sidecar
@@ -23,7 +23,7 @@ export const blobHash = (bytes) => sha256(bytes).slice(0, 16);
 /** A stable file id for a seeded path. */
 export const fidOf = (path) => `f-${sha256(path).slice(0, 10)}`;
 
-/** A 1×1 transparent PNG. */
+/** A 1×1 transparent PNG — what a workspace no longer syncs. */
 export const PIXEL_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
   "base64",
@@ -47,7 +47,7 @@ export const SEED_FILES = {
 
 Welcome. Read [the plan](./Projects/plan.md), the [status](./Projects/status.md) or a [scratch note](./Scratch.md); the [source](https://github.com/boat-builder/doklin) is public and [this page](#home) links to itself.
 
-![a picture](./Projects/assets/pic.png) ![a missing picture](./Nope/none.png)
+![a picture](./Projects/assets/pic.png) ![a missing picture](./Nope/none.png) ![a picture on the web](https://example.com/sky.png)
 `,
   "Projects/plan.md": `# The plan
 
@@ -71,9 +71,6 @@ The hull is done.
 
 We launched.
 `,
-  "Projects/Roadmap/notes.txt": `Loose ends.
-`,
-  "Projects/assets/pic.png": PIXEL_PNG,
   "Ideas.md": `# Ideas
 
 A teleporter, or a jetpack.
@@ -145,7 +142,7 @@ export const SEED_PUBLIC = {
 };
 
 const contentTypeOf = (path) =>
-  path.endsWith(".png") ? "image/png" : path.endsWith(".html") ? "text/html" : path.endsWith(".jsonl") ? "application/jsonl" : "text/markdown";
+  path.endsWith(".html") ? "text/html" : path.endsWith(".jsonl") ? "application/jsonl" : "text/markdown";
 
 /** The manifest's file entries plus the blobs to upload for them. */
 export function seedManifestFiles(files = SEED_FILES) {

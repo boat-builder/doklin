@@ -3,26 +3,33 @@
 // every request; the engine is the only caller, so there is no CORS and no
 // preflight. Every request also carries `x-doklin-device` (attribution for
 // presence and the binding) and `x-doklin-client` (the app version, for
-// the logs — nothing reads it).
+// the logs — nothing reads it); now and then, `x-doklin-used` (the caller's
+// requests today, limits.ts).
+//
+// A bearer that sends too much is a loop, and is told so with a 429 before
+// anything else is done (`DEVICE_LIMIT`, `AGENT_LIMIT`).
 //
 //   GET    /api/meta                 {version, workspace|null, d1: schema version|null,
 //                                    you: who this bearer is — {role, memberId, email, name,
 //                                    tokenId, can: [what that role may do]}, superadmin: {id,
 //                                    name}|null, people: [{id, name}] — the directory a
-//                                    manifest's `by` is read with}
+//                                    manifest's `by` is read with, limits}
 //   POST   /api/workspace            superadmin; bind this domain: body {name, deviceName?} → 201
 //                                    409 {workspace} when it already holds one (never overwrites)
 //   GET    /api/workspace            {id, name, createdAt, createdBy, files, bytes}
-//   GET    /api/poll                 {manifestEtag, presence, leases, spaces} — the cheap 15 s
-//                                    poll; reads only. `spaces` is every space the caller is in,
-//                                    each with its manifest's etag
+//   GET    /api/poll                 {manifestEtag, presence, leases, spaces, limits} — the
+//                                    cheap poll; reads only. `spaces` is every space the caller
+//                                    is in, each with its manifest's etag
 //   POST   /api/poll                 the same poll, carrying this device's beat:
-//                                    body {name, path?, space?, take?} — "here, editing path (in
-//                                    that space)", which claims its lease (take: from whoever holds
-//                                    it) and lets go of any other — or {leave: true}. Presence,
-//                                    leases and spaces are best effort: a database that cannot
-//                                    answer costs the lists ({}, null and null come back), never
-//                                    the etag
+//                                    body {name, path?, space?, take?, ttl?} — "here, editing
+//                                    path (in that space), for ttl ms", which claims its lease
+//                                    (take: from whoever holds it) and lets go of any other — or
+//                                    {leave: true}. Presence, leases, spaces and the fleet are
+//                                    best effort: a database that cannot answer costs the lists
+//                                    ({}, null and null come back, and the Free limits with no
+//                                    fleetToday), never the etag
+//   PUT    /api/settings/plan        superadmin; {plan: "free" | "paid"} → {limits}: which
+//                                    Cloudflare plan the account is on
 //   GET    /api/manifest[?since=e]   the manifest + x-manifest-etag (304 when unchanged)
 //   PUT    /api/manifest             x-base-etag required; 412 + current etag on a lost race;
 //                                    400 on garbage, 426 on a schema this worker predates,
@@ -132,6 +139,7 @@ import { readManifestTotals, readWorkspace, type WorkspaceRecord } from "./bucke
 import type { Env } from "./env";
 import { listEveryPage, takeDownPage } from "./everyPage";
 import { json, readJsonObject } from "./http";
+import { UNKNOWN_LIMITS, isPlan, readLimits, recordUsage, setPlan, usedOf } from "./limits";
 import {
   BLOB_HASH_RE,
   ID_RE,
@@ -173,7 +181,7 @@ import {
   upsertMember,
 } from "./members";
 import { sha256Hex } from "./crypto";
-import { readHere, recordBeat, type Beat, type Here } from "./presence";
+import { beatTtl, readHere, recordBeat, type Beat, type Here } from "./presence";
 import { allowed, can, refusal, type Action } from "./roles";
 import { ensureSchema, wipeSchema } from "./schema";
 import {
@@ -198,6 +206,12 @@ const methodNotAllowed = (): Response => json({ error: "method not allowed" }, 4
 /** What `can` said no to (roles.ts), naming who may. */
 const notAllowed = (action: Action): Response => json({ error: refusal(action) }, 403);
 const notBound = (): Response => json({ error: "not bound" }, 404);
+
+/** What a bearer the loop catchers stopped is told. `Retry-After` is the
+ *  period of the `[[ratelimits]]` blocks in wrangler.toml, where the numbers
+ *  live. */
+const tooMany = (): Response =>
+  json({ error: "This device is sending too many requests — it will slow down by itself." }, 429, { "retry-after": "60" });
 
 export async function handleApi(
   request: Request,
@@ -234,6 +248,24 @@ export async function handleApi(
   if (auth === "unavailable") return unavailable(env);
   if (!auth) return json({ error: "unauthorized" }, 401);
 
+  // A loop, caught: a person's device past what a person does in a minute,
+  // or an agent's machine past what a tool does. Approximate, and only ever
+  // a backstop — a request refused here has been counted against the account
+  // already, so the budget is the clients' to keep (limits.ts). A binding the
+  // deployment lacks is not checked, and one that cannot answer stops nobody.
+  const limiter = auth.agent ? env.AGENT_LIMIT : env.DEVICE_LIMIT;
+  const under = limiter ? await limiter.limit({ key: auth.tokenId }).then((o) => o.success, () => true) : true;
+  if (!under) return tooMany();
+
+  // The caller's own count of its requests today, for everyone's sum. After
+  // the answer: it is nothing the answer waits on.
+  const used = usedOf(request);
+  if (used !== null) {
+    const report = recordUsage(env, auth.tokenId, used);
+    if (ctx) ctx.waitUntil(report);
+    else await report;
+  }
+
   const section = parts[1];
   const method = request.method;
 
@@ -268,11 +300,13 @@ export async function handleApi(
     //
     // `superadmin` is everyone's to know: it is whom the app says to ask for
     // what only they can do — an update of the worker, a person's way back in.
-    const [workspace, d1, people, superadmin] = await Promise.all([
+    // `limits` are what an engine paces itself by from its first request on.
+    const [workspace, d1, people, superadmin, limits] = await Promise.all([
       readWorkspace(env),
       ensureSchema(env),
       listDirectory(env),
       findSuperadmin(env),
+      readLimits(env),
     ]);
     return json({
       version: WORKER_VERSION,
@@ -281,7 +315,20 @@ export async function handleApi(
       you: whoIs(auth),
       superadmin,
       people: people ?? [],
+      limits,
     });
+  }
+
+  // Which Cloudflare plan the account is on — the superadmin's to say, since
+  // the account is theirs — and so which numbers every device paces itself by.
+  if (section === "settings" && parts.length === 3 && parts[2] === "plan") {
+    if (method !== "PUT") return methodNotAllowed();
+    if (!can(auth.role, "workspace.manage")) return notAllowed("workspace.manage");
+    const body = await readJsonObject(request);
+    if (!body) return json({ error: "invalid json body" }, 400);
+    if (!isPlan(body.plan)) return json({ error: 'plan must be "free" or "paid"' }, 400);
+    const limits = await setPlan(env, body.plan);
+    return limits === null ? noDatabase() : json({ limits });
   }
 
   if (section === "workspace" && parts.length === 2) {
@@ -930,11 +977,13 @@ async function blob(request: Request, env: Env, fileId: string, hash: string): P
  * in with where each one's manifest is.
  *
  * The method says whether anything is written. A `GET` reads; a `POST` says
- * "this device is here" (or is leaving), and the engine sends one only when a
- * beat is due — every 45 s, the moment the edited path changes, or when the
- * document it has open is free to claim — so an idle poll writes nothing and
- * the client decides when a write happens. A worker that wrote on every poll
- * would spend 58% of D1's free daily writes on freshness nobody can see.
+ * "this device is here" (or is leaving), for as long as its `ttl` says, and
+ * the engine sends one only when a beat is due — so an idle poll writes
+ * nothing and the client decides when a write happens. A worker that wrote
+ * on every poll would spend D1's free daily writes on freshness nobody can
+ * see.
+ *
+ * Every answer carries the domain's `limits`, read in the same batch.
  *
  * The etag is the poll's job; presence, leases and spaces are not. When the
  * database cannot answer, presence comes back `{}` and leases and spaces
@@ -957,6 +1006,7 @@ async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
             space: typeof body.space === "string" && SPACE_ID_RE.test(body.space) ? body.space : "",
             path: typeof body.path === "string" && validPath(body.path) ? body.path : null,
             take: body.take === true,
+            ttl: beatTtl(body.ttl),
           };
   }
   const answer = (etag: string, here: Here | null): Response =>
@@ -965,13 +1015,14 @@ async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
       presence: here?.presence ?? {},
       leases: here?.leases ?? null,
       spaces: here?.spaces ?? null,
+      limits: here?.limits ?? UNKNOWN_LIMITS,
     });
   const deviceId = auth.deviceId;
   if (beat && deviceId) {
     // In order, for a beat: a domain that holds no workspace answers 404 and
-    // records nobody as being in it, or as holding anything. One poll in
-    // three carries a beat, so the round trip this costs is rare; the idle
-    // read below stays parallel.
+    // records nobody as being in it, or as holding anything. Most polls
+    // carry no beat, so the round trip this costs is rare; the idle read
+    // below stays parallel.
     const head = await env.DATA.head(MANIFEST_KEY);
     if (!head) return notBound();
     return answer(head.etag, await recordBeat(env, auth, deviceId, beat));
