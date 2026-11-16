@@ -411,7 +411,7 @@ Build this when one of these holds:
 
 The design below stays ready for then.
 
-`WORKER_VERSION` 20 → 21. A Durable Object class rings devices when something
+One `WORKER_VERSION` bump. A Durable Object class rings devices when something
 they can see has changed; presence and leases move onto the socket. Polling
 stays only as the catch-up after a gap and a slow safety net.
 
@@ -532,8 +532,7 @@ the hundreds per device.
   changes the module serves no cached page asking for a gone one.
 - `cloud-worker/test/assets.mjs` plays Cloudflare's asset layer in front of a
   bundle (`run.mjs --bundle`, `serve-worker.mjs`).
-- `WORKER_VERSION` 20 → 21 (release 2 being deferred). PR #133 also takes 21:
-  whichever merges second moves to 22.
+- `WORKER_VERSION` 21 → 22 (PR #133, page links, took 21 first).
 - Workers Paid stays the superadmin's call; the plan setting (1.3) is where it
   takes effect.
 
@@ -595,8 +594,8 @@ backoff ladder, ring coalescing — stay engine constants.
 **Release 2**: app and TestFlight first, then the update (adds `LIVE` and its
 migration), then the hand-run drop of `presence` and `leases`.
 
-**Release 3**: the app ships as usual (an app built for 21 keeps syncing
-with worker 20 and shows the update badge, so the order doesn't matter), then
+**Release 3**: the app ships as usual (an app built for 22 keeps syncing
+with an older worker and shows the update badge, so the order doesn't matter), then
 the update (fetches the worker and `doklin-cloud-web.tar.gz`, declares the
 daily trigger), then a look at a public page: fonts, a diagram, the icon. The
 phone needs no TestFlight build for this: its old engine still calls the two

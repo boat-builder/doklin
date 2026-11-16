@@ -66,8 +66,8 @@ pub(crate) const AWAY_AFTER: Duration = Duration::from_secs(30 * 60);
 const BEAT_TTL_MIN: Duration = Duration::from_secs(90);
 const BEAT_TTL_MAX: Duration = Duration::from_secs(15 * 60);
 /// The retry clock: how long after the n-th failure in a row the next try
-/// may go, each ±20 %. A success starts it again.
-const BACKOFF: [Duration; 6] = [
+/// may go, each ± `BACKOFF_JITTER`. A success starts it again.
+pub(crate) const BACKOFF: [Duration; 6] = [
     Duration::from_secs(15),
     Duration::from_secs(30),
     Duration::from_secs(60),
@@ -77,6 +77,9 @@ const BACKOFF: [Duration; 6] = [
 ];
 /// While the account's daily requests are used up: one probe this often.
 const LIMITED_PROBE: Duration = Duration::from_secs(30 * 60);
+/// How far a step of the retry clock is moved, either way, so devices that
+/// failed together do not come back together.
+pub(crate) const BACKOFF_JITTER: f64 = 0.2;
 /// Devices come back after the daily reset spread over this long, rather
 /// than all in its first second.
 const LIMITED_SPREAD_MS: u64 = 10 * 60 * 1000;
@@ -983,7 +986,7 @@ impl<R: Remote> Engine<R> {
             Err(e) => {
                 self.failures += 1;
                 let step = BACKOFF[(self.failures as usize - 1).min(BACKOFF.len() - 1)];
-                let step = step.mul_f64(0.8 + 0.4 * unit_random());
+                let step = step.mul_f64(1.0 - BACKOFF_JITTER + 2.0 * BACKOFF_JITTER * unit_random());
                 match e {
                     RemoteError::Slowed(secs) => step.max(Duration::from_secs(*secs)),
                     _ => step,

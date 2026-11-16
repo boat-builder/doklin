@@ -17,8 +17,8 @@ use super::config::{
     WorkspaceEntry,
 };
 use super::engine::{
-    Engine, EngineCmd, EngineConfig, Exit, PublishRequest, DIRECTORY_MIN_GAP, ACTIVITY_FRESH, POLL_AWAY,
-    POLL_BACKGROUND, POLL_INTERVAL, PRESENCE_BEAT,
+    Engine, EngineCmd, EngineConfig, Exit, PublishRequest, ACTIVITY_FRESH, BACKOFF, BACKOFF_JITTER, DIRECTORY_MIN_GAP,
+    POLL_AWAY, POLL_BACKGROUND, POLL_INTERVAL, PRESENCE_BEAT,
 };
 use super::flows::{bind_domain, seed_download, seed_upload, wipe_all, FlowError};
 use super::invite;
@@ -3596,7 +3596,8 @@ async fn an_engine_that_started_offline_learns_who_it_is_when_the_domain_answers
     assert_eq!(status().phase, Phase::Offline);
     assert_eq!(status().me, "");
     be.lock().unwrap().offline = false;
-    tokio::time::sleep(POLL_INTERVAL + Duration::from_secs(1)).await;
+    // The first failure's retry comes one step of the clock later, jittered.
+    tokio::time::sleep(BACKOFF[0].mul_f64(1.0 + BACKOFF_JITTER) + Duration::from_secs(1)).await;
     assert_eq!((status().phase, status().me.as_str()), (Phase::Idle, "Ada"));
     let by: Vec<String> = manifest_of(&be).files.values().map(|f| f.by.clone()).collect();
     assert_eq!(by, [ADA]);
