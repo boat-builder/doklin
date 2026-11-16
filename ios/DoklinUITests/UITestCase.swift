@@ -82,33 +82,47 @@ class UITestCase: XCTestCase {
 
     /* ---------- Getting around ---------- */
 
-    /// A tab, by its name: Home, Browse, Search.
+    /// Back one screen by the navigation bar's back button: false when
+    /// there is none, at the top of a tab.
+    @discardableResult
+    func backIfAny() -> Bool {
+        let button = app.navigationBars.buttons["BackButton"]
+        guard button.exists else { return false }
+        button.tap()
+        return true
+    }
+
+    /// A tab, by its name: Home, Browse, Search. A document hides the tab
+    /// bar, so it is backed out of first.
     func tab(_ name: String) {
         let button = app.tabBars.buttons[name]
-        if button.waitForExistence(timeout: 5) {
-            button.tap()
-        } else {
-            expect(app.buttons[name].firstMatch, "the \(name) tab").tap()
+        for _ in 0..<6 where !button.waitForExistence(timeout: 2) {
+            if !backIfAny() { break }
         }
+        expect(button, "the \(name) tab").tap()
     }
 
     /// Back until `root` shows: the top of a tab.
     private func backTo(_ root: XCUIElement) {
         for _ in 0..<6 where !root.waitForExistence(timeout: 2) {
-            back()
+            if !backIfAny() { break }
         }
     }
 
     /// Browse, at its top: the workspace's tree.
     func browse() {
-        tab("Browse")
-        backTo(app.navigationBars["Browse"])
+        for _ in 0..<2 where !app.navigationBars["Browse"].exists {
+            tab("Browse")
+            backTo(app.navigationBars["Browse"])
+        }
     }
 
     /// Home, at its top: what changed.
     func home() {
-        tab("Home")
-        backTo(marked("workspace-menu"))
+        for _ in 0..<2 where !marked("workspace-menu").exists {
+            tab("Home")
+            backTo(marked("workspace-menu"))
+        }
     }
 
     /// The workspace's settings, through its name on Home.
