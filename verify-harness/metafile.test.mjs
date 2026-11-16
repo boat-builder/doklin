@@ -1,7 +1,7 @@
 // Unit tests for the entity meta file (src/metaFile.ts) — the disk⇄editor
 // boundary of the hybrid comment layout: extract (full CriticMarkup → bare
 // markers + records), expand (markers + records → full), the tolerant
-// parse/serialize pair, and the pure one-time migration step. Run:
+// parse/serialize pair. Run:
 //
 //   node verify-harness/metafile.test.mjs
 //
@@ -28,7 +28,6 @@ const {
   serializeEntityMeta,
   expandMarkdown,
   extractMarkdown,
-  migrateEntity,
   metaFileOf,
   stemOf,
   metaIsEmpty,
@@ -77,16 +76,16 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
   );
 }
 
-/* ---------- extract: legacy spans get deterministic ids ---------- */
+/* ---------- extract: hand-written spans get deterministic ids ---------- */
 {
-  const legacy = "x {==a==}{>>note one<<} y {==a==}{>>note one<<} z\n";
-  const one = extractMarkdown(legacy);
-  const two = extractMarkdown(legacy);
+  const handWritten = "x {==a==}{>>note one<<} y {==a==}{>>note one<<} z\n";
+  const one = extractMarkdown(handWritten);
+  const two = extractMarkdown(handWritten);
   assert.equal(one.md, two.md); // same input → same bytes, on any machine
   assert.equal(one.mthreads.length, 2); // identical duplicates stay distinct
   assert.notEqual(one.mthreads[0].id, one.mthreads[1].id);
   for (const t of one.mthreads) assert.match(t.id, /^[a-z0-9]{4,16}$/);
-  // Legacy entries parse authorless; bodies survive.
+  // Hand-written entries parse authorless; bodies survive.
   assert.equal(one.mthreads[0].comments[0].body, "note one");
   assert.equal(one.mthreads[0].comments[0].author, "");
 }
@@ -168,62 +167,15 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
   assert.equal(serializeEntityMeta(parseEntityMeta(ser)), ser);
 }
 
-/* ---------- migrateEntity: old layout → hybrid, idempotent ---------- */
+/* ---------- table widths alone are worth a file ---------- */
 {
-  const diskMd =
-    "# T\n\n{==old==}{>>#aa1x A · 2026-01-01T00:00:00Z: inline body<<} tail\n";
-  const first = migrateEntity({ diskMd, meta: emptyMeta() });
-  assert.equal(first.mdChanged, true);
-  assert.equal(first.metaChanged, true);
-  assert.equal(first.md, "# T\n\n{==old==}{>>#aa1x<<} tail\n");
-  assert.equal(first.meta.mthreads.length, 1);
-
-  const again = migrateEntity({ diskMd: first.md, meta: first.meta });
-  assert.equal(again.mdChanged, false);
-  assert.equal(again.metaChanged, false);
-  assert.equal(serializeEntityMeta(again.meta), serializeEntityMeta(first.meta));
-
-  // Orphaned meta bodies survive a migration pass untouched.
-  const withOrphan = migrateEntity({
-    diskMd: "plain\n",
-    meta: {
-      mthreads: [{ id: "or1", comments: [entry("A", 1, "kept")] }],
-      hthreads: [],
-      tcols: [],
-      foreign: [],
-    },
-  });
-  assert.equal(withOrphan.mdChanged, false);
-  assert.equal(withOrphan.meta.mthreads.length, 1);
-
-  // Table widths have no old format and no anchor in the prose: a migration
-  // pass carries them through untouched, and they alone are enough to make
-  // an entity worth a file on disk.
   const widths = { ...emptyMeta(), tcols: [{ id: "tw1", cols: [220, 0] }] };
   assert.equal(metaIsEmpty(widths), false);
-  const kept = migrateEntity({ diskMd: "just prose\n", meta: widths });
-  assert.equal(kept.mdChanged, false);
-  assert.equal(kept.metaChanged, false);
-  assert.deepEqual(kept.meta.tcols, widths.tcols);
-
-  // Html-only entity: markdown side untouched (null), its threads ride through.
-  const hthread = { id: "hh1", anchor: { path: "p", tag: "p", text: "x" }, comments: [entry("W", 7, "a note")] };
-  const htmlOnly = migrateEntity({ diskMd: null, meta: { ...emptyMeta(), hthreads: [hthread] } });
-  assert.equal(htmlOnly.md, null);
-  assert.equal(htmlOnly.mdChanged, false);
-  assert.equal(htmlOnly.metaChanged, false);
-  assert.equal(htmlOnly.meta.hthreads.length, 1);
-
-  // A fully empty entity migrates to... nothing to write.
-  const empty = migrateEntity({ diskMd: "just prose\n", meta: emptyMeta() });
-  assert.equal(empty.mdChanged, false);
-  assert.equal(empty.metaChanged, false);
-  assert.ok(metaIsEmpty(empty.meta));
+  assert.ok(metaIsEmpty(emptyMeta()));
 }
 
-/* ---------- mixed-format file (sync merge artifact): both styles coexist ---------- */
+/* ---------- a hand edit: one thread inline, one a bare marker ---------- */
 {
-  // One thread still inline (old device's write), one already hybrid.
   const mixed =
     "{==a==}{>>#in1x A · 2026-01-01T00:00:00Z: inline<<} and {==b==}{>>#hy1x<<}\n";
   const meta = [{ id: "hy1x", comments: [entry("B", 9, "from meta")] }];

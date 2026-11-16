@@ -45,20 +45,6 @@ const SLUG_ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
 pub const RANDOM_SLUG_LEN: usize = 8;
 const MAX_SLUG_LEN: usize = 64;
 
-/// The shape of an id the workspace's directory can resolve: `m-` (a person)
-/// or `a-` (an agent) and eight hex characters — `ENTITY_ID_RE` in
-/// cloud-worker/src/members.ts narrowed to the prefix a person signs with,
-/// plus `AGENT_ID_RE` in cloud-worker/src/agents.ts. **Change all three.**
-///
-/// What tells a `by` that can be looked up from one written before v3, when
-/// it was a device's name: the engine resolves the first through the
-/// directory `/api/meta` answers and shows the second exactly as it stands.
-pub fn is_directory_id(by: &str) -> bool {
-    by.len() == 10
-        && (by.starts_with("m-") || by.starts_with("a-"))
-        && by[2..].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 /* ---------- Wire types ---------- */
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -98,12 +84,7 @@ pub struct ManifestFile {
     pub size: u64,
     #[serde(default)]
     pub mtime: u64,
-    /// Who last changed it — a **member id** since v3, where it used to be
-    /// the device's name. Empty where there is no
-    /// identity: a workspace whose domain has never said who this Mac is.
-    /// A workspace upgraded from v2 keeps the device names already in it,
-    /// and the surfaces show whatever does not resolve exactly as it stands.
-    #[serde(default)]
+    /// Who last changed it: a member id, or an agent's.
     pub by: String,
 }
 
@@ -112,7 +93,6 @@ pub struct Tombstone {
     pub path: String,
     pub rev: u64,
     pub ts: u64,
-    #[serde(default)]
     pub by: String,
     /// Set when the file was not deleted but moved to another section: the
     /// id of the space it went to, `""` for the shared workspace. A Mac in
@@ -146,9 +126,7 @@ pub struct PublicEntry {
     pub desc: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub root: bool,
-    #[serde(default)]
     pub by: String,
-    #[serde(default)]
     pub at: u64,
 }
 
@@ -178,17 +156,16 @@ pub struct PollResponse {
     pub manifest_etag: String,
     #[serde(default)]
     pub presence: BTreeMap<String, PresenceEntry>,
-    /// Every live lease (worker v8). `None` from an older
-    /// worker, and from one whose database could not answer — both mean
-    /// "nobody is known to hold anything", which is what no lock looks like.
+    /// Every live lease. `None` from a domain whose database could not
+    /// answer, which means "nobody is known to hold anything" — what no lock
+    /// looks like.
     #[serde(default)]
     pub leases: Option<Vec<LeaseEntry>>,
     /// Every space this person is in — their Private and the restricted
     /// folders they were added to — each with its manifest's etag. The whole
     /// list every time: an id that is new is a folder to download, one that
-    /// is gone is a folder to take off this Mac. `None` from a worker
-    /// without `spaces` and from a database that could not answer, which
-    /// both mean "change nothing".
+    /// is gone is a folder to take off this Mac. `None` from a database that
+    /// could not answer, which means "change nothing".
     #[serde(default)]
     pub spaces: Option<Vec<SpaceEntry>>,
 }
@@ -225,11 +202,9 @@ pub struct SpaceEntry {
 /// editing `path` when set.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PresenceEntry {
-    /// Whose Mac it is (worker v7). Absent from an older worker, and null for
-    /// an owner who never adopted an identity — both are shown by the Mac's
-    /// name, which is what `name` is.
-    #[serde(rename = "memberId", default)]
-    pub member_id: Option<String>,
+    /// Whose Mac it is.
+    #[serde(rename = "memberId")]
+    pub member_id: String,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -252,8 +227,8 @@ pub struct LeaseEntry {
     pub space: Option<String>,
     #[serde(rename = "deviceId")]
     pub device_id: String,
-    #[serde(rename = "memberId", default)]
-    pub member_id: Option<String>,
+    #[serde(rename = "memberId")]
+    pub member_id: String,
     /// The holder's Mac.
     #[serde(default)]
     pub name: String,

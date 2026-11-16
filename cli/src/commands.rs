@@ -42,30 +42,12 @@ struct Session {
     ws: Workspace,
 }
 
-/// The workspace this command means and a client for it — after making sure
-/// its worker can do what the command needs. What the worker could do is
-/// remembered from the last time it was asked, and asked again only when
-/// something is not on the list.
-fn session(ctx: &Ctx, feature: &str) -> Result<Session, Failure> {
-    let mut all = creds::load()?;
+/// The workspace this command means, and a client for it.
+fn session(ctx: &Ctx) -> Result<Session, Failure> {
+    let all = creds::load()?;
     let ws = creds::pick(&all, ctx.workspace.as_deref())?.clone();
     let client = Client::new(&ws.endpoint, Some(&ws.token));
-    if ws.features.iter().any(|f| f == feature) {
-        return Ok(Session { client, ws });
-    }
-    let me = client.send("GET", "me", &[], &[], None)?.json()?;
-    let features = strings(&me["features"]);
-    if let Some(entry) = all.workspaces.iter_mut().find(|w| w.endpoint == ws.endpoint) {
-        entry.features = features.clone();
-        creds::save(&all)?;
-    }
-    if !features.iter().any(|f| f == feature) {
-        return Err(Failure::too_old(format!(
-            "the worker on {} is too old for this command — the workspace's owner can update it from Doklin's Cloud panel",
-            ws.domain()
-        )));
-    }
-    Ok(Session { client, ws: Workspace { features, ..ws } })
+    Ok(Session { client, ws })
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -123,16 +105,7 @@ pub fn login(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
 
     let host = gethostname::gethostname().to_string_lossy().to_string();
     let reply = Client::new(&endpoint, None)
-        .send("POST", "login", &[], &[], Some(Body::Json(&json!({ "code": code, "host": host }))))
-        .map_err(|f| match f.status {
-            // No bearer was sent, so the gate's bare word can only mean the
-            // route above the gate is not there: a worker from before agents.
-            Some(401) if f.message == "unauthorized" => Failure::too_old(format!(
-                "the worker on {} is too old for agents — the workspace's owner can update it from Doklin's Cloud panel",
-                domain
-            )),
-            _ => f,
-        })?;
+        .send("POST", "login", &[], &[], Some(Body::Json(&json!({ "code": code, "host": host }))))?;
     let v = reply.json()?;
     let token = text(&v, "token");
     if token.is_empty() {
@@ -147,7 +120,6 @@ pub fn login(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         name: text(&v["workspace"], "name").to_string(),
         agent: text(&v["agent"], "name").to_string(),
         token: token.to_string(),
-        features: strings(&v["features"]),
     });
     creds::save(&all)?;
     // The login this one replaces is no use to anybody now: let it go, so
@@ -212,7 +184,7 @@ pub fn logout(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
 
 pub fn whoami(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     args.at_most(0)?;
-    let s = session(ctx, "agents")?;
+    let s = session(ctx)?;
     let v = s.client.send("GET", "me", &[], &[], None)?.json()?;
     ctx.answer(&v, || {
         // Whose it is, and where that lets it work besides what is shared.
@@ -266,7 +238,7 @@ fn public_of(row: &Value) -> String {
 
 pub fn ls(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     args.at_most(1)?;
-    let s = session(ctx, "agent-docs")?;
+    let s = session(ctx)?;
     let dir = args.positionals.first().map(String::as_str).unwrap_or("");
     let mut query = vec![("dir", dir)];
     if args.has("deep") {
@@ -314,7 +286,7 @@ fn version_line(label: &str, v: &Value) -> String {
 pub fn info(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let path = args.need(0, "which document — doklin info <doc>")?;
     args.at_most(1)?;
-    let s = session(ctx, "agent-docs")?;
+    let s = session(ctx)?;
     let v = s.client.send("GET", "doc", &[("path", path), ("info", "1")], &[], None)?.json()?;
     ctx.answer(&v, || {
         let mut lines = Vec::new();
@@ -361,7 +333,7 @@ pub fn read(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let path = args.need(0, "which document — doklin read <doc>")?;
     args.at_most(1)?;
     let version = version_flag(args)?;
-    let s = session(ctx, "agent-docs")?;
+    let s = session(ctx)?;
     let mut query = vec![("path", path)];
     if let Some(v) = version {
         query.push(("v", v));
@@ -477,7 +449,7 @@ pub fn write(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         }
     }
     let bytes = incoming(args)?;
-    let s = session(ctx, "agent-docs")?;
+    let s = session(ctx)?;
     let v = put_content(&s, ctx, path, version, if_rev, args.has("force"), &bytes)?;
     ctx.answer(&v, || wrote_words(&v, ctx.dry_run));
     Ok(())
@@ -489,7 +461,7 @@ pub fn edit(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let version = version_flag(args)?;
     let find = args.value("find").filter(|f| !f.is_empty()).ok_or_else(|| Failure::usage("say what to change with --find \"…\""))?;
     let replace = args.value("replace").ok_or_else(|| Failure::usage("say what to put there with --replace \"…\" (it may be empty)"))?;
-    let s = session(ctx, "agent-docs")?;
+    let s = session(ctx)?;
 
     // A read and a conditional write: the write names the revision that was
     // read, so a change made in between is refused rather than overwritten.
@@ -536,7 +508,7 @@ pub fn mv(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let from = args.need(0, usage)?;
     let to = args.need(1, usage)?;
     args.at_most(2)?;
-    let s = session(ctx, "agent-docs")?;
+    let s = session(ctx)?;
     let body = json!({ "from": from, "to": to, "dryRun": ctx.dry_run });
     let v = s.client.send("POST", "move", &[], &[], Some(Body::Json(&body)))?.json()?;
     ctx.answer(&v, || {
@@ -566,7 +538,7 @@ pub fn rm(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let path = args.need(0, "which document — doklin rm <doc>")?;
     args.at_most(1)?;
     let version = version_flag(args)?;
-    let s = session(ctx, "agent-docs")?;
+    let s = session(ctx)?;
     let mut query = vec![("path", path)];
     if let Some(v) = version {
         query.push(("v", v));
@@ -608,7 +580,7 @@ pub fn rm(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
 pub fn publish(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let path = args.need(0, "what to publish — doklin publish <doc or folder>")?;
     args.at_most(1)?;
-    let s = session(ctx, "agent-pages")?;
+    let s = session(ctx)?;
     let mut body = json!({ "path": path, "dryRun": ctx.dry_run });
     for key in ["slug", "title", "desc"] {
         if let Some(value) = args.value(key) {
@@ -655,7 +627,7 @@ pub fn publish(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
 pub fn unpublish(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let target = args.need(0, "which page — doklin unpublish <doc, folder or address>")?;
     args.at_most(1)?;
-    let s = session(ctx, "agent-pages")?;
+    let s = session(ctx)?;
     let mut query = vec![(if args.has("slug") { "slug" } else { "path" }, target)];
     if ctx.dry_run {
         query.push(("dry", "1"));
@@ -670,7 +642,7 @@ pub fn unpublish(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
 
 pub fn published(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     args.at_most(0)?;
-    let s = session(ctx, "agent-pages")?;
+    let s = session(ctx)?;
     let v = s.client.send("GET", "pages", &[], &[], None)?.json()?;
     ctx.answer(&v, || {
         let pages = v["pages"].as_array().cloned().unwrap_or_default();
@@ -716,7 +688,7 @@ pub fn published(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
 pub fn comments(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let path = args.need(0, "which document — doklin comments <doc>")?;
     args.at_most(1)?;
-    let s = session(ctx, "agent-comments")?;
+    let s = session(ctx)?;
     let v = s.client.send("GET", "comments", &[("path", path)], &[], None)?.json()?;
     ctx.answer(&v, || {
         let threads = v["threads"].as_array().cloned().unwrap_or_default();
@@ -758,7 +730,7 @@ pub fn comment(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         let path = args.need(1, usage)?;
         let thread = args.need(2, usage)?;
         args.at_most(3)?;
-        let s = session(ctx, "agent-comments")?;
+        let s = session(ctx)?;
         let mut query = vec![("path", path), ("thread", thread)];
         if ctx.dry_run {
             query.push(("dry", "1"));
@@ -782,7 +754,7 @@ pub fn comment(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     })?;
     let said = message(args)?;
     let version = version_flag(args)?;
-    let s = session(ctx, "agent-comments")?;
+    let s = session(ctx)?;
     let mut body = json!({ "path": path, "on": on, "body": said, "dryRun": ctx.dry_run });
     if let Some(v) = version {
         body["v"] = json!(v);
@@ -811,7 +783,7 @@ pub fn reply(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let thread = args.need(1, usage)?;
     args.at_most(2)?;
     let said = message(args)?;
-    let s = session(ctx, "agent-comments")?;
+    let s = session(ctx)?;
     let body = json!({ "path": path, "thread": thread, "body": said, "dryRun": ctx.dry_run });
     let v = s.client.send("POST", "comments", &[], &[], Some(Body::Json(&body)))?.json()?;
     ctx.answer(&v, || {
@@ -842,7 +814,7 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     if limit.is_some_and(|n| n.parse::<u32>().map(|n| n == 0).unwrap_or(true)) {
         return Err(Failure::usage("--limit takes a number of documents"));
     }
-    let s = session(ctx, "agent-search")?;
+    let s = session(ctx)?;
     let mut query = vec![("q", query_text.as_str())];
     if let Some(dir) = args.value("in") {
         query.push(("dir", dir));

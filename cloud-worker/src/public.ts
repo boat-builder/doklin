@@ -11,7 +11,7 @@
 //   GET /<dirSlug>               a published folder: its table of contents
 //   GET /<dirSlug>/<rel/path>    a note inside it (`.md` dropped, segments percent-encoded), its
 //                                rendition at …/raw, or an image / PDF / html file by exact path
-//   GET /og.png · /<slug>/og.png the site's static Open Graph image
+//   GET /og.png                  the site's static Open Graph image
 //   GET /__web/<tag>/mermaid.js  the standalone mermaid module (immutable, content-tagged)
 //   GET /__web/fonts/<file>      the font files the app bundles (theme.ts)
 //   robots.txt, favicon.ico, apple-touch-icon.png
@@ -88,7 +88,7 @@ export async function handlePublic(
   if (path === "/robots.txt") return deliver(robotsTxt(), request.method);
   if (path === "/favicon.ico") return deliver(favicon(), request.method);
   if (path === "/apple-touch-icon.png") return deliver(appleTouchIcon(), request.method);
-  if (path === "/og.png" || /^\/[^/]+\/og\.png$/.test(path)) return deliver(ogImage(), request.method);
+  if (path === "/og.png") return deliver(ogImage(), request.method);
   if (/^\/__web\/[a-z0-9]+\/mermaid\.js$/.test(path)) return deliver(mermaidModule(), request.method);
   if (path.startsWith(FONT_PATH)) {
     return deliver(fontFile(path.slice(FONT_PATH.length)) ?? notFoundPage(), request.method);

@@ -50,8 +50,6 @@ public struct CloudStatus: Decodable, Equatable, Sendable, Identifiable {
     public let presence: [PresenceDevice]
     public let leases: [LeaseHolder]
     public let spaces: [SpaceStatus]
-    /// `Private` and `Restricted` at the top are sections, not shared folders.
-    public let sections: Bool
 
     public var id: String { root }
 
@@ -107,7 +105,7 @@ public struct PublicPage: Decodable, Equatable, Sendable, Identifiable {
 /// Another device here now.
 public struct PresenceDevice: Decodable, Equatable, Sendable, Identifiable {
     public let deviceId: String
-    public let memberId: String?
+    public let memberId: String
     /// Who is here, in words: the person, or the device when it is yours.
     public let name: String
     public let device: String
@@ -122,7 +120,7 @@ public struct LeaseHolder: Decodable, Equatable, Sendable {
     /// Workspace-relative and lowercased.
     public let path: String
     public let deviceId: String
-    public let memberId: String?
+    public let memberId: String
     public let name: String
     public let device: String
     /// The holder is you, on another device.
@@ -165,12 +163,12 @@ public struct People: Decodable, Equatable, Sendable {
     /// `superadmin`, `owner` or `member`.
     public let role: String
     /// Which of `members` is you.
-    public let me: String?
+    public let me: String
     public let can: [String]
     /// This device's own id.
     public let deviceId: String
     /// The row of `devices` that is this device's sign-in.
-    public let tokenId: String?
+    public let tokenId: String
     public let members: [MemberRecord]
     public let invites: [InviteRecord]
     public let devices: [DeviceRecord]

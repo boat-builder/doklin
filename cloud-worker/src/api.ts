@@ -5,7 +5,7 @@
 // presence and the binding) and `x-doklin-client` (the app version, for
 // the logs — nothing reads it).
 //
-//   GET    /api/meta                 {version, features, workspace|null, d1: schema version|null,
+//   GET    /api/meta                 {version, workspace|null, d1: schema version|null,
 //                                    you: who this bearer is — {role, memberId, email, name,
 //                                    tokenId, can: [what that role may do]}, superadmin: {id,
 //                                    name}|null, people: [{id, name}] — the directory a
@@ -47,12 +47,11 @@
 //   The domain's key — the env secret `OWNER_TOKEN` — is no sign-in. As a bearer it is answered
 //   on two routes and refused (403) on every other:
 //
-//   GET    /api/meta                 the probe above, with `key: true` and no `you`
-//   POST   /api/auth/recover         {email?, name?, deviceId?, deviceName?} → 201 {token, tokenId,
-//                                    member}: a device sign-in as the superadmin — `email`'s
-//                                    person, who becomes it, or without one the superadmin there
-//                                    is (409 {code: "no_identity"} when there is none). The key is
-//                                    spent: 401 {code: "key_spent"} the next time
+//   GET    /api/meta                 the probe above, with no `you`
+//   POST   /api/auth/recover         {email, name?, deviceId?, deviceName?} → 201 {token, tokenId,
+//                                    member}: a device sign-in as `email`'s person, who becomes the
+//                                    superadmin. The key is spent: 401 {code: "key_spent"} the
+//                                    next time
 //
 //   People. Everything here is the D1 database beside the bucket; a
 //   deployment without one answers 503. Who may call what is one table
@@ -190,7 +189,7 @@ import {
   spaceEnv,
   spaceOf,
 } from "./spaces";
-import { WORKER_FEATURES, WORKER_VERSION } from "./version";
+import { WORKER_VERSION } from "./version";
 import { handleVersions } from "./versions";
 
 const JSON_OBJECT = { httpMetadata: { contentType: "application/json" } };
@@ -262,8 +261,8 @@ export async function handleApi(
     // that reports what it found. `d1` is the schema version, or null on a
     // deployment whose wrangler.toml has no DB binding.
     //
-    // Since v6 it also answers identity: who the caller is, and what every
-    // person here is called. Both belong on the route an engine already asks
+    // It also answers identity: who the caller is, and what every person
+    // here is called. Both belong on the route an engine already asks
     // before it writes anything — a manifest it PUTs signs with `you.memberId`
     // and every `by` it reads resolves through `people`.
     //
@@ -277,7 +276,6 @@ export async function handleApi(
     ]);
     return json({
       version: WORKER_VERSION,
-      features: WORKER_FEATURES,
       workspace,
       d1,
       you: whoIs(auth),
@@ -342,15 +340,14 @@ export async function handleApi(
 
 /* ---------- People ---------- */
 
-/** A deployment whose wrangler.toml has no `DB` binding, or whose database is
- *  gone. Identity IS the database, so these routes say so instead of
- *  pretending nobody has been invited. */
-const noDatabase = (): Response => json({ error: "this domain has no database — update the worker" }, 503);
+/** The database could not answer. Identity IS the database, so these routes
+ *  say so instead of pretending nobody has been invited. */
+const noDatabase = (): Response => json({ error: "the domain's database isn't answering — try again in a moment" }, 503);
 
-/** A bearer the database could not look up: the workspace is down for
- *  everyone, and says which way. */
+/** The database could not answer a route that needs no row to reach it: the
+ *  workspace is down for everyone, and says which way. */
 const unavailable = (env: Env): Response =>
-  env.DB ? json({ error: "the domain's database isn't answering — try again in a moment" }, 503) : noDatabase();
+  env.DB ? noDatabase() : json({ error: "this domain's worker has no database bound to it" }, 503);
 
 /**
  * The domain's key as a bearer. It is what proves control of the Cloudflare
@@ -363,7 +360,7 @@ async function handleKey(request: Request, env: Env, parts: string[], keyHash: s
   if (parts.length === 2 && parts[1] === "meta") {
     if (request.method !== "GET") return methodNotAllowed();
     const [workspace, d1] = await Promise.all([readWorkspace(env), ensureSchema(env)]);
-    return json({ version: WORKER_VERSION, features: WORKER_FEATURES, workspace, d1, key: true });
+    return json({ version: WORKER_VERSION, workspace, d1 });
   }
   if (parts.length === 3 && parts[1] === "auth" && parts[2] === "recover") {
     if (request.method !== "POST") return methodNotAllowed();
@@ -379,19 +376,16 @@ async function handleKey(request: Request, env: Env, parts: string[], keyHash: s
 async function recoverWithKey(request: Request, env: Env, keyHash: string): Promise<Response> {
   const body = await readJsonObject(request);
   if (!body) return json({ error: "invalid json body" }, 400);
-  const email = body.email == null || body.email === "" ? null : normalizeEmail(body.email);
-  if (body.email != null && body.email !== "" && !email) return json({ error: "a valid email address is required" }, 400);
+  const email = normalizeEmail(body.email);
+  if (!email) return json({ error: "a valid email address is required" }, 400);
   const deviceId = typeof body.deviceId === "string" && ID_RE.test(body.deviceId) ? body.deviceId : null;
   const name = typeof body.name === "string" ? body.name : null;
   const deviceName = typeof body.deviceName === "string" ? body.deviceName : null;
 
   const claimed = await claimSuperadmin(env, keyHash, email, name, deviceId, deviceName);
-  if (claimed === null) return noDatabase();
+  if (claimed === null) return unavailable(env);
   if (claimed === "spent") {
     return json({ error: "this key has been used already — make a fresh one", code: "key_spent" }, 401);
-  }
-  if (claimed === "no_identity") {
-    return json({ error: "this workspace has no superadmin yet — say who you are", code: "no_identity" }, 409);
   }
   return json({ token: claimed.token, tokenId: claimed.tokenId, member: claimed.member }, 201);
 }
@@ -438,7 +432,7 @@ async function joinWithInvite(request: Request, env: Env): Promise<Response> {
   const deviceName = typeof body.deviceName === "string" ? body.deviceName : null;
 
   const redeemed = await redeemInvite(env, await sha256Hex(code), deviceId, deviceName);
-  if (redeemed === null) return noDatabase();
+  if (redeemed === null) return unavailable(env);
   if (redeemed === "unknown" || redeemed === "expired") return json({ error: "that code is not valid" }, 401);
   return json({ token: redeemed.token, tokenId: redeemed.tokenId, member: redeemed.member }, 201);
 }
@@ -858,8 +852,9 @@ async function putManifest(request: Request, env: Env): Promise<Response> {
   const problem = validateManifest(data, inSpace);
   if (problem) return json({ error: problem.error }, problem.status);
 
-  // Its addresses are claimed before it is stored (addresses.ts). The shared
-  // workspace goes on without a database; a space is its rows, so it cannot.
+  // Its addresses are claimed before it is stored (addresses.ts). A database
+  // that cannot answer does not hold up the shared workspace; a space is its
+  // rows, so it does hold that up.
   const claim = await claimAddresses(env, Object.keys((data as Manifest).public ?? {}));
   if (claim === null && inSpace) return noDatabase();
   if (claim && claim.taken.length > 0) return json(takenError(claim.taken), 409);
@@ -930,9 +925,9 @@ async function blob(request: Request, env: Env, fileId: string, hash: string): P
 /* ---------- The poll ---------- */
 
 /**
- * The 15-second question every engine asks — "has the manifest moved?" — and,
- * since v7, the carrier of its presence beat; since v8, of its leases too;
- * since v13, of the spaces the caller is in and where each one's manifest is.
+ * The 15-second question every engine asks — "has the manifest moved?" — and
+ * the carrier of its presence beat, its leases, and the spaces the caller is
+ * in with where each one's manifest is.
  *
  * The method says whether anything is written. A `GET` reads; a `POST` says
  * "this device is here" (or is leaving), and the engine sends one only when a
@@ -941,12 +936,12 @@ async function blob(request: Request, env: Env, fileId: string, hash: string): P
  * the client decides when a write happens. A worker that wrote on every poll
  * would spend 58% of D1's free daily writes on freshness nobody can see.
  *
- * The etag is the poll's job; presence, leases and spaces are not. A database
- * that is missing, broken or mid-outage answers `{}` for presence and `null`
- * for leases and spaces while the etag comes back as it always has — so none
- * is ever on the shared workspace's sync path, and no lease is no lock. A beat this cannot attribute (no
- * device header) or whose path is not one is still a poll: it answers, and
- * records what it can.
+ * The etag is the poll's job; presence, leases and spaces are not. When the
+ * database cannot answer, presence comes back `{}` and leases and spaces
+ * `null` while the etag comes back as it always has — so none is ever on the
+ * shared workspace's sync path, and no lease is no lock. A beat this cannot
+ * attribute (no device header) or whose path is not one is still a poll: it
+ * answers, and records what it can.
  */
 async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
   let beat: Beat | null = null;
@@ -997,9 +992,8 @@ async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
  *
  * The last round empties D1 as well — otherwise a
  * rebound domain would inherit the old workspace's people. The database goes
- * in the round that finishes, never before: an owner whose credential is a
- * row in it — rather than the env secret — would otherwise cut the call off
- * half-done. Everyone's tokens go with it, which is the intent, and so does
+ * in the round that finishes, never before: the caller's credential is a
+ * row in it, and would otherwise cut the call off half-done. Everyone's tokens go with it, which is the intent, and so does
  * `removed_tokens`: a wiped domain has taken nobody's access away, so no Mac
  * is told to delete its copy.
  */
@@ -1009,7 +1003,7 @@ async function wipeBucket(env: Env): Promise<Response> {
     // A database that is bound and did not empty is not done: its people and
     // their tokens would outlive the workspace they were for. The caller
     // repeats while `remaining`, so say so and let the next round try again.
-    const emptied = (await wipeSchema(env)) !== null || !env.DB;
+    const emptied = (await wipeSchema(env)) !== null;
     return json({ wiped: true, purged: deleted, remaining: !emptied });
   };
   for (let round = 0; round < 20; round += 1) {

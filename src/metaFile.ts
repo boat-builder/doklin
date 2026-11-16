@@ -1,10 +1,10 @@
 // The entity meta file — one optional sidecar per document entity.
 //
 // A document entity is a stem: `notes.md`, its optional `notes.html`
-// rendition, and now an optional `notes.meta.jsonl` holding everything the
-// entity owns that isn't the prose itself. Today that is comment-thread
-// BODIES for both renditions; the typed-record format leaves room for more
-// (properties, tags) without another sidecar kind.
+// rendition, and an optional `notes.meta.jsonl` holding everything the
+// entity owns that isn't the prose itself: comment-thread BODIES for both
+// renditions, and table column widths. The typed-record format leaves room
+// for more without another sidecar kind.
 //
 //   notes.md  +  notes.html  +  notes.meta.jsonl
 //
@@ -13,8 +13,7 @@
 // (engine/src/cloud/merge.rs): two people adding threads concurrently
 // merge cleanly line-by-line. Records are sorted by (type, id) and
 // serialized with a fixed key order, so two devices writing the same
-// logical state produce the same bytes (a concurrent one-time migration on
-// two machines must converge, not conflict).
+// logical state produce the same bytes.
 //
 // Record types:
 //   {"t":"hthread", id, anchor, comments}  — a rendition (html) thread,
@@ -36,10 +35,9 @@
 //       app version's records must survive a rewrite by this one).
 //
 // The DISK markdown is the hybrid form (markers only); the EDITOR keeps
-// speaking the full inline form. expandMarkdown /
-// extractMarkdown convert at the IO boundary, and expand∘extract is the
-// identity on a migrated file, which is what makes the one-time migration
-// safe to re-run anywhere, any number of times.
+// speaking the full inline form. expandMarkdown / extractMarkdown convert at
+// the IO boundary, and a file the app wrote expands and extracts back to the
+// same bytes.
 //
 // The iPhone writes the same bytes with a port of this file
 // (ios/DoklinKit/Sources/DoklinKit/Comments/MetaFile.swift), both held to
@@ -123,8 +121,7 @@ const isAnchor = (value: unknown): value is HtmlAnchor => {
   );
 };
 
-// Tolerant parse, same posture as the html sidecar's: skip the header, skip
-// malformed lines (a sync conflict marker or hand edit must never take every
+// Tolerant parse: skip the header, skip malformed lines (a sync conflict marker or hand edit must never take every
 // thread down with it), fold duplicate (type, id) pairs — first wins.
 export function parseEntityMeta(raw: string): EntityMeta {
   const meta = emptyMeta();
@@ -179,11 +176,7 @@ export function parseEntityMeta(raw: string): EntityMeta {
 // Fixed key order (insertion order survives JSON.stringify) so equal state
 // serializes to equal bytes on every device.
 const canonicalEntry = (e: CommentEntry): CommentEntry => {
-  const out: CommentEntry = { author: e.author, at: e.at, body: e.body };
-  if (e.eid !== undefined) out.eid = e.eid;
-  if (e.codeId !== undefined) out.codeId = e.codeId;
-  if (e.label !== undefined) out.label = e.label;
-  return out;
+  return { author: e.author, at: e.at, body: e.body };
 };
 
 export function serializeEntityMeta(meta: EntityMeta): string {
@@ -232,10 +225,9 @@ export const metaIsEmpty = (meta: EntityMeta): boolean =>
 
 /* ---------- entry / thread union (fold-ins) ---------- */
 
-// An entry's identity for folding two copies of a thread: the eid when one
-// was stamped, else author+time (stable across body edits). First side wins
-// the body.
-const entryFoldKey = (e: CommentEntry): string => e.eid ?? `${e.author}|${e.at}`;
+// An entry's identity for folding two copies of a thread: author+time
+// (stable across body edits). First side wins the body.
+const entryFoldKey = (e: CommentEntry): string => `${e.author}|${e.at}`;
 
 function unionEntries(a: CommentEntry[], b: CommentEntry[]): CommentEntry[] {
   const have = new Set(a.map(entryFoldKey));
@@ -268,8 +260,8 @@ export function deriveId(material: string, index: number): string {
   return (id + "000000").slice(0, 8);
 }
 
-// The id for a thread that arrived without one (hand-written or legacy
-// CriticMarkup) — see extractMarkdown.
+// The id for a thread that arrived without one (hand-written CriticMarkup)
+// — see extractMarkdown.
 export const deriveThreadId = deriveId;
 
 export type ExpandResult = {
@@ -284,8 +276,8 @@ export type ExpandResult = {
 // marker (later runs stay bare refs; the parser folds runs by id and the
 // first run's entries win — matching the serializer's own multi-run shape).
 // A marker whose id has no meta body is left alone: with entries inline it
-// IS the body (old format / an old device's write / a web pull), and both
-// present means both survive — entries union, inline side winning bodies.
+// IS the body (a hand edit), and both present means both survive — entries
+// union, inline side winning bodies.
 export function expandMarkdown(md: string, mthreads: MdThread[]): ExpandResult {
   const bodies = new Map(mthreads.map((t) => [t.id, t.comments]));
   const rooted = new Set<string>();
@@ -336,13 +328,13 @@ export type ExtractResult = { md: string; mthreads: MdThread[] };
 
 // Editor → disk: move each thread's entries out to a record, leaving the
 // bare `{==anchor==}{>>#id<<}` marker. First run of an id wins the record
-// (the parser's own rule); every run flattens to a bare ref. Legacy spans
-// with no id get a deterministic content-derived one. A bare ref whose root
+// (the parser's own rule); every run flattens to a bare ref. Hand-written
+// spans with no id get a deterministic content-derived one. A bare ref whose root
 // never appears is left untouched and yields no record — its body, if any,
 // lives in the meta file already.
 export function extractMarkdown(fullMd: string): ExtractResult {
   // Pre-pass: every explicit id the document declares anywhere, so a derived
-  // legacy id can never collide with one that appears later on.
+  // id can never collide with one that appears later on.
   const reserved = new Set<string>();
   {
     const scan = new RegExp(CRITIC_BLOCK_RE.source, "g");
@@ -355,7 +347,7 @@ export function extractMarkdown(fullMd: string): ExtractResult {
   }
   const records: MdThread[] = [];
   const seen = new Set<string>();
-  let legacySeq = 0;
+  let derivedSeq = 0;
   const re = new RegExp(CRITIC_BLOCK_RE.source, "g");
   const md = fullMd.replace(re, (whole, anchor: string, spans: string) => {
     const parsed = parseSpans(spans);
@@ -363,7 +355,7 @@ export function extractMarkdown(fullMd: string): ExtractResult {
     let id = parsed.id;
     if (id === null) {
       do {
-        id = deriveThreadId(`${anchor} ${spans}`, legacySeq++);
+        id = deriveThreadId(`${anchor} ${spans}`, derivedSeq++);
       } while (reserved.has(id));
       reserved.add(id);
     }
@@ -374,51 +366,4 @@ export function extractMarkdown(fullMd: string): ExtractResult {
     return `{==${anchor}==}{>>#${id}<<}`;
   });
   return { md, mthreads: records };
-}
-
-/* ---------- the one-time migration, as a pure step ---------- */
-
-export type MigrateInput = {
-  diskMd: string | null; // null: an html-only entity (no markdown side)
-  meta: EntityMeta;
-};
-
-export type MigrateResult = {
-  md: string | null;
-  meta: EntityMeta;
-  mdChanged: boolean;
-  metaChanged: boolean;
-};
-
-// Normalize an entity to the hybrid layout. Pure and idempotent: running it
-// on an already-migrated entity changes nothing, so it is safe on every
-// open, on every device, concurrently (writes race on snapshots upstream).
-export function migrateEntity(input: MigrateInput): MigrateResult {
-  const before = serializeEntityMeta(input.meta);
-  let md: string | null = input.diskMd;
-  let mthreads = input.meta.mthreads;
-  if (input.diskMd !== null) {
-    const expanded = expandMarkdown(input.diskMd, input.meta.mthreads);
-    const extracted = extractMarkdown(expanded.md);
-    const orphanSet = new Set(expanded.orphanIds);
-    md = extracted.md;
-    mthreads = [
-      ...extracted.mthreads,
-      ...input.meta.mthreads.filter((t) => orphanSet.has(t.id)),
-    ];
-  }
-  // Html threads and table widths have no old format to migrate from and no
-  // anchor in the prose to reconcile against — they ride through untouched.
-  const meta: EntityMeta = {
-    mthreads,
-    hthreads: input.meta.hthreads,
-    tcols: input.meta.tcols,
-    foreign: input.meta.foreign,
-  };
-  return {
-    md,
-    meta,
-    mdChanged: input.diskMd !== null && md !== input.diskMd,
-    metaChanged: serializeEntityMeta(meta) !== before,
-  };
 }

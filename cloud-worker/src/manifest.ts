@@ -5,6 +5,7 @@
 // are the worker's. The check is what stops a broken device from publishing
 // garbage: it never has to trust the client, and it never has to be clever.
 
+import { AGENT_ID_RE } from "./agents";
 import {
   BLOB_HASH_RE,
   ID_RE,
@@ -21,6 +22,7 @@ import {
   reservedTop,
   validPath,
 } from "./layout";
+import { MEMBER_ID_RE } from "./members";
 import { MANIFEST_VERSION } from "./version";
 
 export type ManifestFile = {
@@ -29,18 +31,15 @@ export type ManifestFile = {
   hash: string;
   size: number;
   mtime?: number;
-  /** Who last changed it: a member id since v3.
-   *  Checked as a bounded string rather than as an id, because a workspace
-   *  upgraded from v2 carries the device names it was written with and
-   *  refusing those would throw away the attribution it already has. */
-  by?: string;
+  /** Who last changed it: a member id, or an agent's. */
+  by: string;
 };
 
 /** A removed file. `to` is set when it was not deleted but moved to another
  *  section: the id of the space it went to, `""` for the shared workspace.
  *  A Mac in that section moves its copy there; any other deletes it outright
  *  instead of putting it in the Trash. */
-export type Tombstone = { path: string; rev?: number; ts?: number; by?: string; to?: string };
+export type Tombstone = { path: string; rev: number; ts: number; by: string; to?: string };
 
 /**
  * The public map, keyed by slug. A file entry references the fileId (so a
@@ -57,8 +56,8 @@ export type PublicEntry =
       title?: string;
       desc?: string;
       root?: boolean;
-      by?: string;
-      at?: number;
+      by: string;
+      at: number;
     }
   | {
       kind: "dir";
@@ -67,8 +66,8 @@ export type PublicEntry =
       title?: string;
       desc?: string;
       root?: boolean;
-      by?: string;
-      at?: number;
+      by: string;
+      at: number;
     };
 
 export type Manifest = {
@@ -93,6 +92,8 @@ const isCount = (v: unknown): v is number => Number.isInteger(v) && (v as number
 const isTime = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
 const optionalText = (v: unknown, max: number): boolean =>
   v === undefined || (typeof v === "string" && v.length <= max);
+/** A `by`: the id of a person or an agent. */
+const isAuthor = (v: unknown): boolean => typeof v === "string" && (MEMBER_ID_RE.test(v) || AGENT_ID_RE.test(v));
 
 /** What a shared manifest naming a file under a reserved folder is told. */
 export const RESERVED_SENTENCE = "Private and Restricted are kept for a person's own and restricted folders";
@@ -116,12 +117,12 @@ function validateFiles(files: unknown, space: boolean): string | null {
     if (typeof f.hash !== "string" || !BLOB_HASH_RE.test(f.hash)) return `invalid hash for ${id}`;
     if (!isCount(f.size) || f.size > MAX_FILE_BYTES) return `invalid size for ${id}`;
     if (f.mtime !== undefined && !isTime(f.mtime)) return `invalid mtime for ${id}`;
-    if (!optionalText(f.by, MAX_NAME_LEN)) return `invalid by for ${id}`;
+    if (!isAuthor(f.by)) return `invalid by for ${id}`;
   }
   return null;
 }
 
-function validateTombstones(tombstones: unknown): string | null {
+function validateTombstones(tombstones: unknown, space: boolean): string | null {
   if (tombstones === undefined) return null;
   if (!isObject(tombstones)) return "tombstones must be an object";
   const ids = Object.keys(tombstones);
@@ -130,9 +131,10 @@ function validateTombstones(tombstones: unknown): string | null {
     if (!ID_RE.test(id)) return `invalid tombstone id: ${id}`;
     const t = tombstones[id];
     if (!isObject(t) || !validPath(t.path)) return `invalid tombstone for ${id}`;
-    if (t.rev !== undefined && !isCount(t.rev)) return `invalid tombstone rev for ${id}`;
-    if (t.ts !== undefined && !isTime(t.ts)) return `invalid tombstone ts for ${id}`;
-    if (!optionalText(t.by, MAX_NAME_LEN)) return `invalid tombstone by for ${id}`;
+    if (!space && reservedTop(t.path)) return RESERVED_SENTENCE;
+    if (!isCount(t.rev)) return `invalid tombstone rev for ${id}`;
+    if (!isTime(t.ts)) return `invalid tombstone ts for ${id}`;
+    if (!isAuthor(t.by)) return `invalid tombstone by for ${id}`;
     if (t.to !== undefined && t.to !== "" && !(typeof t.to === "string" && SPACE_ID_RE.test(t.to))) {
       return `invalid tombstone to for ${id}`;
     }
@@ -170,8 +172,8 @@ function validatePublic(map: unknown, space: boolean): string | null {
     }
     if (!optionalText(e.title, MAX_TITLE_LEN)) return `invalid title for ${slug}`;
     if (!optionalText(e.desc, MAX_DESC_LEN)) return `invalid desc for ${slug}`;
-    if (!optionalText(e.by, MAX_NAME_LEN)) return `invalid by for ${slug}`;
-    if (e.at !== undefined && !isTime(e.at)) return `invalid at for ${slug}`;
+    if (!isAuthor(e.by)) return `invalid by for ${slug}`;
+    if (!isTime(e.at)) return `invalid at for ${slug}`;
     if (e.root !== undefined && typeof e.root !== "boolean") return `invalid root for ${slug}`;
     if (e.root === true) roots += 1;
   }
@@ -202,6 +204,6 @@ export function validateManifest(data: unknown, space: boolean): ManifestProblem
   if (!isCount(data.seq)) return bad("seq must be a non-negative integer");
   if (!optionalText(data.name, MAX_NAME_LEN)) return bad("invalid name");
   const problem =
-    validateFiles(data.files, space) ?? validateTombstones(data.tombstones) ?? validatePublic(data.public, space);
+    validateFiles(data.files, space) ?? validateTombstones(data.tombstones, space) ?? validatePublic(data.public, space);
   return problem ? bad(problem) : null;
 }

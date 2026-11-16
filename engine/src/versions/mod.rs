@@ -1113,8 +1113,7 @@ const CLOUD_PREFETCH: usize = 48;
 
 /// What the bucket holds for the workspace `path` is in, with the snapshots
 /// the rail is about to read pulled into the store's cache. Empty for a
-/// folder that isn't connected, or one whose worker predates `versions` —
-/// history is ungated, so neither is an error.
+/// folder that isn't connected — history is ungated, so that is no error.
 async fn mirrored_set(core: &Arc<Core>, path: &str, root: &str) -> Vec<VersionsEntry> {
     let Ok(Some(index)) = crate::cloud::versions_index_for(core, path).await else { return Vec::new() };
     let Ok(store) = store_for(core, root) else { return index.snapshots };

@@ -140,7 +140,7 @@ const toAgent = (r: AgentRow): Agent => ({
 
 /**
  * Resolve a bearer's sha256 to the agent behind it: one row read on the
- * tokens primary key, joined to the agent. A disabled agent is no one.
+ * tokens primary key, joined to the agent.
  * Nothing is written here — `touchAgent` moves `last_used_at`, at most once
  * an hour, so a request costs a read and no write.
  */
@@ -151,7 +151,7 @@ export async function resolveAgentToken(env: Env, bearerHash: string): Promise<A
         `SELECT t.id AS token_id, a.id AS id, a.name AS name, a.scopes AS scopes, a.last_used_at AS last_used_at,
                 a.member_id AS member_id
            FROM agent_tokens t JOIN agents a ON a.id = t.agent_id
-          WHERE t.hash = ? AND a.disabled = 0`,
+          WHERE t.hash = ?`,
       )
       .bind(bearerHash)
       .first<{
@@ -206,7 +206,7 @@ export async function createAgent(
     await db.batch([
       db
         .prepare(
-          "INSERT INTO agents (id, name, scopes, created_at, last_used_at, disabled, member_id) VALUES (?, ?, ?, ?, NULL, 0, ?)",
+          "INSERT INTO agents (id, name, scopes, created_at, last_used_at, member_id) VALUES (?, ?, ?, ?, NULL, ?)",
         )
         .bind(agent.id, agent.name, storeScopes(scopes), now, owner),
       db
@@ -360,7 +360,7 @@ export async function redeemAgentCode(
     if (!code) return "unknown" as LoginResult;
     if (Number(code.expires_at) <= now) return "expired" as LoginResult;
     const row = await db
-      .prepare("SELECT id, name, scopes, created_at, last_used_at FROM agents WHERE id = ? AND disabled = 0")
+      .prepare("SELECT id, name, scopes, created_at, last_used_at FROM agents WHERE id = ?")
       .bind(code.agent_id)
       .first<AgentRow>();
     if (!row) return "unknown" as LoginResult;

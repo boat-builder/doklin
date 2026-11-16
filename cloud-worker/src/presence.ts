@@ -1,12 +1,9 @@
 // Who is here, and who holds which document — a row per device and a row per
 // leased path in D1, both written by the poll that carries a beat.
 //
-// Presence used to be `presence.json`, one R2 object every device read,
-// mutated and wrote back on its own 25-second request. That was a lost update
-// (two beats landing together, one vanished) and, at ten always-on Macs, 86%
-// of the free plan's Class A writes. Here a beat is an upsert of the caller's
-// own row — atomic by itself — and it rides `POST /api/poll`, so the request
-// it used to cost is gone too.
+// A beat is an upsert of the caller's own row — atomic by itself, where one
+// shared object read and rewritten would lose one of two beats landing
+// together — and it rides `POST /api/poll`, so it costs no request of its own.
 //
 // A lease is the same beat read one step further. A beat that names a path
 // claims that document: the upsert of `leases` succeeds when nobody holds it,
@@ -19,10 +16,9 @@
 // Advisory, always. Nothing that writes the manifest reads a lease; it changes
 // what an editor does with a document, never whether a write lands.
 //
-// Best effort, always. Every function answers null when the database is
-// missing or throws, and the poll answers the manifest etag regardless: sync
-// never waits on presence or a lease, which is exactly the contract presence
-// had as an R2 object ("TTL'd, best effort").
+// Best effort, always. Every function answers null when the database cannot
+// answer, and the poll answers the manifest etag regardless: sync never waits
+// on presence or a lease.
 //
 // By space. A beat names the space its document is in ('' the shared
 // workspace), and a lease is one document in one space. What somebody has
@@ -46,7 +42,7 @@ import { spacesStatement, toSpace, type Space, type SpaceRow } from "./spaces";
  *  whose it is, and the app puts a person's name to it. `path` is what they
  *  have open, in `space` when that is not the shared workspace — both absent
  *  when it is in a space the caller is not in. */
-export type PresenceEntry = { memberId: string | null; name: string; path?: string; space?: string; ts: number };
+export type PresenceEntry = { memberId: string; name: string; path?: string; space?: string; ts: number };
 export type PresenceMap = Record<string, PresenceEntry>;
 
 /** One held document. `path` is the lease's key — relative to its space and
@@ -57,7 +53,7 @@ export type LeaseEntry = {
   path: string;
   space?: string;
   deviceId: string;
-  memberId: string | null;
+  memberId: string;
   name: string;
   until: number;
 };
@@ -89,7 +85,7 @@ export const leaseKey = (path: string): string => path.toLowerCase();
 
 type PresenceRow = {
   device_id: string;
-  member_id: string | null;
+  member_id: string;
   device_name: string;
   space_id: string | null;
   path: string | null;
@@ -99,7 +95,7 @@ type LeaseRow = {
   space_id: string;
   path: string;
   device_id: string;
-  member_id: string | null;
+  member_id: string;
   device_name: string;
   until: number;
 };
@@ -120,7 +116,7 @@ function toHere(presenceRows: PresenceRow[], leaseRows: LeaseRow[], spaces: Spac
   const presence: PresenceMap = {};
   for (const r of presenceRows) {
     presence[r.device_id] = {
-      memberId: r.member_id ?? null,
+      memberId: r.member_id,
       name: r.device_name,
       ...(r.path ? { path: r.path, ...(r.space_id ? { space: r.space_id } : {}) } : {}),
       ts: Number(r.ts),
@@ -130,7 +126,7 @@ function toHere(presenceRows: PresenceRow[], leaseRows: LeaseRow[], spaces: Spac
     path: r.path,
     ...(r.space_id ? { space: r.space_id } : {}),
     deviceId: r.device_id,
-    memberId: r.member_id ?? null,
+    memberId: r.member_id,
     name: r.device_name,
     until: Number(r.until),
   }));

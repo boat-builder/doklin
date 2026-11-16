@@ -233,7 +233,7 @@ export function buildRecoverPrompt(i: RecoverPromptInput): string {
 3. Set the key as the worker's secret: run \`npx -y wrangler@4 secret put OWNER_TOKEN --name ${worker}\` and give it exactly this value:
 ${i.key}
    That redeploys the worker with the new secret; its bucket, its database and its domain stay as they are.
-4. Verify: \`curl -fsS -H "Authorization: Bearer ${i.key}" ${endpoint}/api/meta\` must answer 200 with JSON whose "key" is true. Retry for up to a minute while the new secret takes effect. If it answers but has no "key" at all, the worker is too old to recover with: stop and tell me — it needs Doklin's update script first.
+4. Verify: \`curl -fsS -H "Authorization: Bearer ${i.key}" ${endpoint}/api/meta\` must answer 200. Retry for up to a minute while the new secret takes effect.
 5. Then print exactly this line:
 KEY SET: ${endpoint}
 
@@ -332,9 +332,9 @@ export function buildTeardownPrompt(i: TeardownPromptInput): string {
   return `Tear down the Doklin cloud that served ${i.endpoint}: delete its Cloudflare Worker, its D1 database and its R2 bucket from my account. The app has already erased everything in the bucket and the database; nothing on this domain is needed any more.
 
 1. ${LOGIN_STEP}
-2. Confirm the names before deleting anything. The worker should be "${worker}" (${nameNote}): \`npx -y wrangler@4 deployments list --name ${worker}\` must list its deployments. If wrangler knows no such worker, ask me for the exact name — never delete one you guessed. Its bucket should be "${bucket}": confirm it with \`npx -y wrangler@4 r2 bucket list\`. Its database should be "${database}": confirm it with \`npx -y wrangler@4 d1 list\`. Ask me about anything that isn't there — a domain set up before Doklin used a database simply has none, which is fine, but a name that doesn't match is not.
+2. Confirm the names before deleting anything. The worker should be "${worker}" (${nameNote}): \`npx -y wrangler@4 deployments list --name ${worker}\` must list its deployments. If wrangler knows no such worker, ask me for the exact name — never delete one you guessed. Its bucket should be "${bucket}": confirm it with \`npx -y wrangler@4 r2 bucket list\`. Its database should be "${database}": confirm it with \`npx -y wrangler@4 d1 list\`. Ask me about anything that isn't there or whose name doesn't match.
 3. Delete the worker: \`npx -y wrangler@4 delete --name ${worker}\`. This also releases its route or workers.dev address.
-4. Delete the database: \`npx -y wrangler@4 d1 delete ${database}\` — answer yes if it asks (\`-y\` skips the prompt). Skip this if step 2 found no such database.
+4. Delete the database: \`npx -y wrangler@4 d1 delete ${database}\` — answer yes if it asks (\`-y\` skips the prompt).
 5. Delete the bucket: \`npx -y wrangler@4 r2 bucket delete ${bucket}\`. If it refuses because the bucket isn't empty, STOP and tell me — the app's erase step may not have finished. Never force it.
 6. Verify: \`curl -sS -o /dev/null -w "%{http_code}" ${i.endpoint}/\` must no longer print 200 (a custom domain stops resolving or answers 5xx once the route is gone; a workers.dev address answers 404). Then print exactly this line:
 TORN DOWN: ${i.endpoint}

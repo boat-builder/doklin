@@ -65,16 +65,6 @@ for (const c of fx.extract) {
 }
 
 const metaOf = (raw) => (raw === null ? mf.emptyMeta() : mf.parseEntityMeta(raw));
-for (const c of fx.migrate) {
-  const r = mf.migrateEntity({ diskMd: c.md, meta: metaOf(c.meta) });
-  same(r.md, c.outMd, `migrate ${JSON.stringify(c.md)}`);
-  same(mf.serializeEntityMeta(r.meta), c.outMeta, `migrate, meta ${JSON.stringify(c.md)}`);
-  same([r.mdChanged, r.metaChanged], [c.mdChanged, c.metaChanged], `migrate, changed ${JSON.stringify(c.md)}`);
-  // Once is enough — unless an entry is stamped finer than the second,
-  // which the markdown form cannot carry: then every pass writes again.
-  const again = mf.migrateEntity({ diskMd: r.md, meta: r.meta });
-  same(again.mdChanged || again.metaChanged, c.againChanged, `migrate, again ${JSON.stringify(c.md)}`);
-}
 
 for (const c of fx.threads) same(ac.threadsOf(c.md, c.html, metaOf(c.meta)), c.threads, `threads: ${c.about}`);
 
@@ -91,10 +81,8 @@ const WHY = {
 };
 
 function operate(c) {
-  const read = metaOf(c.meta);
-  const open = c.md === null ? { md: null, meta: read } : mf.migrateEntity({ diskMd: c.md, meta: read });
-  const m = open.meta;
-  let md = open.md;
+  const m = metaOf(c.meta);
+  let md = c.md;
   const op = c.do;
   // To the second, as the worker stamps an agent's comment.
   const stamp = (author, at, body) => ({ author: cm.sanitizeAuthor(author), at: Math.floor(at / 1000) * 1000, body });
@@ -139,7 +127,7 @@ function operate(c) {
     const { id, entry, index } = op.deleteReply;
     const found = m.mthreads.find((t) => t.id === id) ?? m.hthreads.find((t) => t.id === id);
     if (!found) return { refusal: { kind: "gone" } };
-    const key = (e) => e.eid ?? `${e.author}|${e.at}`;
+    const key = (e) => `${e.author}|${e.at}`;
     const matching = found.comments.flatMap((e, i) => (i > 0 && key(e) === key(entry) ? [i] : []));
     const at = matching.includes(index) ? index : matching[0];
     if (at === undefined) return { refusal: { kind: "gone" } };
@@ -153,10 +141,14 @@ for (const c of fx.operations) {
   const { about: _about, md: _md, meta: _meta, do: _do, ...expected } = c;
   const done = operate(c);
   same(done, expected, `operation: ${c.about}`);
-  if (done.outMeta !== undefined && done.outMeta !== null) {
-    // What the phone leaves is what a Mac opening it would leave.
-    const settled = mf.migrateEntity({ diskMd: done.outMd, meta: mf.parseEntityMeta(done.outMeta) });
-    same([settled.mdChanged, settled.metaChanged], [false, false], `operation, settled: ${c.about}`);
+  if (done.outMeta !== undefined && done.outMeta !== null && done.outMd !== null) {
+    // What the phone leaves is what a Mac opening and saving it would write:
+    // expanded into the editor and extracted back, the same bytes.
+    const meta = mf.parseEntityMeta(done.outMeta);
+    const back = mf.extractMarkdown(mf.expandMarkdown(done.outMd, meta.mthreads).md);
+    const orphans = meta.mthreads.filter((t) => !back.mthreads.some((r) => r.id === t.id));
+    const resaved = mf.serializeEntityMeta({ ...meta, mthreads: [...back.mthreads, ...orphans] });
+    same([back.md, resaved], [done.outMd, done.outMeta], `operation, settled: ${c.about}`);
   }
 }
 

@@ -50,8 +50,8 @@ pub fn log_cli_in(core: &Core, root: &str, helper: &Path) -> Result<String, Stri
 /// simply not found, and is made again.
 async fn terminal_code(call: &WorkspaceCall) -> Result<String, String> {
     let meta = call.remote.meta().await.map_err(|e| flows::describe(&call.domain, e.into()))?;
-    let person = meta.you.map(|you| you.name).unwrap_or_default();
-    let name = terminal_name(&person, &call.device.name);
+    let you = meta.you.ok_or_else(|| "the domain didn't say who this Mac signs in as".to_string())?;
+    let name = terminal_name(&you.name, &call.device.name);
     let agents = call.remote.list_agents().await.map_err(|e| describe_agents(&call.domain, e))?;
     let (login, hash) = mint_agent_login(&call.endpoint);
     let minted = match find_terminal(&agents, &name) {
@@ -66,17 +66,10 @@ async fn terminal_code(call: &WorkspaceCall) -> Result<String, String> {
     Ok(login.code)
 }
 
-/// `Sherin's terminal (Sherin's MacBook Pro)` — or, when the domain does not
-/// say whose Mac this is, `Terminal (…)`. Capped as the worker caps it, so
-/// the name looked for is the name it keeps.
+/// `Sherin's terminal (Sherin's MacBook Pro)`. Capped as the worker caps
+/// it, so the name looked for is the name it keeps.
 fn terminal_name(person: &str, mac: &str) -> String {
-    let person = person.trim();
-    let name = if person.is_empty() {
-        format!("Terminal ({})", mac)
-    } else {
-        format!("{}'s terminal ({})", person, mac)
-    };
-    clean_name(&name, "Terminal")
+    clean_name(&format!("{}'s terminal ({})", person.trim(), mac), "Terminal")
 }
 
 /// The asker's own agent of that name. The list holds everybody's for an
@@ -139,7 +132,6 @@ mod tests {
     #[test]
     fn the_terminal_is_named_after_its_person_and_mac() {
         assert_eq!(terminal_name("Sherin", "Sherin's MacBook Pro"), "Sherin's terminal (Sherin's MacBook Pro)");
-        assert_eq!(terminal_name("  ", "Studio"), "Terminal (Studio)");
         let long = terminal_name(&"a".repeat(100), "Studio");
         assert_eq!(long.encode_utf16().count(), super::super::manifest::MAX_NAME_LEN);
     }

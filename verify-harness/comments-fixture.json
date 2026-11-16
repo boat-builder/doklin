@@ -561,7 +561,7 @@
         {
           "author": "",
           "at": 0,
-          "body": "legacy"
+          "body": "untimed"
         },
         {
           "author": "X",
@@ -569,7 +569,7 @@
           "body": "y"
         }
       ],
-      "out": "{>>#abc123 A · 2026-01-01T00:00:00Z: b<<}{>>legacy<<}{>>X · 1970-01-01T00:00:00Z: y<<}"
+      "out": "{>>#abc123 A · 2026-01-01T00:00:00Z: b<<}{>>untimed<<}{>>X · 1970-01-01T00:00:00Z: y<<}"
     },
     {
       "id": "q1w2",
@@ -687,9 +687,9 @@
       "empty": false
     },
     {
-      "about": "keys out of order, unknown fields, stamps of old sidecars",
-      "raw": "{\"comments\":[{\"body\":\"b\",\"at\":5,\"author\":\"A\",\"extra\":1}],\"id\":\"k1\",\"t\":\"mthread\",\"more\":true}\n{\"t\":\"hthread\",\"id\":\"k2\",\"anchor\":{\"text\":\"lead\",\"tag\":\"p\",\"path\":\"main > p:nth-of-type(1)\",\"x\":0},\"comments\":[{\"author\":\"W\",\"at\":7,\"body\":\"w\",\"label\":\"web\",\"codeId\":\"c9\",\"eid\":\"e1\"}]}\n{\"t\":\"mthread\",\"id\":\"k3\",\"comments\":[{\"author\":\"N\",\"at\":8,\"body\":\"n\",\"eid\":null},{\"author\":\"O\",\"at\":9,\"body\":\"o\",\"eid\":5},{\"author\":\"P\",\"at\":10,\"body\":\"p\",\"eid\":{\"b\":1,\"2\":0,\"a\":[true,null]}}]}",
-      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"k2\",\"anchor\":{\"path\":\"main > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"lead\"},\"comments\":[{\"author\":\"W\",\"at\":7,\"body\":\"w\",\"eid\":\"e1\",\"codeId\":\"c9\",\"label\":\"web\"}]}\n{\"t\":\"mthread\",\"id\":\"k1\",\"comments\":[{\"author\":\"A\",\"at\":5,\"body\":\"b\"}]}\n{\"t\":\"mthread\",\"id\":\"k3\",\"comments\":[{\"author\":\"N\",\"at\":8,\"body\":\"n\",\"eid\":null},{\"author\":\"O\",\"at\":9,\"body\":\"o\",\"eid\":5},{\"author\":\"P\",\"at\":10,\"body\":\"p\",\"eid\":{\"2\":0,\"b\":1,\"a\":[true,null]}}]}\n",
+      "about": "keys out of order, unknown fields",
+      "raw": "{\"comments\":[{\"body\":\"b\",\"at\":5,\"author\":\"A\",\"extra\":1}],\"id\":\"k1\",\"t\":\"mthread\",\"more\":true}\n{\"t\":\"hthread\",\"id\":\"k2\",\"anchor\":{\"text\":\"lead\",\"tag\":\"p\",\"path\":\"main > p:nth-of-type(1)\",\"x\":0},\"comments\":[{\"body\":\"w\",\"author\":\"W\",\"extra\":[true,null],\"at\":7}]}",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"k2\",\"anchor\":{\"path\":\"main > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"lead\"},\"comments\":[{\"author\":\"W\",\"at\":7,\"body\":\"w\"}]}\n{\"t\":\"mthread\",\"id\":\"k1\",\"comments\":[{\"author\":\"A\",\"at\":5,\"body\":\"b\"}]}\n",
       "empty": false
     },
     {
@@ -1080,89 +1080,6 @@
       ]
     }
   ],
-  "migrate": [
-    {
-      "md": "# T\n\n{==old==}{>>#aa1x A · 2026-01-01T00:00:00Z: inline body<<} tail\n",
-      "meta": null,
-      "outMd": "# T\n\n{==old==}{>>#aa1x<<} tail\n",
-      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aa1x\",\"comments\":[{\"author\":\"A\",\"at\":1767225600000,\"body\":\"inline body\"}]}\n",
-      "mdChanged": true,
-      "metaChanged": true,
-      "againChanged": false
-    },
-    {
-      "md": "# T\n\n{==old==}{>>#aa1x<<} tail\n",
-      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aa1x\",\"comments\":[{\"author\":\"A\",\"at\":1767225600000,\"body\":\"inline body\"}]}\n",
-      "outMd": "# T\n\n{==old==}{>>#aa1x<<} tail\n",
-      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aa1x\",\"comments\":[{\"author\":\"A\",\"at\":1767225600000,\"body\":\"inline body\"}]}\n",
-      "mdChanged": false,
-      "metaChanged": false,
-      "againChanged": false
-    },
-    {
-      "md": "plain\n",
-      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"or1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"kept\"}]}\n",
-      "outMd": "plain\n",
-      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"or1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"kept\"}]}\n",
-      "mdChanged": false,
-      "metaChanged": false,
-      "againChanged": false
-    },
-    {
-      "md": "just prose\n",
-      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"tw1\",\"cols\":[220,0]}\n",
-      "outMd": "just prose\n",
-      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"tw1\",\"cols\":[220,0]}\n",
-      "mdChanged": false,
-      "metaChanged": false,
-      "againChanged": false
-    },
-    {
-      "md": null,
-      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hh1\",\"anchor\":{\"path\":\"p\",\"tag\":\"p\",\"text\":\"x\"},\"comments\":[{\"author\":\"W\",\"at\":7,\"body\":\"a note\"}]}\n",
-      "outMd": null,
-      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hh1\",\"anchor\":{\"path\":\"p\",\"tag\":\"p\",\"text\":\"x\"},\"comments\":[{\"author\":\"W\",\"at\":7,\"body\":\"a note\"}]}\n",
-      "mdChanged": false,
-      "metaChanged": false,
-      "againChanged": false
-    },
-    {
-      "md": "just prose\n",
-      "meta": null,
-      "outMd": "just prose\n",
-      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n",
-      "mdChanged": false,
-      "metaChanged": false,
-      "againChanged": false
-    },
-    {
-      "md": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>c-1<<} and more after it.\n",
-      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"c-1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
-      "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#18n1xsp1<<} and more after it.\n",
-      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"18n1xsp1\",\"comments\":[{\"author\":\"\",\"at\":0,\"body\":\"c-1\"}]}\n{\"t\":\"mthread\",\"id\":\"c-1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"}]}\n",
-      "mdChanged": true,
-      "metaChanged": true,
-      "againChanged": false
-    },
-    {
-      "md": "{==a==}{>>#ms1x A · 2026-01-01T00:00:00.9Z: a stamp finer than the form<<}\n",
-      "meta": null,
-      "outMd": "{==a==}{>>#ms1x<<}\n",
-      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"ms1x\",\"comments\":[{\"author\":\"A\",\"at\":1767225600900,\"body\":\"a stamp finer than the form\"}]}\n",
-      "mdChanged": true,
-      "metaChanged": true,
-      "againChanged": true
-    },
-    {
-      "md": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
-      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"half1\",\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"Signed with a long name.\"}]}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n",
-      "outMd": "# T\n\nSome {==words==}{>>#half1<<} here.\n",
-      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"W\",\"at\":5000,\"body\":\"On the long line.\"}]}\n{\"t\":\"mthread\",\"id\":\"half1\",\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"Signed with a long name.\"}]}\n",
-      "mdChanged": false,
-      "metaChanged": false,
-      "againChanged": false
-    }
-  ],
   "threads": [
     {
       "about": "the seed's note",
@@ -1180,27 +1097,6 @@
               "author": "Ada",
               "at": 1757000000000,
               "body": "Say it plainer."
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "about": "an old inline thread",
-      "md": "Hello {==old words==}{>>#old111 Alice · 2026-01-01T10:00:00Z: an inline thread<<} there.\n",
-      "meta": null,
-      "html": null,
-      "threads": [
-        {
-          "id": "old111",
-          "version": "md",
-          "on": "old words",
-          "line": 1,
-          "comments": [
-            {
-              "author": "Alice",
-              "at": 1767261600000,
-              "body": "an inline thread"
             }
           ]
         }
@@ -1443,22 +1339,6 @@
       },
       "outMd": "# Plan\n\n{==Ship it==}{>>#ph0ne1<<} by June.\n",
       "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"ph0ne1\",\"comments\":[{\"author\":\"iPhone 17 Pro\",\"at\":1784020353000,\"body\":\"When, exactly? << }\"}]}\n"
-    },
-    {
-      "about": "start on a note in the old inline form: it is put in the new layout as well",
-      "md": "Hello {==old words==}{>>#old111 Alice · 2026-01-01T10:00:00Z: an inline thread<<} there. And more here.\n",
-      "meta": null,
-      "do": {
-        "start": {
-          "on": "more here",
-          "body": "Agreed.",
-          "author": "iPhone 17 Pro",
-          "at": 1784020353123,
-          "id": "ph0ne1"
-        }
-      },
-      "outMd": "Hello {==old words==}{>>#old111<<} there. And {==more here==}{>>#ph0ne1<<}.\n",
-      "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"old111\",\"comments\":[{\"author\":\"Alice\",\"at\":1767261600000,\"body\":\"an inline thread\"}]}\n{\"t\":\"mthread\",\"id\":\"ph0ne1\",\"comments\":[{\"author\":\"iPhone 17 Pro\",\"at\":1784020353000,\"body\":\"Agreed.\"}]}\n"
     },
     {
       "about": "an author made plain",

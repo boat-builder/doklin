@@ -146,8 +146,8 @@ type Props = {
   workspaces?: SidebarWorkspace[];
   onOpenWorkspace?: (root: string) => void;
   onJoinWorkspace?: () => void;
-  // Version history for a document — the rail, for any workspace: it is
-  // no longer a cloud feature.
+  // Version history for a document — the rail, for any workspace, cloud or
+  // not.
   onHistory?: (path: string) => void;
   // The workspace's own timeline, a modal — or, with a folder, that
   // section's: each has a history of its own.
@@ -319,7 +319,7 @@ export default function Sidebar({
   // has, the restricted folders this person is in, and their Private. On
   // disk the last two are the folders `Restricted` and `Private` at the top;
   // here they are headings, and those two folders have no row of their own.
-  const sectioned = cloud?.sections === true;
+  const sectioned = cloud != null;
   const layout = useMemo(() => {
     if (!tree || tree.kind !== "dir") return null;
     const top = (name: string) =>

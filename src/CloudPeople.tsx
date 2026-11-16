@@ -173,7 +173,7 @@ export default function CloudPeople({
   const canAgents = may(people, "agents.own");
   const canDevices = may(people, "devices.own");
   // The tabs this person has, and the one showing: a tab the domain does not
-  // offer them — a worker from before devices — falls back to People.
+  // offer them falls back to People.
   const tabs = TABS.filter((t) => t.tab === "people" || (t.tab === "devices" ? canDevices : canAgents));
   const tabbed = tabs.length > 1;
   const showing: AccessTab = tabs.some((t) => t.tab === tab) ? tab : "people";

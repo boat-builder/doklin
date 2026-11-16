@@ -81,11 +81,7 @@ public enum MetaFile {
     private static func entry(_ value: JSValue) -> CommentEntry? {
         guard case .object = value, let author = value["author"]?.string, let at = value["at"]?.number, let body = value["body"]?.string
         else { return nil }
-        var entry = CommentEntry(author: author, at: at, body: body)
-        entry.eid = value["eid"]
-        entry.codeId = value["codeId"]
-        entry.label = value["label"]
-        return entry
+        return CommentEntry(author: author, at: at, body: body)
     }
 
     private static func entries(_ value: JSValue?) -> [CommentEntry]? {
@@ -135,11 +131,7 @@ public enum MetaFile {
     }
 
     private static func json(_ entry: CommentEntry) -> JSValue {
-        var fields: [(JSString, JSValue)] = [("author", .string(entry.author)), ("at", .number(entry.at)), ("body", .string(entry.body))]
-        if let eid = entry.eid { fields.append(("eid", eid)) }
-        if let codeId = entry.codeId { fields.append(("codeId", codeId)) }
-        if let label = entry.label { fields.append(("label", label)) }
-        return .object(fields)
+        .object([("author", .string(entry.author)), ("at", .number(entry.at)), ("body", .string(entry.body))])
     }
 
     /// The file's bytes for these records: the same records, in any order,
@@ -244,15 +236,15 @@ public enum MetaFile {
         var reserved = markerIds(fullMd)
         var records: [MdThread] = []
         var seen = Set<String>()
-        var legacy = 0
+        var made = 0
         let md = CriticMarkup.replacingBlocks(in: fullMd) { block in
             let parsed = CriticMarkup.parseSpans(block.spans)
             guard case .thread(let named, let comments) = parsed else { return block.whole }
             var id = named ?? ""
             if named == nil {
                 repeat {
-                    id = deriveId(block.anchor + " " + block.spans, legacy)
-                    legacy += 1
+                    id = deriveId(block.anchor + " " + block.spans, made)
+                    made += 1
                 } while reserved.contains(id)
                 reserved.insert(id)
             }
@@ -265,10 +257,12 @@ public enum MetaFile {
         return (md, records)
     }
 
-    /// A document in the layout it is kept in: bare markers in the
-    /// markdown, every entry in a record. Running it again changes nothing.
-    /// `md` nil is a page with no markdown, whose records are left alone.
-    public static func migrate(md: JSString?, meta: EntityMeta) -> (md: JSString?, meta: EntityMeta) {
+    /// A document's files as the Mac's opening (`expand`) and saving
+    /// (`extract`) leave them: bare markers in the markdown, every entry in
+    /// a record, and the records whose markers are gone kept. Running it
+    /// again changes nothing. `md` nil is a page with no markdown, whose
+    /// records are left alone.
+    static func roundTrip(md: JSString?, meta: EntityMeta) -> (md: JSString?, meta: EntityMeta) {
         guard let md else { return (nil, meta) }
         let expanded = expand(md, meta.mthreads)
         let extracted = extract(expanded.md)
@@ -280,14 +274,8 @@ public enum MetaFile {
 }
 
 extension CommentEntry {
-    /// Which entry this is, whatever its body says now: its stamp when it
-    /// has one, else who wrote it and when — the same entry in two copies
-    /// of a thread, and in two readings of one file.
-    var identity: [UInt16] {
-        switch eid {
-        case .none, .null?: return Array("s:".utf16) + author.units + Array("|\(JSText.number(at))".utf16)
-        case .string(let eid)?: return Array("s:".utf16) + eid.units
-        case let other?: return Array("v:\(other.json)".utf16)
-        }
-    }
+    /// Which entry this is, whatever its body says now: who wrote it and
+    /// when — the same entry in two copies of a thread, and in two readings
+    /// of one file.
+    var identity: [UInt16] { author.units + Array("|\(JSText.number(at))".utf16) }
 }

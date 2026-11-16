@@ -121,7 +121,7 @@ public struct DocumentComments: Equatable, Sendable {
         disk = md
         self.html = html
         read = meta.map(MetaFile.parse) ?? EntityMeta()
-        (self.md, self.meta) = MetaFile.migrate(md: md.map { JSString($0) }, meta: read)
+        (self.md, self.meta) = MetaFile.roundTrip(md: md.map { JSString($0) }, meta: read)
     }
 
     /* ---------- Reading ---------- */
@@ -131,8 +131,9 @@ public struct DocumentComments: Equatable, Sendable {
     public var threads: [CommentThread] {
         var out: [CommentThread] = []
         if let disk {
-            // Old inline threads and new bare markers read alike: entries
-            // put back, then taken out again, as the Mac does on opening.
+            // Inline threads, bare markers and hand-written ones read alike:
+            // entries put back, then taken out again, as the Mac's opening
+            // and saving do.
             let text = JSString(disk)
             let expanded = MetaFile.expand(text, read.mthreads)
             let extracted = MetaFile.extract(expanded.md)

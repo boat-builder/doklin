@@ -1,7 +1,6 @@
 // The worker as a writer of the manifest.
 //
-// Until the document API, the worker only ever stored a manifest a Mac had
-// built. An agent has no engine and no copy of the folder, so its changes are
+// An agent has no engine and no copy of the folder, so its changes are
 // made here — and made exactly the way a Mac makes them: new content goes up
 // as immutable blobs, then the manifest is replaced by compare-and-swap on
 // its etag. A Mac cannot tell an agent's write from another Mac's, which is

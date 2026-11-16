@@ -10,9 +10,9 @@ export interface Env {
    *  traded, once, for a superadmin's device sign-in (auth.ts, api.ts). */
   OWNER_TOKEN?: string;
   /** The D1 database beside the bucket: `[[d1_databases]] binding = "DB"`.
-   *  Optional on purpose — a domain deployed before the binding existed has
-   *  none, and answers the probe without one (schema.ts); nobody can sign
-   *  in to it until the update adds one. */
+   *  Optional on purpose — a binding that did not take is a deployment
+   *  without one, which still answers the probe (`d1: null`, schema.ts) so
+   *  setup can catch it; nobody can sign in to it. */
   DB?: D1Database;
   /** Never bound: the worker sets it on the `Env` it hands a space's routes
    *  (spaces.ts). `DATA` is then that space's part of the bucket and `whole`

@@ -146,8 +146,8 @@
         // the app was built against (parsed from cloud-worker/src/version.ts).
         workerVersion: 1,
         // What the status's `versions` field carries: the version store's
-        // mirror, or null for a worker too old to hold one.
-        versionsMirror: null,
+        // mirror, or null before the domain has answered.
+        versionsMirror: { mirrored: 0, cloud: 0, lastMirrorMs: null, horizonDays: null },
         wipeResult: 42,
         // The invite the redeem door is scripted with. The engine does the
         // real parsing and the real trade (engine/src/cloud/invite.rs);
@@ -169,8 +169,7 @@
         // somebody's (`memberId`): the list a command
         // answers is the asker's own, and everybody's for an owner, each
         // marked `mine` or not. `error`, when a string, is what every agent
-        // command rejects with — a worker that predates agents answers that
-        // way.
+        // command rejects with.
         agents: {
           list: [
             {
@@ -387,8 +386,7 @@
         lastSyncMs: Date.now(),
         error: null,
         pendingDeletes: 0,
-        // What this Mac signs with here: the person the domain says it is,
-        // or its own name when it has not said.
+        // What this Mac signs with here: the person the domain says it is.
         me: window.__cloud.me,
         meId: window.__cloud.people.me,
         can: window.__cloud.can,
@@ -399,7 +397,6 @@
         presence: [],
         leases: [],
         spaces: [],
-        sections: false,
       });
 
       // The listener registry the app's listen() lands in (see the
@@ -1137,7 +1134,6 @@
         window.__cloud.statuses = [
           {
             ...statusFor("/docs", "https://notes.example.com", "Notes", "w-1"),
-            sections: true,
             spaces: [
               { id: "p-sherin00", kind: "private", name: "Private", path: "Private", by: "Sherin", members: [me] },
               { id: "s-finance0", kind: "restricted", name: "Finance", path: "Restricted/Finance", by: "Sherin", members: [me, "m-bob"] },

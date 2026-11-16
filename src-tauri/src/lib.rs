@@ -115,19 +115,11 @@ struct PersistedSession {
     windows: Vec<PersistedWindow>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Serialize, Deserialize)]
 struct PersistedWindow {
     label: String,
     #[serde(flatten)]
     content: WindowContent,
-    /// One-time migration: builds up to 0.1.89 wrote a window's open files as
-    /// bare paths (session version 1). Read once by `read_persisted_session`,
-    /// which turns them into tabs; never written back.
-    #[serde(skip_serializing)]
-    files: Vec<String>,
-    #[serde(skip_serializing)]
-    active_file: Option<String>,
 }
 
 /// Flipped true when the app starts quitting (⌘Q, or the exit that follows the
@@ -210,26 +202,10 @@ fn session_path(app: &AppHandle) -> Option<PathBuf> {
 }
 
 fn read_persisted_session(app: &AppHandle) -> PersistedSession {
-    let mut session: PersistedSession = session_path(app)
+    session_path(app)
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    // The one-time migration `PersistedWindow` describes: a version 1 window's
-    // file paths become file tabs, so the windows open at the upgrade come
-    // back with what they were showing.
-    for w in &mut session.windows {
-        if !w.content.tabs.is_empty() {
-            continue;
-        }
-        for (i, path) in std::mem::take(&mut w.files).into_iter().enumerate() {
-            let id = format!("{}-{}", w.label, i);
-            if w.active_file.as_deref() == Some(path.as_str()) {
-                w.content.active_id = Some(id.clone());
-            }
-            w.content.tabs.push(WindowTab { id, kind: TabKind::File, path });
-        }
-    }
-    session
+        .unwrap_or_default()
 }
 
 /// Snapshots the window registry to disk. Runs whenever a window's content
@@ -244,11 +220,7 @@ fn persist_session(app: &AppHandle) {
         labels.sort_by_key(|l| win_order(l));
         labels
             .into_iter()
-            .map(|label| PersistedWindow {
-                content: map[&label].clone(),
-                label,
-                ..Default::default()
-            })
+            .map(|label| PersistedWindow { content: map[&label].clone(), label })
             .collect::<Vec<_>>()
     };
     let Ok(json) = serde_json::to_string_pretty(&PersistedSession { version: 2, windows }) else {
@@ -1793,11 +1765,6 @@ pub fn run() {
             // The cloud engines start with the app: one per connected
             // workspace, from cloud.json.
             engine::init(&handle);
-            // Before anything looks in app data: the old drafts folder, if a
-            // previous build left one, becomes untitled notes.
-            if let Ok(data_dir) = handle.path().app_data_dir() {
-                untitled::adopt_legacy_drafts(&data_dir);
-            }
             // The versioners start with it too: one per open folder.
             // `reconcile` starts the rest as windows report in.
             engine::init_versions(&handle);

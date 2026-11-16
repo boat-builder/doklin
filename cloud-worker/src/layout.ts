@@ -14,11 +14,9 @@
 // Nothing public is stored here: public pages are rendered from blobs/. And
 // nobody is stored here: people, their tokens and their invites live in the
 // D1 database beside the bucket (schema.ts, members.ts) — a blob store cannot
-// hold a UNIQUE email or delete a credential atomically. Since v7 so does
-// presence (presence.ts): it was `presence.json`, one object every device
-// read and rewrote with no CAS. A bucket written by an older worker may still
-// hold one, or `history/<fileId>.json` archives from before v6; nothing reads
-// either, and a wipe takes them with everything else.
+// hold a UNIQUE email or delete a credential atomically. So do presence and
+// leases (presence.ts): a row per device is atomic where one shared object
+// read and rewritten with no CAS is not.
 
 export const WORKSPACE_KEY = "workspace.json";
 export const MANIFEST_KEY = "manifest.json";

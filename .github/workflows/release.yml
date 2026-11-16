@@ -391,8 +391,7 @@ jobs:
       # https://github.com/boat-builder/doklin/releases/latest/download/latest.json
       # (the endpoint in tauri.conf.json). The .tar.gz + .sig are produced by the
       # build (createUpdaterArtifacts + TAURI_SIGNING_PRIVATE_KEY); we publish
-      # them as-is. Only darwin-aarch64 is listed — Intel installs of old
-      # universal builds simply stop seeing updates.
+      # them as-is. Only darwin-aarch64 is listed.
       - name: Stage updater artifacts + latest.json
         env:
           TAG: ${{ needs.bump.outputs.tag }}

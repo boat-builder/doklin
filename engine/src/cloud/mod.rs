@@ -12,7 +12,7 @@
 //! engine.rs     Engine<R>: the task, the poll, presence, status, the sections
 //! unit.rs       Unit<R>: one section and its manifest — the cycle, fold_public
 //! space.rs      where a workspace's sections are on disk, and their markers
-//! manifest.rs   the wire types (manifest v2, the public map) + their grammar
+//! manifest.rs   the wire types (the manifest, the public map) + their grammar
 //! remote.rs     the Remote trait; HttpRemote (the real worker)
 //! flows.rs      bind + upload, download, wipe — generic, tested
 //! invite.rs     the invite code and the paste blob — the grammar, and the
@@ -249,10 +249,6 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
                 let host = core.host.clone();
                 Arc::new(move |path: &Path| host.trash(path).is_ok()) as Trash
             }),
-            on_key: Some({
-                let (core, root) = (core.clone(), ws.root.clone());
-                Box::new(move || trade_key(&core, &root))
-            }),
             on_spaces: Some({
                 let core = core.clone();
                 Box::new(move |changed| spaces_changed(&core, changed))
@@ -288,36 +284,6 @@ fn spaces_changed(core: &Arc<Core>, changed: SpacesChanged) {
             crate::versions::forget_root(&owned, &root, store_dir).await;
         }
         crate::versions::reconcile(&owned);
-    });
-}
-
-/// The domain said the token the workspace at `root` syncs with is its key
-/// (`EngineConfig::on_key`): a connection made while the key was a sign-in.
-/// One-time move of stored data — the key is traded for a sign-in of this
-/// device's own, as the superadmin there is, and the engine starts again on
-/// it. A trade that cannot be made leaves the engine saying what to do
-/// (`engine::KEY_SENTENCE`); the next probe tries again.
-fn trade_key(core: &Arc<Core>, root: &str) {
-    let (owned, root) = (core.clone(), root.to_string());
-    core.runtime.spawn(async move {
-        let core = &owned;
-        let Ok((entry, device)) = with_inner(core, |inner| {
-            let entry = read_cloud_file(&inner.data_dir, core.secrets()).by_root(&root).cloned();
-            Ok(entry.map(|e| (e, inner.device.clone())))
-        })
-        .and_then(|held| held.ok_or_else(String::new)) else {
-            return;
-        };
-        let remote = HttpRemote::new(&entry.endpoint, &entry.token, &device.id, &core.client);
-        let Ok(traded) = remote.recover(None, None, &device.name).await else { return };
-        // Only onto the connection that heard it: a folder disconnected and
-        // connected again since holds a credential of its own.
-        let still = with_inner(core, |inner| {
-            Ok(read_cloud_file(&inner.data_dir, core.secrets()).by_root(&root).is_some_and(|w| w.token == entry.token))
-        });
-        if still == Ok(true) {
-            let _ = record_and_spawn(core, WorkspaceEntry { token: traded.token, ..entry });
-        }
     });
 }
 
@@ -613,9 +579,6 @@ fn describe_redeem(domain: &str, e: remote::RemoteError) -> String {
         remote::RemoteError::Unauthorized => {
             "that code doesn't work — it may have been used already, or run out. Get a fresh one.".into()
         }
-        remote::RemoteError::Outdated(_) | remote::RemoteError::NotFound => {
-            format!("{} runs a worker too old to take invites — whoever set it up needs to update it", domain)
-        }
         other => flows::describe(domain, other.into()),
     }
 }
@@ -640,7 +603,7 @@ pub async fn cloud_recover(
     let remote = HttpRemote::new(&endpoint, key.trim(), &device.id, &core.client);
     let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
     let traded = remote
-        .recover(Some(email.trim()), name, &device.name)
+        .recover(email.trim(), name, &device.name)
         .await
         .map_err(|e| describe_recover(&domain, e))?;
     Ok(Redeemed {
@@ -660,10 +623,6 @@ fn describe_recover(domain: &str, e: remote::RemoteError) -> String {
             "{} didn't take that key — a key works once, so it may have been used already, or the agent's step didn't finish. Make a fresh one and run the prompt again.",
             domain
         ),
-        remote::RemoteError::NotFound | remote::RemoteError::Forbidden => format!(
-            "{} runs a worker too old to recover — update it first with the update script, then try again",
-            domain
-        ),
         other => flows::describe(domain, other.into()),
     }
 }
@@ -679,7 +638,6 @@ pub async fn cloud_probe(core: &Arc<Core>, endpoint: String, token: String) -> R
     Ok(Probe {
         worker_version: meta.version,
         bundled_version: BUNDLED_WORKER_VERSION,
-        features: meta.features,
         workspace: meta.workspace,
     })
 }
@@ -704,19 +662,8 @@ pub async fn cloud_device_code(core: &Arc<Core>, root: String) -> Result<DeviceC
     call.remote
         .device_code(&invite::code_hash(&canonical), expires_at)
         .await
-        .map_err(|e| describe_devices(&call.domain, e))?;
+        .map_err(|e| describe_people(&call.domain, e))?;
     Ok(DeviceCode { blob: invite::blob(&call.endpoint, &code), code, expires_at })
-}
-
-/// A failed device call in words. `NotFound` is a worker from before a device
-/// was added this way: it has no such route.
-fn describe_devices(domain: &str, e: remote::RemoteError) -> String {
-    match e {
-        remote::RemoteError::NotFound => {
-            format!("{} runs a worker too old to add a device — update it from the Cloud panel", domain)
-        }
-        other => describe_people(domain, other),
-    }
 }
 
 /// Invite someone to this workspace by email (owner only): the code is
@@ -828,15 +775,7 @@ pub async fn cloud_withdraw_invite(core: &Arc<Core>, root: String, invite_id: St
 /// will be answered, so a member's view costs no refusals.
 async fn people_of<R: remote::Remote>(remote: &R, device_id: &str, domain: &str) -> Result<People, String> {
     let meta = remote.meta().await.map_err(|e| describe_people(domain, e))?;
-    if !meta.features.iter().any(|f| f == "roles") {
-        // Without the role table there is no telling what to offer, and
-        // guessing would draw buttons the domain refuses.
-        return Err(format!(
-            "{} runs a worker too old to say who may do what here — whoever set the domain up needs to update it",
-            domain
-        ));
-    }
-    let you = meta.you.unwrap_or_default();
+    let you = meta.you.ok_or_else(|| format!("{} didn't say who this device is — try again in a moment.", domain))?;
     let may = |action: &str| you.can.iter().any(|held| held == action);
     let (members, invites, devices) = tokio::try_join!(
         async { if may("people.see") { remote.list_members().await } else { Ok(Vec::new()) } },
@@ -856,23 +795,20 @@ async fn people_of<R: remote::Remote>(remote: &R, device_id: &str, domain: &str)
     })
 }
 
-/// A failed people call in words. The arm that earns its place is `NotFound`:
-/// a worker predating the identity routes has no `/api/auth` to miss, so it
-/// 404s — which `flows::describe` would otherwise read as "that domain holds
-/// no workspace yet", which is both wrong and unactionable.
+/// A failed people call in words. `NotFound` is the row the call named
+/// being gone — somebody removed it first — which `flows::describe` would
+/// read as "that domain holds no workspace yet".
 fn describe_people(domain: &str, e: remote::RemoteError) -> String {
     match e {
         remote::RemoteError::NotFound => {
-            format!("{} runs a worker too old to hold people — update it from the Cloud panel", domain)
+            format!("That isn't on {} any more — somebody may have removed it already.", domain)
         }
         other => flows::describe(domain, other.into()),
     }
 }
 
 /// A revocation's answer, where `NotFound` is success: the row is gone, which
-/// is what was asked for. It cannot be the old worker `describe_people`
-/// blames for a 404 either — a Remove button only exists on a list that route
-/// answered.
+/// is what was asked for.
 fn revoked(domain: &str, r: remote::RemoteResult<()>) -> Result<(), String> {
     match r {
         Ok(()) | Err(remote::RemoteError::NotFound) => Ok(()),
@@ -897,12 +833,12 @@ fn mint_agent_login(endpoint: &str) -> (AgentLogin, String) {
     (login, invite::code_hash(&canonical))
 }
 
-/// A failed agent call in words. As with people, the arm that earns its
-/// place is `NotFound`: a worker that predates agents has no such route.
+/// A failed agent call in words. As with people, `NotFound` is the agent
+/// the call named being gone.
 fn describe_agents(domain: &str, e: remote::RemoteError) -> String {
     match e {
         remote::RemoteError::NotFound => {
-            format!("{} runs a worker too old for agents — update it from the Cloud panel", domain)
+            format!("That agent isn't on {} any more — somebody may have removed it already.", domain)
         }
         other => flows::describe(domain, other.into()),
     }
@@ -1049,6 +985,12 @@ pub async fn cloud_connect(
     let name = clean_name(&name, if folder_name.is_empty() { "Notes" } else { &folder_name });
 
     let remote = Arc::new(HttpRemote::new(&endpoint, &token, &device.id, &core.client));
+    // The upload is signed with the person this token signs in as.
+    let meta = remote.meta().await.map_err(|e| flows::describe(&domain, e.into()))?;
+    let me = meta
+        .you
+        .map(|you| you.member_id)
+        .ok_or_else(|| format!("{} didn't say who this device signs in as — try again in a moment.", domain))?;
     let bound = flows::bind_domain(&remote, &name, &device.name)
         .await
         .map_err(|e| flows::describe(&domain, e))?;
@@ -1061,7 +1003,7 @@ pub async fn cloud_connect(
     let sdir = state_dir(&data_dir, &ws_id);
     let _ = std::fs::remove_dir_all(&sdir);
     let events = core.events();
-    let state = flows::seed_upload(&remote, &root_path, &sdir, &name, &bound.manifest_etag, &device.name, &events, &root)
+    let state = flows::seed_upload(&remote, &root_path, &sdir, &name, &bound.manifest_etag, &me, &events, &root)
         .await
         .map_err(|e| flows::describe(&domain, e))?;
     write_json(&sdir.join("state.json"), &state).map_err(|e| format!("save the sync state: {}", e))?;
@@ -1370,24 +1312,12 @@ pub async fn cloud_space_delete(core: &Arc<Core>, root: String, id: String) -> R
 
 /* ---------- Every public address ---------- */
 
-/// A failed call about the domain's pages, in words. As with people, the arm
-/// that earns its place is `NotFound` on the list: a worker that predates the
-/// route has none to miss.
-fn describe_pages(domain: &str, e: remote::RemoteError) -> String {
-    match e {
-        remote::RemoteError::NotFound => {
-            format!("{} runs a worker too old to list every page — update it from the Cloud panel", domain)
-        }
-        other => flows::describe(domain, other.into()),
-    }
-}
-
 /// Every public address on the workspace's domain (an owner's to read),
 /// including pages published from a section this Mac's person is not in —
 /// of which it says only what the address itself says to anyone.
 pub async fn cloud_pages(core: &Arc<Core>, root: String) -> Result<remote::EveryPages, String> {
     let call = workspace_call(core, &root)?;
-    call.remote.list_every_page().await.map_err(|e| describe_pages(&call.domain, e))
+    call.remote.list_every_page().await.map_err(|e| flows::describe(&call.domain, e.into()))
 }
 
 /// Take a page down, whoever published it (an owner's to do). Already gone
@@ -1407,7 +1337,7 @@ pub async fn cloud_page_take_down(core: &Arc<Core>, root: String, slug: String) 
 
 /// The cloud version store's index for the workspace holding `path` — what
 /// the history rail merges with this Mac's own snapshots. `Ok(None)` when
-/// the workspace is connected to a worker that has no `versions` feature.
+/// the bucket holds none for it yet.
 pub(crate) async fn versions_index_for(
     core: &Arc<Core>,
     path: &str,

@@ -84,7 +84,7 @@ final class InlineTests: XCTestCase {
             parse("ship {==next week==}{>>#c7k2x9<<} maybe"),
             [.text("ship "), .highlight(thread: "c7k2x9", children: [.text("next week")]), .text(" maybe")]
         )
-        // The older inline form carries the conversation in the marker.
+        // The inline form carries the conversation in the marker.
         XCTAssertEqual(
             parse("{==odd==}{>>#c7k2x9 Sherin · 2026-07-14T09:12:33Z: This reads odd<<}{>>Aisha · 2026-07-14T10:01:05Z: agree<<}"),
             [.highlight(thread: "c7k2x9", children: [.text("odd")])]

@@ -59,18 +59,15 @@ pub struct CloudStatus {
     pub error: Option<String>,
     pub pending_deletes: u32,
     /// What this Mac signs work with here, in words: the person the domain
-    /// says it is, and this Mac's own name when the domain has not said.
-    /// What a surface compares a `by` against to
-    /// know whether somebody *else* did a thing.
+    /// says it is, empty until it has said. What a surface compares a `by`
+    /// against to know whether somebody *else* did a thing.
     pub me: String,
     /// The same person as the domain's id for them — which of a folder's
     /// `members` is this Mac. None until the domain has said.
     pub me_id: Option<String>,
     /// What this Mac's credential may do here, in the words of the worker's
     /// role table (`work`, `people.invite`, …) — what every surface hides
-    /// the rest by. Empty until the domain has answered once, and from a
-    /// worker that predates the table; a surface reads that as "not known",
-    /// never as "nothing" (src/cloud.ts `mayOn`).
+    /// the rest by. Empty until the domain has answered once.
     pub can: Vec<String>,
     /// The workspace's superadmin, by name — whom a surface says to ask for
     /// what only they can do (an update of the worker). None until the
@@ -78,9 +75,8 @@ pub struct CloudStatus {
     pub superadmin: Option<String>,
     /// What `/api/meta` last reported; null until the worker answered once.
     pub worker_version: Option<u32>,
-    /// The version store's mirror — null when this worker has no `versions`
-    /// feature, which is what the update badge is for.
-    pub versions: Option<VersionsMirror>,
+    /// The version store's mirror.
+    pub versions: VersionsMirror,
     /// The public map as this device believes it: the last applied manifest
     /// overlaid with the ops queued here — so a page the user just
     /// published shows up immediately, not a CAS later.
@@ -93,12 +89,8 @@ pub struct CloudStatus {
     pub leases: Vec<LeaseHolder>,
     /// This person's sections besides the shared workspace — their Private
     /// and the restricted folders they are in — that have a folder on this
-    /// Mac. Empty from a worker without `spaces`.
+    /// Mac.
     pub spaces: Vec<SpaceStatus>,
-    /// The workspace is in sections here: `Private` and `Restricted` at its
-    /// top are not shared folders. False from a worker without `spaces`, and
-    /// while the shared workspace still holds something under those names.
-    pub sections: bool,
 }
 
 /// One section of the workspace that only some people have.
@@ -159,9 +151,8 @@ pub struct PublicPage {
 #[serde(rename_all = "camelCase")]
 pub struct PresenceDevice {
     pub device_id: String,
-    /// Whose Mac it is; null from a worker before v7, or for an owner who
-    /// never said who they are.
-    pub member_id: Option<String>,
+    /// Whose Mac it is.
+    pub member_id: String,
     /// Who is here, in words: the person — or, when it is *your* other Mac,
     /// or nobody the directory can name, the Mac. "Ada is editing" says
     /// nothing to Ada; "MacBook Air is editing" does.
@@ -182,7 +173,7 @@ pub struct LeaseHolder {
     /// section it is in — and lowercased.
     pub path: String,
     pub device_id: String,
-    pub member_id: Option<String>,
+    pub member_id: String,
     pub name: String,
     pub device: String,
     /// True when the holder is you, on another Mac.
@@ -214,7 +205,6 @@ pub struct Probe {
     pub worker_version: u32,
     /// The version this app was built against — the badge compares the two.
     pub bundled_version: u32,
-    pub features: Vec<String>,
     pub workspace: Option<WorkspaceRecord>,
 }
 
@@ -270,15 +260,15 @@ pub struct People {
     /// `superadmin`, `owner` or `member`.
     pub role: String,
     /// The person this Mac is, by member id — which row in `members` is
-    /// "you". None only from a worker too old to say.
-    pub me: Option<String>,
+    /// "you".
+    pub me: String,
     /// What that role may do, in the worker's words (`people.invite`, …).
     pub can: Vec<String>,
     /// This Mac's own device id, so the list can mark which Mac is this one.
     pub device_id: String,
     /// The row in `devices` that is the credential this Mac syncs with.
     /// Never offered for signing out: that would delete the copy in hand.
-    pub token_id: Option<String>,
+    pub token_id: String,
     /// Everyone, newest last.
     pub members: Vec<MemberRecord>,
     /// The pending, unexpired invites. Empty for whoever may not invite.

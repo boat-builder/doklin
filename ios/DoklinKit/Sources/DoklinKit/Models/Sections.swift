@@ -30,9 +30,8 @@ extension Workspace {
         return space
     }
 
-    /// Whether this workspace has sections here, and this person may make
-    /// a restricted folder in it.
-    public var mayRestrict: Bool { status?.sections == true && may("work") }
+    /// Whether this person may make a restricted folder in this workspace.
+    public var mayRestrict: Bool { status != nil && may("work") }
 }
 
 public enum Sections {
@@ -45,7 +44,7 @@ public enum Sections {
 
     /// The section `path` is in, when it is in one.
     public static func space(holding path: String, in status: CloudStatus?) -> SpaceStatus? {
-        guard let status, status.sections else { return nil }
+        guard let status else { return nil }
         return status.spaces.first { holds($0.path, path) }
     }
 

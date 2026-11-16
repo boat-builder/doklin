@@ -115,7 +115,7 @@ pub struct Index {
     /// is thirty days, `Some(None)` is forever, and the field's absence
     /// means settings.json's default still applies. Three states, because
     /// "the user chose forever" and "the user has never chosen" must not be
-    /// the same answer for a store written before horizons existed.
+    /// the same answer.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "chosen_horizon")]
     pub horizon_days: Option<Option<u32>>,
     pub snapshots: Vec<SnapshotRow>,

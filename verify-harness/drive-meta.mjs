@@ -1,9 +1,8 @@
 // Drives the REAL App over meta.html's IPC stub through the entity-meta
-// layout (src/metaFile.ts): lazy migration of an old-format document on
-// open (inline thread bodies → meta records), the workspace sweep migrating
-// an UNOPENED document, expansion feeding the editor full CriticMarkup, a
-// reply saving as a meta-only write (markdown byte-identical), reload
-// persistence, orphan surfacing, and deletions updating both files.
+// layout (src/metaFile.ts): expansion of a bare marker and its meta record
+// feeding the editor full CriticMarkup, opening writing nothing, a reply
+// saving as a meta-only write (markdown byte-identical), reload persistence,
+// orphan surfacing, and deletions updating both files.
 import { chromium } from "playwright";
 
 import { existsSync, mkdirSync } from "node:fs";
@@ -47,8 +46,8 @@ const persistFs = () =>
     sessionStorage.setItem("harness-fs", JSON.stringify([...window.__fs])),
   );
 
-// 1. Boot: the old-format document opens; the editor shows the thread
-//    (expansion happened at the read boundary) with its body in the rail.
+// 1. Boot: the document opens; the editor shows the thread (expansion
+//    happened at the read boundary) with its body in the rail.
 await poll(async () => (await page.locator(".ProseMirror").count()) >= 1);
 await poll(async () => (await page.locator(".critic-anchor").count()) >= 1);
 await poll(async () =>
@@ -56,34 +55,19 @@ await poll(async () =>
     "needs a stronger opening",
   ),
 );
-step("old-format doc opens: anchor highlighted, body in the rail", true);
+step("doc opens: anchor highlighted, body in the rail", true);
 await page.screenshot({ path: `${SHOTS}/meta-01-boot.png` });
 
-// 2. Lazy migration normalized the OPEN document on disk: the markdown
-//    keeps only the bare marker, the body moved to the entity meta.
-await poll(async () => {
-  const md = await fsGet("/docs/notes.md");
-  return md?.includes("{>>#m1meta<<}") && !md.includes("needs a stronger opening");
-});
-const meta1 = await poll(async () => {
-  const m = await fsGet("/docs/notes.meta.jsonl");
-  return m && m.includes('"t":"mthread"') && m.includes("m1meta") && m.includes("needs a stronger opening")
-    ? m
-    : null;
-});
-step("lazy migration: bare marker in md, body in meta", Boolean(meta1));
-
-// 3. The workspace sweep migrated the UNOPENED third.md the same way.
-await poll(async () => {
-  const md = await fsGet("/docs/third.md");
-  const m = await fsGet("/docs/third.meta.jsonl");
-  return (
-    md?.includes("{>>#m3meta<<}") &&
-    !md.includes("sweep me") &&
-    m?.includes("sweep me")
-  );
-});
-step("workspace sweep migrates unopened documents", true);
+// 2. Opening writes nothing: the markdown keeps its bare marker, the body
+//    stays in the entity meta.
+await page.waitForTimeout(600);
+const opened = await page.evaluate(() => window.__writes.slice());
+const md1 = await fsGet("/docs/notes.md");
+step(
+  "opening writes nothing: bare marker in md, body in meta",
+  opened.length === 0 && md1.includes("{>>#m1meta<<}") && !md1.includes("needs a stronger opening"),
+  opened.join(", "),
+);
 
 // 4. A reply typed in the rail is a body-only change: the meta gains the
 //    entry while the markdown file stays byte-identical (no write at all).

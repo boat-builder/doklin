@@ -9,15 +9,15 @@ final class PublishingTests: XCTestCase {
         let json = """
         {"root":"/w","domain":"notes.example.com","endpoint":"https://notes.example.com","wsId":"w1","name":"Notes",
          "phase":"\(phase)","lastSyncMs":\(lastSyncMs.map(String.init) ?? "null"),"error":null,"pendingDeletes":0,"me":"\(me)",
-         "meId":"m1","can":["work"],"workerVersion":17,"public":\(pages),"presence":[],"leases":[],"spaces":[],"sections":true}
+         "meId":"m1","can":["work"],"workerVersion":17,"public":\(pages),"presence":[],"leases":[],"spaces":[]}
         """
         return try JSONDecoder().decode(CloudStatus.self, from: Data(json.utf8))
     }
 
     private let pages = """
     [{"slug":"plan","kind":"file","path":"Projects/plan.md","title":null,"desc":null,"by":"Ada","at":1000,"alive":true,"root":false},
-     {"slug":"projects","kind":"dir","path":"Projects","title":"Our projects","desc":null,"by":"Bo","at":0,"alive":true,"root":false},
-     {"slug":"all","kind":"dir","path":"","title":null,"desc":null,"by":"","at":0,"alive":true,"root":true},
+     {"slug":"projects","kind":"dir","path":"Projects","title":"Our projects","desc":null,"by":"Bo","at":1000,"alive":true,"root":false},
+     {"slug":"all","kind":"dir","path":"","title":null,"desc":null,"by":"","at":1000,"alive":true,"root":true},
      {"slug":"gone","kind":"file","path":"Old.md","title":null,"desc":null,"by":"Ada","at":1000,"alive":false,"root":false}]
     """
 
@@ -71,9 +71,9 @@ final class PublishingTests: XCTestCase {
         XCTAssertEqual(Publishing.name(of: projects, workspace: "Notes"), "Our projects")
         XCTAssertEqual(Publishing.name(of: all, workspace: "Notes"), "Notes")
         XCTAssertEqual(Publishing.byline(of: plan, in: s, now: 61_000), "Published 1 min ago by you")
-        XCTAssertEqual(Publishing.byline(of: projects, in: s, now: 61_000), "Published by Bo")
+        XCTAssertEqual(Publishing.byline(of: projects, in: s, now: 61_000), "Published by Bo · 1 min ago")
         XCTAssertEqual(Publishing.detail(of: plan, now: 61_000), "Projects/plan.md · /plan · Ada · 1 min ago")
-        XCTAssertEqual(Publishing.detail(of: all, now: 61_000), "the whole workspace · /all · someone")
+        XCTAssertEqual(Publishing.detail(of: all, now: 61_000), "the whole workspace · /all · someone · 1 min ago")
         XCTAssertEqual(Publishing.slug(typed: "  My-Page \n"), "my-page")
         XCTAssertNil(Publishing.slug(typed: "   "))
     }

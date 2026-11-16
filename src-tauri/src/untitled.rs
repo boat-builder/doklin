@@ -19,16 +19,12 @@ use crate::{is_app_sidecar, is_markdown, meta_file_of, TabKind, WindowRegistry};
 
 const META_SUFFIX: &str = ".meta.jsonl";
 
-fn dir_in(data_dir: &Path) -> PathBuf {
-    data_dir.join("untitled")
-}
-
 fn dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let data_dir = app
+    let dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("app_data_dir: {}", e))?;
-    let dir = dir_in(&data_dir);
+        .map_err(|e| format!("app_data_dir: {}", e))?
+        .join("untitled");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {}", dir.display(), e))?;
     Ok(dir)
 }
@@ -142,33 +138,6 @@ fn orphans_in(dir: &Path, held: &HashSet<PathBuf>) -> Vec<String> {
         .collect()
 }
 
-/// One-time migration: builds up to 0.1.89 kept every untitled note as a
-/// "draft" in `<app_data>/drafts` — listed in a Drafts panel whether or not a
-/// tab showed it, with a version store of its own. Move those files into the
-/// untitled folder, where this launch's orphan pass reopens each one that has
-/// text as an unsaved note, so nothing a user wrote is dropped; and delete
-/// the drafts' version store, which nothing reads any more. Runs before any
-/// window asks for anything, and does nothing once the old folder is gone.
-pub fn adopt_legacy_drafts(data_dir: &Path) {
-    let legacy = data_dir.join("drafts");
-    if !legacy.is_dir() {
-        return;
-    }
-    let dest = dir_in(data_dir);
-    if std::fs::create_dir_all(&dest).is_err() {
-        return;
-    }
-    if let Ok(entries) = std::fs::read_dir(&legacy) {
-        for entry in entries.flatten() {
-            let _ = std::fs::rename(entry.path(), dest.join(entry.file_name()));
-        }
-    }
-    // Fails, harmlessly, while anything is still inside: the next launch
-    // tries the rest again.
-    let _ = std::fs::remove_dir(&legacy);
-    let _ = std::fs::remove_dir_all(data_dir.join("versions").join("drafts"));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,28 +195,5 @@ mod tests {
         assert!(!dir.join("a.md").exists() && !dir.join("a.meta.jsonl").exists());
         remove(&dir.join("never-written.md")).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The old drafts folder empties into the untitled one, and its version
-    /// store goes; a second run has nothing to do.
-    #[test]
-    fn legacy_drafts_move_over_once() {
-        let data = scratch("legacy");
-        std::fs::create_dir_all(data.join("drafts")).unwrap();
-        std::fs::create_dir_all(data.join("versions").join("drafts")).unwrap();
-        std::fs::create_dir_all(data.join("versions").join("r-0123456789abcdef")).unwrap();
-        std::fs::write(data.join("drafts").join("one.md"), "kept\n").unwrap();
-        std::fs::write(data.join("drafts").join("one.meta.jsonl"), "{}\n").unwrap();
-
-        adopt_legacy_drafts(&data);
-        adopt_legacy_drafts(&data);
-
-        assert!(!data.join("drafts").exists());
-        assert!(!data.join("versions").join("drafts").exists());
-        assert!(data.join("versions").join("r-0123456789abcdef").exists());
-        assert_eq!(std::fs::read_to_string(dir_in(&data).join("one.md")).unwrap(), "kept\n");
-        assert!(dir_in(&data).join("one.meta.jsonl").exists());
-
-        let _ = std::fs::remove_dir_all(&data);
     }
 }

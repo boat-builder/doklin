@@ -137,11 +137,11 @@ final class PeopleTests: XCTestCase {
     }
 
     /// A workspace in sections: Ada's Private, and Finance with Ada and Cy.
-    private func status(sections: Bool = true) throws -> CloudStatus {
+    private func status() throws -> CloudStatus {
         try decode(CloudStatus.self, """
         {"root":"/w","domain":"notes.example.com","endpoint":"https://notes.example.com","wsId":"ws-1","name":"Acme",
          "phase":"idle","lastSyncMs":null,"error":null,"pendingDeletes":0,"me":"Ada","meId":"m-ada","can":[],
-         "workerVersion":17,"public":[],"presence":[],"leases":[],"sections":\(sections),
+         "workerVersion":17,"public":[],"presence":[],"leases":[],
          "spaces":[
           {"id":"p-ada","kind":"private","name":"Private","path":"Private","by":"Ada","members":["m-ada"]},
           {"id":"s-fin","kind":"restricted","name":"Finance","path":"Restricted/Finance","by":"Ada","members":["m-ada","m-cy"]},
@@ -159,7 +159,6 @@ final class PeopleTests: XCTestCase {
         XCTAssertNil(Sections.wider(in: status, from: "Restricted/Finance/a.md", to: "Restricted/finance/Q1"), "within one folder")
         XCTAssertNil(Sections.wider(in: status, from: "Restricted/Finance/a.md", to: "Private"), "narrowing")
         XCTAssertEqual(Sections.wider(in: status, from: "Restricted/Loose/a.md", to: "Restricted/Finance"), "Both people in “Finance” will be able to see it.")
-        XCTAssertNil(Sections.wider(in: try self.status(sections: false), from: "Private/a.md", to: ""), "no sections, no audiences")
         XCTAssertEqual(Sections.space(holding: "restricted/finance/x.md", in: status)?.id, "s-fin")
         XCTAssertNil(Sections.space(holding: "Restricted", in: status))
         XCTAssertNil(Sections.space(holding: "Restricted/Financed/x.md", in: status))

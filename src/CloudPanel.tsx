@@ -276,8 +276,7 @@ export default function CloudPanel({
     const paused = cloud.phase === "paused";
     const others = cloud.presence;
     const pages = cloud.public.length;
-    // The superadmin's, hidden from everyone else — and offered while the
-    // domain has not said, which is every worker from before roles (`mayOn`).
+    // The superadmin's, hidden from everyone else (`mayOn`).
     const manages = mayOn(cloud, "workspace.manage");
     body = (
       <>

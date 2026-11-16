@@ -51,8 +51,8 @@ export type PublicPage = {
 /** Another Mac here now. Mirrors `PresenceDevice` in status.rs — change both. */
 export type PresenceDevice = {
   deviceId: string;
-  /** Whose Mac it is; null from a worker before v7, or an owner nobody named. */
-  memberId: string | null;
+  /** Whose Mac it is. */
+  memberId: string;
   /** Who is here, in words: the person — or the Mac, when it is your own
    *  other Mac or nobody the workspace can name yet. The engine resolves it. */
   name: string;
@@ -70,7 +70,7 @@ export type LeaseHolder = {
    *  `leaseFor` rather than comparing a path to it. */
   path: string;
   deviceId: string;
-  memberId: string | null;
+  memberId: string;
   /** Who holds it, in words — resolved like a presence row: the person, or
    *  the Mac when it is your own other one or nobody the workspace can name. */
   name: string;
@@ -123,37 +123,31 @@ export type CloudStatus = {
   lastSyncMs: number | null;
   error: string | null;
   pendingDeletes: number;
-  /** What this Mac signs work with here, in words: the person the domain
-   *  says it is, or this Mac's own name when it has not said. What a `by` is
-   *  compared against to know whether somebody *else* did a thing. */
+  /** Who this Mac signs work with here, in words: the person the domain
+   *  says it is. What a `by` is compared against to know whether somebody
+   *  *else* did a thing. */
   me: string;
   /** The same person as the domain's id for them — which of a folder's
    *  `members` is you. Null until the domain has said. */
   meId: string | null;
   /** What this Mac's credential may do here, as the domain last said. Empty
-   *  until it has answered, and from a worker that predates roles. Ask it
-   *  with `mayOn`, which reads "not known yet" as it should be read. */
+   *  until it has answered. Ask it with `mayOn`. */
   can: string[];
   /** The workspace's superadmin, by name — whom to ask for what only they
    *  can do. Null until the domain has said. */
   superadmin: string | null;
   /** What the domain's /api/meta last reported; null until it answered. */
   workerVersion: number | null;
-  /** The version store's mirror; null when the worker predates it — which
-   *  is exactly when the update badge is worth showing. */
-  versions: VersionsMirror | null;
+  /** The version store's mirror. */
+  versions: VersionsMirror;
   public: PublicPage[];
   presence: PresenceDevice[];
   /** The documents another Mac holds. Empty when the engine cannot hear the
-   *  domain, or the worker predates leases: a lock nobody can confirm is no
-   *  lock. */
+   *  domain: a lock nobody can confirm is no lock. */
   leases: LeaseHolder[];
   /** This person's sections besides the shared workspace — their Private and
    *  the restricted folders they are in — that have a folder on this Mac. */
   spaces: CloudSpace[];
-  /** The workspace is in sections here: `Private` and `Restricted` at its
-   *  top are not shared folders. False from a worker without spaces. */
-  sections: boolean;
 };
 
 /** One section of a workspace that only some people have. Mirrors
@@ -182,7 +176,6 @@ export type CloudProbe = {
   workerVersion: number;
   /** The worker version this app was built against. */
   bundledVersion: number;
-  features: string[];
   workspace: CloudWorkspaceRecord | null;
 };
 
@@ -259,15 +252,15 @@ export type CloudDevice = {
  *  remembered — a role is the person's, and an owner can change it. */
 export type CloudPeople = {
   role: CloudRole;
-  /** Which of `members` is you; null only from a worker too old to say. */
-  me: string | null;
+  /** Which of `members` is you. */
+  me: string;
   /** What that role may do — the buttons this view offers. */
   can: string[];
   /** This Mac's own device id, so the list can mark which Mac is this one. */
   deviceId: string;
   /** Which of `devices` is the credential this Mac syncs with. Never offered
    *  for signing out. */
-  tokenId: string | null;
+  tokenId: string;
   /** Everyone on the workspace. */
   members: CloudMember[];
   /** Codes nobody has used yet. Empty for whoever may not invite. */
@@ -557,7 +550,7 @@ const RESERVED_TOP = new Set(["private", "restricted"]);
 /** The section `rel` — workspace-relative — is in. Names are compared
  *  without case, as the disk compares them. */
 export function placeOf(cloud: CloudStatus | null, rel: string): Place {
-  if (!cloud?.sections) return { kind: "shared" };
+  if (!cloud) return { kind: "shared" };
   const lower = rel.toLowerCase();
   const space = cloud.spaces.find((s) => {
     const at = s.path.toLowerCase();
@@ -602,13 +595,9 @@ export function mayInviteAgain(people: CloudPeople, memberId: string): boolean {
 }
 
 /** The same question of a workspace's status, whose `can` is empty until the
- *  domain has answered and from a worker older than roles. Not knowing is not
- *  a refusal: the domain decides either way, so what cannot be known yet is
- *  offered, exactly as it was before there was a table to hide it by. */
+ *  domain has answered: a control shows once the domain says it may. */
 export function mayOn(cloud: CloudStatus | null, action: CloudAction): boolean {
-  if (!cloud) return false;
-  const can = cloud.can ?? [];
-  return can.length === 0 || can.includes(action);
+  return !!cloud && cloud.can.includes(action);
 }
 
 /** The lease another Mac holds on the document at `absPath`, with the status
@@ -734,7 +723,7 @@ export function syncWords(s: CloudStatus): { tone: SyncTone; text: string } {
 /** Where a note's own page stands — the Live chip's five states.
  *  `publish`: no page of its own. `live`: up to date. `updating`: edits
  *  from here are still on their way. `stale`: sync has stopped short of the
- *  page (offline, paused, held, an old worker, an error), so it keeps what
+ *  page (offline, paused, held, a worker that needs updating, an error), so it keeps what
  *  it had. `offline`: the page itself is down (this Mac's token isn't
  *  accepted, or the note is not in the sync, so the address answers Not
  *  found). */
@@ -777,17 +766,9 @@ export function pageStateLine(s: CloudStatus, state: PageState, now = Date.now()
 }
 
 /** What the Cloud panel's *Version history* line says: how much of this
- *  folder's history the domain is holding, or that its worker is too old to
- *  hold any. History is never gated on the
- *  cloud, so a worker that can't mirror is a note, not a warning. */
+ *  folder's history the domain is holding. History is never gated on the
+ *  cloud, so a domain that holds none yet is a note, not a warning. */
 export function versionsLine(s: CloudStatus, now = Date.now()): string {
-  if (s.versions == null) {
-    // Never having heard from the domain is not the same as hearing that it
-    // is too old, and only one of the two asks the user to do something.
-    return s.workerVersion == null
-      ? `Still checking what ${s.domain} keeps — every version is kept on this Mac either way.`
-      : "This domain’s worker is too old to keep version history — every version is still kept on this Mac.";
-  }
   const { mirrored, cloud, lastMirrorMs } = s.versions;
   if (cloud === 0) {
     return `Nothing on ${s.domain} yet — this Mac’s history goes up within the hour.`;
