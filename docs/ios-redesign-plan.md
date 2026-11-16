@@ -17,7 +17,7 @@ Editing is rare here: the phone reads, agents write. When it happens it has to b
 
 - **Three tabs: Home, Browse, Search** (`TabView`, Search as `Tab(role: .search)`). One `NavigationStack` per tab. On iPad the same tabs become a sidebar (`.tabViewStyle(.sidebarAdaptable)`), with Browse's tree in it beside the document.
 - **A document pushes over the tab it was opened from.** A followed link pushes over Home, whatever tab was showing, so Back always leads Home.
-- **Home** is the workspace switcher (its name, top left), a few pinned documents, and *Recent changes*: every document by when it last changed, newest first, with who changed it (a person, or whose agent) and a dot when it changed since you last opened it. Filters: All, Unread, Agents, People.
+- **Home** is the workspace switcher (its name, top left) and *Recent changes*: every document by when it last changed, newest first, with who changed it (a person, or whose agent) and a dot when it changed since you last opened it. Filters: All, Unread, Agents, People.
 - **The workspace menu goes.** Its fifteen items become a switcher sheet (workspaces, sync, who is here, People, Settings) and a Settings screen (sync and plan; people, agents, devices, here now; published pages, history, recently deleted; remove from this iPhone). Every screen behind them stays as it is.
 - **Sync speaks only when it needs you.** "Synced" and "Syncing…" sit under the workspace name on Home; a hold, a confirmation, an error or a toast rises into one bar above the tabs. The words stay the Mac's.
 - **Reading first, editing a tap away.** A document opens to read. *Edit* in its bottom toolbar, or a double-tap on a paragraph, makes the same page editable right there; *Done* gives it back. Boxes tick and comments work while reading, as now.
@@ -36,7 +36,7 @@ What makes read-first feel instant is the in-place switch: no new screen, no mar
 
 ### 1. The shell
 
-- Deployment target 17.0 → **26.0** (`project.pbxproj`, both configurations). `Tab` and `sidebarAdaptable` need 18; the bar above the tabs is `tabViewBottomAccessory` and the floating tab bar's minimise-on-scroll is `tabBarMinimizeBehavior`, both 26. The app reaches phones only through TestFlight, so nobody is left on an older iOS. (A floor of 18 works too, with the bar drawn as a `safeAreaInset` instead.)
+- Deployment target 17.0 → **26.0** (`project.pbxproj`, both configurations), for `Tab`, `sidebarAdaptable`, `tabViewBottomAccessory` (the bar above the tabs) and `tabBarMinimizeBehavior`. The app reaches phones only through TestFlight, so nobody is left on an older iOS. ios.md's "iOS 17 or later" changes with it.
 - `WorkspaceView` splits: the tab view, one path per tab (`[Route]` each), and the root's handling of `device.opening`, which now selects Home and pushes there.
 - The bottom inset that holds the sync line, the notices and the toast for the whole stack goes (`WorkspaceView.safeAreaInset`). The trap in ios.md that follows from it ("screens put their actions at the top") goes with it: documents get a bottom toolbar (Comments, Edit, Share, More).
 - `RootView` is unchanged: no workspace → sign-in; otherwise the tab view.
@@ -51,7 +51,11 @@ What makes read-first feel instant is the in-place switch: no new screen, no mar
 
 - A new command, **`files_recent {root, limit}`** → `[{path, fileId, mtime, by, rev, section}]`, newest first, across the workspace and its sections. It reads the last applied manifests the engine already keeps (`state.json`; manifest v4 has `mtime` and `by` per file), plus this device's own changes not yet synced (`by` = this member). Mirrored in `Payloads.swift` ⇄ `engine/src/cloud/status.rs` ⇄ `src/cloud.ts` (**change all three**); the Mac could show the same list.
 - *Created* is `rev == 1`. Trap: a move to another section is a new file id with `rev: 1`, so it reads as created there.
-- Who: `m-…` resolves through the people list. `a-…` resolves only for the person's own agents, and an owner's (`agents.manage`); to anyone else another person's agent is a `404`. "Research agent · Maya Chen's" for everybody needs **a small worker addition**: agents' names and their person, read-only, on `GET /api/meta` or the poll. Until then: "An agent of Maya Chen's" when the person is known, "An agent" when not.
+- **Who, in words.** A person is their name (`m-…`, through the people list); this person is *You*. An agent is its person's first name, possessive, then the name its person gave it: *Maya's Research agent*, *Maya's grok bot*.
+  - A name that already starts with its person's (the Mac's terminal agent is `<name>'s terminal (<Mac>)`) is shown as it stands, never *Maya's Maya Chen's terminal*.
+  - Two people in the workspace with the same first name: the full name, *Maya Chen's Research agent*.
+  - An agent whose name isn't known yet: *Maya's agent*. One whose person has gone (their agents go with them): *An agent*. A person no longer in the workspace: *Someone no longer in Studio*.
+- **The worker tells everyone agents' names.** Today an agent is listed to its person and to owners (`agents.manage`); to anyone else another person's agent is a `404`. New: a read-only list, for everyone in the workspace, of each agent's id, name and person — nothing more (no scopes, machines or codes) — on the signed-in `GET /api/meta` or the poll, whichever reaches the engine often enough for a rename to show. The engine keeps it with the status: `Payloads.swift` ⇄ `status.rs` ⇄ `cloud.ts` (**change all three**). The *Agents* rules in [cloud-people-agents.md](cloud-people-agents.md) change with it: names are everybody's; changing or removing an agent stays its person's and owners'.
 - Home re-reads on `workspace.changes`.
 
 ### 4. What you've read, and what changed since (rows 1–2)
@@ -61,12 +65,13 @@ What makes read-first feel instant is the in-place switch: no new screen, no mar
 
 ### 5. Search (row 3)
 
-- Results group **Titles** first, then **In the text**, with the words in context. Scopes: All, Notes, Pages, and a folder.
-- **Pages' text becomes searchable** (tags stripped). Today a page is found by its name alone, matching the Mac's `search_workspace` and the worker's search: change all three together, or keep the phone's rule the same and leave this out.
-- A tap opens at the first match: `DocumentView` takes a find term; `MarkdownView` marks the runs (`Theme.mark`, the current one ringed) and scrolls to its block; a page uses `WKWebView.find`. A find bar steps through them.
+What it searches stays what is built (`WorkspaceFiles.search`, the same rule as the Mac's `search_workspace` and the worker's search): the **names** of every document, notes and pages, and the **words of notes**. A page's own text is not searched; files that are not documents (PDFs, pictures) are not searched, not even by name. The redesign changes how results are shown and opened, not what is found.
+
+- Results group **Names** first, then **In the text of notes**, with the words in context: the order `search` already answers in. Scopes: All, Notes, Pages, and a folder.
+- A tap on a note opens it at the first match: `DocumentView` takes a find term; `MarkdownView` marks the runs (`Theme.mark`, the current one ringed) and scrolls to its block. A find bar steps through them. A page, found by its name, opens at its top.
 - Press and hold a result: `.contextMenu(menuItems:preview:)` with the document's first screen (the native reader for a note, a small web view for a page).
 - Recent searches stay on the device (`UserDefaults`).
-- The walk (`WorkspaceFiles.search`) is fine at today's sizes. Past about 2,000 documents, an index replaces it; the engine has no SQLite today, so that is a new dependency (FTS5) or an index built in memory at start and kept by `touched`.
+- The walk is fine at today's sizes. If it ever gets slow, an index replaces it, with the same rule.
 
 ### 6. Browse (row 4)
 
@@ -74,7 +79,6 @@ What makes read-first feel instant is the in-place switch: no new screen, no mar
 - Sections as the Mac names them: everyone in the workspace; restricted folders (with how many people); Private.
 - The filter narrows the tree in place: matching names and their folders, opened.
 - `FolderView`'s actions (rename, move, remove, restrict, share, publish) move onto the tree's rows, same models. `FolderView` stays as the screen a restricted folder's access or a "Show in Browse" can push.
-- Pinned documents: device-local first (a list of file ids). Synced pins would be a per-person setting the worker doesn't have.
 
 ### 7. The editor (row 5)
 
@@ -109,12 +113,9 @@ The deciding row is the second: Milkdown normalises markdown when it loads a doc
 1. **Shell, Home and links**: tabs, `files_recent`, the seen-store, Home, the arriving state, the switcher and Settings, the sync bar. Uses 1, 2 and the menus.
 2. **Search**: open at the match, the press-and-hold preview, scopes.
 3. **Changed since you read it.**
-4. **Browse and iPad**: the tree, the filter, pins, the sidebar.
+4. **Browse and iPad**: the tree, the filter, the sidebar.
 5. **The editor**: bundle, bridge, bar, fonts. Biggest, and independent of 1–4.
 
-## Open questions
+## Open
 
-- iOS 26 as the floor, or 18 with the bar drawn by hand?
-- May everyone see the names of other people's agents (the worker addition in 3)?
-- Pages' text in search: on all three, or not at all?
-- Pins on this iPhone only, or synced per person?
+- *Edit as markdown*: keep the plain source editor behind *More*, for what the rich editor can't show as written (raw HTML in a note, unusual markdown an agent wrote), or drop it?
