@@ -122,8 +122,9 @@ pub fn archive_name(root: &Path, day: &str) -> String {
     format!("{} — {}.doklin-backup.tar.gz", folder, day)
 }
 
-/// Everything an export will hold: the workspace as `scan_local` sees it,
-/// and the store directory verbatim. Both as (path in the archive, path on
+/// Everything an export will hold: the workspace as `scan_local` sees it —
+/// its documents and their comments, the files that sync and are versioned,
+/// and nothing else — and the store directory verbatim. Both as (path in the archive, path on
 /// disk), so the writer below is a loop and nothing else.
 fn manifest(root: &Path, store: &Store) -> Result<Vec<(String, PathBuf)>, String> {
     let mut out: Vec<(String, PathBuf)> = Vec::new();

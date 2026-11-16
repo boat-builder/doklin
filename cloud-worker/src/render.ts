@@ -162,9 +162,10 @@ export function markdownHtml(md: string, inputs: MarkdownInputs): string {
       },
       image(this: Renderer, token: Tokens.Image): string {
         borrow(this);
-        const outcome = inputs.links(token.href);
-        if (outcome.kind === "keep") return base.image(token);
-        if (outcome.kind === "rewrite") return base.image({ ...token, href: outcome.href });
+        // A picture on the web is shown. One in the workspace is its alt
+        // text: pictures stay on the device that has them (`syncs`,
+        // layout.ts), so there is none to serve.
+        if (inputs.links(token.href).kind === "keep") return base.image(token);
         return escapeHtml(token.text);
       },
     },

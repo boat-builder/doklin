@@ -1246,6 +1246,7 @@ export default function Sidebar({
       published={publishedByAbs}
       spaces={spacesByAbs}
       loose={loose}
+      synced={sectioned}
       onToggle={toggleOpen}
       onOpenFile={onOpenFile}
       onRowClick={handleRowSelect}
@@ -1791,6 +1792,7 @@ function TreeItem({
   published,
   spaces,
   loose = false,
+  synced,
   onToggle,
   onOpenFile,
   onRowClick,
@@ -1826,6 +1828,9 @@ function TreeItem({
   spaces: Map<string, CloudSpace>;
   // A note at this level is in no section, so it syncs nowhere.
   loose?: boolean;
+  // The workspace is connected: what it holds besides markdown and html stays
+  // on this Mac, and its row says so.
+  synced: boolean;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
   // Modifier-aware selection; true = a multi-select gesture the row must not
@@ -1890,7 +1895,13 @@ function TreeItem({
           onPointerUp={dnd.onPointerUp}
           onPointerCancel={dnd.onPointerCancel}
           onContextMenu={(e) => onRowMenu(e, { path: node.path, kind: "file", openable })}
-          title={openable ? node.path : `${node.path} — Doklin can’t open this file type`}
+          title={
+            openable
+              ? node.path
+              : synced
+                ? "Stays on this Mac — Doklin syncs markdown and html"
+                : `${node.path} — Doklin can’t open this file type`
+          }
         >
           {openable ? <DocTypeIcon node={node} /> : <FileIcon />}
           <span className="tree-label">{openable ? stripDocExt(node.name) : node.name}</span>
@@ -2011,6 +2022,7 @@ function TreeItem({
               presence={presence}
               published={published}
               spaces={spaces}
+              synced={synced}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
               onRowClick={onRowClick}

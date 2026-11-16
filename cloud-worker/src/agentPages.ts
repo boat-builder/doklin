@@ -39,15 +39,11 @@ import { MAX_DESC_LEN, MAX_TITLE_LEN, RESERVED_SLUGS, SLUG_RE } from "./layout";
 import type { Manifest, PublicEntry } from "./manifest";
 import { listDirectory } from "./members";
 import { mirrorAfter } from "./search";
-import { isHtmlPath, isMarkdownPath } from "./workspace";
 
 /** The alphabet a random slug is drawn from — no look-alikes, as the engine's
  *  is (`SLUG_ALPHABET`, engine/src/cloud/manifest.rs). */
 const SLUG_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
 const RANDOM_SLUG_LEN = 8;
-
-/** File types a page can show on their own (pages.ts `fileResponse`). */
-const SERVED_AS_FILE = /\.(html|png|jpe?g|gif|webp|avif|svg|pdf)$/i;
 
 function randomSlug(): string {
   const buf = new Uint8Array(RANDOM_SLUG_LEN);
@@ -55,8 +51,8 @@ function randomSlug(): string {
   return [...buf].map((b) => SLUG_ALPHABET[b % SLUG_ALPHABET.length]).join("");
 }
 
-/** What a page shows: a file (a document's, or a plain one) or a folder. */
-type Target = { kind: "file"; entry: Entry; name: string; shown: "document" | "file" } | { kind: "dir"; path: string };
+/** What a page shows: a document (by its markdown, else its html) or a folder. */
+type Target = { kind: "file"; entry: Entry; name: string } | { kind: "dir"; path: string };
 
 const sameTarget = (e: PublicEntry, t: Target, fids: readonly string[]): boolean =>
   t.kind === "dir" ? e.kind === "dir" && e.path.toLowerCase() === t.path.toLowerCase() : e.kind === "file" && fids.includes(e.file);
@@ -71,8 +67,9 @@ const cleanText = (raw: unknown, max: number): string | undefined => {
 
 /**
  * What a path means to publishing. `/` is the whole workspace; a trailing
- * slash says "the folder"; otherwise a document, then a plain file, then a
- * folder — the order a path is read in everywhere else.
+ * slash says "the folder"; otherwise a document, then a folder — the order a
+ * path is read in everywhere else. A picture or a PDF is refused by `locate`:
+ * nothing but documents syncs, so there is nothing else to show.
  */
 function targetAt(index: Index, raw: string): { target: Target; fids: string[] } | Refusal {
   const asFolder = raw.endsWith("/");
@@ -85,16 +82,10 @@ function targetAt(index: Index, raw: string): { target: Target; fids: string[] }
   if (!asFolder) {
     const at = locate(index, path, null);
     if (at instanceof Refusal) return at;
-    if (at.kind === "document" && docExists(at.doc)) {
+    if (docExists(at.doc)) {
       const entry = primaryOf(at.doc)!;
       const fids = [at.doc.md?.fid, at.doc.html?.fid].filter((f): f is string => f !== undefined);
-      return { target: { kind: "file", entry, name: at.doc.stem, shown: "document" }, fids };
-    }
-    if (at.kind === "file" && at.entry) {
-      if (!SERVED_AS_FILE.test(at.entry.file.path)) {
-        return new Refusal(400, `${at.entry.file.path} cannot be a page of its own — documents, pictures and PDFs can`);
-      }
-      return { target: { kind: "file", entry: at.entry, name: at.entry.file.path, shown: "file" }, fids: [at.entry.fid] };
+      return { target: { kind: "file", entry, name: at.doc.stem }, fids };
     }
   }
   if (index.isFolder(path)) {
@@ -140,13 +131,11 @@ function pagesOf(m: Manifest, origin: string, names: ReadonlyMap<string, string>
     .map((slug) => {
       const e = m.public![slug];
       const live = e.kind === "file" ? m.files[e.file] : undefined;
-      const path = live?.path ?? e.path;
-      const isDoc = isMarkdownPath(path) || isHtmlPath(path);
       return {
         slug,
         url: `${origin}/${slug}`,
-        kind: e.kind === "dir" ? "folder" : isDoc ? "document" : "file",
-        path: e.kind === "dir" ? e.path : isDoc ? nameOf(path).stem : path,
+        kind: e.kind === "dir" ? "folder" : "document",
+        path: e.kind === "dir" ? e.path : nameOf(live?.path ?? e.path).stem,
         ...(e.title ? { title: e.title } : {}),
         ...(e.desc ? { desc: e.desc } : {}),
         ...(e.root ? { home: true } : {}),
@@ -235,7 +224,7 @@ function publish(
   return {
     slug,
     url: `${origin}/${slug}`,
-    kind: target.kind === "dir" ? "folder" : target.shown,
+    kind: target.kind === "dir" ? "folder" : "document",
     path: target.kind === "dir" ? target.path : target.name,
     // Everything this makes readable: one document, or every document in the
     // folder — an html-only one included, which a published folder serves at

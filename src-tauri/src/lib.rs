@@ -87,7 +87,7 @@ pub(crate) struct WindowTab {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct WindowContent {
-    folder: Option<String>,
+    pub(crate) folder: Option<String>,
     pub(crate) tabs: Vec<WindowTab>,
     active_id: Option<String>,
     geometry: Option<WindowGeometry>,
@@ -1315,6 +1315,10 @@ fn register_window_content(
     // Which folders are open is the versioner's cue to start or stop; the
     // registry above is the only place that knows.
     engine::reconcile_versions(&app);
+    // And a focused window that now shows another folder moves its focus.
+    if window.is_focused().unwrap_or(false) {
+        cloud::window_focus(&app, window.label(), true);
+    }
 }
 
 /// Tells a freshly-mounted window what it is and what to open. The label is the
@@ -1731,6 +1735,9 @@ pub fn run() {
             cloud::cloud_sync_now,
             cloud::cloud_pause,
             cloud::cloud_confirm_deletes,
+            cloud::cloud_confirm_adds,
+            cloud::cloud_lift_wait,
+            cloud::cloud_set_plan,
             cloud::cloud_set_activity,
             cloud::cloud_take_over,
             cloud::cloud_publish,
@@ -1856,6 +1863,11 @@ pub fn run() {
             } => {
                 capture_window_geometry(app, label);
             }
+            RunEvent::WindowEvent { label, event: WindowEvent::Focused(focused), .. } => {
+                // How quickly a workspace's engine polls follows whether a
+                // window showing it has focus.
+                cloud::window_focus(app, label, *focused);
+            }
             RunEvent::WindowEvent {
                 label,
                 event: WindowEvent::Destroyed,
@@ -1864,6 +1876,7 @@ pub fn run() {
                 // A window the user closed mid-session shouldn't come back on
                 // relaunch. The main window is the exception: it exists every
                 // launch regardless, so its entry (frame + folder) is kept.
+                cloud::window_focus(app, label, false);
                 if !app.state::<Quitting>().0.load(Ordering::SeqCst) {
                     if label != "main" {
                         if let Ok(mut map) = app.state::<WindowRegistry>().0.lock() {

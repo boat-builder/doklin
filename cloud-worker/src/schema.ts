@@ -244,14 +244,52 @@ const STEPS: readonly Step[] = [
       `CREATE INDEX IF NOT EXISTS addresses_by_space ON addresses(space_id)`,
     ],
   },
+  {
+    // What the account may spend and what it has spent (limits.ts).
+    // `settings` holds the domain's own choices, a row each: `plan` is which
+    // Cloudflare plan the account is on, the superadmin's to say. `usage`
+    // holds each credential's own report of its requests today
+    // (`x-doklin-used`), a row per token, replaced by the next report and
+    // swept the day after. Both are the Cloudflare account's rather than the
+    // workspace's, so a wipe leaves them, as it leaves `spent_keys`: the
+    // account has spent today what it has, whichever workspace is next.
+    //
+    // A beat says how long it holds, so a presence row carries when it
+    // lapses (`until`). Presence holds only what the last beats wrote, so it
+    // is made again with the column: dropping it costs a beat.
+    to: 10,
+    tables: [],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS settings (
+         key   TEXT PRIMARY KEY,                -- 'plan'
+         value TEXT NOT NULL                    -- 'free' | 'paid'
+       )`,
+      `CREATE TABLE IF NOT EXISTS usage (
+         who      TEXT PRIMARY KEY,             -- the token id: a device's, or an agent machine's
+         day      INTEGER NOT NULL,             -- the UTC day it counts, floor(ms / 86400000)
+         requests INTEGER NOT NULL,             -- its requests that day, as it reported them
+         at       INTEGER NOT NULL              -- when the report was written
+       )`,
+      `DROP TABLE IF EXISTS presence`,
+      `CREATE TABLE IF NOT EXISTS presence (
+         device_id   TEXT PRIMARY KEY,          -- x-doklin-device
+         member_id   TEXT,                      -- the person
+         device_name TEXT NOT NULL,
+         space_id    TEXT NOT NULL DEFAULT '',  -- the space its path is in; '' the shared workspace
+         path        TEXT,                      -- what they are editing, when anything
+         ts          INTEGER NOT NULL,          -- the last beat
+         until       INTEGER NOT NULL           -- when it lapses: the beat's ttl on from ts
+       )`,
+    ],
+  },
 ];
 
 /** What a fully migrated database reports. */
 export const SCHEMA_VERSION = STEPS.at(-1)?.to ?? BASE_VERSION;
 
 /** Every table the steps list. The wipe empties these and leaves `meta`,
- *  which is the runner's own bookkeeping, and `spent_keys`, which is the
- *  domain's rather than anyone's. */
+ *  which is the runner's own bookkeeping, and `spent_keys`, `settings` and
+ *  `usage`, which are the domain's and its account's rather than anyone's. */
 export const DATA_TABLES: readonly string[] = STEPS.flatMap((s) => s.tables);
 
 // Per isolate, not per request: the check costs one round trip the first time

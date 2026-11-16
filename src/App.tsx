@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  addsQuestion,
+  cloudConfirmAdds,
   cloudForWorkspace,
   cloudNeedsAttention,
   cloudPublish,
@@ -17,6 +19,7 @@ import {
   onCloudApplied,
   onCloudAddressTaken,
   onCloudConflict,
+  onCloudPendingAdds,
   onCloudPendingDeletes,
   onCloudRemoved,
   onCloudSpaceLeft,
@@ -24,6 +27,7 @@ import {
   placeOf,
   relPathIn,
   widerAudience,
+  type CloudPendingAddsEvent,
   type CloudPendingDeletesEvent,
   type CloudRemovedEvent,
   type CloudSpace,
@@ -51,7 +55,7 @@ import {
   type VersionsStatus,
 } from "./versions";
 import CloudSetup, { type CloudSetupMode } from "./CloudSetup";
-import Toasts, { type Toast, type ToastTone } from "./Toasts";
+import Toasts, { type Toast, type ToastAction, type ToastTone } from "./Toasts";
 import LiveChip from "./LiveChip";
 import SyncStatus from "./SyncStatus";
 import { Facepile } from "./Avatar";
@@ -1016,11 +1020,16 @@ export default function App() {
   const historyTargetRef = useRef<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [pendingDeletes, setPendingDeletes] = useState<CloudPendingDeletesEvent | null>(null);
+  // The last many-new-documents question, and the notice asking it while it
+  // is up — one at a time, gone once it is answered anywhere.
+  const [pendingAdds, setPendingAdds] = useState<CloudPendingAddsEvent | null>(null);
+  const addsToastRef = useRef<number | null>(null);
   const toastSeq = useRef(0);
-  const pushToast = useCallback((tone: ToastTone, text: string, action?: Toast["action"]) => {
+  const pushToast = useCallback((tone: ToastTone, text: string, ...actions: ToastAction[]): number => {
     toastSeq.current += 1;
     const id = toastSeq.current;
-    setToasts((ts) => [...ts.slice(-3), { id, tone, text, action }]);
+    setToasts((ts) => [...ts.slice(-3), { id, tone, text, actions } satisfies Toast]);
+    return id;
   }, []);
   const dismissToast = useCallback(
     (id: number) => setToasts((ts) => ts.filter((t) => t.id !== id)),
@@ -5006,11 +5015,37 @@ export default function App() {
           );
         }
       }),
+      // Many new documents at once: the notice asks, with both answers on it.
+      onCloudPendingAdds((e) => {
+        setPendingAdds(e);
+        if (e.root !== sessionWorkspaceRoot || e.count === 0) return;
+        const open = cloudForRootRef.current;
+        const name = open?.root === e.root ? open.name : basename(e.root);
+        const answer = (sync: boolean) => () => {
+          addsToastRef.current = null;
+          cloudConfirmAdds(e.root, sync).catch((err) => pushToast("error", errText(err)));
+        };
+        if (addsToastRef.current != null) dismissToast(addsToastRef.current);
+        addsToastRef.current = pushToast(
+          "warn",
+          addsQuestion(e.count, e.folders, name),
+          { label: e.count === 1 ? "Sync it" : "Sync them", run: answer(true) },
+          { label: "Not now", run: answer(false) },
+        );
+      }),
     ];
     return () => {
       for (const un of uns) void un.then((f) => f()).catch(() => {});
     };
-  }, [openTab, pushToast, reloadFromDisk, leaveRemovedWorkspace, leaveSpaceFolder]);
+  }, [openTab, pushToast, dismissToast, reloadFromDisk, leaveRemovedWorkspace, leaveSpaceFolder]);
+  // Answered somewhere else — the Cloud panel, another window — the question
+  // leaves the notice too. A pass runs through "syncing" while it waits.
+  const cloudPhase = cloudForRoot?.phase;
+  useEffect(() => {
+    if (addsToastRef.current == null || cloudPhase === "pending-adds" || cloudPhase === "syncing") return;
+    dismissToast(addsToastRef.current);
+    addsToastRef.current = null;
+  }, [cloudPhase, dismissToast]);
   // The version rail follows the document: switching tabs while it is open
   // shows the new one's history and drops the old one's preview.
   useEffect(() => {
@@ -5655,6 +5690,7 @@ export default function App() {
           pendingDeletePaths={
             pendingDeletes && pendingDeletes.root === workspaceRoot ? pendingDeletes.paths : []
           }
+          pendingAdds={pendingAdds && pendingAdds.root === workspaceRoot ? pendingAdds : null}
           onClose={() => setCloudPanelOpen(false)}
           onConnect={() => {
             setCloudPanelOpen(false);

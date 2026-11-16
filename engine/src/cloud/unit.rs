@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -23,6 +23,7 @@ use super::manifest::{
     MAX_TITLE_LEN,
 };
 use super::merge::{conflict_copy_path, merge_texts, MergeOutcome};
+use super::pace::{Pacer, BATCH_BYTES, BATCH_FILES, EXPRESS};
 use super::remote::{Remote, RemoteError, RemoteResult};
 use super::scan::{
     content_type_for, hash16, now_ms, random_id, read_file_checked, read_json, rel_path, scan_local, stat_pair,
@@ -52,6 +53,9 @@ const GC_EVERY_N_CYCLES: u64 = 20;
 /// may have uploaded it moments ago, ahead of its manifest CAS).
 const GC_MIN_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 const CAS_ATTEMPTS: usize = 4;
+/// How long an upload is remembered (`WorkspaceState::uploaded`): well
+/// inside `GC_MIN_AGE_MS`, so a blob remembered here is still on the domain.
+const UPLOADED_TTL_MS: u64 = 12 * 60 * 60 * 1000;
 
 /* ---------- Local persistent state ---------- */
 
@@ -116,6 +120,22 @@ pub struct WorkspaceState {
     /// device gets there first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_cloud_sweep_ms: Option<u64>,
+    /// A new file's id, by path, from the moment its bytes first go up until
+    /// a won manifest carries it. A push that loses a race, is cut short, or
+    /// goes in batches sends the same file under the same id again — so the
+    /// upload it already made is found rather than repeated, and nothing is
+    /// left on the domain under an id no manifest will ever name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_new: BTreeMap<String, String>,
+    /// Blobs this device has put up, `<fileId>/<hash>` → when. One of these
+    /// is not sent again (`UPLOADED_TTL_MS`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub uploaded: BTreeMap<String, u64>,
+    /// Files whose newest revision on the domain is not on this device yet:
+    /// downloads the bulk lane still owes. Never pushed over, never read as
+    /// deleted, until they have arrived.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub owed: BTreeSet<String>,
 }
 
 /* ---------- What a cycle decides ---------- */
@@ -140,6 +160,8 @@ struct StagedPush {
     path: String,
     bytes: Vec<u8>,
     hash: String,
+    /// A file no manifest has carried yet.
+    new: bool,
 }
 
 impl Staged {
@@ -173,6 +195,14 @@ pub(crate) struct Ctx<'a> {
     pub releasing: &'a HashSet<String>,
     /// Files of this unit that are in another section on this Mac now.
     pub moved_out: &'a HashMap<String, MovedOut>,
+    /// The workspace's bulk lane (pace.rs).
+    pub pacer: &'a Mutex<Pacer>,
+    /// Paths of this unit the app itself wrote since they last went up: a
+    /// person's own edits, which never wait behind a bulk job.
+    pub touched: &'a HashSet<String>,
+    /// The many-new-documents valve is holding: files no manifest has
+    /// carried stay on this device until the person says.
+    pub hold_new: bool,
 }
 
 impl Ctx<'_> {
@@ -260,12 +290,20 @@ pub(crate) struct Unit<R: Remote> {
     cloud_versions: Option<VersionsIndex>,
     pub mirror: Option<MirrorReport>,
     pub last_mirror_ms: Option<u64>,
+    /// The last cycle left work for the bulk lane: uploads it did not send,
+    /// or downloads it still owes. The engine comes back for it.
+    pub owes: bool,
+    /// How many changes that work is.
+    pub waiting: u32,
 }
 
 impl<R: Remote> Unit<R> {
     pub(crate) fn new(cfg: UnitConfig, remote: Arc<R>) -> Self {
         let _ = std::fs::create_dir_all(cfg.state_dir.join("base"));
-        let state: WorkspaceState = read_json(&cfg.state_dir.join("state.json")).unwrap_or_default();
+        let mut state: WorkspaceState = read_json(&cfg.state_dir.join("state.json")).unwrap_or_default();
+        if forget_out_of_scope(&mut state, &cfg.state_dir) {
+            let _ = write_json(&cfg.state_dir.join("state.json"), &state);
+        }
         Unit {
             id: cfg.id,
             name: cfg.name,
@@ -287,6 +325,8 @@ impl<R: Remote> Unit<R> {
             cloud_versions: None,
             mirror: None,
             last_mirror_ms: None,
+            owes: false,
+            waiting: 0,
         }
     }
 
@@ -442,6 +482,12 @@ impl<R: Remote> Unit<R> {
         let mut refused: HashSet<String> = HashSet::new();
         self.cycles += 1;
         self.poke = false;
+        let cutoff = now_ms().saturating_sub(UPLOADED_TTL_MS);
+        self.state.uploaded.retain(|_, at| *at >= cutoff);
+        // What the bulk lane gives this cycle, once asked: a lost race goes
+        // again on the same allowance rather than drawing more of it.
+        let mut downloads: Option<usize> = None;
+        let mut batch: Option<usize> = None;
 
         for attempt in 0..CAS_ATTEMPTS {
             // 1. Where is remote?
@@ -452,12 +498,15 @@ impl<R: Remote> Unit<R> {
 
             // 2. Apply remote-only changes to disk (downloads, renames,
             //    deletions). Local-vs-remote overlap is decided inside.
-            let applied = self.apply_remote(&remote_manifest, ctx).await?;
+            let applied = self.apply_remote(&remote_manifest, ctx, &mut downloads).await?;
             changed_paths.extend(applied);
 
-            // 3. What changed locally?
+            // 3. What changed locally — and of that, what goes this cycle.
             let scan = scan_local(&self.root, self.skip()).map_err(RemoteError::Other)?;
-            let staged = self.stage_local(&scan, &remote_manifest, ctx).await?;
+            let mut staged = self.stage_local(&scan, &remote_manifest, ctx).await?;
+            let held = self.pace_pushes(&mut staged, ctx, &mut batch);
+            self.waiting = held + self.state.owed.len() as u32;
+            self.owes = self.waiting > 0;
 
             // 3½. What the manifest would become, the public map folded in
             //     (folders re-pointed, pages following renames, dead pages
@@ -469,9 +518,12 @@ impl<R: Remote> Unit<R> {
                 next.public.remove(slug);
             }
             let public_changed = next.public != remote_manifest.public;
+            // A manifest from before the md + html rule still names files
+            // nobody syncs; the first write cleans it.
+            let cleans = !in_scope(&remote_manifest);
 
             // Remote moved under us but we have nothing to say: adopt theirs.
-            if staged.is_empty() && !public_changed {
+            if staged.is_empty() && !public_changed && !cleans {
                 // Ops that resolved to exactly what the manifest already says
                 // are spent — a CAS carrying no change would be pure waste.
                 self.clear_folded(&folded);
@@ -482,12 +534,29 @@ impl<R: Remote> Unit<R> {
             }
 
             // 4. Upload content first (idempotent, content-addressed), then
-            //    try to win the manifest.
-            for push in &staged.pushes {
-                self.remote
-                    .put_blob(&push.file_id, &push.hash, push.bytes.clone(), content_type_for(&push.path))
-                    .await?;
+            //    try to win the manifest. A new file's id is written down
+            //    before its bytes go, and each upload once it has landed: a
+            //    push cut short anywhere resumes with what it already sent.
+            for push in staged.pushes.iter().filter(|p| p.new) {
+                self.state.pending_new.insert(push.path.clone(), push.file_id.clone());
             }
+            self.persist_state();
+            for push in &staged.pushes {
+                let key = format!("{}/{}", push.file_id, push.hash);
+                if self.state.uploaded.contains_key(&key) {
+                    continue;
+                }
+                let sent = self
+                    .remote
+                    .put_blob(&push.file_id, &push.hash, push.bytes.clone(), content_type_for(&push.path))
+                    .await;
+                if let Err(e) = sent {
+                    self.persist_state();
+                    return Err(e);
+                }
+                self.state.uploaded.insert(key, now_ms());
+            }
+            self.persist_state();
 
             match self.remote.put_manifest(&next, &remote_etag).await {
                 Ok(new_etag) => {
@@ -501,7 +570,7 @@ impl<R: Remote> Unit<R> {
                 }
                 Err(RemoteError::Conflict) if attempt + 1 < CAS_ATTEMPTS => {
                     // Someone else landed first — reconcile again from their
-                    // reality. Uploaded blobs stay valid either way.
+                    // reality. What went up stays up, and is not sent again.
                     continue;
                 }
                 Err(RemoteError::Taken(slugs)) if attempt + 1 < CAS_ATTEMPTS => {
@@ -533,6 +602,35 @@ impl<R: Remote> Unit<R> {
             ctx.events.emit_json(EV_ADDRESS_TAKEN, json!({ "root": ctx.ws_root, "slug": slug, "path": path }));
         }
         self.persist_state();
+    }
+
+    /// Which staged pushes go this cycle. All of them while there are no
+    /// more than `EXPRESS`. Past that, the paths the app itself just wrote go
+    /// at once — a person's own edit never waits behind a bulk job — and the
+    /// rest go one batch a cycle, as many as the bulk lane gives (none while
+    /// it waits), edits to known files before new ones, smallest first.
+    /// Answers how many are left for later.
+    fn pace_pushes(&self, staged: &mut Staged, ctx: &Ctx<'_>, batch: &mut Option<usize>) -> u32 {
+        if staged.pushes.len() <= EXPRESS {
+            return 0;
+        }
+        staged.pushes.sort_by_key(|p| (!ctx.touched.contains(&p.path), p.new, p.bytes.len()));
+        let express = staged.pushes.iter().take_while(|p| ctx.touched.contains(&p.path)).count().min(EXPRESS);
+        let rest = staged.pushes.len() - express;
+        let allowed = *batch.get_or_insert_with(|| lock(ctx.pacer).take(rest.min(BATCH_FILES)));
+        let mut keep = express;
+        let mut bytes = 0u64;
+        for push in &staged.pushes[express..] {
+            let size = push.bytes.len() as u64;
+            if keep - express >= allowed || (keep > express && bytes + size > BATCH_BYTES) {
+                break;
+            }
+            bytes += size;
+            keep += 1;
+        }
+        let held = staged.pushes.len() - keep;
+        staged.pushes.truncate(keep);
+        held as u32
     }
 
     /* ----- status ----- */
@@ -572,12 +670,14 @@ impl<R: Remote> Unit<R> {
     /// once a day thin what is up there. History is not the document: a
     /// mirror that cannot finish leaves the sync's phase alone and tries
     /// again on the next pass, because a version that is late is not a
-    /// change that is lost. True when a pass finished.
-    pub(crate) async fn mirror_versions(&mut self) -> bool {
+    /// change that is lost. True when a pass finished. `budget` is the bulk
+    /// lane's: what it does not cover goes up on a later pass.
+    pub(crate) async fn mirror_versions(&mut self, budget: &mut usize) -> bool {
         let store = crate::versions::store_for_root(&self.data_dir, &self.root);
         let remote = self.remote.clone();
         let mut swept = self.state.last_cloud_sweep_ms;
-        let result = version_store::mirror(remote.as_ref(), &store, &self.device_id, &mut swept, now_ms()).await;
+        let result =
+            version_store::mirror(remote.as_ref(), &store, &self.device_id, &mut swept, now_ms(), budget).await;
         self.state.last_cloud_sweep_ms = swept;
         self.persist_state();
         match result {
@@ -701,9 +801,19 @@ impl<R: Remote> Unit<R> {
     /// last applied manifest. Returns relative paths it touched. Files the
     /// user also edited locally are merged here (that's the one both-sides
     /// case); everything else is plain download/rename/trash.
-    async fn apply_remote(&mut self, remote: &Manifest, ctx: &Ctx<'_>) -> RemoteResult<Vec<String>> {
+    ///
+    /// Downloads are paced like uploads: what this manifest changed goes at
+    /// once while it is no more than `EXPRESS` downloads; past that, and for
+    /// whatever an earlier cycle still owes, one batch a cycle as the bulk
+    /// lane allows (`downloads`, drawn once per cycle). What is left is
+    /// `owed`, and the next cycle carries on with it.
+    async fn apply_remote(
+        &mut self,
+        remote: &Manifest,
+        ctx: &Ctx<'_>,
+        downloads: &mut Option<usize>,
+    ) -> RemoteResult<Vec<String>> {
         let mut touched = Vec::new();
-
         // Deletions: in our applied manifest (or state) but tombstoned now.
         let deleted_ids: Vec<String> = self
             .state
@@ -748,10 +858,12 @@ impl<R: Remote> Unit<R> {
             let _ = std::fs::remove_file(self.base_path(&fid));
         }
 
-        // New or changed files.
-        let changed: Vec<(String, ManifestFile)> = remote
+        // New or changed files: what this manifest changed, and what an
+        // earlier cycle still owes. Never a file outside what syncs.
+        let fresh: Vec<(String, ManifestFile)> = remote
             .files
             .iter()
+            .filter(|(_, rf)| crate::syncs(&rf.path))
             .filter(|(fid, rf)| {
                 self.state
                     .manifest
@@ -762,136 +874,190 @@ impl<R: Remote> Unit<R> {
             })
             .map(|(fid, rf)| (fid.clone(), rf.clone()))
             .collect();
+        self.state.owed.retain(|fid| remote.files.get(fid).is_some_and(|rf| crate::syncs(&rf.path)));
+        let owed: Vec<(String, ManifestFile)> = self
+            .state
+            .owed
+            .iter()
+            .filter(|fid| !fresh.iter().any(|(f, _)| f == *fid))
+            .map(|fid| (fid.clone(), remote.files[fid].clone()))
+            .collect();
+        let needs_bytes = |state: &WorkspaceState, fid: &str, rf: &ManifestFile| {
+            state.files.get(fid).map(|held| held.hash != rf.hash).unwrap_or(true)
+        };
+        let fresh_bytes = fresh.iter().filter(|(fid, rf)| needs_bytes(&self.state, fid, rf)).count();
+        let (express, bulk) = if fresh_bytes <= EXPRESS {
+            (fresh, owed)
+        } else {
+            (Vec::new(), fresh.into_iter().chain(owed).collect())
+        };
 
-        for (fid, rf) in changed {
-            let target = self.root.join(&rf.path);
-            let prior = self.state.files.get(&fid).cloned();
-
-            // A pure rename of an unedited file: move it, no bytes.
-            if let Some(p) = &prior {
-                if p.hash == rf.hash && p.path != rf.path {
-                    let from = self.root.join(&p.path);
-                    if from.exists() && !target.exists() {
-                        if let Some(parent) = target.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        if std::fs::rename(&from, &target).is_ok() {
-                            self.record_synced(&fid, &rf, None);
-                            // A rename moves no bytes, so the snapshot from
-                            // before it still says whether the file was
-                            // edited here meanwhile; the fresh stat would
-                            // make that edit read as synced and never push.
-                            if let Some(st) = self.state.files.get_mut(&fid) {
-                                (st.size, st.mtime_ms) = (p.size, p.mtime_ms);
-                            }
-                            touched.push(rf.path.clone());
-                            continue;
-                        }
-                    }
-                }
-                if p.hash == rf.hash && p.path == rf.path {
-                    // Only metadata (rev/hist) moved. Adopt the revision but
-                    // DON'T refresh the disk snapshot: right after a merge the
-                    // stored snapshot is deliberately stale so the next scan
-                    // re-hashes the file and pushes the merged content —
-                    // stamping fresh stats here would erase that signal.
-                    if let Some(st) = self.state.files.get_mut(&fid) {
-                        st.rev = rf.rev;
-                    }
-                    continue;
-                }
-            }
-
-            let local_now = read_file_checked(&target);
-            let locally_edited = match (&prior, &local_now) {
-                (Some(p), Some(bytes)) => hash16(bytes) != p.hash,
-                (None, Some(_)) => true, // exists here but we never synced it
-                _ => false,
-            };
-
-            if !locally_edited {
-                // Plain download (or first appearance).
-                let bytes = self.remote.get_blob(&fid, &rf.hash).await?;
-                // The file may have changed in the window since we looked;
-                // if so, leave it — the next cycle will see a merge case.
-                let still = read_file_checked(&target);
-                let safe = match (&local_now, &still) {
-                    (Some(a), Some(b)) => a == b,
-                    (None, None) => true,
-                    _ => false,
-                };
-                if safe {
-                    if let Some(p) = &prior {
-                        if p.path != rf.path {
-                            let old_abs = self.root.join(&p.path);
-                            if old_abs.exists()
-                                && read_file_checked(&old_abs)
-                                    .map(|b| hash16(&b) == p.hash)
-                                    .unwrap_or(false)
-                            {
-                                self.delete_local_silent(&old_abs);
-                            }
-                        }
-                    }
-                    write_atomic(&target, &bytes)
-                        .map_err(|e| RemoteError::Other(format!("write {}: {}", rf.path, e)))?;
-                    self.record_synced(&fid, &rf, Some(&bytes));
-                    touched.push(rf.path.clone());
-                }
-                continue;
-            }
-
-            // Both sides have this file. Identical bytes are not a conflict
-            // — a folder resumed in place, or two devices that wrote the
-            // same thing: adopt the revision as synced and move on.
-            let ours = local_now.unwrap_or_default();
-            // The content address settles it before anything is downloaded.
-            if hash16(&ours) == rf.hash {
-                self.record_synced(&fid, &rf, Some(&ours));
-                continue;
-            }
-            let theirs = self.remote.get_blob(&fid, &rf.hash).await?;
-
-            // Both sides changed: three-way merge against the stored base.
-            let base = std::fs::read(self.base_path(&fid)).ok();
-            let merged = merge_texts(base.as_deref(), &ours, &theirs);
-            match merged {
-                MergeOutcome::Clean(text) => {
-                    write_atomic(&target, text.as_bytes())
-                        .map_err(|e| RemoteError::Other(format!("write {}: {}", rf.path, e)))?;
-                    // Adopt their revision as the synced point; the merged
-                    // content (≠ theirs) now reads as a local edit and gets
-                    // pushed as rev+1 by stage_local in this same cycle.
-                    self.record_synced_content(&fid, &rf, &theirs);
-                    touched.push(rf.path.clone());
-                }
-                MergeOutcome::Conflicted => {
-                    // Keep ours as the live document; their version lands
-                    // beside it as a conflict copy (a normal file that syncs
-                    // to everyone). Ours pushes as rev+1 this cycle.
-                    // The filename carries a name, so the id is resolved
-                    // here rather than shown: a file called
-                    // "notes (conflict — m-1a2b3c4d…).md" helps nobody.
-                    let author = ctx.name_of(&rf.by);
-                    let copy = conflict_copy_path(&target, if author.is_empty() { "someone" } else { &author });
-                    write_atomic(&copy, &theirs)
-                        .map_err(|e| RemoteError::Other(format!("write conflict copy: {}", e)))?;
-                    self.record_synced_content(&fid, &rf, &theirs);
-                    let copy_rel = rel_path(&self.root, &copy).unwrap_or_default();
-                    touched.push(copy_rel.clone());
-                    ctx.events.emit_json(
-                        EV_CONFLICT,
-                        json!({
-                            "root": ctx.ws_root,
-                            "path": self.ws_rel(&rf.path),
-                            "by": author,
-                            "conflictPath": self.ws_rel(&copy_rel),
-                        }),
-                    );
-                }
+        for (fid, rf) in express {
+            if !self.apply_file(&fid, &rf, ctx, &mut touched).await? {
+                self.state.owed.insert(fid);
             }
         }
+
+        let wanted = bulk.iter().filter(|(fid, rf)| needs_bytes(&self.state, fid, rf)).count();
+        let mut left = *downloads.get_or_insert_with(|| lock(ctx.pacer).take(wanted.min(BATCH_FILES)));
+        let mut bytes = 0u64;
+        for (fid, rf) in bulk {
+            if needs_bytes(&self.state, &fid, &rf) {
+                if left == 0 || bytes >= BATCH_BYTES {
+                    self.state.owed.insert(fid);
+                    continue;
+                }
+                left -= 1;
+                bytes += rf.size;
+            }
+            if self.apply_file(&fid, &rf, ctx, &mut touched).await? {
+                self.state.owed.remove(&fid);
+            } else {
+                self.state.owed.insert(fid);
+            }
+        }
+        *downloads = Some(left);
         Ok(touched)
+    }
+
+    /// Apply one file the remote changed. False when it could not be applied
+    /// this cycle — the copy here changed while its download was in flight —
+    /// and is owed to the next.
+    async fn apply_file(
+        &mut self,
+        fid: &str,
+        rf: &ManifestFile,
+        ctx: &Ctx<'_>,
+        touched: &mut Vec<String>,
+    ) -> RemoteResult<bool> {
+        let (fid, rf) = (fid.to_string(), rf.clone());
+        let target = self.root.join(&rf.path);
+        let prior = self.state.files.get(&fid).cloned();
+
+        // A pure rename of an unedited file: move it, no bytes.
+        if let Some(p) = &prior {
+            if p.hash == rf.hash && p.path != rf.path {
+                let from = self.root.join(&p.path);
+                if from.exists() && !target.exists() {
+                    if let Some(parent) = target.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if std::fs::rename(&from, &target).is_ok() {
+                        self.record_synced(&fid, &rf, None);
+                        // A rename moves no bytes, so the snapshot from
+                        // before it still says whether the file was
+                        // edited here meanwhile; the fresh stat would
+                        // make that edit read as synced and never push.
+                        if let Some(st) = self.state.files.get_mut(&fid) {
+                            (st.size, st.mtime_ms) = (p.size, p.mtime_ms);
+                        }
+                        touched.push(rf.path.clone());
+                        return Ok(true);
+                    }
+                }
+            }
+            if p.hash == rf.hash && p.path == rf.path {
+                // Only metadata (rev/hist) moved. Adopt the revision but
+                // DON'T refresh the disk snapshot: right after a merge the
+                // stored snapshot is deliberately stale so the next scan
+                // re-hashes the file and pushes the merged content —
+                // stamping fresh stats here would erase that signal.
+                if let Some(st) = self.state.files.get_mut(&fid) {
+                    st.rev = rf.rev;
+                }
+                return Ok(true);
+            }
+        }
+
+        let local_now = read_file_checked(&target);
+        let locally_edited = match (&prior, &local_now) {
+            (Some(p), Some(bytes)) => hash16(bytes) != p.hash,
+            (None, Some(_)) => true, // exists here but we never synced it
+            _ => false,
+        };
+
+        if !locally_edited {
+            // Plain download (or first appearance).
+            let bytes = self.remote.get_blob(&fid, &rf.hash).await?;
+            // The file may have changed in the window since we looked; if
+            // so, leave it — it is owed, and the next cycle merges it.
+            let still = read_file_checked(&target);
+            let safe = match (&local_now, &still) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => true,
+                _ => false,
+            };
+            if safe {
+                if let Some(p) = &prior {
+                    if p.path != rf.path {
+                        let old_abs = self.root.join(&p.path);
+                        if old_abs.exists()
+                            && read_file_checked(&old_abs)
+                                .map(|b| hash16(&b) == p.hash)
+                                .unwrap_or(false)
+                        {
+                            self.delete_local_silent(&old_abs);
+                        }
+                    }
+                }
+                write_atomic(&target, &bytes)
+                    .map_err(|e| RemoteError::Other(format!("write {}: {}", rf.path, e)))?;
+                self.record_synced(&fid, &rf, Some(&bytes));
+                touched.push(rf.path.clone());
+            }
+            return Ok(safe);
+        }
+
+        // Both sides have this file. Identical bytes are not a conflict
+        // — a folder resumed in place, or two devices that wrote the
+        // same thing: adopt the revision as synced and move on.
+        let ours = local_now.unwrap_or_default();
+        // The content address settles it before anything is downloaded.
+        if hash16(&ours) == rf.hash {
+            self.record_synced(&fid, &rf, Some(&ours));
+            return Ok(true);
+        }
+        let theirs = self.remote.get_blob(&fid, &rf.hash).await?;
+
+        // Both sides changed: three-way merge against the stored base.
+        let base = std::fs::read(self.base_path(&fid)).ok();
+        let merged = merge_texts(base.as_deref(), &ours, &theirs);
+        match merged {
+            MergeOutcome::Clean(text) => {
+                write_atomic(&target, text.as_bytes())
+                    .map_err(|e| RemoteError::Other(format!("write {}: {}", rf.path, e)))?;
+                // Adopt their revision as the synced point; the merged
+                // content (≠ theirs) now reads as a local edit and gets
+                // pushed as rev+1 by stage_local in this same cycle.
+                self.record_synced_content(&fid, &rf, &theirs);
+                touched.push(rf.path.clone());
+            }
+            MergeOutcome::Conflicted => {
+                // Keep ours as the live document; their version lands
+                // beside it as a conflict copy (a normal file that syncs
+                // to everyone). Ours pushes as rev+1 this cycle.
+                // The filename carries a name, so the id is resolved
+                // here rather than shown: a file called
+                // "notes (conflict — m-1a2b3c4d…).md" helps nobody.
+                let author = ctx.name_of(&rf.by);
+                let copy = conflict_copy_path(&target, if author.is_empty() { "someone" } else { &author });
+                write_atomic(&copy, &theirs)
+                    .map_err(|e| RemoteError::Other(format!("write conflict copy: {}", e)))?;
+                self.record_synced_content(&fid, &rf, &theirs);
+                let copy_rel = rel_path(&self.root, &copy).unwrap_or_default();
+                touched.push(copy_rel.clone());
+                ctx.events.emit_json(
+                    EV_CONFLICT,
+                    json!({
+                        "root": ctx.ws_root,
+                        "path": self.ws_rel(&rf.path),
+                        "by": author,
+                        "conflictPath": self.ws_rel(&copy_rel),
+                    }),
+                );
+            }
+        }
+        Ok(true)
     }
 
     /// Detect local edits/creates/renames/deletes against the synced state
@@ -919,6 +1085,11 @@ impl<R: Remote> Unit<R> {
             if self.deferred.contains(&fid) {
                 continue; // moved to another section, and not dealt with yet
             }
+            if self.state.owed.contains(&fid) {
+                // A newer revision is on its way: pushing this copy would
+                // write over it unmerged, and reading it gone would delete it.
+                continue;
+            }
             match scan.get(&fstate.path) {
                 None => vanished.push(fid),
                 Some(entry) => {
@@ -935,16 +1106,20 @@ impl<R: Remote> Unit<R> {
                         }
                         continue;
                     }
-                    staged.pushes.push(StagedPush { file_id: fid, path: fstate.path.clone(), hash, bytes });
+                    staged.pushes.push(StagedPush { file_id: fid, path: fstate.path.clone(), hash, bytes, new: false });
                 }
             }
         }
 
         // Pass 2: paths we don't know — new files (or the far side of a
         // rename, matched by content below).
+        // A path where a file the domain has and this device is still owed
+        // will land is that file's: it is merged when it arrives.
+        let arriving: HashSet<&str> =
+            self.state.owed.iter().filter_map(|fid| remote.files.get(fid)).map(|rf| rf.path.as_str()).collect();
         let mut news: Vec<(String, Vec<u8>, String)> = Vec::new(); // (path, bytes, hash)
         for (path, entry) in scan {
-            if by_path.contains_key(path) {
+            if by_path.contains_key(path) || arriving.contains(path.as_str()) {
                 continue;
             }
             let Some(bytes) = read_file_checked(&entry.abs) else { continue };
@@ -1019,15 +1194,23 @@ impl<R: Remote> Unit<R> {
         // same name independently) adopts that id instead — apply_remote just
         // stored their version's state, so this becomes a plain edit push and
         // the merge machinery owns any content difference next cycle.
+        //
+        // A new file keeps the id it was first sent under (`pending_new`).
+        // While the many-new-documents valve holds, new files stay here.
+        self.state.pending_new.retain(|path, _| scan.contains_key(path) && !by_path.contains_key(path));
         for (path, bytes, hash) in remaining_news {
             let existing = remote.files.iter().find(|(_, rf)| rf.path == path);
             match existing {
                 Some((fid, _)) if self.state.files.contains_key(fid) => {
                     if self.state.files.get(fid).map(|s| s.hash != hash).unwrap_or(true) {
-                        staged.pushes.push(StagedPush { file_id: fid.clone(), path, hash, bytes });
+                        staged.pushes.push(StagedPush { file_id: fid.clone(), path, hash, bytes, new: false });
                     }
                 }
-                _ => staged.pushes.push(StagedPush { file_id: random_id("f"), path, hash, bytes }),
+                _ if ctx.hold_new => {}
+                _ => {
+                    let fid = self.state.pending_new.get(&path).cloned().unwrap_or_else(|| random_id("f"));
+                    staged.pushes.push(StagedPush { file_id: fid, path, hash, bytes, new: true });
+                }
             }
         }
 
@@ -1047,6 +1230,12 @@ impl<R: Remote> Unit<R> {
             next.name = self.name.clone();
         }
         next.name = super::manifest::cap_utf16(&next.name, MAX_NAME_LEN);
+        // Only what syncs is in a manifest. One written before that rule is
+        // cleaned here: every device has already forgotten those files
+        // (`forget_out_of_scope`), so leaving the manifest deletes nothing.
+        next.files.retain(|_, f| crate::syncs(&f.path));
+        next.tombstones.retain(|_, t| crate::syncs(&t.path));
+        next.public.retain(|_, e| e.kind != PublicKind::File || crate::syncs(&e.path));
 
         for push in &staged.pushes {
             let prev = next.files.get(&push.file_id);
@@ -1305,6 +1494,9 @@ impl<R: Remote> Unit<R> {
                 let _ = write_atomic(&self.base_path(&push.file_id), &push.bytes);
                 self.gc_candidates.insert(push.file_id.clone());
             }
+            if push.new {
+                self.state.pending_new.remove(&push.path);
+            }
         }
         for (fid, to) in &staged.moves {
             let abs = self.root.join(to);
@@ -1375,9 +1567,19 @@ impl<R: Remote> Unit<R> {
     /// now, once it is old enough that no racing pusher still needs it.
     /// There is nothing else to keep: a file's past is the
     /// version store's, and the sync side needs exactly the current bytes.
-    pub(crate) async fn gc_blobs(&mut self) {
-        let candidates: Vec<String> = std::mem::take(&mut self.gc_candidates).into_iter().collect();
+    /// At most `budget` files: collecting is bulk work, and what is left
+    /// waits for the next round.
+    pub(crate) async fn gc_blobs(&mut self, budget: usize) {
+        let candidates: Vec<String> = self.gc_candidates.iter().take(budget).cloned().collect();
+        for fid in &candidates {
+            self.gc_candidates.remove(fid);
+        }
         self.sweep_blobs(&candidates).await;
+    }
+
+    /// How many files are waiting to have their old blobs collected.
+    pub(crate) fn gc_pending(&self) -> usize {
+        self.gc_candidates.len()
     }
 
     /// "Keep the current hash, drop the rest" over these files.
@@ -1427,6 +1629,9 @@ impl<R: Remote> Unit<R> {
         let rel = req.rel.trim_matches('/').to_string();
         match req.kind {
             PublicKind::File if !valid_rel_path(&rel) => return Err("that path can't be published".into()),
+            PublicKind::File if !crate::syncs(&rel) => {
+                return Err("Only markdown and html documents can be published.".into())
+            }
             PublicKind::Dir if !rel.is_empty() && !valid_rel_path(&rel) => {
                 return Err("that folder can't be published".into())
             }
@@ -1594,4 +1799,34 @@ fn describe(e: &PublicEntry) -> String {
         PublicKind::Dir if e.path.is_empty() => "the workspace".to_string(),
         PublicKind::Dir => format!("the folder {}", e.path),
     }
+}
+
+/// A lock that a panic elsewhere has not made useless: the pacer holds
+/// counts, and a count is still a count.
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Whether a manifest names only what syncs.
+fn in_scope(m: &Manifest) -> bool {
+    m.files.values().all(|f| crate::syncs(&f.path))
+        && m.tombstones.values().all(|t| crate::syncs(&t.path))
+        && m.public.values().all(|e| e.kind != PublicKind::File || crate::syncs(&e.path))
+}
+
+/// Forget every file a unit's state holds that does not sync — its record
+/// and its merge base; the file on disk is never touched. What a device kept
+/// before the md + html rule leaves its state this way, before any manifest
+/// leaves it: a file absent from a manifest with no tombstone is a deletion
+/// (`apply_remote`), so the state must let go first. True when it changed.
+fn forget_out_of_scope(state: &mut WorkspaceState, state_dir: &Path) -> bool {
+    let gone: Vec<String> =
+        state.files.iter().filter(|(_, st)| !crate::syncs(&st.path)).map(|(fid, _)| fid.clone()).collect();
+    for fid in &gone {
+        state.files.remove(fid);
+        let _ = std::fs::remove_file(state_dir.join("base").join(fid));
+    }
+    let before = state.pending_new.len();
+    state.pending_new.retain(|path, _| crate::syncs(path));
+    !gone.is_empty() || state.pending_new.len() != before
 }

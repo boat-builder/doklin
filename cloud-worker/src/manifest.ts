@@ -1,9 +1,10 @@
 // The workspace manifest — the one mutable object in the bucket — as the
-// worker sees it: the wire types and the shape
-// check every PUT goes through. Semantics (revision ordering, merges, which
-// device's entry wins) are the engine's business; corruption and traversal
-// are the worker's. The check is what stops a broken device from publishing
-// garbage: it never has to trust the client, and it never has to be clever.
+// worker sees it: the wire types and the shape check every PUT goes through.
+// Semantics (revision ordering, merges, which device's entry wins) are the
+// engine's business; corruption, traversal and what may sync at all
+// (`syncs`, layout.ts) are the worker's. The check is what stops a broken
+// device from publishing garbage: it never has to trust the client, and it
+// never has to be clever.
 
 import { AGENT_ID_RE } from "./agents";
 import {
@@ -19,7 +20,9 @@ import {
   RESERVED_SLUGS,
   SLUG_RE,
   SPACE_ID_RE,
+  UNSYNCED_SENTENCE,
   reservedTop,
+  syncs,
   validPath,
 } from "./layout";
 import { MEMBER_ID_RE } from "./members";
@@ -98,6 +101,9 @@ const isAuthor = (v: unknown): boolean => typeof v === "string" && (MEMBER_ID_RE
 /** What a shared manifest naming a file under a reserved folder is told. */
 export const RESERVED_SENTENCE = "Private and Restricted are kept for a person's own and restricted folders";
 
+/** What a manifest naming a file outside `syncs` is told. */
+const unsynced = (path: string): string => `${UNSYNCED_SENTENCE} — "${path}" is neither`;
+
 function validateFiles(files: unknown, space: boolean): string | null {
   if (!isObject(files)) return "files must be an object";
   const ids = Object.keys(files);
@@ -108,6 +114,7 @@ function validateFiles(files: unknown, space: boolean): string | null {
     const f = files[id];
     if (!isObject(f)) return `invalid file entry: ${id}`;
     if (!validPath(f.path)) return `invalid path for ${id}`;
+    if (!syncs(f.path)) return unsynced(f.path);
     if (!space && reservedTop(f.path)) return RESERVED_SENTENCE;
     // Case-insensitive: the workspace lives on a case-insensitive disk.
     const pathKey = f.path.toLowerCase();
@@ -131,6 +138,7 @@ function validateTombstones(tombstones: unknown, space: boolean): string | null 
     if (!ID_RE.test(id)) return `invalid tombstone id: ${id}`;
     const t = tombstones[id];
     if (!isObject(t) || !validPath(t.path)) return `invalid tombstone for ${id}`;
+    if (!syncs(t.path)) return unsynced(t.path);
     if (!space && reservedTop(t.path)) return RESERVED_SENTENCE;
     if (!isCount(t.rev)) return `invalid tombstone rev for ${id}`;
     if (!isTime(t.ts)) return `invalid tombstone ts for ${id}`;
@@ -163,6 +171,7 @@ function validatePublic(map: unknown, space: boolean): string | null {
     if (e.kind === "file") {
       if (typeof e.file !== "string" || !ID_RE.test(e.file)) return `invalid file for ${slug}`;
       if (!validPath(e.path)) return `invalid path for ${slug}`;
+      if (!syncs(e.path)) return unsynced(e.path);
     } else if (e.kind === "dir") {
       if (typeof e.path !== "string" || (e.path !== "" && !validPath(e.path))) {
         return `invalid path for ${slug}`;
@@ -206,4 +215,24 @@ export function validateManifest(data: unknown, space: boolean): ManifestProblem
   const problem =
     validateFiles(data.files, space) ?? validateTombstones(data.tombstones, space) ?? validatePublic(data.public, space);
   return problem ? bad(problem) : null;
+}
+
+/**
+ * `data` without the files, tombstones and pages of a file that `syncs`
+ * says no to — what the worker's own write makes of a stored manifest that
+ * still lists one (commit.ts), so that the write cleans it, as the engine's
+ * does (`build_manifest`). An entry this cannot read is left for
+ * `validateManifest` to refuse.
+ */
+export function withoutUnsynced(data: unknown): unknown {
+  if (!isObject(data)) return data;
+  const keep = (map: unknown, kept: (e: Record<string, unknown>) => boolean): unknown =>
+    isObject(map) ? Object.fromEntries(Object.entries(map).filter(([, e]) => !isObject(e) || kept(e))) : map;
+  const synced = (e: Record<string, unknown>): boolean => typeof e.path !== "string" || syncs(e.path);
+  return {
+    ...data,
+    files: keep(data.files, synced),
+    ...(data.tombstones === undefined ? {} : { tombstones: keep(data.tombstones, synced) }),
+    ...(data.public === undefined ? {} : { public: keep(data.public, (e) => e.kind !== "file" || synced(e)) }),
+  };
 }

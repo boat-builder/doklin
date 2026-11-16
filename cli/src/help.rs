@@ -8,8 +8,9 @@ use crate::{Command, Failure, COMMANDS};
 const OVERVIEW: &str = r#"doklin — work with a Doklin workspace from anywhere
 
 A workspace is a folder of documents that lives on people's Macs and syncs through
-a domain of their own. This program reads and changes it through that domain.
-Nothing is copied to this machine.
+a domain of their own. Doklin syncs markdown and html documents; any other file in
+the folder stays on the device it is on. This program reads and changes the
+workspace through that domain. Nothing is copied to this machine.
 
 You work as one person's agent, and see what they see. A path says where a thing is:
   Private/…                    only your person sees it
@@ -33,7 +34,7 @@ Reading
 Changing
   write <doc>                  create or replace a document   [--md|--html] [--if-rev n|--force] [--from file]
   edit <doc>                   change part of a document      --find "…" --replace "…" [--all]
-  mv <from> <to>               move or rename a document, a file or a folder
+  mv <from> <to>               move or rename a document or a folder
   rm <doc>                     remove a document, or one version of it   [--md|--html]
   comment <doc>                start a comment thread         --on "…" -m "…"
   reply <doc> <thread>         answer a thread                -m "…"
@@ -59,7 +60,8 @@ More
   doklin help <command>
 
 Exit codes: 0 done · 2 bad usage · 3 not found · 4 not permitted · 5 conflict ·
-6 not logged in · 7 the workspace's worker is too old for the command"#;
+6 not logged in · 7 the workspace's worker is too old for the command ·
+8 the domain asked to slow down, or today's Cloudflare requests are used up"#;
 
 const DOCUMENTS: &str = r#"DOCUMENTS
 
@@ -95,8 +97,9 @@ back with `write --if-rev <n>`. If somebody changed the document in between, the
 write is refused and nothing is lost — read it again. `edit` does this for you.
 --force replaces whatever is there.
 
-Anything that is not markdown or html is a plain file: a picture, a PDF, a CSV.
-Name it in full (Projects/chart.png). It has no versions and no comments.
+Doklin syncs markdown and html documents, nothing else. Any other file in a person's
+folder stays on their device: it is not part of the workspace, and a path to one is
+refused.
 
 `mv` and `rm` act on the whole document — both versions and its comments —
 whatever extension you type. `rm --md` or `rm --html` removes one version, and
@@ -356,7 +359,9 @@ What matters here
 Output is JSON whenever it is not going to a terminal. A refusal is one sentence
 on stderr that says what to do next, with an exit code: 2 bad usage, 3 not found,
 4 not permitted, 5 conflict (the document changed, or the name is taken), 6 not
-logged in, 7 the workspace's worker is too old for the command."#;
+logged in, 7 the workspace's worker is too old for the command, 8 the domain asked
+to slow down, or today's Cloudflare requests are used up. On 8, stop: wait as long
+as its sentence says before the next command, and never retry it in a loop."#;
 
 /// Print the overview, a topic, or one command's own help. A topic wins over
 /// a command of the same name: `doklin help comments` is how comments work,

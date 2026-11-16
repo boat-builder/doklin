@@ -187,11 +187,15 @@ pub async fn seed_download<R: Remote>(
     let _ = std::fs::create_dir_all(state_dir.join("base"));
     let progress_root = dest.to_string_lossy().to_string();
 
-    let total = manifest.files.len();
+    // What syncs, and nothing else: a manifest written before the rule may
+    // still name a picture, and this folder will never hold one from here.
+    let wanted: Vec<(String, ManifestFile)> =
+        manifest.files.iter().filter(|(_, f)| crate::syncs(&f.path)).map(|(fid, f)| (fid.clone(), f.clone())).collect();
+    let total = wanted.len();
     let mut done = 0usize;
     let mut states: BTreeMap<String, FileState> = BTreeMap::new();
     let mut set = tokio::task::JoinSet::new();
-    let mut queue = manifest.files.clone().into_iter();
+    let mut queue = wanted.into_iter();
     loop {
         while set.len() < PARALLEL {
             let Some((fid, rf)) = queue.next() else { break };

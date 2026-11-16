@@ -4,7 +4,9 @@
 // a note's page, the MD/HTML pill and the sandboxed rendition, a folder's
 // table of contents, a nested note with its crumb, a note whose frontmatter
 // is left off its page, a diagram hydrating in light and in dark, the app's
-// own type and palettes, links between notes, the root page, and a 404. Run:
+// own type and palettes, links between notes, the root page, a picture in the
+// workspace shown as its alt text, an html document by its exact path, and a
+// 404. Run:
 //
 //   node verify-harness/serve-worker.mjs &     # bundles the worker (mermaid included), seeds, serves :8787
 //   node verify-harness/drive-public.mjs
@@ -218,20 +220,50 @@ step(
 );
 
 /* 7 — the root page and its links */
+// The picture on the web stays a picture; the drive never fetches it.
+await page.route("https://example.com/**", (route) => route.abort());
 await page.goto(`${BASE}/`);
 await poll(async () => (await page.locator("main.doc h1").count()) === 1);
 const planHref = await page.locator("main.doc a", { hasText: "the plan" }).getAttribute("href");
 const statusHref = await page.locator("main.doc a", { hasText: "status" }).getAttribute("href");
 const scratchLinks = await page.locator("main.doc a", { hasText: "scratch note" }).count();
-const picSrc = await page.locator("main.doc img").first().getAttribute("src");
 step(
-  "the root page: Home at /, links rewritten to public addresses, an unpublished target left as text, a picture inside the published folder resolves",
+  "the root page: Home at /, links rewritten to public addresses, an unpublished target left as text",
   (await page.locator("main.doc h1").textContent()) === "Home" &&
     planHref === "/plan" &&
     statusHref === "/projects/status" &&
-    scratchLinks === 0 &&
-    picSrc === "/projects/assets/pic.png",
-  `${planHref} ${statusHref} ${picSrc}`,
+    scratchLinks === 0,
+  `${planHref} ${statusHref}`,
+);
+
+/* 7a — pictures: one in the workspace is its alt text, one on the web is shown */
+const imgSrcs = await page.locator("main.doc img").evaluateAll((els) => els.map((el) => el.getAttribute("src")));
+const homeText = await page.locator("main.doc").innerText();
+step(
+  "a note's picture in the workspace is its alt text — pictures stay on their device — and a picture on the web is an <img>",
+  JSON.stringify(imgSrcs) === JSON.stringify(["https://example.com/sky.png"]) &&
+    /\ba picture\b/.test(homeText) &&
+    homeText.includes("a missing picture") &&
+    !(await page.content()).includes("pic.png"),
+  `${JSON.stringify(imgSrcs)} · ${JSON.stringify(homeText.split("\n").at(-1))}`,
+);
+
+/* 7b — a published folder serves an html document by its exact path, and nothing else */
+const byPath = await page.goto(`${BASE}/projects/plan.html`);
+const byPathCsp = byPath.headers()["content-security-policy"];
+const byPathType = byPath.headers()["content-type"];
+const rendered = await page.locator("#rendered").count();
+const pic = await page.goto(`${BASE}/projects/assets/pic.png`);
+const picHeading = await page.locator("h1").textContent();
+step(
+  "a published folder: an html document answers at its exact path, sandboxed; /projects/assets/pic.png is the 404 page",
+  byPath.status() === 200 &&
+    /^text\/html/.test(byPathType ?? "") &&
+    byPathCsp === "sandbox allow-scripts allow-popups" &&
+    rendered === 1 &&
+    pic.status() === 404 &&
+    picHeading === "Nothing here",
+  `${byPath.status()} ${byPathType} · ${pic.status()}`,
 );
 
 /* 8 — what isn't there */

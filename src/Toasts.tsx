@@ -1,8 +1,9 @@
 // Transient notices, stacked bottom-right: a cloud merge that left a
 // conflict copy ("Open the copy"), a mass deletion the engine is holding
-// ("Review…"), a restored version, a publish stopped from the sidebar
-// ("Undo"), and errors from any of them. A notice with an action stays until
-// it is used or dismissed; a plain one fades on its own.
+// ("Review…"), many new documents it is holding ("Sync them" / "Not now"), a
+// restored version, a publish stopped from the sidebar ("Undo"), and errors
+// from any of them. A notice with an action stays until one is used or it is
+// dismissed; a plain one fades on its own.
 //
 // Each carries a tone from the one status vocabulary (src/cloud.ts): green
 // when something is done, amber when it waits on you, red when it failed,
@@ -12,11 +13,14 @@ import { useEffect } from "react";
 
 export type ToastTone = "info" | "done" | "warn" | "error";
 
+export type ToastAction = { label: string; run: () => void };
+
 export type Toast = {
   id: number;
   tone: ToastTone;
   text: string;
-  action?: { label: string; run: () => void };
+  /** Its buttons, in order; none for a plain notice. */
+  actions: ToastAction[];
 };
 
 const PLAIN_TOAST_MS = 9000;
@@ -56,7 +60,7 @@ export default function Toasts({
 }) {
   // Plain notices leave on their own; the timer belongs to the newest set.
   useEffect(() => {
-    const plain = toasts.filter((t) => !t.action);
+    const plain = toasts.filter((t) => t.actions.length === 0);
     if (plain.length === 0) return;
     const timers = plain.map((t) => window.setTimeout(() => onDismiss(t.id), PLAIN_TOAST_MS));
     return () => timers.forEach((h) => window.clearTimeout(h));
@@ -69,17 +73,18 @@ export default function Toasts({
         <div key={t.id} className={`toast is-${t.tone}`} role="status">
           <ToneMark tone={t.tone} />
           <span className="toast-text">{t.text}</span>
-          {t.action && (
+          {t.actions.map((a) => (
             <button
+              key={a.label}
               className="toast-btn"
               onClick={() => {
-                t.action?.run();
+                a.run();
                 onDismiss(t.id);
               }}
             >
-              {t.action.label}
+              {a.label}
             </button>
-          )}
+          ))}
           <button className="toast-close" onClick={() => onDismiss(t.id)} aria-label="Dismiss">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" aria-hidden>
               <path d="M18 6L6 18M6 6l12 12" />

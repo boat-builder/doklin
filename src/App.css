@@ -4291,7 +4291,9 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .cloud-dot.phase-pending-deletes,
-.cloud-dot.phase-worker-outdated {
+.cloud-dot.phase-pending-adds,
+.cloud-dot.phase-worker-outdated,
+.cloud-dot.phase-limited {
   background: var(--warn);
   opacity: 1;
 }
@@ -4347,6 +4349,23 @@ body.tree-dragging.tree-drag-invalid * {
   list-style: none;
   margin-left: -16px;
   color: var(--text-3);
+}
+
+/* "Cloudflare plan: Free / Workers Paid" — the superadmin's segmented
+   control, plain words for everyone else. */
+.cloud-plan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-md);
+}
+
+.cloud-plan-label {
+  color: var(--text-3);
+}
+
+.cloud-plan-value {
+  color: var(--text-1);
 }
 
 .cloud-presence {

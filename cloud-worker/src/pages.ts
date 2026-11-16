@@ -1,9 +1,10 @@
 // What a public URL resolves to, read from the synced tree and handed to the
 // renderer: a note (its blob, frontmatter left off, comments stripped, widths
 // from its sidecar, links resolved against the public map), its html
-// rendition framed or raw, a folder's table of contents, or a plain file
-// inside a published folder served by exact path. public.ts decides which of
-// these a request means; render.ts turns the result into HTML.
+// rendition framed or raw, a folder's table of contents, or an html document
+// inside a published folder served by exact path. Nothing else is served:
+// a workspace holds only documents (`syncs`, layout.ts). public.ts decides
+// which of these a request means; render.ts turns the result into HTML.
 
 import { WEB_ASSETS } from "./assets";
 import { notFoundPage } from "./static";
@@ -80,7 +81,7 @@ export async function notePage(ws: Workspace, pub: PublicMap, loc: Located, o: N
     };
     return html(framedPageHtml({ meta, crumb: o.crumb, hasMd: false, rawUrl }));
   }
-  if (!isMarkdownPath(path)) return fileResponse(ws, loc);
+  if (!isMarkdownPath(path)) return notFoundPage();
 
   const text = await ws.text(loc);
   if (text === null) return notFoundPage();
@@ -147,51 +148,34 @@ function linkResolver(ws: Workspace, pub: PublicMap, fromDir: string, dirSlug: s
   };
 }
 
-/* ---------- Renditions and plain files ---------- */
+/* ---------- Renditions ---------- */
 
 /** The html rendition a note keeps beside it (or an html file itself), byte for byte, sandboxed. */
 export async function rawRendition(ws: Workspace, loc: Located): Promise<Response> {
   const path = loc.file.path;
   const rendition = isHtmlPath(path) ? loc : ws.fileAt(htmlSiblingOf(path));
   if (!rendition) return notFoundPage();
-  return fileResponse(ws, rendition);
+  return htmlFile(ws, rendition);
 }
 
-const CONTENT_TYPES: Record<string, string> = {
-  html: "text/html; charset=utf-8",
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  avif: "image/avif",
-  svg: "image/svg+xml",
-  pdf: "application/pdf",
-};
-
-/** Files that may run script when served as a document: they get an opaque origin. */
-const SANDBOXED = new Set(["html", "svg"]);
-
 /**
- * A synced file served as itself — an image a note shows, a PDF beside it,
- * an html rendition. Only what a note can usefully link to: anything else
- * in a published folder is not reachable. An html document is served under
- * a sandbox so its scripts run under an opaque origin whether it is framed
- * by the note's page or opened directly.
+ * An html document served as itself: a note's rendition, or an html page in
+ * a published folder by its exact path. Under a sandbox, so its scripts run
+ * under an opaque origin whether it is framed by the note's page or opened
+ * directly. Any other file is not served: a note's picture is its alt text
+ * (render.ts), because pictures stay on the device that has them.
  */
-export async function fileResponse(ws: Workspace, loc: Located): Promise<Response> {
-  const ext = loc.file.path.slice(loc.file.path.lastIndexOf(".") + 1).toLowerCase();
-  const type = CONTENT_TYPES[ext];
-  if (!type || ext === loc.file.path.toLowerCase()) return notFoundPage();
+export async function htmlFile(ws: Workspace, loc: Located): Promise<Response> {
+  if (!isHtmlPath(loc.file.path)) return notFoundPage();
   const obj = await ws.bytes(loc);
   if (!obj) return notFoundPage();
   return new Response(obj.body, {
     headers: {
-      "content-type": type,
+      "content-type": "text/html; charset=utf-8",
       "content-length": String(obj.size),
       "cache-control": "no-cache",
       "x-robots-tag": "noindex",
-      ...(SANDBOXED.has(ext) ? { "content-security-policy": "sandbox allow-scripts allow-popups" } : {}),
+      "content-security-policy": "sandbox allow-scripts allow-popups",
     },
   });
 }
