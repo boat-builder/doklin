@@ -10,9 +10,10 @@ use doklin_engine::cloud::status::{
     AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, People, Probe, Redeemed, Removed,
     SpaceStatus,
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
-use crate::engine::core;
+use crate::engine::{core, try_core};
+use crate::WindowRegistry;
 
 #[tauri::command]
 pub(crate) fn cloud_status(app: AppHandle) -> Result<Vec<CloudStatus>, String> {
@@ -201,6 +202,36 @@ pub(crate) fn cloud_pause(app: AppHandle, root: String, paused: bool) -> Result<
 #[tauri::command]
 pub(crate) fn cloud_confirm_deletes(app: AppHandle, root: String) -> Result<(), String> {
     cloud::cloud_confirm_deletes(&core(&app)?, root)
+}
+
+#[tauri::command]
+pub(crate) fn cloud_confirm_adds(app: AppHandle, root: String, sync: bool) -> Result<(), String> {
+    cloud::cloud_confirm_adds(&core(&app)?, root, sync)
+}
+
+#[tauri::command]
+pub(crate) fn cloud_lift_wait(app: AppHandle, root: String) -> Result<(), String> {
+    cloud::cloud_lift_wait(&core(&app)?, root)
+}
+
+#[tauri::command]
+pub(crate) async fn cloud_set_plan(app: AppHandle, root: String, plan: String) -> Result<(), String> {
+    cloud::cloud_set_plan(&core(&app)?, root, plan).await
+}
+
+/// A window gained focus or lost it — not a command: the window's own event
+/// calls this (lib.rs), and the registry says which folder it shows. What a
+/// workspace's engine polls by.
+pub(crate) fn window_focus(app: &AppHandle, label: &str, focused: bool) {
+    let folder = app
+        .state::<WindowRegistry>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|map| map.get(label).and_then(|content| content.folder.clone()));
+    if let Some(core) = try_core(app) {
+        let _ = cloud::cloud_set_focus(&core, label, folder, focused);
+    }
 }
 
 #[tauri::command]

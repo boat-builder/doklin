@@ -22,9 +22,42 @@ export type CloudPhase =
   | "offline"
   | "paused"
   | "pending-deletes"
+  | "pending-adds"
   | "revoked"
   | "worker-outdated"
+  | "limited"
   | "error";
+
+/** The Cloudflare plan the superadmin says the account is on — what every
+ *  limit is derived from (cloud-worker/src/limits.ts). */
+export type CloudPlan = "free" | "paid";
+
+/** How this Mac’s requests stand against the day’s limits. Mirrors `UsageStatus` in
+ *  status.rs and Payloads.swift — change all three. */
+export type CloudUsage = {
+  /** `bulk-waits`: big changes wait for the next UTC day while edits go on.
+   *  `slow`: everything goes out about once a minute until then. */
+  mode: "normal" | "bulk-waits" | "slow";
+  /** Whose spend set the mode: this Mac's own, or everyone's together. */
+  cause: "device" | "fleet" | null;
+  /** This Mac's requests to the domain today (UTC day). */
+  today: number;
+  /** Everyone's, roughly, as the domain last summed it; null when it could not. */
+  fleetToday: number | null;
+  /** The account's daily requests; null on Workers Paid. */
+  cap: number | null;
+  /** Null until the domain has said. */
+  plan: CloudPlan | null;
+  /** The next 00:00 UTC (ms), set when the mode is not `normal` or the phase
+   *  is `limited`. */
+  resumesAt: number | null;
+  /** Changes held back: uploads not sent and downloads owed. */
+  waiting: number;
+  /** This Mac's own allowance is what holds them, and it was not lifted today. */
+  liftable: boolean;
+  /** This Mac's person lifted the wait for today. */
+  lifted: boolean;
+};
 
 export type PublicKind = "file" | "dir";
 
@@ -123,6 +156,10 @@ export type CloudStatus = {
   lastSyncMs: number | null;
   error: string | null;
   pendingDeletes: number;
+  /** New documents the many-new-documents valve is holding. */
+  pendingAdds: number;
+  /** Today's requests and what the limits are doing to sync. */
+  usage: CloudUsage;
   /** Who this Mac signs work with here, in words: the person the domain
    *  says it is. What a `by` is compared against to know whether somebody
    *  *else* did a thing. */
@@ -306,6 +343,9 @@ export type CloudAppliedEvent = { root: string; paths: string[] };
  *  Both paths are workspace-relative. */
 export type CloudConflictEvent = { root: string; path: string; by: string; conflictPath: string };
 export type CloudPendingDeletesEvent = { root: string; count: number; total: number; paths: string[] };
+/** The many-new-documents valve is holding `count` new documents. `folders`
+ *  are workspace-relative ("" is the workspace's top), most first, at most 5. */
+export type CloudPendingAddsEvent = { root: string; count: number; folders: { path: string; count: number }[] };
 /** A page asked for an address another section holds on this domain, and was
  *  not published. `path` is workspace-relative. */
 export type CloudAddressTakenEvent = { root: string; slug: string; path: string };
@@ -442,6 +482,20 @@ export const cloudSyncNow = (root: string) => invoke<void>("cloud_sync_now", { r
 export const cloudPause = (root: string, paused: boolean) => invoke<void>("cloud_pause", { root, paused });
 export const cloudConfirmDeletes = (root: string) => invoke<void>("cloud_confirm_deletes", { root });
 
+/** Answer the many-new-documents question: `sync` sends them (and lifts the
+ *  day's wait for them); false — "Not now" — leaves them on this Mac until
+ *  it asks again. */
+export const cloudConfirmAdds = (root: string, sync: boolean) =>
+  invoke<void>("cloud_confirm_adds", { root, sync });
+
+/** Send what this Mac's spent allowance holds back, now. Holds until the next
+ *  00:00 UTC, so it is never asked twice in a day. */
+export const cloudLiftWait = (root: string) => invoke<void>("cloud_lift_wait", { root });
+
+/** Tell the domain which Cloudflare plan the account is on (the superadmin's
+ *  to do); the new limits arrive in the next status. */
+export const cloudSetPlan = (root: string, plan: CloudPlan) => invoke<void>("cloud_set_plan", { root, plan });
+
 /** Which document this window is editing (absolute path), or none — what
  *  presence reports, and the document this Mac claims the lease on. */
 export const cloudSetActivity = (path: string | null) => invoke<void>("cloud_set_activity", { path });
@@ -513,6 +567,8 @@ export const onCloudConflict = (cb: (e: CloudConflictEvent) => void) =>
   listen<CloudConflictEvent>("cloud-conflict", (e) => cb(e.payload));
 export const onCloudPendingDeletes = (cb: (e: CloudPendingDeletesEvent) => void) =>
   listen<CloudPendingDeletesEvent>("cloud-pending-deletes", (e) => cb(e.payload));
+export const onCloudPendingAdds = (cb: (e: CloudPendingAddsEvent) => void) =>
+  listen<CloudPendingAddsEvent>("cloud-pending-adds", (e) => cb(e.payload));
 export const onCloudAddressTaken = (cb: (e: CloudAddressTakenEvent) => void) =>
   listen<CloudAddressTakenEvent>("cloud-address-taken", (e) => cb(e.payload));
 export const onCloudSpaceLeft = (cb: (e: CloudSpaceLeftEvent) => void) =>
@@ -657,6 +713,102 @@ export function timeUntil(ms: number, now = Date.now()): string {
   return `${days} day${days === 1 ? "" : "s"}`;
 }
 
+/** A time within the next day as this Mac's clock shows it: "05:30", "5:30 AM". */
+export function clockTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString(undefined, { timeStyle: "short" });
+}
+
+/** "1 change", "1,240 changes". */
+const counted = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+/* ---------- The day's limits ----------
+   The words are the surfaces' own (the engine says only the mode). The
+   iPhone says the same — the mode lines, the plan's name, the
+   many-new-documents question and its footer words (`syncWords`) — in
+   ios/DoklinKit/Sources/DoklinKit/Models/Limits.swift: change both. */
+
+/** What the day's limits are doing to sync right now. `waits`: big changes
+ *  are held until the next UTC day, by this Mac's spend or everyone's.
+ *  `sending`: this Mac's person lifted the wait and they are on their way.
+ *  `slow`: everything goes out about once a minute until then. */
+export type UsageState =
+  | { kind: "normal" }
+  | { kind: "waits"; cause: "device" | "fleet"; waiting: number; until: string | null }
+  | { kind: "sending"; waiting: number }
+  | { kind: "slow"; until: string | null };
+
+export function usageState(u: CloudUsage): UsageState {
+  const until = u.resumesAt == null ? null : clockTime(u.resumesAt);
+  if (u.mode === "slow") return { kind: "slow", until };
+  const cause = u.cause ?? "device";
+  // A lift lets go of this Mac's own wait, never everyone's.
+  if (u.mode === "bulk-waits" && !(u.lifted && cause === "device")) {
+    return { kind: "waits", cause, waiting: u.waiting, until };
+  }
+  if (u.lifted && u.waiting > 0) return { kind: "sending", waiting: u.waiting };
+  return { kind: "normal" };
+}
+
+/** "412 changes wait until 05:30". */
+export function waitWords(waiting: number, until: string | null): string {
+  return `${counted(waiting, "change waits", "changes wait")}${until ? ` until ${until}` : ""}`;
+}
+
+/** "Sending 412 changes…". */
+export const sendingWords = (waiting: number): string => `Sending ${counted(waiting, "change", "changes")}…`;
+
+/** The footer's words for a mode that changes what sync does, in place of
+ *  "Synced" and "Syncing…" — or null when the day's limits change nothing
+ *  anybody would notice. */
+export function usageWords(u: CloudUsage): { tone: SyncTone; text: string } | null {
+  const state = usageState(u);
+  switch (state.kind) {
+    case "waits":
+      return state.waiting > 0 ? { tone: "warn", text: waitWords(state.waiting, state.until) } : null;
+    case "sending":
+      return { tone: "busy", text: sendingWords(state.waiting) };
+    case "slow":
+      return { tone: "warn", text: "Sync is slower today" };
+    case "normal":
+      return null;
+  }
+}
+
+/** The Cloud panel's quiet line: "This Mac today: 1,240 requests · everyone
+ *  ≈ 8,900 of 100,000". A number the domain could not give is left out. */
+export function usageLine(u: CloudUsage): string {
+  const mine = `This Mac today: ${counted(u.today, "request", "requests")}`;
+  if (u.fleetToday == null) return mine;
+  return `${mine} · everyone ≈ ${u.fleetToday.toLocaleString()}${u.cap == null ? "" : ` of ${u.cap.toLocaleString()}`}`;
+}
+
+/** The plan in words, as Cloudflare names it. */
+export const planName = (plan: CloudPlan): string => (plan === "paid" ? "Workers Paid" : "Free");
+
+/** The many-new-documents question: "212 new documents appeared in
+ *  Projects/foo. Sync them?" — one folder by its path (the workspace's top by
+ *  `workspace`, its name), several by how many, and no place at all when only
+ *  the count is known (a window that opened after the event). The event
+ *  lists at most 5 folders, so counts that fall short mean more. */
+export function addsQuestion(
+  count: number,
+  folders: { path: string; count: number }[] | null,
+  workspace: string,
+): string {
+  let where = "";
+  if (folders && folders.length === 1) {
+    where = ` in ${folders[0].path || workspace}`;
+  } else if (folders && folders.length > 1) {
+    const listed = folders.reduce((n, f) => n + f.count, 0);
+    where = listed >= count ? ` in ${folders.length} folders` : ` in more than ${folders.length} folders`;
+  }
+  return `${counted(count, "new document", "new documents")} appeared${where}. Sync ${count === 1 ? "it" : "them"}?`;
+}
+
+/** When the next 00:00 UTC is on this Mac's clock, as `limited` waits for it. */
+const resumesWords = (s: CloudStatus): string =>
+  s.usage.resumesAt == null ? " for today" : ` until ${clockTime(s.usage.resumesAt)}`;
+
 /** The phase in words, lowercase: "synced 2 min ago", "paused", "offline — synced 3 h ago". */
 export function phaseLine(s: CloudStatus, now = Date.now()): string {
   const synced = s.lastSyncMs == null ? "not synced yet" : `synced ${timeAgo(s.lastSyncMs, now)}`;
@@ -671,10 +823,14 @@ export function phaseLine(s: CloudStatus, now = Date.now()): string {
       return "paused";
     case "pending-deletes":
       return `${s.pendingDeletes} deletion${s.pendingDeletes === 1 ? "" : "s"} waiting for your go`;
+    case "pending-adds":
+      return `${counted(s.pendingAdds, "new document", "new documents")} waiting for your go`;
     case "revoked":
       return "this Mac's token isn't accepted";
     case "worker-outdated":
       return "waiting on a worker update";
+    case "limited":
+      return `Cloudflare’s requests are used up${resumesWords(s)}`;
     case "error":
       return s.error ?? "error";
   }
@@ -694,14 +850,14 @@ export function describeCloud(s: CloudStatus, now = Date.now()): string {
 export type SyncTone = "live" | "busy" | "quiet" | "warn" | "error";
 
 /** The workspace's sync in a few words, for the sidebar footer:
- *  "Synced", "Syncing…", "2 deletions to confirm". The full line
- *  (describeCloud) is the tooltip. */
+ *  "Synced", "Syncing…", "2 deletions to confirm", "412 changes wait until
+ *  05:30". The full line (describeCloud) is the tooltip. */
 export function syncWords(s: CloudStatus): { tone: SyncTone; text: string } {
   switch (s.phase) {
     case "idle":
-      return { tone: "live", text: s.lastSyncMs == null ? "Not synced yet" : "Synced" };
+      return usageWords(s.usage) ?? { tone: "live", text: s.lastSyncMs == null ? "Not synced yet" : "Synced" };
     case "syncing":
-      return { tone: "busy", text: "Syncing…" };
+      return usageWords(s.usage) ?? { tone: "busy", text: "Syncing…" };
     case "offline":
       return { tone: "quiet", text: "Offline" };
     case "paused":
@@ -711,8 +867,16 @@ export function syncWords(s: CloudStatus): { tone: SyncTone; text: string } {
         tone: "warn",
         text: `${s.pendingDeletes} deletion${s.pendingDeletes === 1 ? "" : "s"} to confirm`,
       };
+    // The iPhone's words are in Limits.swift — change both.
+    case "pending-adds":
+      return {
+        tone: "warn",
+        text: `${counted(s.pendingAdds, "new document", "new documents")} — Sync ${s.pendingAdds === 1 ? "it" : "them"}?`,
+      };
     case "worker-outdated":
       return { tone: "warn", text: "Worker update needed" };
+    case "limited":
+      return { tone: "warn", text: `Cloudflare’s requests are used up${resumesWords(s)}` };
     case "revoked":
       return { tone: "error", text: "Not signed in" };
     case "error":
@@ -723,16 +887,18 @@ export function syncWords(s: CloudStatus): { tone: SyncTone; text: string } {
 /** Where a note's own page stands — the Live chip's five states.
  *  `publish`: no page of its own. `live`: up to date. `updating`: edits
  *  from here are still on their way. `stale`: sync has stopped short of the
- *  page (offline, paused, held, a worker that needs updating, an error), so it keeps what
- *  it had. `offline`: the page itself is down (this Mac's token isn't
- *  accepted, or the note is not in the sync, so the address answers Not
- *  found). */
+ *  page (offline, paused, a held deletion, a worker that needs updating,
+ *  today's requests used up, an error), so it keeps what it had. Held new
+ *  documents stop nothing else: edits still go out. `offline`: the page
+ *  itself is down (this Mac's token isn't accepted, or the note is not in
+ *  the sync, so the address answers Not found). The iPhone decides the same
+ *  (Publishing.swift) — change both. */
 export type PageState = "publish" | "live" | "updating" | "stale" | "offline";
 
 export function pageState(s: CloudStatus | null, page: PublicPage | null, pending: boolean): PageState {
   if (!s || !page) return "publish";
   if (s.phase === "revoked" || !page.alive) return "offline";
-  if (s.phase !== "idle" && s.phase !== "syncing") return "stale";
+  if (s.phase !== "idle" && s.phase !== "syncing" && s.phase !== "pending-adds") return "stale";
   return pending ? "updating" : "live";
 }
 
@@ -759,6 +925,8 @@ export function pageStateLine(s: CloudStatus, state: PageState, now = Date.now()
           return "Sync is holding a deletion for your go, and the page waits with it.";
         case "worker-outdated":
           return `${s.domain} needs a worker update before the page changes again.`;
+        case "limited":
+          return "Today’s Cloudflare requests are used up, so the page keeps what it had.";
         default:
           return `Sync stopped: ${s.error ?? "an error"}.`;
       }

@@ -69,7 +69,8 @@ await context.grantPermissions(["clipboard-read", "clipboard-write"]);
 const page = await context.newPage();
 page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
 
-await page.goto("http://localhost:1420/verify-harness/cloud.html");
+const PORT = process.env.PORT ?? "1420";
+await page.goto(`http://localhost:${PORT}/verify-harness/cloud.html`);
 // The fake engine's worker answers with the version this app was built for.
 await page.evaluate((v) => {
   window.__cloud.workerVersion = v;
@@ -121,6 +122,8 @@ const status = (over = {}) => ({
   lastSyncMs: Date.now(),
   error: null,
   pendingDeletes: 0,
+  pendingAdds: 0,
+  usage: { mode: "normal", cause: null, today: 0, fleetToday: null, cap: 100000, plan: "free", resumesAt: null, waiting: 0, liftable: false, lifted: false },
   me: "Sherin",
   meId: "m-owner",
   can: SUPERADMIN_CAN,

@@ -1,10 +1,11 @@
 // The workspace's sync in words, at the foot of the sidebar:
-// "Synced", "Syncing…", "Offline", "2 deletions to confirm". The full
-// line (describeCloud: the phase, when it last synced, the domain) is the
-// tooltip, and a click opens the Cloud panel.
+// "Synced", "Syncing…", "Offline", "2 deletions to confirm", and what the
+// day's Cloudflare limits are doing — "412 changes wait until 05:30". The
+// full line (describeCloud: the phase, when it last synced, the domain) is
+// the tooltip, and a click opens the Cloud panel, where a wait is lifted.
 
 import { useEffect, useState } from "react";
-import { describeCloud, syncWords, type CloudStatus, type SyncTone } from "./cloud";
+import { describeCloud, syncWords, usageState, usageWords, type CloudStatus, type SyncTone } from "./cloud";
 
 /** The engine passes through "syncing" on every cycle (one every 15 s,
  *  engine/src/cloud/engine.rs POLL_INTERVAL), and most finish in a blink.
@@ -40,7 +41,8 @@ function SyncIcon({ tone }: { tone: SyncTone }) {
 export default function SyncStatus({ cloud, onOpen }: { cloud: CloudStatus; onOpen: () => void }) {
   const [shown, setShown] = useState(cloud);
   useEffect(() => {
-    if (cloud.phase !== "syncing") {
+    // A mode's words stand through a pass, so only plain Syncing… waits.
+    if (cloud.phase !== "syncing" || usageWords(cloud.usage)) {
       setShown(cloud);
       return;
     }
@@ -49,12 +51,15 @@ export default function SyncStatus({ cloud, onOpen }: { cloud: CloudStatus; onOp
   }, [cloud]);
 
   const { tone, text } = syncWords(shown);
-  const line = describeCloud(cloud);
+  // The tooltip leads with a mode's words: the phase line alone says "Synced".
+  const mode = cloud.phase === "idle" || cloud.phase === "syncing" ? usageWords(cloud.usage) : null;
+  const line = mode ? `${mode.text} · ${describeCloud(cloud)}` : describeCloud(cloud);
   return (
     <button
       className={`sync-status is-${tone}`}
       data-testid="sync-status"
       data-phase={shown.phase}
+      data-usage={usageState(shown.usage).kind}
       title={line}
       aria-label={line}
       onClick={onOpen}
