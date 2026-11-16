@@ -28,6 +28,14 @@ public final class DocumentModel {
     public private(set) var phase: LoadPhase = .idle
     /// Something a person should read; the view shows it and sets it back.
     public var problem: String?
+    /// What changed in the note since this person last read it here — nil
+    /// when nothing did, it was their own change, or they never read it.
+    public private(set) var sinceRead: ChangeMarks?
+    /// When the version they read was kept, ms.
+    public private(set) var readAt: Int?
+    /// It changed since they read it, but that version is not kept here,
+    /// so what changed can't be shown.
+    public private(set) var changedUnmarked = false
 
     public init(workspace: Workspace, path: String) {
         self.workspace = workspace
@@ -84,6 +92,48 @@ public final class DocumentModel {
         }
     }
 
+    /* ---------- What was read ---------- */
+
+    /// It is on screen: what changed since this person last read it here is
+    /// worked out — against the version they read, when this device keeps
+    /// it — and what it holds now is what they have read.
+    public func shown() async {
+        try? await workspace.loadRecent()
+        let (seen, now) = workspace.lastRead(path)
+        let me = workspace.recent?.me
+        if isNote, let seen, let current = now?.hash, seen != current, now?.by != me, !(now?.by.isEmpty ?? true),
+           let document {
+            await compare(with: seen, now: document)
+        }
+        await workspace.markRead(path)
+    }
+
+    private func compare(with seen: String, now document: MarkdownDocument) async {
+        do {
+            let history: FileHistory = try await Engine.shared.call(
+                "versions_history", ["path": .string(workspace.files.absolute(path))]
+            )
+            guard let version = history.versions.first(where: { $0.hash.hasPrefix(seen) }) else {
+                changedUnmarked = true
+                return
+            }
+            let read: String = try await Engine.shared.call(
+                "versions_read", ["root": .string(history.root), "hash": .string(version.hash)]
+            )
+            let marks = ChangeMarks.between(MarkdownDocument.parse(read), document)
+            sinceRead = marks.isEmpty ? nil : marks
+            readAt = version.ts
+        } catch {
+            changedUnmarked = true
+        }
+    }
+
+    /// Put the marks of what changed away.
+    public func hideChanges() {
+        sinceRead = nil
+        changedUnmarked = false
+    }
+
     /* ---------- Writing ---------- */
 
     /// Put new markdown down, as the person typed it over `expected` — what
@@ -135,37 +185,5 @@ public final class DocumentModel {
         try? await Engine.shared.run(
             "cloud_take_over", ["root": .string(workspace.root), "path": .string(workspace.files.absolute(path))]
         )
-    }
-}
-
-/// A search of the workspace's notes, on this iPhone's copy.
-@MainActor
-@Observable
-public final class SearchModel {
-    public let workspace: Workspace
-    public private(set) var results: [SearchResult] = []
-    public private(set) var phase: LoadPhase = .idle
-    @ObservationIgnored private var asked = 0
-
-    public init(workspace: Workspace) {
-        self.workspace = workspace
-    }
-
-    /// Search for `text`; an empty one clears what was found.
-    public func run(_ text: String) async {
-        asked += 1
-        let ticket = asked
-        let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
-            results = []
-            phase = .idle
-            return
-        }
-        phase = .loading
-        let files = workspace.files
-        let found = await Task.detached(priority: .userInitiated) { files.search(query) }.value
-        guard ticket == asked else { return }
-        results = found
-        phase = .loaded
     }
 }

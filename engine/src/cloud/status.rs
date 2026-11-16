@@ -222,6 +222,18 @@ pub struct RecentFile {
     pub section: Option<String>,
 }
 
+/// `cloud_link_target`: which workspace a link to a page is in, and where
+/// this device holds it — what an app needs to say "it is on its way" rather
+/// than "you are not in that workspace" before the file is here.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkTarget {
+    pub domain: String,
+    pub ws_id: String,
+    /// The workspace's folder on this device; null when it isn't connected.
+    pub root: Option<String>,
+}
+
 /// One row of the workspace's directory (`GET /api/meta` `people`).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

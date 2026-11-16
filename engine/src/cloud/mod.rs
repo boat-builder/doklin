@@ -76,7 +76,7 @@ use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
 use status::{
     emit_statuses, snapshot, AgentAdded, AgentLogin, CloudStatus, DeviceCode, Invited, PageLinkCopy, People,
-    Probe, RecentFiles, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
+    LinkTarget, Probe, RecentFiles, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
 };
 
 /// The worker version this app was built against, parsed out of
@@ -1387,6 +1387,18 @@ pub async fn cloud_follow_link(core: &Arc<Core>, url: String) -> Result<String, 
     })?;
     let rel = ask(tx, |reply| EngineCmd::Follow { space: link.space, file: link.file, reply }).await?;
     Ok(Path::new(&root).join(rel).to_string_lossy().to_string())
+}
+
+/// Which workspace a link to a page is in, and that workspace's folder on
+/// this device when it is connected. Reads the link and this device's list
+/// of workspaces only: nothing is asked of a domain.
+pub fn cloud_link_target(core: &Arc<Core>, url: String) -> Result<LinkTarget, String> {
+    let link = link::PageLink::parse(&url).ok_or_else(|| "that isn't a link to a page in Doklin".to_string())?;
+    with_inner(core, |inner| {
+        let file = read_cloud_file(&inner.data_dir, core.secrets());
+        let root = file.workspaces.iter().find(|w| w.ws_id == link.ws_id).map(|w| w.root.clone());
+        Ok(LinkTarget { domain: link.domain.clone(), ws_id: link.ws_id.clone(), root })
+    })
 }
 
 /// What changed lately in the workspace at `root`: its documents by when

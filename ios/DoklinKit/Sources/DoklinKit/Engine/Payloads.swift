@@ -298,7 +298,7 @@ public struct RecentFiles: Decodable, Equatable, Sendable {
     }
 }
 
-public struct RecentFile: Decodable, Equatable, Sendable {
+public struct RecentFile: Decodable, Hashable, Sendable {
     /// Workspace-relative.
     public let path: String
     /// Null for a file made here that no manifest carries yet.
@@ -326,6 +326,15 @@ public struct RecentFile: Decodable, Equatable, Sendable {
         self.rev = rev
         self.section = section
     }
+}
+
+/// `cloud_link_target`: which workspace a link to a page is in, and its
+/// folder here when this device has joined it. Mirrors `LinkTarget`
+/// (engine/src/cloud/status.rs).
+public struct PageLinkTarget: Decodable, Equatable, Sendable {
+    public let domain: String
+    public let wsId: String
+    public let root: String?
 }
 
 /// One row of the workspace's directory.

@@ -15,6 +15,18 @@ public struct Opening: Identifiable, Equatable, Sendable {
     public let path: String
 }
 
+/// A followed link whose page is not on this device yet: its workspace's
+/// screens show it on its way, and it opens by itself when sync brings it —
+/// or, after a while, says why it can't.
+public struct Arriving: Identifiable, Equatable, Sendable {
+    public let id = UUID()
+    public let root: String
+    public let url: URL
+    public let started: Date
+    /// Why it never came, as a sentence, once the wait is over.
+    public var problem: String?
+}
+
 /// Something sync said that a person should read once.
 public struct Notice: Identifiable, Equatable, Sendable {
     public let id = UUID()
@@ -45,8 +57,13 @@ public final class Workspaces {
     public private(set) var removed: Removed?
     /// The page a followed link asked to see, until its workspace has opened it.
     public private(set) var opening: Opening?
-    /// Why a followed link opened nothing, as a sentence.
+    /// Why a followed link opened nothing, as a sentence — when there is no
+    /// workspace on this device to show it in.
     public private(set) var linkProblem: String?
+    /// A followed link whose page is still on its way here.
+    public private(set) var arrivingPage: Arriving?
+    /// What this person has read on this device (Home's dots).
+    public private(set) var seen: SeenStore?
     /// What a person calls this device in a sentence: `iPhone`, `iPad`
     /// (`EngineSetup.deviceKind`).
     public private(set) var kind = "iPhone"
@@ -72,9 +89,13 @@ public final class Workspaces {
     /// What the engine was last told about that, so it is told once.
     @ObservationIgnored private var told: (folder: String?, focused: Bool)?
 
-    public init(remembered: UserDefaults = .standard) {
+    public init(remembered: UserDefaults = .standard, seen: SeenStore? = nil) {
         self.remembered = remembered
+        self.seen = seen
     }
+
+    /// How long a followed link waits for its page to arrive.
+    public nonisolated static let arrivalWait: TimeInterval = 30
 
     /* ---------- Starting ---------- */
 
@@ -83,6 +104,7 @@ public final class Workspaces {
         guard !starting else { return }
         starting = true
         kind = setup.deviceKind
+        if seen == nil { seen = SeenStore(file: setup.dataDirectory.appendingPathComponent("seen.json")) }
         let events = Engine.shared.events()
         Task { [weak self] in
             for await event in events {
@@ -164,23 +186,72 @@ public final class Workspaces {
     /// Its workspace is shown and opens the page (`opening`), or the person
     /// is told why it can't be (`linkProblem`). A link that launched the app
     /// waits for the engine first.
+    ///
+    /// A page another device made a moment ago may not be here yet: then its
+    /// workspace shows it on its way (`arriving`) and it is asked for again
+    /// as sync goes on, for `arrivalWait`, before the engine's sentence says
+    /// why not — which never tells a deleted page from one in a folder this
+    /// person is not in: a link is an address, never access.
     public func follow(_ url: URL) async {
         for _ in 0..<100 where !ready {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
+        let target: PageLinkTarget
         do {
-            let absolute: String = try await Engine.shared.call("cloud_follow_link", ["url": .string(url.absoluteString)])
-            let holder = { self.statuses.first { absolute.hasPrefix($0.root + "/") } }
-            if holder() == nil { await refresh() }
-            if let status = holder() {
-                select(status.root)
-                opening = Opening(root: status.root, path: String(absolute.dropFirst(status.root.count + 1)))
-            } else {
-                linkProblem = "That page's workspace isn't showing here yet. Try the link again in a moment."
-            }
+            target = try await Engine.shared.call("cloud_link_target", ["url": .string(url.absoluteString)])
         } catch {
             linkProblem = (error as? DoklinError)?.message ?? error.localizedDescription
+            return
         }
+        guard let root = target.root else {
+            linkProblem = LinkWords.notJoined(domain: target.domain, kind: kind)
+            return
+        }
+        select(root)
+        let waiting = Arriving(root: root, url: url, started: Date())
+        arrivingPage = waiting
+        if await arrive() { return }
+        Task { [weak self] in
+            while let self, self.arrivingPage?.id == waiting.id, self.arrivingPage?.problem == nil {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard self.arrivingPage?.id == waiting.id else { return }
+                if await self.arrive() { return }
+                if Date().timeIntervalSince(waiting.started) >= Self.arrivalWait {
+                    self.arrivingPage?.problem = self.arrivalProblem ?? LinkWords.neverCame
+                    return
+                }
+            }
+        }
+    }
+
+    /// The engine's last word on the page being waited for.
+    @ObservationIgnored private var arrivalProblem: String?
+
+    /// Ask for the page being waited for once more: true once it is here and
+    /// its workspace has been told to open it.
+    @discardableResult
+    private func arrive() async -> Bool {
+        guard let waiting = arrivingPage, waiting.problem == nil else { return false }
+        do {
+            let absolute: String = try await Engine.shared.call("cloud_follow_link", ["url": .string(waiting.url.absoluteString)])
+            let holder = { self.statuses.first { absolute.hasPrefix($0.root + "/") } }
+            if holder() == nil { await refresh() }
+            guard arrivingPage?.id == waiting.id, let status = holder() else { return false }
+            arrivingPage = nil
+            arrivalProblem = nil
+            select(status.root)
+            opening = Opening(root: status.root, path: String(absolute.dropFirst(status.root.count + 1)))
+            return true
+        } catch {
+            arrivalProblem = (error as? DoklinError)?.message ?? error.localizedDescription
+            return false
+        }
+    }
+
+    /// The page being waited for is not wanted any more.
+    public func dismissArriving() {
+        arrivingPage = nil
+        arrivalProblem = nil
     }
 
     /// Whether `url` is a link to a page, which the app follows rather than
@@ -268,7 +339,9 @@ public final class Workspaces {
     /// deleted, though the sign-in is gone either way.
     @discardableResult
     public func leave(_ root: String) async throws -> Bool {
+        let wsId = status(root)?.wsId
         let deleted = try await Engine.shared.call("cloud_leave", ["root": .string(root)], as: Bool.self)
+        if let wsId { seen?.forget(wsId) }
         open[root] = nil
         if selected == root { selected = nil }
         try? await Engine.shared.run("versions_reconcile")
@@ -333,7 +406,11 @@ public final class Workspaces {
         case "versions-status":
             if let all = event.decode([VersionsStatus].self) { versions = all }
         case "cloud-applied":
-            if let applied = event.decode(CloudApplied.self) { open[applied.root]?.changed(applied.paths) }
+            if let applied = event.decode(CloudApplied.self) {
+                open[applied.root]?.changed(applied.paths)
+                // What sync just brought may be the page a link is waiting for.
+                if arrivingPage?.root == applied.root { Task { await arrive() } }
+            }
         case "versions-applied":
             if let applied = event.decode(VersionsApplied.self) {
                 for workspace in open.values {
@@ -364,6 +441,7 @@ public final class Workspaces {
             if let gone = event.decode(Removed.self) {
                 removed = gone
                 open[gone.root] = nil
+                if arrivingPage?.root == gone.root { dismissArriving() }
             }
         default:
             break
@@ -419,6 +497,10 @@ public final class Workspace: Identifiable {
     /// The last restricted folder to leave this iPhone: the screens inside
     /// it close when it moves.
     public private(set) var left: FolderLeft?
+    /// What changed lately, as the engine last said (`cloud_recent`).
+    public private(set) var recent: RecentFiles?
+    /// Moves whenever something is marked read here, so the dots follow.
+    public private(set) var reads = 0
 
     public nonisolated var id: String { root }
 
@@ -434,6 +516,47 @@ public final class Workspace: Identifiable {
 
     /// Whether this device may do `action` here, in the worker's words.
     public func may(_ action: String) -> Bool { status?.may(action) ?? true }
+
+    /* ---------- What changed, and what was read ---------- */
+
+    /// Ask the engine what changed lately.
+    public func loadRecent() async throws {
+        recent = try await Engine.shared.call("cloud_recent", ["root": .string(root), "limit": 400])
+    }
+
+    /// Every document by when it last changed, newest first — Home's rows.
+    public var recentItems: [RecentItem] {
+        _ = reads
+        guard let recent else { return [] }
+        return RecentItem.items(recent, seen: device?.seen, wsId: status?.wsId ?? root, workspace: name)
+    }
+
+    /// The row of the document at `path` (its note or its page).
+    public func recentItem(_ path: String) -> RecentItem? {
+        let key = path.lowercased()
+        return recentItems.first { $0.id == key || $0.html?.lowercased() == key }
+    }
+
+    /// What this person last read of the file at `path` here — its content
+    /// address then — and what it holds now, as the engine last said.
+    public func lastRead(_ path: String) -> (seen: String?, now: RecentFile?) {
+        let file = recent?.files.first { $0.path.lowercased() == path.lowercased() }
+        let key = SeenStore.key(fileId: file?.fileId, path: path)
+        return (device?.seen?.hash(status?.wsId ?? root, key), file)
+    }
+
+    /// The document at `path` was shown: what its files hold now is what
+    /// this person has read. Asks the engine first, so it is what is here.
+    public func markRead(_ path: String) async {
+        try? await loadRecent()
+        guard let item = recentItem(path) else { return }
+        let entries = item.parts.compactMap { part in
+            part.hash.map { (key: SeenStore.key(fileId: part.fileId, path: part.path), hash: $0) }
+        }
+        guard !entries.isEmpty else { return }
+        device?.seen?.saw(status?.wsId ?? root, entries)
+        reads += 1
+    }
 
     /// Sync now rather than at the next poll.
     public func syncNow() async {
@@ -546,4 +669,15 @@ public enum Audience: Equatable, Sendable {
         if under("restricted") || under("private") { return .nowhere }
         return .everyone
     }
+}
+
+/// What a followed link says when it opens nothing.
+public enum LinkWords {
+    /// The link's workspace is not on this device: how to get it here.
+    public static func notJoined(domain: String, kind: String) -> String {
+        "That page is in \(domain), which this \(kind) hasn't joined. To join it, choose Join another workspace and paste the line from a device that has it: on a Mac, open the workspace’s menu and choose Devices… → Add a device."
+    }
+
+    /// The page never came, and the engine had nothing to say about why.
+    public static let neverCame = "That page didn't arrive. It may have been deleted, or moved where you can't see it."
 }
