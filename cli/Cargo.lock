@@ -61,6 +61,7 @@ name = "doklin-cli"
 version = "0.1.112"
 dependencies = [
  "gethostname",
+ "libc",
  "serde",
  "serde_json",
  "ureq",

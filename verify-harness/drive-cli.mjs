@@ -6,7 +6,8 @@
 //
 //   0 done · 1 anything else · 2 bad usage · 3 not found · 4 not permitted ·
 //   5 conflict · 6 not logged in, or the login was revoked · 7 the worker is
-//   too old for the command
+//   too old for the command · 8 the domain asked to slow down, or today's
+//   Cloudflare requests are used up
 //
 // It needs no browser and builds nothing. It starts the harness worker
 // itself, on a port of its own, and stops it when it is done. Run:
@@ -379,6 +380,8 @@ await check("help: the overview lists every command; each topic and each command
     "the overview prints and exits 0": overview.code === 0 && overview.out.startsWith("doklin — work with a Doklin workspace"),
     "--help and -h are the overview": (await doklin(nobody, ["--help"])).out === overview.out && (await doklin(nobody, ["-h"])).out === overview.out,
     "the overview says the exit codes": /Exit codes: 0 done · 2 bad usage · 3 not found · 4 not permitted · 5 conflict/.test(overview.out),
+    "…8 among them": /8 the domain asked to slow down, or today's Cloudflare requests are used up/.test(overview.out),
+    "the overview says only documents sync": /Doklin syncs markdown and html documents; any other file in\nthe folder stays on the device it is on\./.test(overview.out),
   };
   for (const name of COMMANDS) facts[`the overview lists ${name}`] = new RegExp(`^  ${name}\\b`, "m").test(overview.out);
   for (const [topic, headline] of [["documents", "DOCUMENTS"], ["comments", "COMMENTS"], ["publishing", "PUBLISHING"], ["drawings", "DRAWINGS"], ["agent", "FOR AN AGENT"]]) {
@@ -393,6 +396,10 @@ await check("help: the overview lists every command; each topic and each command
     if (name !== "comments") facts[`help ${name}`] = (await doklin(nobody, ["help", name])).out === own.out;
   }
   facts["read -h"] = (await doklin(nobody, ["read", "-h"])).out.startsWith("doklin read <doc>");
+  const documents = (await doklin(nobody, ["help", "documents"])).out;
+  facts["help documents says only documents sync"] =
+    documents.includes("Doklin syncs markdown and html documents, nothing else.") && !/plain file|a picture|a PDF|CSV/.test(documents);
+  facts["no help mentions a plain file"] = !/plain file/.test(overview.out + documents + (await doklin(nobody, ["help", "agent"])).out);
   facts["an unknown topic is exit 2"] = refused(await doklin(nobody, ["help", "nonsense"]), 2, /no help on "nonsense"/);
   return facts;
 });
@@ -631,12 +638,14 @@ await check("whoami: the workspace, the agent, what it may do and the worker's v
     who: same(me.agent, { id: editor.id, name: "Editor bot" }) && me.workspace.name === "Notes",
     "what it may do": same(me.scopes, ALL_SCOPES) && same(readerMe.scopes, ["read"]) && readerMe.agent.name === "Reader bot",
     "the worker": Number.isInteger(me.version),
+    "the domain's limits come with it": Number.isInteger(me.limits?.cliDaily) && me.limits.plan === "free",
+    "the fleet's sum is a number": Number.isInteger(me.limits?.fleetToday),
     "--json is the same answer": same(flagged.json, me),
     "one line of JSON, nothing on stderr": piped.out.trim().split("\n").length === 1 && piped.err === "",
   };
 });
 
-await check("ls: folders, documents with their versions and public addresses, plain files — never a sidecar", async () => {
+await check("ls: folders, and documents with their versions and public addresses — never a sidecar, never a plain file", async () => {
   const root = (await doklin(editorBox, ["ls"])).json;
   const projects = (await doklin(editorBox, ["ls", "Projects"])).json;
   const slashed = (await doklin(editorBox, ["ls", "/Projects/"])).json;
@@ -649,19 +658,16 @@ await check("ls: folders, documents with their versions and public addresses, pl
     // Sherin's Private is a section of hers, so her agents see it too.
     "the root's folders": same(root.folders, ["Private", "Projects"]) && root.dir === "",
     "the root's documents": same(root.documents.map((d) => d.path), ["Comments", "Diagram", "Home", "Ideas", "Scratch", "Sizes"]),
-    "no plain files at the root": same(root.files, []),
+    "a listing is folders and documents, nothing else": same(Object.keys(root).sort(), ["dir", "documents", "folders"]),
     "Home is public at / and /home": same(home.public, [`${WORKER}/`, `${WORKER}/home`]),
     "Scratch is not public": doc(root, "Scratch").public === undefined,
     "a version's facts": home.md.file === "Home.md" && home.md.rev === 1 && home.md.size === Buffer.byteLength(SEED_FILES["Home.md"]) && home.html === undefined,
-    "Projects' folders": same(projects.folders, ["Projects/assets", "Projects/Roadmap"]) && projects.dir === "Projects",
+    "Projects' folders": same(projects.folders, ["Projects/Roadmap"]) && projects.dir === "Projects",
     "plan has both versions, in step": plan.md.file === "plan.md" && plan.html.file === "plan.html" && plan.htmlBehind === undefined,
     "plan's addresses: its own page, and inside the published folder": same(plan.public, [`${WORKER}/plan`, `${WORKER}/projects/plan`]),
     "status has only markdown": doc(projects, "Projects/status").md.rev === 1 && doc(projects, "Projects/status").html === undefined,
     "slashes around a folder are forgiven": same(slashed, projects),
-    "--deep reaches the plain files": same(deepProjects.files.map((f) => [f.path, f.size]), [
-      ["Projects/assets/pic.png", PIXEL_PNG.length],
-      ["Projects/Roadmap/notes.txt", Buffer.byteLength(SEED_FILES["Projects/Roadmap/notes.txt"])],
-    ]),
+    "--deep is folders and documents too": same(Object.keys(deepProjects).sort(), ["dir", "documents", "folders"]) && deepProjects.documents.some((d) => d.path === "Projects/Roadmap/Paint it"),
     "--deep lists nested documents and folders": deep.documents.some((d) => d.path === "Projects/Roadmap/Launch") && deep.folders.includes("Projects/Roadmap"),
     "no sidecar anywhere": !JSON.stringify(deep).includes(".meta.jsonl"),
   };
@@ -673,20 +679,19 @@ await check("ls: a folder that is not there is exit 3; a hidden or an ignored on
   ignored: refused(await doklin(editorBox, ["ls", "node_modules"]), 2, /does not sync/),
 }));
 
-await check("info: a document's versions, comment threads and addresses — by its name or either file's; a plain file's facts", async () => {
+await check("info: a document's versions, comment threads and addresses — by its name or either file's; a plain file is refused", async () => {
   const plan = (await doklin(editorBox, ["info", "Projects/plan"])).json;
   const byHtml = (await doklin(editorBox, ["info", "Projects/plan.html"])).json;
   const byMd = (await doklin(editorBox, ["info", "Projects/plan.md", "--json"])).json;
   const comments = (await doklin(editorBox, ["info", "Comments"])).json;
-  const pic = (await doklin(editorBox, ["info", "Projects/assets/pic.png"])).json;
   return {
     "a document": plan.kind === "document" && plan.path === "Projects/plan" && plan.md.rev === 1 && plan.html.rev === 1 && plan.comments === 0,
     "each version's size": plan.md.size === Buffer.byteLength(SEED_FILES["Projects/plan.md"]) && plan.html.size === Buffer.byteLength(SEED_FILES["Projects/plan.html"]),
     "its addresses": same(plan.public, [`${WORKER}/plan`, `${WORKER}/projects/plan`]),
     "the same document by either file's name": same(byHtml, plan) && same(byMd, plan),
     "its comment threads are counted": comments.comments === 1,
-    "a plain file": pic.kind === "file" && pic.path === "Projects/assets/pic.png" && pic.size === PIXEL_PNG.length && pic.rev === 1 && same(pic.public, [`${WORKER}/projects/assets/pic.png`]),
-    "what is not there is exit 3": refused(await doklin(editorBox, ["info", "Nope"]), 3, /no document or file at "Nope"/),
+    "a plain file is bad usage that names what syncs": refused(await doklin(editorBox, ["info", "Projects/assets/pic.png"]), 2, /^Doklin syncs markdown and html documents only — "pic\.png" is neither/),
+    "what is not there is exit 3": refused(await doklin(editorBox, ["info", "Nope"]), 3, /there is no document at "Nope"/),
   };
 });
 
@@ -700,9 +705,6 @@ await check("read: the text on stdout and what is known about it on stderr; --md
   const clean = await doklin(editorBox, ["read", "Comments", "--clean"]);
   const copy = join(SCRATCH, "plan-copy.md");
   const toFile = await doklin(editorBox, ["read", "Projects/plan", "-o", copy]);
-  const picCopy = join(SCRATCH, "pic-copy.png");
-  const picture = await doklin(editorBox, ["read", "Projects/assets/pic.png", "--output", picCopy]);
-  const raw = await doklin(editorBox, ["read", "Projects/assets/pic.png"]);
   return {
     "markdown by default, byte for byte": md.code === 0 && md.out === SEED_FILES["Projects/plan.md"],
     "what it is, on stderr": same(md.meta, { kind: "document", path: "Projects/plan", file: "Projects/plan.md", rev: 1, version: "md" }),
@@ -713,17 +715,16 @@ await check("read: the text on stdout and what is known about it on stderr; --md
     "comment markers are kept": marked.out === SEED_FILES["Comments.md"] && marked.out.includes("{=="),
     "--clean drops them and keeps the words": clean.code === 0 && !/\{==|==\}|\{>>|<<\}/.test(clean.out) && clean.out.includes("a highlighted phrase"),
     "-o writes the file and prints nothing": toFile.code === 0 && toFile.out === "" && readFileSync(copy, "utf8") === SEED_FILES["Projects/plan.md"] && toFile.meta.rev === 1,
-    "a plain file's bytes, to a file": picture.code === 0 && readFileSync(picCopy).equals(PIXEL_PNG) && same(picture.meta, { kind: "file", path: "Projects/assets/pic.png", file: "Projects/assets/pic.png", rev: 1 }),
-    "…and to stdout untouched": raw.bytes.equals(PIXEL_PNG),
   };
 });
 
-await check("read: what is not there is exit 3 and says which half is missing; a sidecar and a hidden path are bad usage", async () => {
+await check("read: what is not there is exit 3 and says which half is missing; a sidecar, a plain file and a hidden path are bad usage", async () => {
   const noHtml = await doklin(editorBox, ["read", "Home", "--html"]);
   return {
-    "no such document": refused(await doklin(editorBox, ["read", "Nope"]), 3, /no document or file at "Nope"/),
+    "no such document": refused(await doklin(editorBox, ["read", "Nope"]), 3, /there is no document at "Nope"/),
     "no html version": refused(noHtml, 3, /Home has no html version/) && noHtml.problem.code === "no_html",
     "a sidecar is not a document": refused(await doklin(editorBox, ["read", "Sizes.meta.jsonl"]), 2, /comments commands/),
+    "nor is a plain file": refused(await doklin(editorBox, ["read", "Projects/Roadmap/notes.txt"]), 2, /Doklin syncs markdown and html documents only — "notes\.txt" is neither/),
     "a hidden path": refused(await doklin(editorBox, ["read", ".env"]), 2, /hidden/),
   };
 });
@@ -766,25 +767,20 @@ await check("write: creates a document from what is piped in; replacing needs th
   };
 });
 
-await check("write --from: a file's bytes; a plain file is named in full and round-trips byte for byte, text or not", async () => {
+await check("write --from: a file's bytes become a document; a plain file — a CSV, a picture — is refused, and nothing is written", async () => {
   const beta = "# Beta\n\nA second document, from a file.\n";
   const made = await doklin(editorBox, ["write", "Drive/beta", "--from", scratchFile("beta.md", beta)]);
-  const csv = "name,knots\nAda,7\n";
-  const data = await doklin(editorBox, ["write", "Drive/data.csv", "--from", scratchFile("data.csv", csv)]);
-  // Bytes that are not text in any encoding.
-  const blob = Buffer.concat([Buffer.from([0xff, 0xfe, 0x00, 0x80]), randomBytes(252)]);
-  const bin = await doklin(editorBox, ["write", "Drive/blob.bin"], { input: blob });
-  const back = join(SCRATCH, "blob-back.bin");
-  const readBin = await doklin(editorBox, ["read", "Drive/blob.bin", "-o", back]);
-  const again = await doklin(editorBox, ["write", "Drive/data.csv", "--if-rev", "1"], { input: `${csv}Grace,9\n` });
-  const info = (await doklin(editorBox, ["info", "Drive/data.csv"])).json;
+  const from = calls.length;
+  const csv = await doklin(editorBox, ["write", "Drive/data.csv", "--from", scratchFile("data.csv", "name,knots\nAda,7\n")]);
+  const picture = await doklin(editorBox, ["write", "Drive/pic.png", "--force"], { input: PIXEL_PNG });
+  const wire = asked(from);
+  const listed = JSON.stringify((await doklin(editorBox, ["ls", "--deep"])).json);
   return {
     "a document from a file": made.code === 0 && made.json.created === true && (await doklin(editorBox, ["read", "Drive/beta"])).out === beta,
-    "a plain file": data.code === 0 && same(data.json, { kind: "file", path: "Drive/data.csv", rev: 1, size: Buffer.byteLength(csv), created: true }),
-    "it reads back": (await doklin(editorBox, ["read", "Drive/data.csv"])).out === `${csv}Grace,9\n`,
-    "a plain file has revisions too": again.code === 0 && again.json.rev === 2 && info.kind === "file" && info.rev === 2,
-    "binary in": bin.code === 0 && bin.json.kind === "file" && bin.json.size === blob.length,
-    "binary out": readBin.code === 0 && readFileSync(back).equals(blob),
+    "a CSV is bad usage that names what syncs": refused(csv, 2, /^Doklin syncs markdown and html documents only — "data\.csv" is neither\. Name a document/),
+    "so is a picture, --force or not": refused(picture, 2, /Doklin syncs markdown and html documents only — "pic\.png" is neither/),
+    "the domain refused each": same(wire, ["PUT doc → 400", "PUT doc → 400"]),
+    "nothing was written": !/data\.csv|pic\.png/.test(listed),
   };
 });
 
@@ -898,7 +894,6 @@ await check("edit: changes part of a document with the revision it read; --find 
   const now = await doklin(editorBox, ["read", "Drive/alpha"]);
   const html = await doklin(editorBox, ["edit", "Drive/alpha", "--html", "--find", "Alpha page", "--replace", "Alpha, the page"]);
   const onlyHtml = await doklin(editorBox, ["edit", "Drive/poster", "--find", "Saturday", "--replace", "Sunday"]);
-  const binary = await doklin(editorBox, ["edit", "Drive/blob.bin", "--find", "a", "--replace", "b"]);
   return {
     "one place changed": once.code === 0 && once.json.rev === 5 && once.json.version === "md",
     "a read, then a write that names the revision read": same(wire, ["GET doc → 200", "PUT doc → 200"]) && put.headers["if-rev"] === "4",
@@ -911,7 +906,6 @@ await check("edit: changes part of a document with the revision it read; --find 
     "the text after all that": now.out === "# Alpha\n\nThe boat ships in June if the paint dries.\n\nThe boat was green.\n" && now.meta.rev === 7,
     "--html edits the html version": html.code === 0 && html.json.version === "html" && html.json.rev === 2 && (await doklin(editorBox, ["read", "Drive/alpha", "--html"])).out.includes("<h1>Alpha, the page</h1>"),
     "an html-only document is edited as html": onlyHtml.code === 0 && onlyHtml.json.version === "html" && (await doklin(editorBox, ["read", "Drive/poster"])).out.includes("Sunday at one"),
-    "a file that is not text has nothing to find": refused(binary, 2, /is not text/),
   };
 });
 
@@ -1056,12 +1050,13 @@ await check("a write keeps every comment where it was: keeping a marker keeps it
   };
 });
 
-await check("comments: a thread or a document that is not there is exit 3; a plain file has no comments", async () => ({
+await check("comments: a thread or a document that is not there is exit 3; a plain file is no document to comment on", async () => ({
   "reply to no thread": refused(await doklin(editorBox, ["reply", "Drive/alpha", "nosuch", "-m", "x"]), 3, /no thread #nosuch/),
   "comment rm of no thread": refused(await doklin(editorBox, ["comment", "rm", "Drive/alpha", "nosuch"]), 3, /no thread #nosuch/),
   "comments on no document": refused(await doklin(editorBox, ["comments", "Nope"]), 3, /no document at "Nope"/),
   "comment on no document": refused(await doklin(editorBox, ["comment", "Nope", "--on", "a", "-m", "b"]), 3, /no document at "Nope"/),
-  "a plain file": refused(await doklin(editorBox, ["comments", "Drive/data.csv"]), 2, /plain file, not a document/),
+  "a plain file": refused(await doklin(editorBox, ["comments", "Drive/data.csv"]), 2, /Doklin syncs markdown and html documents only — "data\.csv" is neither/),
+  "nor is one to start a thread on": refused(await doklin(editorBox, ["comment", "Drive/data.csv", "--on", "Ada", "-m", "Who?"]), 2, /Doklin syncs markdown and html documents only/),
 }));
 
 /* ====================================================================== */
@@ -1127,7 +1122,7 @@ await check("publish: an address already taken is a conflict (exit 5); one that 
 /* 7 — moving and removing                                                */
 /* ====================================================================== */
 
-await check("mv: a document moves whole — both versions and its comments — whatever extension is typed, and its page follows; into a folder; a plain file; a rename; a folder; --dry-run only says", async () => {
+await check("mv: a document moves whole — both versions and its comments — whatever extension is typed, and its page follows; into a folder; a rename; a folder; --dry-run only says", async () => {
   const dry = await doklin(editorBox, ["mv", "Drive/alpha", "Drive/Archive/alpha2", "--dry-run"]);
   const stillThere = (await doklin(editorBox, ["info", "Drive/alpha"])).code === 0;
   const moved = await doklin(editorBox, ["mv", "Drive/alpha.md", "Drive/Archive/alpha2"]);
@@ -1137,7 +1132,6 @@ await check("mv: a document moves whole — both versions and its comments — w
   const page = await fetch(alphaPage.url);
   const listed = (await published()).find((p) => p.slug === alphaPage.slug) ?? {};
   const into = await doklin(editorBox, ["mv", "Drive/beta", "Drive/Archive/"]);
-  const file = await doklin(editorBox, ["mv", "Drive/data.csv", "Drive/Archive"]);
   const renamed = await doklin(editorBox, ["mv", "Drive/Archive/beta", "Drive/Archive/gamma", "--json"]);
   const folder = await doklin(editorBox, ["mv", "Drive/Archive", "Drive/Old"]);
   const old = (await doklin(editorBox, ["ls", "Drive/Old"])).json;
@@ -1150,25 +1144,24 @@ await check("mv: a document moves whole — both versions and its comments — w
     "nothing is left where it was": refused(gone, 3),
     "its page follows it": page.status === 200 && listed.path === "Drive/Archive/alpha2",
     "a destination ending in / means into it": into.code === 0 && same(into.json, { kind: "document", from: "Drive/beta", to: "Drive/Archive/beta", files: 1 }),
-    "so does one that is a folder already — a plain file": file.code === 0 && same(file.json, { kind: "file", from: "Drive/data.csv", to: "Drive/Archive/data.csv", files: 1 }),
     "a rename": renamed.code === 0 && same(renamed.json, { kind: "document", from: "Drive/Archive/beta", to: "Drive/Archive/gamma", files: 1 }),
-    "a folder, with everything in it": folder.code === 0 && same(folder.json, { kind: "folder", from: "Drive/Archive", to: "Drive/Old", files: 5 }),
-    "what the folder holds now": same(old.documents.map((d) => d.path), ["Drive/Old/alpha2", "Drive/Old/gamma"]) && same(old.files.map((f) => f.path), ["Drive/Old/data.csv"]),
+    "a folder, with everything in it": folder.code === 0 && same(folder.json, { kind: "folder", from: "Drive/Archive", to: "Drive/Old", files: 4 }),
+    "what the folder holds now": same(old.documents.map((d) => d.path), ["Drive/Old/alpha2", "Drive/Old/gamma"]) && same(old.folders, []),
     "a move is not an edit: the text is the same": text.out === "# Alpha\n\nThe boat leaves in July if the paint dries.\n\nThe boat was teal.\n",
     "a renamed document's page follows it too": (await published()).find((p) => p.slug === "beta-page")?.path === "Drive/Old/gamma" && (await fetch(`${WORKER}/beta-page`)).status === 200,
   };
 });
 
-await check("mv: onto something that is there is a conflict (exit 5); nothing to move is exit 3; a folder into itself, or anything to a hidden place, is bad usage", async () => ({
+await check("mv: onto something that is there is a conflict (exit 5); nothing to move is exit 3; a folder into itself, a plain file, or anything to a hidden place, is bad usage", async () => ({
   "onto a document": refused(await doklin(editorBox, ["mv", "Drive/Old/gamma", "Drive/Old/alpha2"]), 5, /already/),
-  "onto a file": refused(await doklin(editorBox, ["mv", "Drive/blob.bin", "Drive/Old/data.csv"]), 5, /already there/),
+  "a plain file is no document to move": refused(await doklin(editorBox, ["mv", "Drive/data.csv", "Drive/Old"]), 2, /Doklin syncs markdown and html documents only — "data\.csv" is neither/),
   "nothing there": refused(await doklin(editorBox, ["mv", "Nope", "Somewhere"]), 3, /nothing at "Nope"/),
   "a folder into itself": refused(await doklin(editorBox, ["mv", "Drive/Old", "Drive/Old/Inner"]), 2, /inside itself/),
   "to a hidden place": refused(await doklin(editorBox, ["mv", "Drive/Old/gamma", ".hidden/gamma"]), 2, /hidden/),
   "nothing moved": same((await doklin(editorBox, ["ls", "Drive/Old"])).json.documents.map((d) => d.path), ["Drive/Old/alpha2", "Drive/Old/gamma"]),
 }));
 
-await check("rm: one version with --html or --md, never the last; the whole document with its comments; a plain file; --dry-run only says; a page outlives its document", async () => {
+await check("rm: one version with --html or --md, never the last; the whole document with its comments; --dry-run only says; a page outlives its document; a plain file is refused", async () => {
   const dry = await doklin(editorBox, ["rm", "Drive/Old/alpha2", "--html", "--dry-run"]);
   const html = await doklin(editorBox, ["rm", "Drive/Old/alpha2", "--html"]);
   const info = (await doklin(editorBox, ["info", "Drive/Old/alpha2"])).json;
@@ -1180,7 +1173,6 @@ await check("rm: one version with --html or --md, never the last; the whole docu
   const gone = await doklin(editorBox, ["read", "Drive/Old/alpha2"]);
   const page = await fetch(alphaPage.url);
   const listed = (await published()).find((p) => p.slug === alphaPage.slug) ?? {};
-  const file = await doklin(editorBox, ["rm", "Drive/Old/data.csv", "--json"]);
   return {
     "--dry-run says what would go": dry.code === 0 && same(dry.json, { kind: "document", path: "Drive/Old/alpha2", versions: ["html"], threadsRemoved: 1, removed: false }),
     "--html removes the html, and the threads that were on it": html.code === 0 && same(html.json, { kind: "document", path: "Drive/Old/alpha2", versions: ["html"], threadsRemoved: 1 }),
@@ -1191,8 +1183,8 @@ await check("rm: one version with --html or --md, never the last; the whole docu
     "the whole document, by either name": whole.code === 0 && same(whole.json, { kind: "document", path: "Drive/Old/alpha2", versions: ["md"], stillPublic: [alphaPage.url] }),
     "it is gone": refused(gone, 3),
     "its page answers 404 and is listed as missing": page.status === 404 && listed.missing === true && listed.path === "Drive/Old/alpha2",
-    "a plain file": file.code === 0 && same(file.json, { kind: "file", path: "Drive/Old/data.csv", stillPublic: [] }),
-    "what is not there is exit 3": refused(await doklin(editorBox, ["rm", "Nope"]), 3, /no document or file at "Nope"/),
+    "a plain file is bad usage": refused(await doklin(editorBox, ["rm", "Drive/Old/data.csv", "--json"]), 2, /Doklin syncs markdown and html documents only — "data\.csv" is neither/),
+    "what is not there is exit 3": refused(await doklin(editorBox, ["rm", "Nope"]), 3, /there is no document at "Nope"/),
   };
 });
 
@@ -1439,7 +1431,7 @@ if (!canTty) {
         whoami.out.includes("It may read, comment, edit and publish.") &&
         whoami.out.includes("It sees the shared workspace, and Private/.") &&
         /Worker version \d+\./.test(whoami.out),
-      ls: ls.out.includes("Projects/assets/\n") && /Projects\/plan  \[md · html\]  public: http/.test(ls.out) && ls.out.includes("Projects/status  [md]"),
+      ls: ls.out.includes("Projects/Roadmap/\n") && /Projects\/plan  \[md · html\]  public: http/.test(ls.out) && ls.out.includes("Projects/status  [md]"),
       info: info.out.includes("Projects/plan — a document") && /markdown\s+plan\.md  revision 2 · \d+ B · changed .* by Editor bot/.test(info.out) && /comments\s+none/.test(info.out) && /public\s+http/.test(info.out),
       read: read.out.includes("The halyard needs splicing.") && /Scratch · markdown · revision \d+/.test(read.out),
       write: write.code === 0 && write.out.includes("Created the markdown version of Drive/typed — revision 1."),
@@ -1512,7 +1504,7 @@ if (!canTty) {
       "rm --html": rmHtml.out.includes("Removed the html version of Drive/Pair.") && rmHtml.out.includes("1 comment thread on that version went with it."),
       "rm, of something published": rm.out.includes(`It stays published at ${WORKER}/pair-page — the page answers 404 until the document is back. Stop with \`doklin unpublish\`.`),
       unpublish: unpublish.out.includes(`Stopped publishing ${WORKER}/pair-page.`),
-      "a plain file's info": file.out.includes("Projects/assets/pic.png — a plain file") && new RegExp(`content\\s+revision 1 · ${PIXEL_PNG.length} B`).test(file.out),
+      "a plain file, refused in a sentence": file.code === 2 && file.out.includes('doklin: Doklin syncs markdown and html documents only — "pic.png" is neither. Name a document: plan, plan.md or plan.html.'),
       "nothing found": nothing.code === 0 && nothing.out.includes('Nothing contains "qqzzxxqq".'),
       "a search that waits says why, then answers": waited.out.includes("Reading the workspace into its search index") && waited.out.includes("60 documents contain it; these are the first 20 — narrow it with --in <folder>, or raise --limit."),
     };
@@ -1528,7 +1520,7 @@ if (!canTty) {
     const logout = await t(["logout"]);
     const after = await t(["whoami"]);
     return {
-      "not found": missing.code === 3 && missing.out.includes('doklin: there is no document or file at "Nope"') && !missing.out.includes('{"'),
+      "not found": missing.code === 3 && missing.out.includes('doklin: there is no document at "Nope"') && !missing.out.includes('{"'),
       "bad usage": usage.code === 2 && usage.out.includes("doklin: say which document — doklin read <doc>"),
       "write with nothing piped in is refused, not waited for": noPipe.code === 2 && noPipe.out.includes("doklin: pipe the new content in, or name a file with --from <file>"),
       "a conflict says how to go on": conflict.code === 5 && conflict.out.includes("--if-rev 1"),
@@ -1572,7 +1564,40 @@ await check("logout: --dry-run only says; logout revokes this machine's token on
 });
 
 /* ====================================================================== */
-/* 14 — a worker that is behind                                           */
+/* 14 — the CLI's own allowance                                           */
+/* ====================================================================== */
+
+await check("allowance: every request is counted beside the credentials; the count rides a signed-in request at most every 15 minutes; past the domain's cliDaily nothing is sent and it is exit 8", async () => {
+  const counted = await addAgent("Counted bot", ["read"]);
+  const box = machine("counted");
+  const file = join(box.dir, "usage.json");
+  const today = () => JSON.parse(readFileSync(file, "utf8"))[DOMAIN];
+  const from = calls.length;
+  const login = await doklin(box, ["login", BASE, counted.code]);
+  const afterLogin = today();
+  const whoami = await doklin(box, ["whoami"]);
+  const ls = await doklin(box, ["ls"]);
+  const wire = calls.slice(from);
+  const afterThree = today();
+  // The rest of today's allowance, spent: what a loop would have done by now.
+  writeFileSync(file, JSON.stringify({ [DOMAIN]: { ...afterThree, requests: afterThree.limits.cliDaily } }));
+  const before = calls.length;
+  const spent = await doklin(box, ["ls"]);
+  return {
+    "login, whoami and ls": login.code === 0 && whoami.code === 0 && ls.code === 0,
+    "the count is kept as privately as the login": (statSync(file).mode & 0o777) === 0o600,
+    "the login is counted, and the domain's limits kept": afterLogin.requests === 1 && afterLogin.limits.cliDaily === whoami.json.limits.cliDaily && Number.isInteger(afterLogin.day),
+    "every request after it too": afterThree.requests === 3 && wire.length === 3,
+    "a login reports nothing": wire[0].url === "/api/agent/login" && wire[0].headers["x-doklin-used"] === undefined,
+    "the first signed-in request reports the count so far": wire[1].headers["x-doklin-used"] === "2",
+    "the next, within 15 minutes, does not": wire[2].headers["x-doklin-used"] === undefined,
+    "past the allowance it is exit 8, saying when it comes back": refused(spent, 8, new RegExp(`^this machine has sent its [\\d,]+ requests to ${DOMAIN} for today — it can send again at \\S+`)),
+    "and nothing is sent": calls.length === before,
+  };
+});
+
+/* ====================================================================== */
+/* 15 — a worker that is behind                                           */
 /* ====================================================================== */
 
 // Not the real worker: a stand-in that answers login and `me` and knows no
@@ -1608,13 +1633,13 @@ await check("a worker that is behind: a route it does not know, or a method, is 
 });
 
 /* ====================================================================== */
-/* 15 — the whole run                                                     */
+/* 16 — the whole run                                                     */
 /* ====================================================================== */
 
 await check("the whole run: every exit code was seen; the CLI asked only the document API, and always said which client it is", async () => {
   const facts = {};
-  for (const code of [0, 1, 2, 3, 4, 5, 6, 7]) facts[`exit ${code}`] = seen.has(code);
-  facts["no other exit code"] = [...seen].every((code) => Number.isInteger(code) && code >= 0 && code <= 7);
+  for (const code of [0, 1, 2, 3, 4, 5, 6, 7, 8]) facts[`exit ${code}`] = seen.has(code);
+  facts["no other exit code"] = [...seen].every((code) => Number.isInteger(code) && code >= 0 && code <= 8);
   facts["only /api/agent/ was asked"] = calls.length > 0 && calls.every((c) => c.url.startsWith("/api/agent/"));
   facts["x-doklin-client on every request"] = calls.every((c) => c.headers["x-doklin-client"] === `cli/${CLI_VERSION}`);
   return facts;

@@ -4,7 +4,7 @@ macOS, Apple Silicon only. Producer: `.github/workflows/release.yml`. Consumer: 
 
 ## Jobs
 
-- `ci.yml` (PRs): `checks` (eslint, tsc, cloud worker tests + bundle, max 3 MB gzipped), `cli` (`--locked` build + `verify-harness/drive-cli.mjs`), `engine` (`cargo test --workspace --locked` in `engine/`), `ios` (colour sets + `verify-harness/drive-ios.mjs`).
+- `ci.yml` (PRs): `checks` (eslint, tsc, cloud worker tests + bundle, max 3 MB gzipped), `cli` (`--locked` build, `cargo test`, `verify-harness/drive-cli.mjs`), `engine` (`cargo test --workspace --locked` in `engine/`), `ios` (colour sets + `verify-harness/drive-ios.mjs`).
 - `ios.yml` (push touching `ios/`): on macos-15, the iOS core's tests, a simulator build, and the app driven in a simulator (`verify-harness/drive-ios.mjs --app`). Nothing ships the iOS app: [ios.md](ios.md).
 - `release.yml` (push to `main`): `bump` → `build-cli` (Linux x64/arm64 musl) → `build-release` (macos-15, publishes).
 

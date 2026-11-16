@@ -16,6 +16,7 @@ mod help;
 mod http;
 mod open;
 mod text;
+mod usage;
 
 use std::io::IsTerminal;
 
@@ -26,8 +27,10 @@ use serde_json::Value;
 /// Why a command did not do what was asked, and the exit code that says so:
 /// `2` bad usage · `3` not found · `4` not permitted · `5` conflict ·
 /// `6` not logged in, or the login was revoked · `7` the workspace's worker
-/// is too old for this command · `1` anything else. The Doklin app reads `6`
-/// off the bundled copy (engine/src/cloud/terminal.rs) — change both.
+/// is too old for this command · `8` the domain asked to slow down, or
+/// today's Cloudflare requests are used up · `1` anything else. The Doklin
+/// app reads `6` off the bundled copy (engine/src/cloud/terminal.rs) —
+/// change both.
 #[derive(Debug)]
 pub struct Failure {
     pub exit: i32,
@@ -56,6 +59,10 @@ impl Failure {
     }
     pub fn not_logged_in(message: impl Into<String>) -> Self {
         Self::with(6, message)
+    }
+    /// Past this machine's allowance, a `429` twice, or Cloudflare's daily limit.
+    pub fn limited(message: impl Into<String>) -> Self {
+        Self::with(8, message)
     }
 }
 
@@ -96,7 +103,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "ls",
         usage: "doklin ls [folder] [--deep]",
-        about: "What a folder holds: its folders, its documents (with their versions and public addresses) and its plain files. --deep lists everything beneath it.",
+        about: "What a folder holds: its folders and its documents, with their versions and public addresses. --deep lists everything beneath it.",
         accepts: Accepts { values: &[], switches: &["deep"] },
         run: commands::ls,
     },
@@ -159,7 +166,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "mv",
         usage: "doklin mv <from> <to>",
-        about: "Move or rename a document (both versions and its comments), a plain file or a folder. A destination that is a folder means into it. Moving between Private/, a restricted folder and what is shared changes who can see it.",
+        about: "Move or rename a document (both versions and its comments) or a folder. A destination that is a folder means into it. Moving between Private/, a restricted folder and what is shared changes who can see it.",
         accepts: Accepts { values: &[], switches: &[] },
         run: commands::mv,
     },

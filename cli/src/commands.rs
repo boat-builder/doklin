@@ -13,7 +13,7 @@ use crate::args::Args;
 use crate::creds::{self, Workspace};
 use crate::http::{Body, Client, Reply};
 use crate::text::{ago, list, plural, size, stamp, version_word};
-use crate::Failure;
+use crate::{usage, Failure};
 
 /// What every command is told about the line it was run from.
 pub struct Ctx {
@@ -127,6 +127,10 @@ pub fn login(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     if let Some(old) = before {
         let _ = Client::new(&endpoint, Some(&old)).send("DELETE", "login", &[], &[], None);
     }
+    // The allowance for the requests to come. Best effort: the login is
+    // made, and a usage file that cannot be written stops the next command
+    // with its own sentence.
+    let _ = usage::keep_limits(&domain, &v["limits"]);
 
     // Never the token: it is in the credentials file and nowhere else.
     let shown = json!({ "workspace": v["workspace"], "agent": v["agent"], "scopes": v["scopes"], "endpoint": endpoint });
@@ -186,6 +190,7 @@ pub fn whoami(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     args.at_most(0)?;
     let s = session(ctx)?;
     let v = s.client.send("GET", "me", &[], &[], None)?.json()?;
+    usage::keep_limits(s.ws.domain(), &v["limits"])?;
     ctx.answer(&v, || {
         // Whose it is, and where that lets it work besides what is shared.
         let whose = match v["person"].get("name").and_then(Value::as_str) {
@@ -253,9 +258,6 @@ pub fn ls(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         for doc in v["documents"].as_array().into_iter().flatten() {
             lines.push(format!("{}  {}{}", text(doc, "path"), versions_of(doc), public_of(doc)));
         }
-        for file in v["files"].as_array().into_iter().flatten() {
-            lines.push(format!("{}  (file, {}){}", text(file, "path"), size(file["size"].as_u64().unwrap_or(0)), public_of(file)));
-        }
         let unlisted = strings(&v["notListed"]);
         if !unlisted.is_empty() {
             lines.push(format!("Not listed here — list each on its own: {}.", unlisted.join(", ")));
@@ -289,22 +291,16 @@ pub fn info(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let s = session(ctx)?;
     let v = s.client.send("GET", "doc", &[("path", path), ("info", "1")], &[], None)?.json()?;
     ctx.answer(&v, || {
-        let mut lines = Vec::new();
-        if text(&v, "kind") == "file" {
-            lines.push(format!("{} — a plain file", text(&v, "path")));
-            lines.push(version_line("content", &v));
-        } else {
-            lines.push(format!("{} — a document", text(&v, "path")));
-            if let Some(md) = v.get("md") {
-                lines.push(version_line("markdown", md));
-            }
-            if let Some(html) = v.get("html") {
-                let behind = if v.get("htmlBehind").is_some() { "   (made from an older text than the markdown)" } else { "" };
-                lines.push(format!("{}{}", version_line("html", html), behind));
-            }
-            let threads = v["comments"].as_u64().unwrap_or(0) as usize;
-            lines.push(format!("  {:<9} {}", "comments", if threads == 0 { "none".to_string() } else { plural(threads, "thread", "threads") }));
+        let mut lines = vec![format!("{} — a document", text(&v, "path"))];
+        if let Some(md) = v.get("md") {
+            lines.push(version_line("markdown", md));
         }
+        if let Some(html) = v.get("html") {
+            let behind = if v.get("htmlBehind").is_some() { "   (made from an older text than the markdown)" } else { "" };
+            lines.push(format!("{}{}", version_line("html", html), behind));
+        }
+        let threads = v["comments"].as_u64().unwrap_or(0) as usize;
+        lines.push(format!("  {:<9} {}", "comments", if threads == 0 { "none".to_string() } else { plural(threads, "thread", "threads") }));
         let urls = strings(&v["public"]);
         lines.push(format!("  {:<9} {}", "public", if urls.is_empty() { "no".to_string() } else { urls.join(", ") }));
         lines.join("\n")
@@ -315,7 +311,7 @@ pub fn info(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
 /// What a read answered about the content, from its headers.
 fn read_meta(reply: &Reply) -> Value {
     let mut meta = json!({
-        "kind": reply.header("x-doklin-kind").unwrap_or("file"),
+        "kind": reply.header("x-doklin-kind").unwrap_or("document"),
         "path": reply.header("x-doklin-path").unwrap_or(""),
         "file": reply.header("x-doklin-file").unwrap_or(""),
         "rev": reply.header("x-doklin-rev").and_then(|r| r.parse::<u64>().ok()),
@@ -384,11 +380,7 @@ fn incoming(args: &Args) -> Result<Vec<u8>, Failure> {
 
 /// The sentence for what a write did, from the worker's answer.
 fn wrote_words(v: &Value, dry: bool) -> String {
-    let what = if text(v, "kind") == "file" {
-        text(v, "path").to_string()
-    } else {
-        format!("the {} version of {}", version_word(text(v, "version")), text(v, "path"))
-    };
+    let what = format!("the {} version of {}", version_word(text(v, "version")), text(v, "path"));
     if v.get("unchanged").is_some() {
         return format!("{} already says exactly that — nothing was written.", capitalize(&what));
     }
@@ -512,11 +504,7 @@ pub fn mv(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let body = json!({ "from": from, "to": to, "dryRun": ctx.dry_run });
     let v = s.client.send("POST", "move", &[], &[], Some(Body::Json(&body)))?.json()?;
     ctx.answer(&v, || {
-        let kind = match text(&v, "kind") {
-            "folder" => "the folder",
-            "file" => "the file",
-            _ => "the document",
-        };
+        let kind = if text(&v, "kind") == "folder" { "the folder" } else { "the document" };
         let mut out = format!(
             "{} {} {} to {} ({}).",
             if ctx.dry_run { "Would move" } else { "Moved" },
@@ -549,10 +537,8 @@ pub fn rm(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let v = s.client.send("DELETE", "doc", &query, &[], None)?.json()?;
     ctx.answer(&v, || {
         let verb = if ctx.dry_run { "Would remove" } else { "Removed" };
-        let mut out = if text(&v, "kind") == "file" {
-            format!("{} the file {}.", verb, text(&v, "path"))
-        } else if version.is_some() {
-            format!("{} the {} version of {}.", verb, version_word(version.unwrap_or("md")), text(&v, "path"))
+        let mut out = if let Some(version) = version {
+            format!("{} the {} version of {}.", verb, version_word(version), text(&v, "path"))
         } else {
             let versions: Vec<String> = strings(&v["versions"]).iter().map(|x| version_word(x).to_string()).collect();
             format!("{} the document {} ({}), and its comments.", verb, text(&v, "path"), list(&versions))
