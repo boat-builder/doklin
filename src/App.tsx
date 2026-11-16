@@ -69,6 +69,7 @@ import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialo
 import Editor, { type EditorHandle } from "./Editor";
 import type { SearchInfo } from "./searchPlugin";
 import Sidebar, {
+  forgetOpenFolders,
   pruneNestedSelection,
   type SidebarSelection,
   type FileClipboardPayload,
@@ -4878,6 +4879,7 @@ export default function App() {
         setHistoryRoot(null);
         setDeletedFor(null);
         forgetStoredSession(e.root);
+        forgetOpenFolders(e.root);
         sessionWorkspaceRoot = null;
         setWorkspaceRoot(null);
         selectSidebarEntries([]);

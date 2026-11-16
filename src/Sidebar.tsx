@@ -199,6 +199,66 @@ const readShowAll = () => {
   }
 };
 
+// The folders open in the tree, per workspace — a view preference kept on
+// this Mac. A folder is closed until it is opened, so a big workspace starts
+// folded and a folder that turns up later (synced, made in Finder) arrives
+// closed. Stored as paths inside the workspace, keyed by the workspace's.
+const OPEN_FOLDERS_STORAGE_KEY = "doklin:sidebar-open-folders";
+const readAllOpenFolders = (): Record<string, string[]> => {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(OPEN_FOLDERS_STORAGE_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, string[]> = {};
+    for (const [root, rels] of Object.entries(parsed)) {
+      if (Array.isArray(rels)) out[root] = rels.filter((r): r is string => typeof r === "string" && r !== "");
+    }
+    return out;
+  } catch {
+    return {};
+  }
+};
+const readOpenFolders = (root: string) =>
+  new Set((readAllOpenFolders()[root] ?? []).map((rel) => `${root}/${rel}`));
+const writeOpenFolders = (root: string, open: Set<string>) => {
+  try {
+    const all = readAllOpenFolders();
+    const prefix = `${root}/`;
+    const rels = [...open].filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length));
+    if (rels.length === 0) delete all[root];
+    else all[root] = rels;
+    localStorage.setItem(OPEN_FOLDERS_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    /* private mode / quota — folders still open and close for this session */
+  }
+};
+// Drop a workspace's open folders: it is gone from this Mac.
+export const forgetOpenFolders = (root: string) => writeOpenFolders(root, new Set());
+
+// The folders from just under `root` down to `dir`, `dir` included: what has
+// to be open for a row inside `dir` to show.
+const foldersDownTo = (root: string, dir: string) => {
+  const out: string[] = [];
+  for (let p = dir; p.startsWith(`${root}/`); ) {
+    out.push(p);
+    const up = dirname(p);
+    if (up === p) break;
+    p = up;
+  }
+  return out;
+};
+
+// The open set with the folder at `from` (and the open folders inside it) now
+// at `to`: a folder renamed or moved from the tree stays as open as it was.
+const movedOpen = (open: Set<string>, from: string, to: string) => {
+  const next = new Set<string>();
+  for (const p of open) {
+    if (p === from) next.add(to);
+    else if (p.startsWith(`${from}/`)) next.add(to + p.slice(from.length));
+    else next.add(p);
+  }
+  return next;
+};
+
 export default function Sidebar({
   root,
   cloud = null,
@@ -243,7 +303,15 @@ export default function Sidebar({
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  // The open folders, for the workspace they were read for: another root in
+  // this window reads its own.
+  const [openDirs, setOpenDirs] = useState<Set<string>>(() => readOpenFolders(root));
+  const [openDirsRoot, setOpenDirsRoot] = useState(root);
+  if (openDirsRoot !== root) {
+    setOpenDirsRoot(root);
+    setOpenDirs(readOpenFolders(root));
+  }
+  useEffect(() => writeOpenFolders(openDirsRoot, openDirs), [openDirsRoot, openDirs]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [ctxMenu, setCtxMenu] = useState<MenuState | null>(null);
   const [pendingCreate, setPendingCreate] = useState<PendingCreate | null>(null);
@@ -289,23 +357,27 @@ export default function Sidebar({
   // Bring the folder an open from outside asked for into view: open the
   // folders above it (and it), then scroll to its row once the tree has drawn
   // it. A folder the tree never shows (a hidden one) simply never scrolls.
+  const openFolders = useCallback((dirs: string[]) => {
+    setOpenDirs((prev) => (dirs.every((d) => prev.has(d)) ? prev : new Set([...prev, ...dirs])));
+  }, []);
+
   const revealedRef = useRef(0);
   useEffect(() => {
     if (!reveal || revealedRef.current === reveal.seq || !tree) return;
     const target = reveal.path;
-    const holds = (dir: string) => target === dir || target.startsWith(`${dir}/`);
-    if ([...collapsed].some(holds)) {
-      setCollapsed((prev) => new Set([...prev].filter((dir) => !holds(dir))));
+    const shut = foldersDownTo(root, target).filter((dir) => !openDirs.has(dir));
+    if (shut.length > 0) {
+      openFolders(shut);
       return; // this runs again once they are open
     }
     const row = document.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(target)}"]`);
     if (!row) return;
     revealedRef.current = reveal.seq;
     row.scrollIntoView({ block: "nearest" });
-  }, [reveal, tree, collapsed]);
+  }, [reveal, tree, openDirs, root, openFolders]);
 
-  const toggleCollapsed = useCallback((path: string) => {
-    setCollapsed((prev) => {
+  const toggleOpen = useCallback((path: string) => {
+    setOpenDirs((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
@@ -350,14 +422,14 @@ export default function Sidebar({
 
   /* ---------- Selection (single, ⌘-toggle, ⇧-range) ---------- */
 
-  // The rows in on-screen order, respecting collapsed folders — the universe
-  // a ⇧-click range spans.
+  // The rows in on-screen order, inside open folders only — the universe a
+  // ⇧-click range spans.
   const visibleEntries = useMemo(() => {
     const out: SidebarSelection[] = [];
     const walk = (nodes: TreeNode[]) => {
       for (const c of nodes) {
         out.push({ path: c.path, kind: c.kind });
-        if (c.kind === "dir" && !collapsed.has(c.path)) walk(c.children);
+        if (c.kind === "dir" && openDirs.has(c.path)) walk(c.children);
       }
     };
     if (layout) {
@@ -366,7 +438,7 @@ export default function Sidebar({
       walk(layout.private);
     }
     return out;
-  }, [layout, collapsed]);
+  }, [layout, openDirs]);
 
   // The fixed end of a ⇧-click range: the row last plain- or ⌘-clicked.
   const selectionAnchorRef = useRef<string | null>(null);
@@ -454,10 +526,10 @@ export default function Sidebar({
   const suppressClickRef = useRef(false);
   const autoScrollRafRef = useRef<number | null>(null);
   const autoExpandRef = useRef<{ path: string; timer: number } | null>(null);
-  const collapsedRef = useRef(collapsed);
+  const openDirsRef = useRef(openDirs);
   useEffect(() => {
-    collapsedRef.current = collapsed;
-  }, [collapsed]);
+    openDirsRef.current = openDirs;
+  }, [openDirs]);
 
   // A drop is valid when it actually moves something: at least one entry
   // isn't already in the destination, and the destination is never inside a
@@ -520,22 +592,18 @@ export default function Sidebar({
         window.clearTimeout(pending.timer);
         autoExpandRef.current = null;
       }
-      if (hoveredDir && collapsedRef.current.has(hoveredDir) && !autoExpandRef.current) {
+      if (hoveredDir && !openDirsRef.current.has(hoveredDir) && !autoExpandRef.current) {
         const path = hoveredDir;
         autoExpandRef.current = {
           path,
           timer: window.setTimeout(() => {
             autoExpandRef.current = null;
-            setCollapsed((prev) => {
-              const next = new Set(prev);
-              next.delete(path);
-              return next;
-            });
+            openFolders([path]);
           }, AUTO_EXPAND_MS),
         };
       }
     },
-    [root, canDrop, setDropState],
+    [root, canDrop, setDropState, openFolders],
   );
 
   // Dragging near the tree's top/bottom edge scrolls it (rAF loop, so the
@@ -585,13 +653,17 @@ export default function Sidebar({
       const leaving = entries.filter((en) => dirname(en.path) !== toDir);
       if (onConfirmMove && !(await onConfirmMove(leaving, toDir))) return;
       const moved: SidebarSelection[] = [];
+      const movedDirs: [from: string, to: string][] = [];
       const errors: string[] = [];
       for (const entry of entries) {
         if (dirname(entry.path) === toDir) continue; // already lives here
         const to = `${toDir}/${basename(entry.path)}`;
         const err = await onMovePath(entry.path, to, entry.kind);
         if (err) errors.push(`"${basename(entry.path)}": ${err}`);
-        else moved.push({ path: to, kind: entry.kind });
+        else {
+          moved.push({ path: to, kind: entry.kind });
+          if (entry.kind === "dir") movedDirs.push([entry.path, to]);
+        }
       }
       if (errors.length === 1) {
         window.alert(`Could not move ${errors[0]}`);
@@ -600,15 +672,15 @@ export default function Sidebar({
       }
       if (moved.length === 0) return;
       onSelect(moved);
-      // Open the destination folder so the moved rows are visible where they landed.
-      setCollapsed((prev) => {
-        if (!prev.has(toDir)) return prev;
-        const next = new Set(prev);
-        next.delete(toDir);
-        return next;
+      // Moved folders stay as open as they were, and the destination opens so
+      // the moved rows are visible where they landed.
+      setOpenDirs((prev) => {
+        let next = prev;
+        for (const [from, to] of movedDirs) next = movedOpen(next, from, to);
+        return toDir === root || next.has(toDir) ? next : new Set([...next, toDir]);
       });
     },
-    [onMovePath, onSelect, onConfirmMove],
+    [onMovePath, onSelect, onConfirmMove, root],
   );
 
   const onRowPointerDown = useCallback(
@@ -756,8 +828,8 @@ export default function Sidebar({
 
   /* ---------- Create & rename ---------- */
 
-  // Begin inline creation inside `parentDir`, expanding it (and any collapsed
-  // ancestors) so the input row is actually visible.
+  // Begin inline creation inside `parentDir`, opening it (and the folders
+  // above it) so the input row is actually visible.
   const startCreate = useCallback(
     (kind: "file" | "dir", wantedDir: string) => {
       // Nothing is made straight under Restricted from here: a note there
@@ -766,19 +838,10 @@ export default function Sidebar({
       setCtxMenu(null);
       setMenuOpen(false);
       setPendingRename(null); // one inline input at a time
-      setCollapsed((prev) => {
-        const next = new Set(prev);
-        let p = parentDir;
-        while (p.length >= root.length) {
-          next.delete(p);
-          if (p === root) break;
-          p = dirname(p);
-        }
-        return next;
-      });
+      openFolders(foldersDownTo(root, parentDir));
       setPendingCreate({ parentDir, kind });
     },
-    [root, sectioned, restrictedDir],
+    [root, sectioned, restrictedDir, openFolders],
   );
 
   // Where "New File" / "New Folder" should land for a given target: inside a
@@ -855,6 +918,7 @@ export default function Sidebar({
       const err = await onMovePath(pr.path, to, pr.kind);
       if (err) return err;
       setPendingRename(null);
+      if (pr.kind === "dir") setOpenDirs((prev) => movedOpen(prev, pr.path, to));
       onSelect([{ path: to, kind: pr.kind }]);
       return null;
     },
@@ -1107,7 +1171,7 @@ export default function Sidebar({
       currentPath={currentPath}
       selection={selection}
       cutPaths={cutPaths}
-      collapsed={collapsed}
+      openDirs={openDirs}
       pendingCreate={pendingCreate}
       pendingRename={pendingRename}
       dragPaths={dragPaths}
@@ -1117,7 +1181,7 @@ export default function Sidebar({
       published={publishedByAbs}
       spaces={spacesByAbs}
       loose={loose}
-      onToggle={toggleCollapsed}
+      onToggle={toggleOpen}
       onOpenFile={onOpenFile}
       onRowClick={handleRowSelect}
       onRowMenu={openRowMenu}
@@ -1587,7 +1651,7 @@ function TreeItem({
   currentPath,
   selection,
   cutPaths,
-  collapsed,
+  openDirs,
   pendingCreate,
   pendingRename,
   dragPaths,
@@ -1613,7 +1677,8 @@ function TreeItem({
   selection: SidebarSelection[];
   // Roots of a pending Cut (dimmed until pasted or replaced).
   cutPaths: Set<string>;
-  collapsed: Set<string>;
+  // The folders showing their contents.
+  openDirs: Set<string>;
   pendingCreate: PendingCreate | null;
   pendingRename: PendingRename | null;
   // The dragged rows' paths (dimmed) and the highlighted destination folder.
@@ -1725,11 +1790,11 @@ function TreeItem({
   }
 
   const space = spaces.get(node.path) ?? null;
-  const isCollapsed = collapsed.has(node.path);
+  const isOpen = openDirs.has(node.path);
   const creatingHere = pendingCreate?.parentDir === node.path;
   const isDropTarget = dropDir === node.path;
   return (
-    <li role="treeitem" aria-expanded={!isCollapsed} aria-selected={isSelected}>
+    <li role="treeitem" aria-expanded={isOpen} aria-selected={isSelected}>
       {renamingHere ? (
         <NameRow
           depth={depth}
@@ -1762,7 +1827,7 @@ function TreeItem({
           onContextMenu={(e) => onRowMenu(e, { path: node.path, kind: "dir" })}
           title={node.path}
         >
-          <span className={`tree-chevron ${isCollapsed ? "is-collapsed" : ""}`}>
+          <span className={`tree-chevron ${isOpen ? "" : "is-collapsed"}`}>
             <ChevronRightIcon />
           </span>
           <span className="tree-label tree-dir-label">{node.name}</span>
@@ -1784,7 +1849,7 @@ function TreeItem({
           )}
         </button>
       )}
-      {!isCollapsed && (
+      {isOpen && (
         // --depth places the folder's indent guide under its chevron.
         <ul role="group" style={{ "--depth": depth } as React.CSSProperties}>
           {creatingHere && pendingCreate && (
@@ -1806,7 +1871,7 @@ function TreeItem({
               currentPath={currentPath}
               selection={selection}
               cutPaths={cutPaths}
-              collapsed={collapsed}
+              openDirs={openDirs}
               pendingCreate={pendingCreate}
               pendingRename={pendingRename}
               dragPaths={dragPaths}

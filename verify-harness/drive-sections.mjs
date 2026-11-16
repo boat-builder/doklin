@@ -82,8 +82,43 @@ const drag = async (from, to) => {
   await page.mouse.up();
 };
 
+// A folder row's open state, and opening one (a click on its row).
+const isOpen = async (path) => (await row(path).locator("xpath=..").getAttribute("aria-expanded")) === "true";
+const openFolder = async (path) => {
+  if (!(await isOpen(path))) await row(path).click();
+  await poll(() => isOpen(path));
+};
+
 await poll(async () => (await page.locator(".sidebar").count()) === 1);
 await poll(async () => (await row("/docs/Restricted/Finance").count()) === 1);
+
+/* 0 — folders start closed, and stay as they were left: the ones opened are
+      kept for the workspace, and still open when the tree is drawn again
+      (here: off to Search and back, which unmounts it). */
+const closedAtStart =
+  !(await isOpen("/docs/Restricted/Finance")) &&
+  !(await isOpen("/docs/Projects")) &&
+  (await row("/docs/Restricted/Finance/budget.md").count()) === 0 &&
+  (await row("/docs/Projects/plan.md").count()) === 0;
+await openFolder("/docs/Restricted/Finance");
+await openFolder("/docs/Projects");
+const storedOpen = await page.evaluate(() => localStorage.getItem("doklin:sidebar-open-folders"));
+await page.locator(".sidebar-search").click();
+await poll(async () => (await page.locator(".ws-search-input").count()) === 1);
+const treeGone = (await page.locator('aside[aria-label="File browser"]').count()) === 0;
+await page.locator('[title="Back to files"]').click();
+await poll(async () => (await row("/docs/Restricted/Finance").count()) === 1);
+step(
+  "folders start closed; the ones opened are kept for the workspace and are still open when the tree is drawn again",
+  closedAtStart &&
+    storedOpen === '{"/docs":["Restricted/Finance","Projects"]}' &&
+    treeGone &&
+    (await isOpen("/docs/Restricted/Finance")) &&
+    (await isOpen("/docs/Projects")) &&
+    (await row("/docs/Restricted/Finance/budget.md").count()) === 1 &&
+    (await row("/docs/Projects/plan.md").count()) === 1,
+  storedOpen,
+);
 
 /* 1 — three lists. On disk Private and Restricted are two folders at the top
       of the workspace; here they are headings, with no row of their own. */
@@ -222,6 +257,8 @@ await poll(async () => (await tid("restricted-people").count()) === 1);
 const shareNeedsSomebody = await tid("restricted-create").isDisabled();
 await tid("restricted-pick-m-bob").check();
 await tid("restricted-create").click();
+await poll(async () => (await row("/docs/Restricted/journal").count()) === 1);
+await openFolder("/docs/Restricted/journal");
 await poll(async () => (await row("/docs/Restricted/journal/journal.md").count()) === 1);
 const shared = (await lastCall("cloud_space_create")).args;
 const sharedMove = (await moves()).at(-1);
