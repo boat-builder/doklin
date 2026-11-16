@@ -11,9 +11,12 @@ struct DocumentView: View {
     @Binding var route: [Route]
     @State private var model: DocumentModel
     @State private var comments: CommentsModel
-    @State private var editing = false
-    /// The top-level block to start editing at.
-    @State private var editingAt: Int?
+    /// The note being edited here, while it is.
+    @State private var session: NoteEditing?
+    /// *Aa*: the panel that turns a block into another kind, in place of the keyboard.
+    @State private var turning = false
+    /// The top-level block at the top of the screen, by id: where Edit starts.
+    @State private var topBlock: Int?
     @State private var showingPage = false
     @State private var scrollTarget: Int?
     /// The comments sheet, and what it opens on: a thread, or words for a new one.
@@ -32,6 +35,7 @@ struct DocumentView: View {
     @Environment(Workspaces.self) private var device
     @Environment(Toaster.self) private var toaster
     @Environment(Shell.self) private var shell
+    @Environment(\.scenePhase) private var scenePhase
 
     init(workspace: Workspace, path: String, route: Binding<[Route]>, find: String? = nil, line: Int? = nil) {
         _route = route
@@ -46,8 +50,10 @@ struct DocumentView: View {
     var body: some View {
         content
             .background(Theme.sheet)
-            .navigationTitle(model.title)
+            .navigationTitle(session == nil ? model.title : "")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationBarBackButtonHidden(session != nil)
+            .toolbar { editingToolbar }
             .toolbar(.hidden, for: .tabBar)
             .safeAreaInset(edge: .bottom, spacing: 0) { bottom }
             .onAppear {
@@ -60,20 +66,33 @@ struct DocumentView: View {
                 await model.shown()
             }
             .onChange(of: workspace.changes) {
-                // Sync, or a restore, wrote this document: read it again.
-                if model.isAffected(by: workspace.lastChanged) {
+                if let session {
+                    Task {
+                        if await session.heardChange() { close() }
+                    }
+                } else if model.isAffected(by: workspace.lastChanged) {
+                    // Sync, or a restore, wrote this document: read it again.
                     model.load()
                     markFound()
                 }
                 if comments.isAffected(by: workspace.lastChanged) { comments.load() }
+            }
+            .onChange(of: model.lease) { session?.leaseChanged() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active, let session { Task { await session.save() } }
+            }
+            .onDisappear {
+                if let session { Task { await session.leave() } }
             }
             .onChange(of: model.html == nil) { _, gone in
                 // The page went (removed, or moved off on another device):
                 // what is shown, edited and outlined is the markdown again.
                 if gone { showingPage = false }
             }
-            .fullScreenCover(isPresented: $editing) {
-                EditorView(model: model)
+            .alert("Not saved", isPresented: Binding(get: { session?.failure != nil }, set: { if !$0 { session?.failure = nil } })) {
+                Button("OK", role: .cancel) { session?.failure = nil }
+            } message: {
+                Text(session?.failure ?? "")
             }
             .sheet(item: $commentStart) { start in
                 CommentsView(model: comments, start: start, mayComment: mayComment)
@@ -117,10 +136,26 @@ struct DocumentView: View {
             HTMLView(html: model.html ?? "")
         } else if let document = model.document {
             VStack(spacing: 0) {
-                if let lease = model.lease {
+                if let session {
+                    editingBanners(session)
+                } else if let lease = model.lease {
                     NoticeBar(text: LeaseWords.line(lease))
                 }
-                reader(document)
+                ZStack {
+                    reader(document)
+                        .opacity(session?.phase == .editing ? 0 : 1)
+                    if let session {
+                        if case .failed(let message) = session.phase {
+                            ContentUnavailableView("Can't edit this note here", systemImage: "pencil.slash", description: Text(message))
+                                .background(Theme.sheet)
+                        } else {
+                            EditorSurface()
+                                .opacity(session.phase == .editing ? 1 : 0)
+                                .accessibilityIdentifier("editor")
+                        }
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: session?.phase)
             }
         } else if let data = model.data {
             FileView(path: model.path, data: data)
@@ -156,6 +191,7 @@ struct DocumentView: View {
                 .frame(maxWidth: .infinity)
                 .environment(\.readerMarks, marks)
             }
+            .scrollPosition(id: $topBlock, anchor: .top)
             .refreshable { await workspace.syncNow() }
             .onChange(of: scrollTarget) { _, target in
                 guard let target else { return }
@@ -256,9 +292,88 @@ struct DocumentView: View {
         return actions
     }
 
+    /// Edit the note right here, at top-level block `index` — or, from the
+    /// bar, at the block at the top of the screen.
     private func startEditing(at index: Int?) {
-        editingAt = index
-        editing = true
+        // Another device's hold opens the editor view-only, with Take over.
+        guard session == nil, model.canEdit, let document = model.document else { return }
+        let block = index ?? topBlock.flatMap { id in document.blocks.firstIndex { $0.id == id } }
+        let prefix = block.flatMap { document.blocks[safe: $0]?.plainText }.map { String($0.prefix(40)) }
+        let editing = NoteEditing(model: model)
+        turning = false
+        session = editing
+        Task { await editing.start(at: block, prefix: prefix) }
+    }
+
+    /// Done: what was typed is in the file, and the note reads again.
+    private func finish() {
+        guard let session else { return }
+        Task {
+            if await session.finish() { close() }
+        }
+    }
+
+    private func close() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            session = nil
+            turning = false
+        }
+        markFound()
+    }
+
+    @ToolbarContentBuilder private var editingToolbar: some ToolbarContent {
+        if let session {
+            ToolbarItem(placement: .principal) {
+                Text(editingWords(session))
+                    .font(.footnote)
+                    .foregroundStyle(Theme.text2)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("editing-status")
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { finish() }
+                    .fontWeight(.semibold)
+                    .accessibilityIdentifier("done")
+            }
+        }
+    }
+
+    private func editingWords(_ session: NoteEditing) -> String {
+        if session.lease != nil || session.changedElsewhere { return "Not saved" }
+        if session.saving { return "Saving…" }
+        if session.phase == .opening { return "Opening…" }
+        return "Saved · other devices see it view-only while you edit"
+    }
+
+    /// Why what is typed here can't be saved right now, and what to do.
+    @ViewBuilder private func editingBanners(_ session: NoteEditing) -> some View {
+        if let lease = session.lease {
+            banner(LeaseWords.line(lease), symbol: "lock") {
+                Button(session.takingOver ? "Taking over…" : "Take over") { session.takeOver() }
+                    .disabled(session.takingOver)
+                    .accessibilityHint(LeaseWords.takeOverHint(lease))
+            }
+        }
+        if session.changedElsewhere {
+            banner("This note changed on another device while you were typing.", symbol: "exclamationmark.triangle") {
+                Button("Reload") { Task { await session.reload() } }
+                Button("Keep mine") { Task { await session.keepMine() } }
+            }
+        }
+    }
+
+    private func banner<Actions: View>(_ words: String, symbol: String, @ViewBuilder actions: () -> Actions) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(words, systemImage: symbol)
+                .font(.footnote)
+                .foregroundStyle(Theme.text1)
+            HStack(spacing: 16) { actions() }
+                .font(.footnote.weight(.semibold))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Theme.sunken)
     }
 
     /// The words a search found, marked, and the find bar on the first.
@@ -349,6 +464,21 @@ struct DocumentView: View {
     /* ---------- The bar ---------- */
 
     @ViewBuilder private var bottom: some View {
+        if session != nil {
+            if turning {
+                TurnIntoPanel { turning = false }
+                    .transition(.move(edge: .bottom))
+            } else {
+                EditorBar(turning: $turning)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
+            }
+        } else {
+            reading
+        }
+    }
+
+    @ViewBuilder private var reading: some View {
         VStack(spacing: 8) {
             ToastBar(toaster: toaster)
                 .clipShape(RoundedRectangle(cornerRadius: 14))

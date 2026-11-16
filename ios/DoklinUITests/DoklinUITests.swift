@@ -15,38 +15,35 @@
 import XCTest
 
 final class DoklinUITests: UITestCase {
-    /// Put the caret where a person adding to a note puts it: after the last line.
-    private func tapBelowTheText(of editor: XCUIElement) {
-        editor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
-    }
-
     func testAPersonsWayThroughTheApp() throws {
         // Joining: the line from another device, typed as a paste would put it.
         launchAndJoin()
 
-        // The workspace, downloaded: its folders and notes, and no comment
-        // file among them.
+        // The workspace, downloaded: its tree, and no comment file in it.
         expect(marked("entry-Home"), "the Home note")
-        expect(text(containing: "Synced"), "the sync line")
         record("the workspace")
         XCTAssertFalse(marked("entry-Comments.meta.jsonl").exists, "a comment file is listed")
 
-        // A folder, and a note in it, read.
+        // Home: what changed, and how sync stands, quietly.
+        home()
+        expect(text(containing: "Synced"), "the sync line")
+        expect(text(containing: "Recent changes"), "Home's title")
+        record("home")
+
+        // A folder opened in place in the tree, and a note in it, read.
+        browse()
         marked("entry-Projects").tap()
-        expect(marked("entry-plan"), "the plan in Projects").tap()
+        expect(marked("entry-plan"), "the plan, under Projects in the tree").tap()
         expect(app.staticTexts["The plan"], "the plan's heading")
         expect(text(containing: "Ship it by June"), "the plan's first paragraph")
         record("a note, read")
         back()
-        back()
 
-        // Editing: what is typed is what the note then says.
+        // Editing in place: what is typed is what the note then says.
         expect(marked("entry-Scratch"), "the Scratch note").tap()
         expect(app.staticTexts["Scratch"], "Scratch's heading")
-        marked("edit").tap()
-        let editor = expect(app.textViews.firstMatch, "the editor")
-        tapBelowTheText(of: editor)
-        editor.typeText("\n\nTyped in the simulator.")
+        let editor = editAtTheEnd()
+        editor.typeText("\nTyped in the simulator.")
         record("the editor")
         marked("done").tap()
         // A paragraph of its own under what was there, and the title still the title.
@@ -64,10 +61,8 @@ final class DoklinUITests: UITestCase {
         name.typeText("Phone list")
         app.alerts.buttons["Create"].tap()
         expect(app.staticTexts["Phone list"], "the new note's heading")
-        marked("edit").tap()
-        let fresh = expect(app.textViews.firstMatch, "the editor for the new note")
-        tapBelowTheText(of: fresh)
-        fresh.typeText("- [ ] milk")
+        let fresh = editAtTheEnd()
+        fresh.typeText("\n- [ ] milk")
         marked("done").tap()
         expect(app.buttons["Not done"], "the unticked box").tap()
         expect(app.buttons["Done"], "the ticked box")
@@ -75,20 +70,26 @@ final class DoklinUITests: UITestCase {
         expect(app.staticTexts["Phone list"], "the new note's heading after the edit")
         record("a box, ticked")
         back()
-        expect(marked("entry-Phone list"), "the new note in the list")
+        expect(marked("entry-Phone list"), "the new note in the tree")
+
+        // Home has what was just changed here, by you.
+        home()
+        expect(marked("recent-Phone list"), "the new note among what changed")
+        expect(text(containing: "You created"), "who made it")
+        record("home, after the edits")
 
         // Search finds a note by words in it.
-        app.buttons["Search"].tap()
+        tab("Search")
         let search = expect(app.searchFields.firstMatch, "the search field")
         search.tap()
         search.typeText("ship it by june")
         expect(marked("result-plan"), "the plan among the results")
         record("search")
-        back()
 
         // Quit and come back: still joined, and the edit is still there.
         app.terminate()
         app.launch()
+        browse()
         expect(marked("entry-Scratch"), "the workspace after a relaunch").tap()
         expect(app.staticTexts["Typed in the simulator."], "the edit after a relaunch")
         back()

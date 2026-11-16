@@ -116,7 +116,7 @@ final class CommentsUITests: UITestCase {
         // A folder not yet public is offered an address made of its name,
         // and none at all is not one.
         expect(marked("entry-Projects"), "the Projects folder").tap()
-        expect(marked("entry-Roadmap"), "the Roadmap folder").press(forDuration: 1.2)
+        expect(marked("entry-Roadmap"), "the Roadmap folder, opened in place").press(forDuration: 1.2)
         expect(app.buttons["Publish folder…"], "Publish folder… in its menu").tap()
         let folderAddress = expect(marked("publish-slug"), "the folder's address field")
         XCTAssertEqual(folderAddress.value as? String, "roadmap", "the address offered for Roadmap")
@@ -128,11 +128,9 @@ final class CommentsUITests: UITestCase {
         XCTAssertFalse(marked("publish-go").isEnabled, "Publish folder, with no address")
         record("a folder, with no address")
         app.buttons["Done"].tap()
-        back()
 
         // Every published page of the workspace, the seed's among them.
-        marked("workspace-menu").tap()
-        expect(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Published pages'")).firstMatch, "Published pages in the menu").tap()
+        setting("Published pages")
         expect(marked("page-home"), "the home page")
         expect(marked("page-plan"), "the plan's page")
         expect(marked("page-projects"), "the Projects folder's page")

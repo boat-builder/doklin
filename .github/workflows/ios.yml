@@ -24,6 +24,9 @@ on:
       - "ios/**"
       - "engine/**"
       - "scripts/ios-engine.sh"
+      - "scripts/ios-editor.sh"
+      - "src/ios-editor/**"
+      - "vite.ios-editor.config.ts"
       - "verify-harness/drive-ios.mjs"
       # The comment cases the core's tests read, beside the Mac's.
       - "verify-harness/comments-fixture.json"
@@ -68,6 +71,19 @@ jobs:
       - name: Test the core
         run: swift test --package-path ios/DoklinKit -Xlinker "-L$PWD/ios/Engine/host"
 
+      # The app's note editor is built from src/ (scripts/ios-editor.sh, a
+      # phase of the app), and the drive serves the cloud worker from
+      # source, through vite.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: pnpm
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Build the app for the simulator
         run: |
           xcodebuild \
@@ -78,18 +94,6 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             build
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          cache: pnpm
-
-      # The drive serves the cloud worker from source, through vite.
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
 
       - name: Drive the app in a simulator
         run: node verify-harness/drive-ios.mjs --app

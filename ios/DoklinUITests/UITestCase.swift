@@ -80,10 +80,74 @@ class UITestCase: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
     }
 
+    /* ---------- Getting around ---------- */
+
+    /// A tab, by its name: Home, Browse, Search.
+    func tab(_ name: String) {
+        let button = app.tabBars.buttons[name]
+        if button.waitForExistence(timeout: 5) {
+            button.tap()
+        } else {
+            expect(app.buttons[name].firstMatch, "the \(name) tab").tap()
+        }
+    }
+
+    /// Back until `root` shows: the top of a tab.
+    private func backTo(_ root: XCUIElement) {
+        for _ in 0..<6 where !root.waitForExistence(timeout: 2) {
+            back()
+        }
+    }
+
+    /// Browse, at its top: the workspace's tree.
+    func browse() {
+        tab("Browse")
+        backTo(app.navigationBars["Browse"])
+    }
+
+    /// Home, at its top: what changed.
+    func home() {
+        tab("Home")
+        backTo(marked("workspace-menu"))
+    }
+
+    /// The workspace's settings, through its name on Home.
+    func settings() {
+        home()
+        // A tap the moment the app has launched can be lost: tap again when
+        // the switcher did not open.
+        for _ in 0..<3 where !marked("workspace-settings").exists {
+            marked("workspace-menu").tap()
+            _ = marked("workspace-settings").waitForExistence(timeout: 5)
+        }
+        expect(marked("workspace-settings"), "Settings in the switcher").tap()
+    }
+
+    /// One of the workspace's settings — People, Your devices, Workspace
+    /// history…
+    func setting(_ item: String) {
+        settings()
+        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", item)).firstMatch
+        for _ in 0..<4 where row.waitForExistence(timeout: 2) && !row.isHittable {
+            app.swipeUp()
+        }
+        expect(row, "\(item) in Settings").tap()
+    }
+
+    /// Edit the note on screen, with the caret after its last line.
+    @discardableResult
+    func editAtTheEnd() -> XCUIElement {
+        marked("edit").tap()
+        expect(text(containing: "other devices see it view-only"), "the editor, ready")
+        let editor = expect(app.webViews.textViews.firstMatch, "the editor")
+        editor.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.97)).tap()
+        return editor
+    }
+
     /* ---------- Joining and leaving ---------- */
 
     /// Launch, take off any workspace a stopped run left behind, and join
-    /// with this class's line. Ends on the workspace's top folder.
+    /// with this class's line. Ends on Browse, the workspace's tree.
     func launchAndJoin() {
         app.launch()
         for _ in 0..<3 where marked("workspace-menu").waitForExistence(timeout: 8) {
@@ -94,19 +158,19 @@ class UITestCase: XCTestCase {
         field.tap()
         field.typeText(line)
         marked("join").tap()
+        expect(marked("workspace-menu"), "Home, once joined", timeout: 60)
+        browse()
         expect(marked("entry-Projects"), "the workspace, downloaded", timeout: 60)
     }
 
-    /// Take the workspace being looked at off this iPhone, through its menu.
+    /// Take the workspace being looked at off this iPhone, from its settings.
     func removeFromThisPhone() {
+        settings()
         let remove = app.buttons["Remove from this iPhone"]
-        // A tap the moment the app has launched can be lost on older iOS:
-        // open the menu again when it did not open.
-        for _ in 0..<3 where !remove.exists {
-            marked("workspace-menu").tap()
-            _ = remove.waitForExistence(timeout: 5)
+        for _ in 0..<4 where remove.waitForExistence(timeout: 2) && !remove.isHittable {
+            app.swipeUp()
         }
-        expect(remove, "Remove from this iPhone in the menu").tap()
+        expect(remove, "Remove from this iPhone in Settings").tap()
         let confirm = app.sheets.buttons["Remove from this iPhone"]
         if confirm.waitForExistence(timeout: 5) {
             confirm.tap()

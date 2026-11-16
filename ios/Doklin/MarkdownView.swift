@@ -106,6 +106,8 @@ struct MarkdownView: View {
                 RemovedBlocks(texts: gone)
             }
         }
+        // Its blocks are what a scroll position names: where Edit starts.
+        .scrollTargetLayout()
     }
 
     private func block(_ node: BlockNode, at index: Int) -> some View {

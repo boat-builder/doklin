@@ -47,10 +47,8 @@ final class HistoryUITests: UITestCase {
         // An edit made here, so the note has a version before it and one after.
         expect(marked("entry-Scratch"), "the Scratch note").tap()
         expect(app.staticTexts["Scratch"], "Scratch's heading")
-        marked("edit").tap()
-        let editor = expect(app.textViews.firstMatch, "the editor")
-        editor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
-        editor.typeText("\n\nA line for history.")
+        let editor = editAtTheEnd()
+        editor.typeText("\nA line for history.")
         marked("done").tap()
         expect(app.staticTexts["A line for history."], "the line, saved")
 
@@ -93,8 +91,7 @@ final class HistoryUITests: UITestCase {
 
         // The workspace's history lists its moments; the first, from joining,
         // would put Scratch back as it was.
-        marked("workspace-menu").tap()
-        expect(app.buttons["Workspace history"], "Workspace history in the menu").tap()
+        setting("Workspace history")
         let moments = app.buttons.matching(identifier: "moment-row")
         expect(moments.element(boundBy: 1), "a second moment")
         XCTAssertGreaterThanOrEqual(moments.count, 2)
@@ -117,8 +114,7 @@ final class HistoryUITests: UITestCase {
         record("a moment restored")
         app.buttons["Undo"].tap()
         expectGone(text(containing: "Restored — 1 file written."), "the moment restore's toast, after Undo")
-        back()
-        back()
+        browse()
         expect(marked("entry-Scratch"), "the Scratch note, after the moment's undo").tap()
         expect(app.staticTexts["A line for history."], "the line, back after the moment's Undo")
         back()
@@ -130,8 +126,7 @@ final class HistoryUITests: UITestCase {
         expect(app.buttons["Remove"], "Remove, under the swipe").tap()
         answer("Remove")
         expectGone(marked("entry-Comments"), "the removed note, in the folder")
-        marked("workspace-menu").tap()
-        expect(app.buttons["Recently deleted"], "Recently deleted in the menu").tap()
+        setting("Recently deleted")
         expect(marked("deleted-Comments"), "the removed note under Recently deleted")
         XCTAssertFalse(marked("deleted-Comments.meta.jsonl").exists, "the note's comments are a row of their own")
         record("recently deleted")
@@ -139,7 +134,7 @@ final class HistoryUITests: UITestCase {
         expect(text(containing: "Comments is back."), "the toast saying so")
         expectGone(marked("deleted-Comments"), "the note, under Recently deleted once it is back")
         record("brought back")
-        back()
+        browse()
         expect(marked("entry-Comments"), "the note, back in its folder")
         record("back in the folder")
 

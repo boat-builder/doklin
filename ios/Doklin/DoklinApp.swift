@@ -12,7 +12,13 @@ struct DoklinApp: App {
             RootView()
                 .environment(device)
                 .tint(Theme.accent)
-                .task { device.start(.onThisPhone) }
+                .task {
+                    device.start(.onThisPhone)
+                    // The note editor is ready before the first Edit, made
+                    // once the first screen is up.
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    EditorPage.shared.warm()
+                }
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
