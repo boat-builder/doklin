@@ -4564,9 +4564,14 @@ export default function App() {
   // Open a workspace-search result: load the file, then seed the search query
   // so the match is highlighted and scrolled into view (WYSIWYG has no line to
   // jump to). We deliberately do NOT open the find bar — the highlight alone is
-  // the "you landed here" cue; Esc clears it (see the keydown handler).
+  // the "you landed here" cue; Esc clears it (see the keydown handler). A
+  // document found by its name alone (null) just opens, as from the tree.
   const openResult = useCallback(
-    async (p: string, query: string) => {
+    async (p: string, query: string | null) => {
+      if (query === null) {
+        await openTab(p);
+        return;
+      }
       viewPrefsRef.current.set(p, "md"); // the match lives in the markdown
       await openTab(p);
       if (docViewRef.current === "html") await selectDocView("md");

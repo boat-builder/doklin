@@ -853,8 +853,14 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         let mut lines = Vec::new();
         for r in &results {
             let html = if text(r, "version") == "html" { " (html)" } else { "" };
-            let comments = if r.get("inComments").is_some() { " — in a comment (see `doklin comments`)" } else { "" };
-            lines.push(format!("{}{}{}", text(r, "path"), html, comments));
+            // Where it was found, when no line shows it.
+            let found = match (r.get("inName").is_some(), r.get("inComments").is_some()) {
+                (true, true) => " — in its name and a comment (see `doklin comments`)",
+                (false, true) => " — in a comment (see `doklin comments`)",
+                (true, false) if r["matches"].as_array().is_none_or(|m| m.is_empty()) => " — in its name",
+                _ => "",
+            };
+            lines.push(format!("{}{}{}", text(r, "path"), html, found));
             for m in r["matches"].as_array().into_iter().flatten() {
                 match m.get("line").and_then(Value::as_u64) {
                     Some(line) => lines.push(format!("  {}: {}", line, text(m, "text"))),
@@ -867,10 +873,10 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         }
         let total = v["total"].as_u64().unwrap_or(0) as usize;
         lines.push(if total == 0 {
-            format!("Nothing contains \"{}\".", query_text)
+            format!("Nothing has \"{}\" in its name or its text.", query_text)
         } else if v.get("truncated").is_some() {
             format!(
-                "{} contain it; these are the first {} — narrow it with --in <folder>, or raise --limit.",
+                "{} match; these are the first {} — narrow it with --in <folder>, or raise --limit.",
                 plural(total, "document", "documents"),
                 results.len()
             )

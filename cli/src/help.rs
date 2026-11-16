@@ -30,7 +30,7 @@ Reading
   ls [folder] [--deep]         what a folder holds
   info <doc>                   a document's versions, comments and public addresses
   read <doc>                   a document's text              [--md|--html] [--clean] [-o file]
-  search <text>                documents containing the text  [--in folder] [--limit n]
+  search <text>                documents by name or text      [--in folder] [--limit n]
   comments <doc>               the comment threads on a document
   published                    everything that is public
 
@@ -326,7 +326,7 @@ seconds, signed with your name.
 Start here
   doklin whoami                whose agent you are, and what you may do
   doklin ls --deep             everything you can see
-  doklin search "<words>"      find documents by what they say
+  doklin search "<words>"      find documents by name or by what they say
 
 Where things go
   You see what your person sees. Private/ is theirs alone, Restricted/<folder>/ is

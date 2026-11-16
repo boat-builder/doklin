@@ -1103,13 +1103,16 @@ struct SearchMatchInfo {
 struct FileMatches {
     path: String,
     name: String,
+    /// The document's name — its file name without the extension, as the
+    /// tree shows it — holds the query.
+    named: bool,
     matches: Vec<SearchMatchInfo>,
 }
 
-/// Collects markdown file paths under `dir` (depth-first), skipping the same
-/// hidden/ignored directories as the file tree. Mirrors `walk`'s traversal but
-/// gathers a flat file list instead of building a pruned tree.
-fn collect_md_files(dir: &Path, depth: usize, budget: &mut usize, out: &mut Vec<PathBuf>) {
+/// Collects the documents under `dir` (depth-first) as the file tree lists
+/// them: every markdown file, and each html file with no markdown of its stem
+/// beside it (`walk`'s rule), skipping the same hidden/ignored names.
+fn collect_documents(dir: &Path, depth: usize, budget: &mut usize, out: &mut Vec<PathBuf>) {
     if depth > MAX_TREE_DEPTH || *budget == 0 {
         return;
     }
@@ -1118,6 +1121,8 @@ fn collect_md_files(dir: &Path, depth: usize, budget: &mut usize, out: &mut Vec<
         Err(_) => return,
     };
     let mut subdirs: Vec<PathBuf> = Vec::new();
+    let mut markdown: Vec<PathBuf> = Vec::new();
+    let mut html: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
         if *budget == 0 {
             break;
@@ -1136,19 +1141,115 @@ fn collect_md_files(dir: &Path, depth: usize, budget: &mut usize, out: &mut Vec<
         if ft.is_dir() {
             subdirs.push(path);
         } else if ft.is_file() && is_markdown(&path) {
-            out.push(path);
+            markdown.push(path);
+        } else if ft.is_file() && is_html(&path) {
+            html.push(path);
         }
     }
+    let md_stems: std::collections::HashSet<std::ffi::OsString> =
+        markdown.iter().filter_map(|p| p.file_stem().map(|s| s.to_os_string())).collect();
+    out.extend(markdown);
+    out.extend(html.into_iter().filter(|h| h.file_stem().is_none_or(|s| !md_stems.contains(s))));
     subdirs.sort();
     for sub in subdirs {
-        collect_md_files(&sub, depth + 1, budget, out);
+        collect_documents(&sub, depth + 1, budget, out);
     }
 }
 
-/// Greps every markdown file under `root` for `query`, returning per-file
-/// matches with 1-based line numbers and a preview of each matching line.
-/// Case-insensitive unless `case_sensitive`. Results are bounded by the
-/// MAX_* caps so a broad query stays responsive.
+/// The lines of a markdown file holding `needle` (already lower-cased unless
+/// `case_sensitive`), then the comment bodies that do, counted into `total`
+/// and stopping at the MAX_* caps.
+fn lines_matching(
+    file: &Path,
+    needle: &str,
+    case_sensitive: bool,
+    total: &mut usize,
+) -> Vec<SearchMatchInfo> {
+    let mut matches: Vec<SearchMatchInfo> = Vec::new();
+    let contents = match std::fs::read_to_string(file) {
+        Ok(c) => c,
+        Err(_) => return matches, // skip binary/unreadable files
+    };
+    for (i, line) in contents.lines().enumerate() {
+        let hay = if case_sensitive {
+            line.to_string()
+        } else {
+            line.to_lowercase()
+        };
+        if let Some(byte_idx) = hay.find(needle) {
+            let column = hay[..byte_idx].chars().count();
+            let preview: String = line.trim().chars().take(SEARCH_PREVIEW_MAX).collect();
+            matches.push(SearchMatchInfo {
+                line: i + 1,
+                column,
+                preview,
+            });
+            *total += 1;
+            if matches.len() >= MAX_MATCHES_PER_FILE || *total >= MAX_TOTAL_MATCHES {
+                return matches;
+            }
+        }
+    }
+    // Markdown comment-thread bodies live in the entity meta file, not in
+    // the markdown itself (the file keeps only `{>>#id<<}` markers — see
+    // the frontend's metaFile.ts). Search them too, attributing each hit
+    // to the thread's marker line so a result click lands on the anchor.
+    let meta_path = meta_file_of(&file.to_string_lossy());
+    let Ok(meta_raw) = std::fs::read_to_string(&meta_path) else {
+        return matches;
+    };
+    for mline in meta_raw.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(mline) else {
+            continue;
+        };
+        if v.get("t").and_then(|t| t.as_str()) != Some("mthread") {
+            continue;
+        }
+        let Some(id) = v.get("id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        let Some(comments) = v.get("comments").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for c in comments {
+            let Some(body) = c.get("body").and_then(|b| b.as_str()) else {
+                continue;
+            };
+            let hay = if case_sensitive {
+                body.to_string()
+            } else {
+                body.to_lowercase()
+            };
+            if !hay.contains(needle) {
+                continue;
+            }
+            let marker = format!("{{>>#{}", id);
+            let (line_no, column) = contents
+                .lines()
+                .enumerate()
+                .find_map(|(i, l)| l.find(&marker).map(|c| (i + 1, l[..c].chars().count())))
+                .unwrap_or((1, 0));
+            let preview: String = body.trim().chars().take(SEARCH_PREVIEW_MAX).collect();
+            matches.push(SearchMatchInfo {
+                line: line_no,
+                column,
+                preview,
+            });
+            *total += 1;
+            if matches.len() >= MAX_MATCHES_PER_FILE || *total >= MAX_TOTAL_MATCHES {
+                return matches;
+            }
+        }
+    }
+    matches
+}
+
+/// Finds the documents under `root` whose name holds `query` or whose text
+/// does: per-file matches with 1-based line numbers and a preview of each
+/// matching line. Markdown is read for its text; an html page is found by
+/// its name. Documents named for the query come first. Case-insensitive
+/// unless `case_sensitive`. Results are bounded by the MAX_* caps so a broad
+/// query stays responsive.
 #[tauri::command]
 fn search_workspace(
     root: String,
@@ -1168,111 +1269,55 @@ fn search_workspace(
     } else {
         needle_raw.to_lowercase()
     };
+    let is_named = |file: &Path| {
+        file.file_stem().is_some_and(|stem| {
+            let stem = stem.to_string_lossy();
+            if case_sensitive {
+                stem.contains(&needle)
+            } else {
+                stem.to_lowercase().contains(&needle)
+            }
+        })
+    };
 
     let mut files: Vec<PathBuf> = Vec::new();
     let mut budget = MAX_TREE_ENTRIES;
-    collect_md_files(&root_path, 0, &mut budget, &mut files);
+    collect_documents(&root_path, 0, &mut budget, &mut files);
     files.sort();
-    files.truncate(MAX_SEARCH_FILES);
+    let mut docs: Vec<(PathBuf, bool)> = files
+        .into_iter()
+        .map(|f| {
+            let named = is_named(&f);
+            (f, named)
+        })
+        .collect();
+    // Whoever typed a name is after that document: named ones first, each
+    // run in path order (the sort is stable).
+    docs.sort_by_key(|(_, named)| !named);
+    docs.truncate(MAX_SEARCH_FILES);
 
     let mut results: Vec<FileMatches> = Vec::new();
     let mut total = 0usize;
-    'files: for file in files {
-        if total >= MAX_TOTAL_MATCHES {
+    for (file, named) in docs {
+        // Named documents come first, so past the cap nothing more is found.
+        if total >= MAX_TOTAL_MATCHES && !named {
             break;
         }
-        let contents = match std::fs::read_to_string(&file) {
-            Ok(c) => c,
-            Err(_) => continue, // skip binary/unreadable files
+        let matches = if is_markdown(&file) && total < MAX_TOTAL_MATCHES {
+            lines_matching(&file, &needle, case_sensitive, &mut total)
+        } else {
+            Vec::new()
         };
-        let mut matches: Vec<SearchMatchInfo> = Vec::new();
-        for (i, line) in contents.lines().enumerate() {
-            let hay = if case_sensitive {
-                line.to_string()
-            } else {
-                line.to_lowercase()
-            };
-            if let Some(byte_idx) = hay.find(&needle) {
-                let column = hay[..byte_idx].chars().count();
-                let preview: String = line.trim().chars().take(SEARCH_PREVIEW_MAX).collect();
-                matches.push(SearchMatchInfo {
-                    line: i + 1,
-                    column,
-                    preview,
-                });
-                total += 1;
-                if matches.len() >= MAX_MATCHES_PER_FILE || total >= MAX_TOTAL_MATCHES {
-                    break;
-                }
-            }
-        }
-        // Markdown comment-thread bodies live in the entity meta file, not in
-        // the markdown itself (the file keeps only `{>>#id<<}` markers — see
-        // the frontend's metaFile.ts). Search them too, attributing each hit
-        // to the thread's marker line so a result click lands on the anchor.
-        if matches.len() < MAX_MATCHES_PER_FILE && total < MAX_TOTAL_MATCHES {
-            let meta_path = meta_file_of(&file.to_string_lossy());
-            if let Ok(meta_raw) = std::fs::read_to_string(&meta_path) {
-                'meta: for mline in meta_raw.lines() {
-                    let Ok(v) = serde_json::from_str::<serde_json::Value>(mline) else {
-                        continue;
-                    };
-                    if v.get("t").and_then(|t| t.as_str()) != Some("mthread") {
-                        continue;
-                    }
-                    let Some(id) = v.get("id").and_then(|i| i.as_str()) else {
-                        continue;
-                    };
-                    let Some(comments) = v.get("comments").and_then(|c| c.as_array()) else {
-                        continue;
-                    };
-                    for c in comments {
-                        let Some(body) = c.get("body").and_then(|b| b.as_str()) else {
-                            continue;
-                        };
-                        let hay = if case_sensitive {
-                            body.to_string()
-                        } else {
-                            body.to_lowercase()
-                        };
-                        if !hay.contains(&needle) {
-                            continue;
-                        }
-                        let marker = format!("{{>>#{}", id);
-                        let (line_no, column) = contents
-                            .lines()
-                            .enumerate()
-                            .find_map(|(i, l)| {
-                                l.find(&marker).map(|c| (i + 1, l[..c].chars().count()))
-                            })
-                            .unwrap_or((1, 0));
-                        let preview: String =
-                            body.trim().chars().take(SEARCH_PREVIEW_MAX).collect();
-                        matches.push(SearchMatchInfo {
-                            line: line_no,
-                            column,
-                            preview,
-                        });
-                        total += 1;
-                        if matches.len() >= MAX_MATCHES_PER_FILE || total >= MAX_TOTAL_MATCHES {
-                            break 'meta;
-                        }
-                    }
-                }
-            }
-        }
-        if !matches.is_empty() {
+        if named || !matches.is_empty() {
             results.push(FileMatches {
                 path: file.to_string_lossy().to_string(),
                 name: file
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default(),
+                named,
                 matches,
             });
-        }
-        if total >= MAX_TOTAL_MATCHES {
-            break 'files;
         }
     }
     Ok(results)
@@ -1968,3 +2013,62 @@ mod tree_tests {
     }
 }
 
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    /// What a search found, in its order: path under the root, whether by
+    /// name, and the lines.
+    fn found(root: &Path, query: &str, case_sensitive: bool) -> Vec<(String, bool, Vec<usize>)> {
+        search_workspace(root.to_string_lossy().to_string(), query.to_string(), case_sensitive)
+            .unwrap()
+            .into_iter()
+            .map(|f| {
+                let path = Path::new(&f.path).strip_prefix(root).unwrap().to_string_lossy().to_string();
+                (path, f.named, f.matches.iter().map(|m| m.line).collect())
+            })
+            .collect()
+    }
+
+    /// A document is found by its own name (not its folder's, not its
+    /// extension) as well as its text, named ones first; an html page by its
+    /// name alone, and the html beside a markdown is that one document.
+    #[test]
+    fn names_are_searched_with_the_text_and_come_first() {
+        let dir = std::env::temp_dir().join(format!("doklin-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Otter")).unwrap();
+        for (name, text) in [
+            ("aaa.md", "# First\n\nAn otter swam by.\n"),
+            ("otter.md", "# River\n\nNotes from the bank.\n"),
+            ("sea-otter-facts.md", "# Facts\n\nThe otter holds hands.\n"),
+            ("Otter Poster.html", "<p>Come and see.</p>\n"),
+            ("twin.md", "# Left\n"),
+            ("twin.html", "<p>Right.</p>\n"),
+            ("Otter/zoo.md", "# Animals\n"),
+        ] {
+            std::fs::write(dir.join(name), text).unwrap();
+        }
+        let own = |rows: &[(&str, bool, &[usize])]| -> Vec<(String, bool, Vec<usize>)> {
+            rows.iter().map(|(p, n, l)| (p.to_string(), *n, l.to_vec())).collect()
+        };
+
+        assert_eq!(
+            found(&dir, "otter", false),
+            own(&[
+                ("Otter Poster.html", true, &[]),
+                ("otter.md", true, &[]),
+                ("sea-otter-facts.md", true, &[3]),
+                ("aaa.md", false, &[3]),
+            ])
+        );
+        assert_eq!(found(&dir, "OTTER", false), found(&dir, "otter", false));
+        assert_eq!(found(&dir, "Otter", true), own(&[("Otter Poster.html", true, &[])]));
+        assert_eq!(found(&dir, "twin", false), own(&[("twin.md", true, &[])]));
+        assert!(found(&dir, ".md", false).is_empty());
+        assert!(found(&dir, ".html", false).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -195,8 +195,8 @@ GET comments?path=  {path, threads: [{id, version, on, line?|tag?, orphaned?, co
 GET find?workspace=&space=&file=  {path}: where a link to a page leads (space "" = shared), the
     document by its stem. 404 for every page this agent cannot open, alike
 GET search?q=&dir=&limit=  {query, dir, results: [{path, version, matches: [{line?, text}],
-    moreLines?, inComments?}], total, truncated?, notSearched?, sectionsNotSearched?} | 202
-    {indexing, pending}; limit ≤ 30
+    moreLines?, inName?, inComments?}], total, truncated?, notSearched?, sectionsNotSearched?} | 202
+    {indexing, pending}; limit ≤ 30; named documents first
 GET pages  {pages: [{slug, url, kind: document|folder, path, title?, desc?, home?, by?, byName?,
     at, missing?}], notListed?}
 edit:

@@ -1,4 +1,4 @@
-// Search: which documents contain this text, with the
+// Search: which documents are called this or contain this text, with the
 // lines — the question the app's own search asks (`search_workspace`,
 // src-tauri/src/lib.rs), answered for a caller that has no copy of the folder.
 //
@@ -30,6 +30,10 @@
 //   · Until somebody searches there is no mirror, and nothing here costs
 //     anything.
 //
+// A document's name is read off the manifest, not the mirror: it is never
+// stale, a rename costs the mirror nothing, and a document found by its name
+// alone costs no read.
+//
 // It is the database or nothing: a database that cannot answer is a 503 to a
 // search, and costs nothing else.
 
@@ -44,7 +48,7 @@ import { blobKey } from "./layout";
 import type { Manifest } from "./manifest";
 import { ensureSchema } from "./schema";
 import { spaceOf } from "./spaces";
-import { isHtmlPath, isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
+import { basename, isHtmlPath, isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 import { stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, parseEntityMeta } from "../../src/metaFile";
 
@@ -266,6 +270,14 @@ function matchingLines(path: string, text: string, needle: string): { matches: M
 /** A path in a section, as its person names it. */
 const under = (mount: string, path: string): string => (mount ? `${mount}/${path}` : path);
 
+/** Whether a document is called something holding the needle: its file name
+ *  without the extension, as the sidebar shows it — not its folders'. */
+const isCalled = (path: string, needle: string): boolean => basename(nameOf(path).stem).toLowerCase().includes(needle);
+
+/** A document a search found: by its name, by its mirror row — `text` when
+ *  the row holds the needle, `big` when it was too large to mirror — or both. */
+type Found = { doc: Searchable; section: Section; path: string; named: boolean; row: "text" | "big" | null };
+
 export async function getSearch(c: Call): Promise<Response> {
   const { env, url, places } = c;
   const query = (url.searchParams.get("q") ?? "").trim();
@@ -337,31 +349,55 @@ export async function getSearch(c: Call): Promise<Response> {
     return unavailable();
   }
 
-  const bySpace = new Map(open.map((o) => [o.section.space, o]));
   const prefix = dir ? `${dir.toLowerCase()}/` : "";
-  const inDir = rows
-    .map((r) => {
-      const from = bySpace.get(r.space_id);
-      const doc = from?.want.get(r.fid);
-      return from && doc ? { big: Number(r.big) !== 0, doc, section: from.section, path: under(from.section.mount, doc.text.file.path) } : null;
-    })
-    .filter((r): r is { big: boolean; doc: Searchable; section: Section; path: string } => r !== null && r.path.toLowerCase().startsWith(prefix))
-    .sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: "base" }));
-  const hits = inDir.filter((r) => !r.big);
-  const shown = hits.slice(0, Math.min(limit, Math.max(1, SEARCH_READS - spent)));
+  const docs = new Map<string, Found>();
+  const found = (section: Section, fid: string, doc: Searchable): Found => {
+    const k = `${section.space}/${fid}`;
+    let f = docs.get(k);
+    if (!f) docs.set(k, (f = { doc, section, path: under(section.mount, doc.text.file.path), named: false, row: null }));
+    return f;
+  };
+  for (const { section, want } of open) {
+    for (const [fid, doc] of want) if (isCalled(doc.text.file.path, needle)) found(section, fid, doc).named = true;
+  }
+  const bySpace = new Map(open.map((o) => [o.section.space, o]));
+  for (const r of rows) {
+    const from = bySpace.get(r.space_id);
+    const doc = from?.want.get(r.fid);
+    if (from && doc) found(from.section, r.fid, doc).row = Number(r.big) !== 0 ? "big" : "text";
+  }
+  const inDir = [...docs.values()].filter((r) => r.path.toLowerCase().startsWith(prefix));
+  // What a document is called first: whoever typed a name is after that one.
+  const hits = inDir
+    .filter((r) => r.named || r.row === "text")
+    .sort((a, b) => Number(b.named) - Number(a.named) || a.path.localeCompare(b.path, undefined, { sensitivity: "base" }));
+  // Only a row's lines cost a read; a name alone is already in the manifest.
+  const shown: Found[] = [];
+  let reads = Math.max(1, SEARCH_READS - spent);
+  for (const hit of hits) {
+    if (shown.length === limit) break;
+    if (hit.row === "text") {
+      if (reads === 0) break;
+      reads -= 1;
+    }
+    shown.push(hit);
+  }
 
-  const results = await mapLimited(shown, READ_CONCURRENCY, async ({ doc, section, path }) => {
-    const text = await blobText(section.env, doc.text);
+  const results = await mapLimited(shown, READ_CONCURRENCY, async ({ doc, section, path, named, row }) => {
+    const text = row === "text" ? await blobText(section.env, doc.text) : null;
     const { matches, total } = text === null ? { matches: [], total: 0 } : matchingLines(path, text, needle);
     return {
       path: nameOf(path).stem,
       version: isMarkdownPath(path) ? "md" : "html",
       matches,
       ...(total > matches.length ? { moreLines: total - matches.length } : {}),
+      ...(named ? { inName: true } : {}),
       // In the mirror but on no line: the text was said in a comment.
-      ...(total === 0 ? { inComments: true } : {}),
+      ...(row === "text" && total === 0 ? { inComments: true } : {}),
     };
   });
+  // Too large to mirror, and not found by its name either.
+  const notSearched = inDir.filter((r) => r.row === "big" && !r.named).map((r) => nameOf(r.path).stem);
 
   return json({
     query,
@@ -370,7 +406,7 @@ export async function getSearch(c: Call): Promise<Response> {
     total: hits.length,
     ...(hits.length > shown.length ? { truncated: true } : {}),
     // Too large to mirror — said, rather than silently never found.
-    ...(inDir.some((r) => r.big) ? { notSearched: inDir.filter((r) => r.big).map((r) => nameOf(r.path).stem) } : {}),
+    ...(notSearched.length > 0 ? { notSearched } : {}),
     // More sections than one request opens: search inside one of these.
     ...(left.length > 0 ? { sectionsNotSearched: left } : {}),
   });

@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 type SearchMatch = { line: number; column: number; preview: string };
-type FileMatches = { path: string; name: string; matches: SearchMatch[] };
+// `named`: the document's name holds the query (search_workspace, lib.rs).
+type FileMatches = { path: string; name: string; named: boolean; matches: SearchMatch[] };
 
 type Props = {
   root: string;
@@ -12,7 +13,8 @@ type Props = {
   onToggleCase: () => void;
   // Open a result: load the file in a tab and seed the in-file find with the
   // query so the matching text is highlighted (WYSIWYG has no line to jump to).
-  onOpenResult: (path: string, query: string) => void;
+  // A null query opens a document found by its name alone, as the tree would.
+  onOpenResult: (path: string, query: string | null) => void;
   onBackToFiles: () => void;
   // Bumped on ⌘⇧F (or the Search toggle) to focus the input.
   focusToken: number;
@@ -77,9 +79,10 @@ export default function WorkspaceSearch({
     };
   }, [root, query, caseSensitive]);
 
+  // A name that holds the query is a result of its own, beside its lines.
   const totals = useMemo(() => {
     const files = results.length;
-    const matches = results.reduce((n, f) => n + f.matches.length, 0);
+    const matches = results.reduce((n, f) => n + f.matches.length + (f.named ? 1 : 0), 0);
     return { files, matches };
   }, [results]);
 
@@ -149,22 +152,29 @@ export default function WorkspaceSearch({
             <ul className="ws-result-list">
               {results.map((file) => {
                 const isCollapsed = collapsed.has(file.path);
+                const name = stripDocExt(file.name);
+                // Found by its name alone: no lines to unfold, so the row opens it.
+                const nameOnly = file.matches.length === 0;
                 return (
                   <li key={file.path} className="ws-result-file">
                     <button
                       className="ws-result-file-header"
-                      onClick={() => toggleCollapsed(file.path)}
+                      onClick={() =>
+                        nameOnly ? onOpenResult(file.path, null) : toggleCollapsed(file.path)
+                      }
                       title={file.path}
                     >
                       <span
                         className={`tree-chevron ${isCollapsed ? "is-collapsed" : ""}`}
                       >
-                        <ChevronRightIcon />
+                        {!nameOnly && <ChevronRightIcon />}
                       </span>
                       <span className="ws-result-file-name">
-                        {stripMdExt(file.name)}
+                        {file.named ? highlight(name, query.trim(), caseSensitive) : name}
                       </span>
-                      <span className="ws-result-file-count">{file.matches.length}</span>
+                      {!nameOnly && (
+                        <span className="ws-result-file-count">{file.matches.length}</span>
+                      )}
                     </button>
                     {!isCollapsed && (
                       <ul className="ws-result-matches">
@@ -195,8 +205,8 @@ export default function WorkspaceSearch({
   );
 }
 
-function stripMdExt(name: string): string {
-  return name.replace(/\.(md|markdown|mdown|mkd)$/i, "");
+function stripDocExt(name: string): string {
+  return name.replace(/\.(md|markdown|mdown|mkd|html)$/i, "");
 }
 
 // Wrap occurrences of `query` in <mark> for the preview line. Case-insensitive
