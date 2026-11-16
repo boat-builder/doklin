@@ -35,6 +35,12 @@ public final class Workspaces {
     public private(set) var notices: [Notice] = []
     /// A workspace taken off this device, until the person has read so.
     public private(set) var removed: Removed?
+    /// What a person calls this device in a sentence: `iPhone`, `iPad`
+    /// (`EngineSetup.deviceKind`).
+    public private(set) var kind = "iPhone"
+    /// The last question about many new documents, by workspace root, until
+    /// it is answered. Shown only while the workspace's phase asks it.
+    public private(set) var adds: [String: CloudPendingAdds] = [:]
 
     @ObservationIgnored private var open: [String: Workspace] = [:]
     @ObservationIgnored private let remembered: UserDefaults
@@ -48,6 +54,11 @@ public final class Workspaces {
     /// Restricted folders this person is giving up here, as `<root>/<path>`
     /// lowercased: when one goes, that is no news to them.
     @ObservationIgnored private var givenUp: Set<String> = []
+    /// Whether the app is on screen: the workspace selected then is the one
+    /// the engine polls for most often.
+    @ObservationIgnored private var onScreen = true
+    /// What the engine was last told about that, so it is told once.
+    @ObservationIgnored private var told: (folder: String?, focused: Bool)?
 
     public init(remembered: UserDefaults = .standard) {
         self.remembered = remembered
@@ -59,6 +70,7 @@ public final class Workspaces {
     public func start(_ setup: EngineSetup) {
         guard !starting else { return }
         starting = true
+        kind = setup.deviceKind
         let events = Engine.shared.events()
         Task { [weak self] in
             for await event in events {
@@ -77,6 +89,7 @@ public final class Workspaces {
             // Every connected workspace has a history of its own here.
             try? await Engine.shared.run("versions_reconcile")
             ready = true
+            await focus()
         }
     }
 
@@ -88,6 +101,7 @@ public final class Workspaces {
 
     private func take(_ all: [CloudStatus]) {
         statuses = all
+        defer { Task { await focus() } }
         if let selected, let status = all.first(where: { $0.root == selected }) {
             // By id, not by path: iOS moves the app's folder between launches.
             remembered.set(status.wsId, forKey: Self.selectedKey)
@@ -121,6 +135,7 @@ public final class Workspaces {
     public func select(_ root: String) {
         selected = root
         if let status = status(root) { remembered.set(status.wsId, forKey: Self.selectedKey) }
+        Task { await focus() }
     }
 
     /// The version store a path is kept in: the deepest whose root holds it.
@@ -197,6 +212,7 @@ public final class Workspaces {
         if selected == root { selected = nil }
         try? await Engine.shared.run("versions_reconcile")
         await refresh()
+        await focus()
         return deleted
     }
 
@@ -209,6 +225,8 @@ public final class Workspaces {
     /// The app is about to stop running: keep what is pending and send it,
     /// within `seconds` — iOS gives an app leaving the screen about thirty.
     public func settle(within seconds: Double) async {
+        onScreen = false
+        await focus()
         let started = Int(Date().timeIntervalSince1970 * 1000)
         try? await Engine.shared.run("versions_flush", ["ms": 2000])
         for status in statuses { await syncNow(status.root) }
@@ -223,7 +241,26 @@ public final class Workspaces {
 
     /// The app is in front again: whatever changed meanwhile comes now.
     public func woke() async {
+        onScreen = true
+        await focus()
         for status in statuses { await syncNow(status.root) }
+    }
+
+    /// Tell the engine whether the workspace on screen has a person looking
+    /// at it — it polls that one often, and the rest seldom. The phone has
+    /// one window, `main`; on screen means the app is active.
+    private func focus() async {
+        guard ready else { return }
+        let now = (folder: selected, focused: onScreen)
+        if let told, told.folder == now.folder, told.focused == now.focused { return }
+        told = now
+        do {
+            try await Engine.shared.run(
+                "cloud_set_focus", ["window": "main", "folder": .optional(now.folder), "focused": .bool(now.focused)]
+            )
+        } catch {
+            told = nil
+        }
     }
 
     /* ---------- What the engine says ---------- */
@@ -260,6 +297,8 @@ public final class Workspaces {
             if let taken = event.decode(CloudAddressTaken.self) {
                 say(taken.root, "The address “\(taken.slug)” is already taken on this domain, so \(DocLinks.name(of: taken.path)) was not published.", path: nil)
             }
+        case "cloud-pending-adds":
+            if let asked = event.decode(CloudPendingAdds.self) { adds[asked.root] = asked }
         case "cloud-removed":
             if let gone = event.decode(Removed.self) {
                 removed = gone
@@ -283,6 +322,11 @@ public final class Workspaces {
 
     public func dismiss(_ notice: Notice) {
         notices.removeAll { $0.id == notice.id }
+    }
+
+    /// The question about many new documents in `root` was answered.
+    func answered(_ root: String) {
+        adds[root] = nil
     }
 
     public func dismissRemoved() {
@@ -333,6 +377,32 @@ public final class Workspace: Identifiable {
     /// Sync now rather than at the next poll.
     public func syncNow() async {
         try? await Engine.shared.run("cloud_sync_now", ["root": .string(root)])
+    }
+
+    /// Where the many new documents of the last question here appeared,
+    /// until it is answered.
+    public var adds: CloudPendingAdds? { device?.adds[root] }
+
+    /// Answer it: sync them, or leave them on this device until it asks
+    /// again.
+    public func confirmAdds(sync: Bool) async throws {
+        try await Engine.shared.run("cloud_confirm_adds", ["root": .string(root), "sync": .bool(sync)])
+        device?.answered(root)
+        await device?.refresh()
+    }
+
+    /// Send this device's held-back big changes now rather than at the next
+    /// UTC day: for today, and only when `usage.liftable`.
+    public func liftWait() async throws {
+        try await Engine.shared.run("cloud_lift_wait", ["root": .string(root)])
+        await device?.refresh()
+    }
+
+    /// The domain's Cloudflare plan, which every limit is derived from: the
+    /// superadmin's to change (`workspace.manage`).
+    public func setPlan(_ plan: CloudPlan) async throws {
+        try await Engine.shared.run("cloud_set_plan", ["root": .string(root), "plan": .string(plan.rawValue)])
+        await device?.refresh()
     }
 
     /// This person is leaving or deleting the restricted folder at `path`.

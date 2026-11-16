@@ -140,7 +140,9 @@ final class PeopleTests: XCTestCase {
     private func status() throws -> CloudStatus {
         try decode(CloudStatus.self, """
         {"root":"/w","domain":"notes.example.com","endpoint":"https://notes.example.com","wsId":"ws-1","name":"Acme",
-         "phase":"idle","lastSyncMs":null,"error":null,"pendingDeletes":0,"me":"Ada","meId":"m-ada","can":[],
+         "phase":"idle","lastSyncMs":null,"error":null,"pendingDeletes":0,"pendingAdds":0,
+         "usage":{"mode":"normal","cause":null,"today":0,"fleetToday":null,"cap":null,"plan":null,"resumesAt":null,"waiting":0,"liftable":false,"lifted":false},
+         "me":"Ada","meId":"m-ada","can":[],
          "workerVersion":17,"public":[],"presence":[],"leases":[],
          "spaces":[
           {"id":"p-ada","kind":"private","name":"Private","path":"Private","by":"Ada","members":["m-ada"]},

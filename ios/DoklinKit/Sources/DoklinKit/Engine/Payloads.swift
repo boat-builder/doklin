@@ -17,8 +17,14 @@ public enum CloudPhase: String, Decodable, Sendable {
     case offline
     case paused
     case pendingDeletes = "pending-deletes"
+    /// Many new documents appeared at once: they wait for a yes
+    /// (`cloud_confirm_adds`); edits, moves and deletions go on.
+    case pendingAdds = "pending-adds"
     case revoked
     case workerOutdated = "worker-outdated"
+    /// Today's Cloudflare requests are used up: nothing is sent until the
+    /// next UTC day. `error` says so in a sentence.
+    case limited
     case error
 }
 
@@ -35,6 +41,10 @@ public struct CloudStatus: Decodable, Equatable, Sendable, Identifiable {
     public let lastSyncMs: Int?
     public let error: String?
     public let pendingDeletes: Int
+    /// New documents held until this person says to sync them.
+    public let pendingAdds: Int
+    /// How today's requests stand, and what that holds back.
+    public let usage: CloudUsage
     /// Who this device works as here, in words.
     public let me: String
     /// The same person by member id; null until the domain has said.
@@ -59,6 +69,53 @@ public struct CloudStatus: Decodable, Equatable, Sendable, Identifiable {
     public func may(_ action: String) -> Bool {
         can.isEmpty || can.contains(action)
     }
+}
+
+/// How the engine paces this workspace today.
+public enum UsageMode: String, Decodable, Sendable {
+    case normal
+    /// Big changes wait for the next UTC day; edits go on.
+    case bulkWaits = "bulk-waits"
+    /// Polls once a minute and sends no big changes; edits still go out.
+    case slow
+}
+
+/// Whose spending put the workspace in its mode.
+public enum UsageCause: String, Decodable, Sendable {
+    /// This device's own allowance: it may lift the wait for today.
+    case device
+    /// Everyone's together: nobody can lift it.
+    case fleet
+}
+
+/// The Cloudflare plan the domain's numbers come from.
+public enum CloudPlan: String, Decodable, Sendable, CaseIterable {
+    case free
+    case paid
+}
+
+/// `CloudStatus.usage`: this device's requests today on the domain, and what
+/// the day's limits hold back.
+public struct CloudUsage: Decodable, Equatable, Sendable {
+    public let mode: UsageMode
+    public let cause: UsageCause?
+    /// This device's requests today (UTC day) on this domain.
+    public let today: Int
+    /// Everyone's, as the domain last said; null when it could not.
+    public let fleetToday: Int?
+    /// The account's daily requests; null when there is no such limit.
+    public let cap: Int?
+    /// Null until the domain has said.
+    public let plan: CloudPlan?
+    /// The next 00:00 UTC, when the mode is not `normal` or the phase is
+    /// `limited`.
+    public let resumesAt: Int?
+    /// Changes held back: uploads not sent and downloads owed.
+    public let waiting: Int
+    /// The cause is this device's own allowance and it was not lifted today.
+    public let liftable: Bool
+    /// This device's wait was lifted today (`cloud_lift_wait`).
+    public let lifted: Bool
 }
 
 public enum SpaceKind: String, Decodable, Sendable {
@@ -304,6 +361,20 @@ public struct CloudPendingDeletes: Decodable, Sendable {
     public let count: Int
     public let total: Int
     public let paths: [String]
+}
+
+/// `cloud-pending-adds`: so many new documents that they wait for a yes.
+public struct CloudPendingAdds: Decodable, Equatable, Sendable {
+    public let root: String
+    public let count: Int
+    /// Where they are, workspace-relative, most first, at most 5.
+    public let folders: [AddedFolder]
+}
+
+public struct AddedFolder: Decodable, Equatable, Sendable {
+    /// Workspace-relative; `""` is the workspace itself.
+    public let path: String
+    public let count: Int
 }
 
 /// `cloud-space-left`: a restricted folder left this device.

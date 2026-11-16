@@ -101,7 +101,8 @@ public enum Publishing {
     public static func state(of page: PublicPage?, in status: CloudStatus?, pending: Bool) -> PageState {
         guard let status, let page else { return .unpublished }
         if status.phase == .revoked || !page.alive { return .offline }
-        if status.phase != .idle, status.phase != .syncing { return .stale }
+        // New documents held for a yes hold nothing else: edits go out.
+        if status.phase != .idle, status.phase != .syncing, status.phase != .pendingAdds { return .stale }
         return pending ? .updating : .live
     }
 
@@ -123,6 +124,7 @@ public enum Publishing {
             case .paused: return "Sync is paused, so the page keeps what it had."
             case .pendingDeletes: return "Sync is holding a deletion for your go, and the page waits with it."
             case .workerOutdated: return "\(status.domain) needs a worker update before the page changes again."
+            case .limited: return "Today’s Cloudflare requests are used up, so the page keeps what it had."
             default: return "Sync stopped: \(status.error ?? "an error")."
             }
         }

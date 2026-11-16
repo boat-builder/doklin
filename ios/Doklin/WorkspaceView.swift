@@ -15,6 +15,7 @@ struct WorkspaceView: View {
     @State private var leaving = false
     @State private var publishingWorkspace = false
     @State private var failure: String?
+    @State private var question: Question?
     @State private var toaster = Toaster()
 
     var body: some View {
@@ -56,6 +57,7 @@ struct WorkspaceView: View {
         // screen's navigation bar.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
+                adds
                 notice
                 ToastBar(toaster: toaster)
                 SyncLine(workspace: workspace)
@@ -96,6 +98,7 @@ struct WorkspaceView: View {
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
         }
+        .asking($question)
         .alert("That did not work", isPresented: failureShown) {
             Button("OK", role: .cancel) { failure = nil }
         } message: {
@@ -202,6 +205,7 @@ struct WorkspaceView: View {
                 }
             }
             Section {
+                plan
                 Button {
                     Task { await device.syncNow(workspace.root) }
                 } label: {
@@ -217,6 +221,82 @@ struct WorkspaceView: View {
             Label(workspace.name, systemImage: "square.stack")
         }
         .accessibilityIdentifier("workspace-menu")
+    }
+
+    /// The Cloudflare plan the domain's limits come from: the superadmin's to
+    /// change, from any device of theirs; everybody else reads it.
+    @ViewBuilder private var plan: some View {
+        if let status = workspace.status, let plan = status.usage.plan {
+            let words = "Cloudflare plan: \(LimitWords.plan(plan))"
+            if status.can.contains("workspace.manage") {
+                Menu {
+                    Picker(words, selection: Binding(get: { plan }, set: { ask(plan: $0, from: plan) })) {
+                        ForEach(CloudPlan.allCases, id: \.self) { choice in
+                            Text(LimitWords.plan(choice)).tag(choice)
+                        }
+                    }
+                } label: {
+                    Label(words, systemImage: "cloud")
+                }
+            } else {
+                Button {} label: {
+                    Label(words, systemImage: "cloud")
+                }
+                .disabled(true)
+            }
+        }
+    }
+
+    private func ask(plan: CloudPlan, from current: CloudPlan) {
+        guard plan != current else { return }
+        let named = LimitWords.plan(plan)
+        question = Question(
+            "Change the Cloudflare plan to \(named)?", LimitWords.planChange(to: plan), button: "Use \(named)", destructive: false
+        ) {
+            do {
+                try await workspace.setPlan(plan)
+            } catch {
+                failure = (error as? DoklinError)?.message ?? error.localizedDescription
+            }
+        }
+    }
+
+    /// Many new documents appeared at once: they wait for this person's yes,
+    /// while edits, moves and deletions go on.
+    @ViewBuilder private var adds: some View {
+        if let status = workspace.status, status.phase == .pendingAdds {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "doc.badge.plus")
+                        .foregroundStyle(Theme.warnInk)
+                    Text(LimitWords.adds(status.pendingAdds, in: workspace.adds?.folders ?? [], workspace: workspace.name))
+                        .font(.footnote)
+                        .foregroundStyle(Theme.text1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("pending-adds")
+                }
+                HStack(spacing: 20) {
+                    Spacer()
+                    Button("Not now") { answerAdds(sync: false) }
+                    Button(LimitWords.syncThem(status.pendingAdds)) { answerAdds(sync: true) }
+                        .fontWeight(.semibold)
+                }
+                .font(.footnote)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Theme.sunken)
+        }
+    }
+
+    private func answerAdds(sync: Bool) {
+        Task {
+            do {
+                try await workspace.confirmAdds(sync: sync)
+            } catch {
+                failure = (error as? DoklinError)?.message ?? error.localizedDescription
+            }
+        }
     }
 
     /// The first thing sync said that has not been read yet.
@@ -276,26 +356,33 @@ struct WorkspaceView: View {
 }
 
 /// How the workspace's sync stands, in the Mac's words — and, when it is
-/// holding a large deletion, the way to let it go ahead.
+/// holding a large deletion, the way to let it go ahead; when this device's
+/// share of today's big changes is spent, the way to send them anyway.
 struct SyncLine: View {
     let workspace: Workspace
 
     @Environment(Workspaces.self) private var device
+    @Environment(Toaster.self) private var toaster
     @State private var confirming = false
+    @State private var lifting = false
 
     var body: some View {
         if let status = workspace.status {
+            let hold = status.hold
             HStack(spacing: 8) {
                 Circle()
-                    .fill(tint(status))
+                    .fill(tint(status, hold))
                     .frame(width: 7, height: 7)
-                Text(words(status))
+                Text(words(status, hold))
                     .font(.footnote)
                     .foregroundStyle(Theme.text2)
                     .accessibilityIdentifier("sync-status")
                 Spacer(minLength: 8)
                 if status.phase == .pendingDeletes {
                     Button("Review") { confirming = true }
+                        .font(.footnote)
+                } else if case .waiting(_, _, liftable: true)? = hold {
+                    Button("Send now") { lifting = true }
                         .font(.footnote)
                 } else {
                     Text(status.domain)
@@ -320,28 +407,60 @@ struct SyncLine: View {
             } message: {
                 Text("Sync holds a deletion this large until you say so. Delete them on \(status.domain) too, or put the files back and they sync again on their own.")
             }
+            .confirmationDialog(
+                hold.map { LimitWords.line($0, time: time) } ?? "",
+                isPresented: $lifting,
+                titleVisibility: .visible
+            ) {
+                Button("Send them now") { lift() }
+            } message: {
+                Text(LimitWords.share(of: device.kind, until: status.usage.resumesAt.map(time)))
+            }
         }
     }
 
-    private func words(_ status: CloudStatus) -> String {
+    /// A moment as a time of day, in this person's language and zone: 05:30.
+    private func time(_ ms: Int) -> String {
+        HistoryDates().time(ms)
+    }
+
+    private func lift() {
+        Task {
+            do {
+                try await workspace.liftWait()
+            } catch {
+                toaster.show((error as? DoklinError)?.message ?? error.localizedDescription, tone: .error)
+            }
+        }
+    }
+
+    private func words(_ status: CloudStatus, _ hold: SyncHold?) -> String {
+        if let hold { return LimitWords.line(hold, time: time) }
         switch status.phase {
         case .idle: return status.lastSyncMs == nil ? "Not synced yet" : "Synced"
         case .syncing: return "Syncing…"
         case .offline: return "Offline — changes wait on this iPhone"
         case .paused: return "Sync paused"
         case .pendingDeletes: return "\(status.pendingDeletes) deletion\(status.pendingDeletes == 1 ? "" : "s") to confirm"
+        case .pendingAdds: return LimitWords.pendingAdds(status.pendingAdds)
         case .workerOutdated: return "Worker update needed — update it from a Mac"
         case .revoked: return "Not signed in"
+        case .limited: return status.error ?? "Today’s Cloudflare requests are used up"
         case .error: return status.error.map { "Can't sync: \($0)" } ?? "Can't sync"
         }
     }
 
-    private func tint(_ status: CloudStatus) -> Color {
+    private func tint(_ status: CloudStatus, _ hold: SyncHold?) -> Color {
+        switch hold {
+        case .waiting?, .slow?: return Theme.warnInk
+        case .sending?: return Theme.accent
+        case nil: break
+        }
         switch status.phase {
         case .idle: return Theme.live
         case .syncing: return Theme.accent
         case .offline, .paused: return Theme.text3
-        case .pendingDeletes, .workerOutdated: return Theme.warnInk
+        case .pendingDeletes, .pendingAdds, .workerOutdated, .limited: return Theme.warnInk
         case .revoked, .error: return Theme.errorInk
         }
     }

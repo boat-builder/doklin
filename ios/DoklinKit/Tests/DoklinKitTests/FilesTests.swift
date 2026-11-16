@@ -154,7 +154,9 @@ final class AudienceTests: XCTestCase {
     private func status(spaces: String) throws -> CloudStatus {
         let json = """
         {"root":"/w","domain":"d","endpoint":"https://d","wsId":"w-1","name":"Notes","phase":"idle",
-         "lastSyncMs":1,"error":null,"pendingDeletes":0,"me":"Ada","meId":"m-1","can":[],"workerVersion":17,
+         "lastSyncMs":1,"error":null,"pendingDeletes":0,"pendingAdds":0,
+         "usage":{"mode":"normal","cause":null,"today":0,"fleetToday":null,"cap":null,"plan":null,"resumesAt":null,"waiting":0,"liftable":false,"lifted":false},
+         "me":"Ada","meId":"m-1","can":[],"workerVersion":17,
          "public":[],"presence":[],"leases":[],"spaces":\(spaces)}
         """
         return try JSONDecoder().decode(CloudStatus.self, from: Data(json.utf8))
