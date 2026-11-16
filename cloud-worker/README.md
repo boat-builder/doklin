@@ -45,10 +45,9 @@ GET  /api/manifest[?since=e]  body + x-manifest-etag; 304 unchanged
 PUT  /api/manifest  x-base-etag (428 without) → {etag, seq} + x-manifest-etag; 412 {etag} lost
      race; 400 invalid; 426 other manifest version; 413 > 4 MB; 409 {error, taken: [slug]} when
      the public map names an address another space holds
-GET    /api/blobs/<fid>         {blobs: [{hash, size, uploaded}]}
 GET    /api/blobs/<fid>/<hash>  bytes, content-type as uploaded
-PUT    /api/blobs/<fid>/<hash>  create-only → {stored, existed, hash, size}; 413 > 25 MB
-DELETE /api/blobs/<fid>/<hash>  {deleted: true}
+PUT    /api/blobs/<fid>/<hash>  create-only → {stored, existed, hash, size}; 413 > 25 MB; the
+                                same bytes again are stored again (the sweep's day starts over)
 GET  /api/versions/index  index + x-versions-etag; 404 none
 PUT  /api/versions/index  x-base-etag (428), "*" creates; 412 {etag}; 400; 413 > 1 MB
 GET|PUT|DELETE /api/versions/snapshots/<id>  PUT create-only ({existed: true} on re-PUT); 413 > 4 MB
@@ -76,6 +75,16 @@ of a device's requests today. `fleetToday` = everyone's reported requests today
 (`usage`), `null` when D1 could not say; public page views and other Workers on
 the account are not in it. The plan is `settings.plan`, `free` until the
 superadmin says otherwise; D1 down → the Free numbers and `fleetToday: null`.
+
+## The daily sweep (`src/sweep.ts`; `scheduled` in `src/index.ts`)
+
+A cron trigger (`[triggers] crons`, once a day) deletes every `blobs/<fid>/<hash>` — in the
+shared workspace and under each `spaces/<id>/` — that its section's manifest doesn't name and
+that was stored more than a day ago (`SWEEP_MIN_AGE_MS` ⇄ `UPLOADED_TTL_MS`,
+`engine/src/cloud/unit.rs`, which must stay inside it). Listing first, manifest after. A manifest
+that can't be read leaves its section alone; no manifest names nothing; a file outside `syncs`
+is not named. At most `SWEEP_CALLS` (40) bucket calls a run (Free: 50 an invocation); each day
+starts at another section. `versions/` is not its: the engine collects the version store.
 
 ## Spaces (`src/spaces.ts`, `src/api.ts`)
 
@@ -246,11 +255,20 @@ case-insensitive collision.
                         by exact path; nothing else is served
                         a slug the shared map lacks is looked up in `addresses` and served from
                         that space (cache key carries its etag and id); held by nobody → 404, uncached
-/og.png · /robots.txt · /favicon.ico · /apple-touch-icon.png
-/__web/<tag>/mermaid.js  immutable, content-tagged
-/__web/fonts/<file>      the app's bundled fonts
 anything else            404 page
 ```
+
+Static assets, served by Cloudflare from `doklin-cloud-web/` without running
+the worker (free, uncounted; headers from its `_headers`, `cloud-worker/web/_headers`):
+
+```
+/__web/<tag>/mermaid.js  immutable, content-tagged (the tag is spliced into the worker)
+/__web/fonts/<file>      the app's bundled fonts, a week
+/og.png · /favicon.ico · /apple-touch-icon.png   a week
+/robots.txt
+```
+
+One of those paths that reaches the worker names nothing: a 404, no bucket read.
 
 ## Bucket (`src/layout.ts`)
 
@@ -352,6 +370,7 @@ worse than none).
 
 ```sh
 curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js -o doklin-cloud-worker.js
+curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-web.tar.gz | tar -xz   # doklin-cloud-web/
 npx -y wrangler@4 whoami
 npx -y wrangler@4 r2 bucket create doklin-notes-example-com
 npx -y wrangler@4 d1 create doklin-notes-example-com      # prints database_id
@@ -362,9 +381,11 @@ curl -fsS -H "Authorization: Bearer $KEY" https://notes.example.com/api/meta    
 sh doklin-cloud-update.sh https://notes.example.com       # update (release asset)
 ```
 
-`wrangler.toml` carries two `[[ratelimits]]` blocks, `DEVICE_LIMIT` and
-`AGENT_LIMIT` (namespaces `1001`, `1002`): the setup prompt, the update script
-and the example write the same ones, held together by
+`wrangler.toml` serves `[assets] directory = "doklin-cloud-web"`, declares the
+sweep's `[triggers] crons = ["17 3 * * *"]` (one of an account's five on Free),
+and carries two `[[ratelimits]]` blocks, `DEVICE_LIMIT` and `AGENT_LIMIT`
+(namespaces `1001`, `1002`). The setup prompt, the update script and the
+example write the same lines, held together by
 `verify-harness/cloudprompts.test.mjs`. A namespace is the account's, so two
 domains on one account share it; their keys (token ids) never meet.
 
@@ -377,7 +398,7 @@ Teardown: app wipe, then `wrangler delete`, `wrangler d1 delete`, `wrangler r2 b
 ```sh
 pnpm typecheck:worker
 pnpm test:worker       # node cloud-worker/test/run.mjs [--bundle <file>]; fake R2, D1 on node:sqlite
-pnpm bundle:worker     # node scripts/bundle-worker.mjs [--no-mermaid] → cloud-worker/dist/
+pnpm bundle:worker     # node scripts/bundle-worker.mjs [--no-mermaid] → cloud-worker/dist/ (worker + doklin-cloud-web/)
 node verify-harness/serve-worker.mjs   # bundle over test/seed.mjs on :8787
 node verify-harness/drive-cli.mjs      # built cli/ against the worker
 ```

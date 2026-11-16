@@ -23,7 +23,9 @@ worker renders synced blobs on request. See also [cloud.md](cloud.md).
 
 ## Rendering (`cloud-worker/src/`)
 
-`workspace.ts` (synced tree), `publicMap.ts` (where is it public), `pages.ts` (page from files), `render.ts` (HTML), `theme.ts` (app tokens and fonts, imported at build), `public.ts` (routing, cache), `static.ts` (landing, 404, icons, OG, fonts, mermaid). They reuse the app's pure modules (`src/criticMarkup.ts`, `src/frontmatter.ts`, `src/metaFile.ts`, `src/docLinks.ts`, `src/drawingSvg.ts`) so a page cannot disagree with the app.
+`workspace.ts` (synced tree), `publicMap.ts` (where is it public), `pages.ts` (page from files), `render.ts` (HTML), `theme.ts` (app tokens and font faces, imported at build), `public.ts` (routing, cache), `static.ts` (landing, 404). They reuse the app's pure modules (`src/criticMarkup.ts`, `src/frontmatter.ts`, `src/metaFile.ts`, `src/docLinks.ts`, `src/drawingSvg.ts`) so a page cannot disagree with the app.
+
+The files pages ask for — fonts, icons, `og.png`, `robots.txt`, the mermaid module — are static assets in the web directory `scripts/bundle-worker.mjs` builds (`doklin-cloud-web/`; `og.png`, `robots.txt` and `_headers` from `cloud-worker/web/`). Cloudflare serves them without running the worker, so they cost none of the day's requests and a public page view is one request. An asset path that reaches the worker is a 404 without a bucket read. `_headers`: no path may match two `Cache-Control` rules (Cloudflare joins them with a comma).
 
 - Comment markers stripped; thread bodies never leave the sidecar. From `<stem>.meta.jsonl` only table widths are used, under the app's table identity (`tableSignature` in `render.ts` ⇄ `src/tableWidths.ts`, byte-compatible).
 - The frontmatter block is left off the page (`splitFrontmatter`, `src/frontmatter.ts`): only the body is rendered.
@@ -34,4 +36,4 @@ worker renders synced blobs on request. See also [cloud.md](cloud.md).
 
 ## Cache
 
-- `caches.default`, key `https://cache.doklin/<manifestEtag><pathname><search>`; 200s and 404s kept a day; browser gets `no-cache`; static assets bypass. A manifest change gives every URL a new key, so a page is never stale past one `head` (steady state: one head, one hit).
+- `caches.default`, key `https://cache.doklin/<webTag>/<manifestEtag><pathname><search>`; 200s and 404s kept a day; browser gets `no-cache`. The web tag is in the key because a page names the mermaid module by it: a deploy that changes the module serves no cached page asking for one that is gone. A manifest change gives every URL a new key, so a page is never stale past one `head` (steady state: one head, one hit).

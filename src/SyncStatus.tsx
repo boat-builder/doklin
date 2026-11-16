@@ -1,8 +1,9 @@
 // The workspace's sync in words, at the foot of the sidebar:
 // "Synced", "Syncing…", "Offline", "2 deletions to confirm", and what the
-// day's Cloudflare limits are doing — "412 changes wait until 05:30". The
-// full line (describeCloud: the phase, when it last synced, the domain) is
-// the tooltip, and a click opens the Cloud panel, where a wait is lifted.
+// day's Cloudflare limits are doing — "412 held until 05:30". The full line
+// (a mode's whole words, then describeCloud: the phase, when it last synced,
+// the domain) is the tooltip, and a click opens the Cloud panel, where a wait
+// is lifted.
 
 import { useEffect, useState } from "react";
 import { describeCloud, syncWords, usageState, usageWords, type CloudStatus, type SyncTone } from "./cloud";
@@ -53,7 +54,7 @@ export default function SyncStatus({ cloud, onOpen }: { cloud: CloudStatus; onOp
   const { tone, text } = syncWords(shown);
   // The tooltip leads with a mode's words: the phase line alone says "Synced".
   const mode = cloud.phase === "idle" || cloud.phase === "syncing" ? usageWords(cloud.usage) : null;
-  const line = mode ? `${mode.text} · ${describeCloud(cloud)}` : describeCloud(cloud);
+  const line = mode ? `${mode.whole} · ${describeCloud(cloud)}` : describeCloud(cloud);
   return (
     <button
       className={`sync-status is-${tone}`}

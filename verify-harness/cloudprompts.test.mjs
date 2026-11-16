@@ -37,6 +37,7 @@ const {
   CLI_INSTALL_SCRIPT_URL,
   WORKER_BUNDLE_URL,
   WORKER_UPDATE_SCRIPT_URL,
+  WORKER_WEB_URL,
   buildAgentLoginPrompt,
   buildRecoverPrompt,
   buildSetupPrompt,
@@ -140,7 +141,10 @@ function skeleton(prompt, { steps, secret, wrangler = true }) {
   skeleton(p, { steps: 10, secret: true });
   ok(p.includes('workspace "Notes"'), "names the workspace");
   ok(p.includes(`curl -fsSL ${WORKER_BUNDLE_URL} -o doklin-cloud-worker.js`), "fetches the bundle");
+  ok(p.includes(`curl -fsSL ${WORKER_WEB_URL} -o doklin-cloud-web.tar.gz`), "…and the web files");
+  ok(p.includes("tar -xzf doklin-cloud-web.tar.gz"), "…unpacked beside it");
   ok(p.includes("scripts/bundle-worker.mjs"), "…with the clone-and-bundle fallback");
+  ok(p.includes("cloud-worker/dist/doklin-cloud-web directory"), "…which copies the web files too");
   ok(p.includes("deployments list --name doklin-notes-example-com"), "verifies the worker name is free");
   ok(p.includes("r2 bucket list"), "verifies the bucket name is free");
   ok(p.includes("d1 list"), "…and the database name too");
@@ -265,6 +269,8 @@ eq(
 
   eq(path.basename(WORKER_UPDATE_SCRIPT_URL), "doklin-cloud-update.sh", "the release asset's name");
   ok(text.includes(`BUNDLE_URL="${WORKER_BUNDLE_URL}"`), "the script fetches the same worker bundle");
+  ok(text.includes(`WEB_URL="${WORKER_WEB_URL}"`), "…and the same web files");
+  ok(text.includes("tar -xzf doklin-cloud-web.tar.gz"), "…unpacked beside it");
 
   const workerSource = fs.readFileSync(path.join(repoRoot, "cloud-worker", "src", "version.ts"), "utf8");
   const date = workerSource.match(/^export const COMPATIBILITY_DATE = "(.+)";$/m)?.[1];
@@ -332,6 +338,30 @@ eq(
   for (const name of fromPrompt.map((b) => b.split(" ")[0])) {
     ok(new RegExp(`^\\s+${name}\\?: RateLimit;$`, "m").test(envSource), `the worker reads ${name}`);
   }
+
+  // The web directory: the archive unpacks to the directory every writer of
+  // wrangler.toml names, which is the one the bundle script writes, and the
+  // release attaches the archive under the name both downloads use.
+  const assets = (toml) => toml.match(/^\[assets\]\ndirectory = "([^"]+)"$/m)?.[1];
+  const bundler = fs.readFileSync(path.join(repoRoot, "scripts", "bundle-worker.mjs"), "utf8");
+  const webDir = bundler.match(/^export const WEB_DIR = "([^"]+)";$/m)?.[1];
+  ok(webDir, "the bundle script names its web directory");
+  eq(assets(setup({ kind: "domain", domain: "notes.example.com" })), webDir, "the setup prompt serves the bundle script's web directory");
+  eq(assets(setup({ kind: "workers-dev", name: "sherin-notes" })), webDir, "on a workers.dev address too");
+  eq(assets(text), webDir, "…and so does the update script");
+  eq(assets(example), webDir, "…and the template");
+
+  // The daily sweep's trigger, the same line from every writer.
+  const crons = (toml) => toml.match(/^\[triggers\]\ncrons = (\[[^\]\n]*\])$/m)?.[1];
+  const fromSetup = crons(setup({ kind: "domain", domain: "notes.example.com" }));
+  ok(fromSetup && JSON.parse(fromSetup).length === 1, `the setup prompt declares one daily trigger: ${fromSetup}`);
+  eq(crons(setup({ kind: "workers-dev", name: "sherin-notes" })), fromSetup, "on a workers.dev address too");
+  eq(crons(text), fromSetup, "…and so does the update script");
+  eq(crons(example), fromSetup, "…and the template");
+  ok(/^\s+async scheduled\(/m.test(fs.readFileSync(path.join(repoRoot, "cloud-worker", "src", "index.ts"), "utf8")), "the worker answers it");
+  eq(path.basename(WORKER_WEB_URL), "doklin-cloud-web.tar.gz", "the release asset's name");
+  const release = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
+  ok(release.includes(`-czf release-assets/doklin-cloud-web.tar.gz -C cloud-worker/dist ${webDir}`), "the release attaches the directory, archived under its own name");
 }
 
 /* ---------- teardown ---------- */

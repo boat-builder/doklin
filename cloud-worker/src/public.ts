@@ -1,9 +1,8 @@
 // The public surface — no auth, GET/HEAD only.
-// The static assets and the landing page answer without touching the
-// workspace; everything else is resolved against a public map and rendered
-// from synced blobs (pages.ts), through a cache keyed by that manifest's
-// etag. The map is the shared workspace's own — or, for an address it does
-// not hold, the map of the space the address registry names (addresses.ts):
+// Pages are resolved against a public map and rendered from synced blobs
+// (pages.ts), through a cache keyed by that manifest's etag. The map is the
+// shared workspace's own — or, for an address it does not hold, the map of
+// the space the address registry names (addresses.ts):
 //
 //   GET /                        the root page when the map names one, else the landing page
 //   GET /<slug>                  a published note (html rendition when it has one; ?v=md the markdown)
@@ -11,30 +10,29 @@
 //   GET /<dirSlug>               a published folder: its table of contents
 //   GET /<dirSlug>/<rel/path>    a note inside it (`.md` dropped, segments percent-encoded), its
 //                                rendition at …/raw, or an html document by exact path
-//   GET /og.png                  the site's static Open Graph image
-//   GET /__web/<tag>/mermaid.js  the standalone mermaid module (immutable, content-tagged)
-//   GET /__web/fonts/<file>      the font files the app bundles (theme.ts)
+//
+// The files pages ask for never reach the worker: Cloudflare serves them
+// from the web directory deployed beside it (scripts/bundle-worker.mjs),
+// free and uncounted —
+//
+//   /__web/<tag>/mermaid.js      the standalone mermaid module (immutable, content-tagged)
+//   /__web/fonts/<file>          the font files the app bundles (theme.ts)
+//   /og.png                      the site's static Open Graph image
 //   robots.txt, favicon.ico, apple-touch-icon.png
+//
+// — so one of those paths that does reach it names nothing, and is a 404
+// without a look at the workspace.
 //
 // Every page carries <meta name="robots" content="noindex">.
 
 import { spaceAt } from "./addresses";
+import { WEB_TAG } from "./assets";
 import type { Env } from "./env";
 import { RESERVED_SLUGS, SLUG_RE, validPath } from "./layout";
 import { dirTitle, htmlFile, notePage, rawRendition, tocPage } from "./pages";
 import { PublicMap, nestedUrl, type DirPage, type Page } from "./publicMap";
-import {
-  appleTouchIcon,
-  favicon,
-  fontFile,
-  landingPage,
-  mermaidModule,
-  notFoundPage,
-  ogImage,
-  robotsTxt,
-} from "./static";
+import { landingPage, notFoundPage } from "./static";
 import { spaceEnv } from "./spaces";
-import { FONT_PATH } from "./theme";
 import { isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 
 /* ---------- The cache ----------
@@ -60,8 +58,11 @@ function cacheStore(): CacheLike | null {
   return c?.default ?? null;
 }
 
+// The web tag rides in the key too: a cached page names the mermaid module by
+// it, and a deploy that changes the module serves no page asking for one
+// that is gone.
 const cacheKey = (ws: Workspace, url: URL): string =>
-  `https://cache.doklin/${ws.etag}${ws.space ? `@${ws.space}` : ""}${url.pathname}${url.search}`;
+  `https://cache.doklin/${WEB_TAG}/${ws.etag}${ws.space ? `@${ws.space}` : ""}${url.pathname}${url.search}`;
 
 const cacheable = (res: Response): boolean =>
   (res.status === 200 || res.status === 404) && !res.headers.has("set-cookie");
@@ -78,6 +79,9 @@ const deliver = (res: Response, method: string): Response =>
 
 /* ---------- Routing ---------- */
 
+/** The web directory's files outside /__web/ (cloud-worker/web/). */
+const WEB_FILES: ReadonlySet<string> = new Set(["/robots.txt", "/favicon.ico", "/apple-touch-icon.png", "/og.png"]);
+
 export async function handlePublic(
   request: Request,
   env: Env,
@@ -85,14 +89,7 @@ export async function handlePublic(
   url: URL,
 ): Promise<Response> {
   const path = url.pathname;
-  if (path === "/robots.txt") return deliver(robotsTxt(), request.method);
-  if (path === "/favicon.ico") return deliver(favicon(), request.method);
-  if (path === "/apple-touch-icon.png") return deliver(appleTouchIcon(), request.method);
-  if (path === "/og.png") return deliver(ogImage(), request.method);
-  if (/^\/__web\/[a-z0-9]+\/mermaid\.js$/.test(path)) return deliver(mermaidModule(), request.method);
-  if (path.startsWith(FONT_PATH)) {
-    return deliver(fontFile(path.slice(FONT_PATH.length)) ?? notFoundPage(), request.method);
-  }
+  if (path.startsWith("/__web/") || WEB_FILES.has(path)) return deliver(notFoundPage(), request.method);
 
   const shared = await openWorkspace(env);
   if (!shared) return deliver(path === "/" ? landingPage(null) : notFoundPage(), request.method);

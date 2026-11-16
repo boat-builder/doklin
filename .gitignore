@@ -45,8 +45,11 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# Cloud worker: the real deployment config carries an account id and a domain
+# Cloud worker: the real deployment config carries an account id and a domain;
+# a deploy by hand downloads the worker and its web files beside it
 cloud-worker/wrangler.toml
+cloud-worker/doklin-cloud-worker.js
+cloud-worker/doklin-cloud-web/
 
 # wrangler's local state
 .wrangler

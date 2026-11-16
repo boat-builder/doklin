@@ -424,16 +424,6 @@ pub trait Remote: Send + Sync + 'static {
         bytes: Vec<u8>,
         content_type: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
-    /// (hash, uploaded-at ms) per stored revision of one file.
-    fn list_blobs(
-        &self,
-        file_id: &str,
-    ) -> impl std::future::Future<Output = RemoteResult<Vec<(String, u64)>>> + Send;
-    fn delete_blob(
-        &self,
-        file_id: &str,
-        hash: &str,
-    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
     /* ----- the version store ----- */
 
     /// The index and its etag; None when the workspace has never mirrored.
@@ -1087,49 +1077,6 @@ impl Remote for HttpRemote {
                 .send()
                 .await
                 .map_err(transport_err)?;
-            expect_status(res).await.map(|_| ())
-        }
-    }
-
-    fn list_blobs(
-        &self,
-        file_id: &str,
-    ) -> impl std::future::Future<Output = RemoteResult<Vec<(String, u64)>>> + Send {
-        let url = self.sync_url(&format!("blobs/{}", file_id));
-        async move {
-            let res = self.auth(self.client.get(url)).send().await.map_err(transport_err)?;
-            let res = expect_status(res).await?;
-            let v = res.json::<serde_json::Value>().await.map_err(transport_err)?;
-            let blobs = v
-                .get("blobs")
-                .and_then(|b| b.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|b| {
-                            let hash = b.get("hash")?.as_str()?.to_string();
-                            let uploaded = b
-                                .get("uploaded")
-                                .and_then(|u| u.as_str())
-                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                                .map(|d| d.timestamp_millis() as u64)
-                                .unwrap_or(0);
-                            Some((hash, uploaded))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ok(blobs)
-        }
-    }
-
-    fn delete_blob(
-        &self,
-        file_id: &str,
-        hash: &str,
-    ) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let url = self.sync_url(&format!("blobs/{}/{}", file_id, hash));
-        async move {
-            let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             expect_status(res).await.map(|_| ())
         }
     }

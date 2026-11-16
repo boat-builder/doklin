@@ -47,14 +47,11 @@ const TOMBSTONE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// Protects against an unmounted/renamed folder nuking the remote.
 const MASS_DELETE_PCT: usize = 30;
 const MASS_DELETE_MIN: usize = 5;
-/// Blob GC runs opportunistically on this fraction of cycles.
-const GC_EVERY_N_CYCLES: u64 = 20;
-/// A blob must be at least this old before GC may take it (a racing pusher
-/// may have uploaded it moments ago, ahead of its manifest CAS).
-const GC_MIN_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 const CAS_ATTEMPTS: usize = 4;
 /// How long an upload is remembered (`WorkspaceState::uploaded`): well
-/// inside `GC_MIN_AGE_MS`, so a blob remembered here is still on the domain.
+/// inside the day the worker's sweep leaves a blob no manifest names
+/// (`SWEEP_MIN_AGE_MS`, cloud-worker/src/sweep.ts), so a blob remembered here
+/// is still on the domain. Change both.
 const UPLOADED_TTL_MS: u64 = 12 * 60 * 60 * 1000;
 
 /* ---------- Local persistent state ---------- */
@@ -270,10 +267,6 @@ pub(crate) struct Unit<R: Remote> {
     pub held_deletes: Vec<String>,
     allow_mass_delete: bool,
     cycles: u64,
-    /// fileIds pushed since the last GC — the only ones that can have an
-    /// old blob to collect. A set, because twenty cycles of edits to one
-    /// file is still one file to look at.
-    gc_candidates: BTreeSet<String>,
     /// Files a cycle met as moved to another section and left alone, for
     /// `Engine::relocate`.
     pub deferred: HashSet<String>,
@@ -318,7 +311,6 @@ impl<R: Remote> Unit<R> {
             held_deletes: Vec::new(),
             allow_mass_delete: false,
             cycles: 0,
-            gc_candidates: BTreeSet::new(),
             deferred: HashSet::new(),
             poke: false,
             gone: false,
@@ -429,11 +421,6 @@ impl<R: Remote> Unit<R> {
             self.held_deletes.clear();
             self.poke = true;
         }
-    }
-
-    /// Is blob collection due? Asked after a cycle.
-    pub(crate) fn gc_due(&self) -> bool {
-        self.cycles > 0 && self.cycles % GC_EVERY_N_CYCLES == 0
     }
 
     /* ----- relocation: a file arriving from another section ----- */
@@ -1492,7 +1479,6 @@ impl<R: Remote> Unit<R> {
                     FileState { path: rf.path.clone(), rev: rf.rev, hash: rf.hash.clone(), size, mtime_ms },
                 );
                 let _ = write_atomic(&self.base_path(&push.file_id), &push.bytes);
-                self.gc_candidates.insert(push.file_id.clone());
             }
             if push.new {
                 self.state.pending_new.remove(&push.path);
@@ -1561,40 +1547,6 @@ impl<R: Remote> Unit<R> {
 
     fn delete_local_silent(&self, abs: &Path) {
         let _ = std::fs::remove_file(abs);
-    }
-
-    /// Drop every blob of a pushed file but the one the manifest points at
-    /// now, once it is old enough that no racing pusher still needs it.
-    /// There is nothing else to keep: a file's past is the
-    /// version store's, and the sync side needs exactly the current bytes.
-    /// At most `budget` files: collecting is bulk work, and what is left
-    /// waits for the next round.
-    pub(crate) async fn gc_blobs(&mut self, budget: usize) {
-        let candidates: Vec<String> = self.gc_candidates.iter().take(budget).cloned().collect();
-        for fid in &candidates {
-            self.gc_candidates.remove(fid);
-        }
-        self.sweep_blobs(&candidates).await;
-    }
-
-    /// How many files are waiting to have their old blobs collected.
-    pub(crate) fn gc_pending(&self) -> usize {
-        self.gc_candidates.len()
-    }
-
-    /// "Keep the current hash, drop the rest" over these files.
-    /// A fileId the manifest no longer holds (a deleted file) keeps nothing.
-    async fn sweep_blobs(&self, fids: &[String]) {
-        for fid in fids {
-            let current = self.state.manifest.files.get(fid).map(|f| f.hash.as_str());
-            let Ok(blobs) = self.remote.list_blobs(fid).await else { continue };
-            for (hash, uploaded_ms) in blobs {
-                let old_enough = now_ms().saturating_sub(uploaded_ms) > GC_MIN_AGE_MS;
-                if old_enough && current != Some(hash.as_str()) {
-                    let _ = self.remote.delete_blob(fid, &hash).await;
-                }
-            }
-        }
     }
 
     pub(crate) fn file_id_at(&self, rel: &str) -> Option<String> {

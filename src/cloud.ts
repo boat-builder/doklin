@@ -734,8 +734,10 @@ const counted = (n: number, one: string, many: string) => `${n.toLocaleString()}
 /* ---------- The day's limits ----------
    The words are the surfaces' own (the engine says only the mode). The
    iPhone says the same — the mode lines, the plan's name, the
-   many-new-documents question and its footer words (`syncWords`) — in
-   ios/DoklinKit/Sources/DoklinKit/Models/Limits.swift: change both. */
+   many-new-documents question — in
+   ios/DoklinKit/Sources/DoklinKit/Models/Limits.swift: change both. Its sync
+   line spans the screen, so it carries the whole words (`waitWords`); only
+   the Mac's footer, a corner of the sidebar, says them short (`heldWords`). */
 
 /** What the day's limits are doing to sync right now. `waits`: big changes
  *  are held until the next UTC day, by this Mac's spend or everyone's.
@@ -764,21 +766,31 @@ export function waitWords(waiting: number, until: string | null): string {
   return `${counted(waiting, "change waits", "changes wait")}${until ? ` until ${until}` : ""}`;
 }
 
+/** The footer's "412 held until 05:30": the sidebar's default width cuts
+ *  `waitWords` off before its time. */
+export function heldWords(waiting: number, until: string | null): string {
+  return `${waiting.toLocaleString()} held${until ? ` until ${until}` : ""}`;
+}
+
 /** "Sending 412 changes…". */
 export const sendingWords = (waiting: number): string => `Sending ${counted(waiting, "change", "changes")}…`;
 
 /** The footer's words for a mode that changes what sync does, in place of
  *  "Synced" and "Syncing…" — or null when the day's limits change nothing
- *  anybody would notice. */
-export function usageWords(u: CloudUsage): { tone: SyncTone; text: string } | null {
+ *  anybody would notice. `whole` is the same said in full, for its tooltip. */
+export function usageWords(u: CloudUsage): { tone: SyncTone; text: string; whole: string } | null {
   const state = usageState(u);
   switch (state.kind) {
     case "waits":
-      return state.waiting > 0 ? { tone: "warn", text: waitWords(state.waiting, state.until) } : null;
-    case "sending":
-      return { tone: "busy", text: sendingWords(state.waiting) };
+      return state.waiting > 0
+        ? { tone: "warn", text: heldWords(state.waiting, state.until), whole: waitWords(state.waiting, state.until) }
+        : null;
+    case "sending": {
+      const text = sendingWords(state.waiting);
+      return { tone: "busy", text, whole: text };
+    }
     case "slow":
-      return { tone: "warn", text: "Sync is slower today" };
+      return { tone: "warn", text: "Sync is slower today", whole: "Sync is slower today" };
     case "normal":
       return null;
   }

@@ -411,7 +411,7 @@ Build this when one of these holds:
 
 The design below stays ready for then.
 
-`WORKER_VERSION` 20 → 21. A Durable Object class rings devices when something
+One `WORKER_VERSION` bump. A Durable Object class rings devices when something
 they can see has changed; presence and leases move onto the socket. Polling
 stays only as the catch-up after a gap and a slow safety net.
 
@@ -512,20 +512,48 @@ the hundreds per device.
 
 ---
 
-## Release 3 — public pages
+## Release 3 — public pages *(built 2026-11-16, on `claude/rate-limits-release-3`)*
 
 - Fonts, mermaid, `og.png`, `favicon.ico`, `apple-touch-icon.png`,
-  `robots.txt` become **static assets** (`[assets] directory = "web"` in
-  `wrangler.toml`): Cloudflare serves them without invoking the worker, so
-  they cost nothing. A page view drops to one request.
-- `scripts/bundle-worker.mjs` writes `dist/web/` (paths content-tagged as
-  today) and the bundle loses mermaid (the 3 MB gzip guard gets easier); the
-  release ships `doklin-cloud-web.tar.gz` beside `doklin-cloud-worker.js`; the
-  update script and setup prompt fetch and unpack it. `cloud-worker/src/assets.ts`
-  and the `WEB_ASSETS` splice are deleted.
-- `WORKER_VERSION` bump (21 → 22) — a page's delivery changed.
+  `robots.txt` are **static assets** (`[assets] directory =
+  "doklin-cloud-web"` in `wrangler.toml`): Cloudflare serves them without
+  invoking the worker, so they cost nothing. A page view is one request. Their
+  headers come from `cloud-worker/web/_headers` (no path matches two
+  Cache-Control rules: Cloudflare would join them). An asset path that reaches
+  the worker is a 404 without a bucket read.
+- `scripts/bundle-worker.mjs` writes `doklin-cloud-web/` beside the worker
+  (paths as before; the mermaid module content-tagged), and the worker
+  itself drops to 85 KB gzipped. The release ships
+  `doklin-cloud-web.tar.gz` beside `doklin-cloud-worker.js`; the update script
+  and the setup prompt fetch and unpack it. `og.png` is a file in
+  `cloud-worker/web/`; the icons are copied from `public/`, the fonts from
+  `src/assets/fonts/`. The worker keeps only the tag (`assets.ts`,
+  `WEB_TAG`), which also rides in the render cache's key, so a deploy that
+  changes the module serves no cached page asking for a gone one.
+- `cloud-worker/test/assets.mjs` plays Cloudflare's asset layer in front of a
+  bundle (`run.mjs --bundle`, `serve-worker.mjs`).
+- `WORKER_VERSION` 21 → 22 (PR #133, page links, took 21 first).
 - Workers Paid stays the superadmin's call; the plan setting (1.3) is where it
   takes effect.
+
+### 3.1 Left over from release 1 (the user's call, 2026-11-16: done with this release)
+
+- **Uploads no manifest names.** *(Done, as a lasting sweep — the user's
+  call, 2026-11-16: the bucket is small, but clean.)* Reading the app's own
+  collector showed more than the runaway: a deleted file's copies were never
+  collected (deletions never fed it), a version replaced less than a day
+  before its round stayed for good, and a Mac that quit before its round
+  forgot its list. So the worker sweeps once a day (`cloud-worker/src/sweep.ts`,
+  a cron trigger): every `blobs/` copy, in every section, that its manifest
+  doesn't name and that is more than a day old. The app's collector, and the
+  routes it used (`GET /api/blobs/<fid>`, `DELETE /api/blobs/<fid>/<hash>`),
+  are gone — no device deletes a copy. A re-upload of a copy's own bytes
+  stores it again, so a file back to an old version restarts its day.
+- **The Mac footer's wording is cut off.** *(Done.)* The footer says
+  "412 held until 5:30 AM" (`heldWords`, `src/cloud.ts`); the tooltip and the
+  panel keep "412 changes wait until 5:30 AM". The iPhone's sync line spans
+  the screen and keeps the whole words. `drive-limits.mjs` checks the footer
+  fits at the default width, 12,400 included.
 
 ---
 
@@ -566,7 +594,12 @@ backoff ladder, ring coalescing — stay engine constants.
 **Release 2**: app and TestFlight first, then the update (adds `LIVE` and its
 migration), then the hand-run drop of `presence` and `leases`.
 
-**Release 3**: the update only (assets), then a look at a public page.
+**Release 3**: the app ships as usual (an app built for 22 keeps syncing
+with an older worker and shows the update badge, so the order doesn't matter), then
+the update (fetches the worker and `doklin-cloud-web.tar.gz`, declares the
+daily trigger), then a look at a public page: fonts, a diagram, the icon. The
+phone needs no TestFlight build for this: its old engine still calls the two
+removed routes now and then, which fail quietly. Its next build drops them.
 
 ## Calls I made (unconfirmed)
 

@@ -6,6 +6,8 @@
 //               and, under /api/agent, an agent's (agentApi.ts)
 //   everything  the visitor's — no auth, GET/HEAD only; see public.ts
 //   else
+// and one daily run, the cron trigger wrangler.toml declares: the sweep of
+// stored copies no manifest points at (sweep.ts).
 //
 // The worker holds no page content of its own: the bucket is the synced
 // workspace (manifest + content-addressed blobs), and a public page is a
@@ -15,6 +17,7 @@
 import { handleApi } from "./api";
 import type { Env } from "./env";
 import { handlePublic } from "./public";
+import { sweep } from "./sweep";
 
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
@@ -27,5 +30,13 @@ export default {
       return new Response("method not allowed", { status: 405 });
     }
     return handlePublic(request, env, ctx, url);
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    const r = await sweep(env, Date.now());
+    console.log(
+      `sweep: ${r.deleted} copies deleted; ${r.swept} of ${r.sections} sections swept` +
+        (r.unreadable > 0 ? `, ${r.unreadable} with an unreadable manifest left alone` : ""),
+    );
   },
 } satisfies ExportedHandler<Env>;
