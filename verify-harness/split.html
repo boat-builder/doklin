@@ -43,7 +43,14 @@
           `# Linked\n\nSee [the other note](./other.md) and ` +
             `[a missing one](./gone.md), plus [the web](https://example.com/).\n`,
         ],
+        // Two files that are not documents: listed greyed in the tree,
+        // opened as a tab that says so, never read (drive-unsupported.mjs).
+        ["/docs/photo.png", "\u0089PNG binary"],
+        ["/docs/data.csv", "a,b\n1,2\n"],
       ]);
+      // Every read, and every file sent to the Trash.
+      window.__reads = [];
+      window.__trashed = [];
       window.__mtime = 1000;
       window.__writes = [];
       const snap = (c) => ({ mtime_ms: ++window.__mtime, size: c.length });
@@ -71,6 +78,7 @@
             case "take_pending_folder":
               return Promise.resolve(null);
             case "read_file": {
+              window.__reads.push(args.path);
               const c = window.__fs.get(args.path);
               return c === undefined
                 ? Promise.reject(`no such file: ${args.path}`)
@@ -93,8 +101,14 @@
                   { kind: "file", name: "other.md", path: "/docs/other.md" },
                   { kind: "file", name: "third.md", path: "/docs/third.md" },
                   { kind: "file", name: "linked.md", path: "/docs/linked.md" },
-                ],
+                  { kind: "file", name: "data.csv", path: "/docs/data.csv", supported: false },
+                  { kind: "file", name: "photo.png", path: "/docs/photo.png", supported: false },
+                ].filter((f) => window.__fs.has(f.path)),
               });
+            case "trash_file":
+              window.__trashed.push(args.path);
+              window.__fs.delete(args.path);
+              return Promise.resolve(`/Users/me/.Trash/${args.path.split("/").pop()}`);
             case "stat_file": {
               const c = window.__fs.get(args.path);
               return c === undefined

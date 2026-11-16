@@ -2691,16 +2691,13 @@ body.sidebar-resizing {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 24px;
-  padding: 0 10px 0 16px;
+  height: 30px;
 }
 
 .sidebar-section-label {
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-3);
+  color: var(--text-1);
 }
 
 .sidebar-section-actions {
@@ -2927,15 +2924,14 @@ body.sidebar-resizing {
   color: var(--text-1);
 }
 
-/* Files Doklin can't open, listed only in "Show all files": greyed out and
-   inert to clicks (no open), but still selectable and movable, so the row
-   reads as "this exists on disk" rather than "this is a document". */
+/* Files Doklin can't open, listed only in "Show all files": greyed out, so
+   the row reads as "this exists on disk" rather than "this is a document".
+   A click opens a tab that says so; the open one keeps its full highlight. */
 .tree-row.is-unsupported,
 .tree-row.is-unsupported .tree-label {
   color: var(--text-3);
-  cursor: default;
 }
-.tree-row.is-unsupported {
+.tree-row.is-unsupported:not(.is-active) {
   opacity: 0.72;
 }
 
@@ -3034,8 +3030,17 @@ body.sidebar-resizing {
   border-radius: 8px;
 }
 
+/* A hairline and some air between the lists. */
 .tree-section + .tree-section {
   margin-top: 10px;
+}
+
+.tree-section + .tree-section::before {
+  content: "";
+  display: block;
+  height: 1px;
+  margin: 0 8px 6px;
+  background: var(--border-strong);
 }
 
 .tree-section.is-drop-section {
@@ -3043,8 +3048,62 @@ body.sidebar-resizing {
   background: var(--hover);
 }
 
+/* A list's heading pins to the top of the tree while its rows scroll under
+   it; the next list's heading pushes it off. Opaque, so rows pass beneath. */
 .tree-section-head {
-  padding: 0 6px 0 12px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 0 6px 0 0;
+  background: var(--canvas);
+}
+
+.tree-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+}
+
+button.tree-section-toggle:hover {
+  background: var(--hover);
+}
+
+.tree-section-toggle > svg {
+  flex-shrink: 0;
+}
+
+/* The fold chevron shows on hover, and stays while the list is folded. */
+.tree-section-chevron {
+  display: inline-flex;
+  color: var(--text-3);
+  opacity: 0;
+  transform: rotate(90deg);
+  transition:
+    opacity var(--dur-fast),
+    transform var(--dur-fast);
+}
+
+.tree-section-toggle:hover .tree-section-chevron,
+.tree-section-toggle:focus-visible .tree-section-chevron,
+.tree-section-toggle.is-folded .tree-section-chevron {
+  opacity: 1;
+}
+
+.tree-section-toggle.is-folded .tree-section-chevron {
+  transform: none;
+}
+
+.tree-section-count {
+  font-size: var(--fs-sm);
+  color: var(--text-3);
 }
 
 .tree-section-hint {

@@ -73,6 +73,7 @@ import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialo
 import Editor, { type EditorHandle } from "./Editor";
 import type { SearchInfo } from "./searchPlugin";
 import Sidebar, {
+  forgetTreeView,
   pruneNestedSelection,
   type SidebarSelection,
   type FileClipboardPayload,
@@ -80,6 +81,7 @@ import Sidebar, {
 import TabBar from "./TabBar";
 import {
   isUnsaved,
+  isUnsupportedTab,
   isUntitled,
   noteHasText,
   noteTitle,
@@ -1448,7 +1450,7 @@ export default function App() {
       }
     }
     const sd = splitRef.current?.doc;
-    if (sd && sd.kind === "file" && !sd.missing) {
+    if (sd && sd.kind === "file" && !sd.missing && !isUnsupportedTab(sd)) {
       files.push(sd.path, ...watchExtrasOf(sd.path, sd.htmlPath));
     }
     const seen = new Set<string>();
@@ -1701,6 +1703,33 @@ export default function App() {
   const loadCompanionDoc = useCallback(
     async (tab: Tab, viewPref?: DocView): Promise<{ doc: CompanionDoc; view: DocView }> => {
       const htmlOnly = tab.kind === "file" && isHtmlPath(tab.path);
+      // No document in this pane: the file is gone (the ghost state), or it
+      // is not a document and is never read (see isUnsupportedTab).
+      const noDocument = (missing: boolean): { doc: CompanionDoc; view: DocView } => ({
+        doc: {
+          path: tab.path,
+          kind: tab.kind,
+          missing,
+          contents: "",
+          snapshot: null,
+          htmlPath: null,
+          hasHtml: false,
+          htmlContent: null,
+          threads: [],
+          sidecarExists: false,
+          mdThreads: [],
+          mdOrphans: [],
+          tcols: [],
+          metaForeign: [],
+          head: "",
+          conflict: null,
+          dirty: false,
+        },
+        view: "md",
+      });
+      if (isUnsupportedTab(tab)) {
+        return noDocument(!(await invoke<boolean>("path_exists", { path: tab.path }).catch(() => false)));
+      }
       let contents = "";
       let snapshot: FileSnapshot | null = null;
       try {
@@ -1709,28 +1738,7 @@ export default function App() {
         snapshot = r.snapshot;
       } catch (e) {
         console.error("read failed", tab.path, e);
-        return {
-          doc: {
-            path: tab.path,
-            kind: tab.kind,
-            missing: true,
-            contents: "",
-            snapshot: null,
-            htmlPath: null,
-            hasHtml: false,
-            htmlContent: null,
-            threads: [],
-            sidecarExists: false,
-            mdThreads: [],
-            mdOrphans: [],
-            tcols: [],
-            metaForeign: [],
-            head: "",
-            conflict: null,
-            dirty: false,
-          },
-          view: "md",
-        };
+        return noDocument(true);
       }
       let htmlPath: string | null = null;
       if (htmlOnly) {
@@ -1833,23 +1841,31 @@ export default function App() {
     // An html-only document: rendered read-only, never loaded into the
     // markdown editor and never an autosave target (pathRef stays null).
     const htmlOnly = tab.kind === "file" && isHtmlPath(tab.path);
+    // A file that is not a document is never read: its tab only says so
+    // (or, once it is gone, is a ghost like any other).
+    const unsupported = isUnsupportedTab(tab);
 
     let contents = "";
     let snapshot: FileSnapshot | null = null;
     let failed = false;
-    try {
-      const result = await readTabDoc(tab);
-      contents = result.contents;
-      snapshot = result.snapshot;
-    } catch (e) {
-      failed = true;
-      console.error("read failed", tab.path, e);
+    if (unsupported) {
+      failed = !(await invoke<boolean>("path_exists", { path: tab.path }).catch(() => false));
+    } else {
+      try {
+        const result = await readTabDoc(tab);
+        contents = result.contents;
+        snapshot = result.snapshot;
+      } catch (e) {
+        failed = true;
+        console.error("read failed", tab.path, e);
+      }
     }
     if (superseded()) return;
-    if (failed) {
-      // Ghost state: pathRef stays null so autosave can't recreate the file at
-      // its old path, and nothing is watched. The editor is not rendered.
-      setTabMissing(tab.id, true);
+    if (failed || unsupported) {
+      // No document: pathRef stays null so autosave can't write (or recreate)
+      // the file, and nothing is watched. The editor is not rendered — the
+      // pane shows the ghost state, or that the file isn't a document.
+      setTabMissing(tab.id, failed);
       adoptFrontmatter("");
       baselineCapturedRef.current = false;
       pathRef.current = null;
@@ -1963,10 +1979,12 @@ export default function App() {
         if (note) out.push(note);
         continue;
       }
-      const readable = await invoke<ReadFileResult>("read_file", { path }).then(
-        () => true,
-        () => false,
-      );
+      const readable = isUnsupportedTab({ kind, path })
+        ? await invoke<boolean>("path_exists", { path }).catch(() => false)
+        : await invoke<ReadFileResult>("read_file", { path }).then(
+            () => true,
+            () => false,
+          );
       out.push({ id, kind, path, missing: readable ? undefined : true });
     }
     return out;
@@ -2745,7 +2763,7 @@ export default function App() {
       };
       const incomingHtmlOnly = incoming.kind === "file" && isHtmlPath(incoming.path);
       pathRef.current =
-        incoming.missing || incomingHtmlOnly ? null : incoming.path;
+        incoming.missing || incomingHtmlOnly || isUnsupportedTab(incoming) ? null : incoming.path;
       snapshotRef.current = incoming.snapshot;
       currentMarkdownRef.current = incomingMd.baselined ? incomingMd.md : incoming.contents;
       lastSavedRef.current = incomingMd.baselined ? incomingMd.baseline : incoming.contents;
@@ -2813,7 +2831,7 @@ export default function App() {
       const id = activeIdRef.current;
       if (!id) return;
       const tab = tabsRef.current.find((t) => t.id === id);
-      if (!tab || tab.missing) return;
+      if (!tab || tab.missing || isUnsupportedTab(tab)) return;
       const htmlOnly = tab.kind === "file" && isHtmlPath(tab.path);
       let v: DocView = view ?? docViewRef.current;
       if (htmlOnly) v = "html";
@@ -3659,6 +3677,7 @@ export default function App() {
             ? to + p.slice(from.length)
             : p;
 
+      const activeBefore = tabsRef.current.find((t) => t.id === activeIdRef.current);
       let tabsChanged = false;
       const nextTabs = tabsRef.current.map((t) => {
         const np = remap(t.path);
@@ -3728,8 +3747,15 @@ export default function App() {
       if (remapped.some((s, i) => s !== sels[i])) selectSidebarEntries(remapped);
 
       setTreeRefreshToken((t) => t + 1);
+
+      // Renamed into or out of being a document (notes.txt → notes.md): the
+      // open tab loads again as what it is now.
+      const activeNow = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      if (activeBefore && activeNow && isUnsupportedTab(activeBefore) !== isUnsupportedTab(activeNow)) {
+        await loadActiveContent(activeNow);
+      }
     },
-    [selectSidebarEntries, refreshWatchSet, setSplitState],
+    [selectSidebarEntries, refreshWatchSet, setSplitState, loadActiveContent],
   );
 
   // Move or rename a file/folder on disk (the sidebar's drag-and-drop and
@@ -4565,7 +4591,7 @@ export default function App() {
         const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
         // Find drives the markdown editor; there's nothing to search in the
         // rendered html view.
-        if (active && !active.missing && docViewRef.current === "md") {
+        if (active && !active.missing && !isUnsupportedTab(active) && docViewRef.current === "md") {
           setFindOpen(true);
           setFindFocusToken((t) => t + 1);
         }
@@ -4808,27 +4834,33 @@ export default function App() {
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
   const activeMissing = activeTab?.missing === true;
+  // A file that is not a document: its tab says so, with no document loaded.
+  const activeUnsupported = activeTab != null && isUnsupportedTab(activeTab);
+  // Nothing to edit, find in, publish or split: a ghost, or not a document.
+  const activeNoDoc = activeMissing || activeUnsupported;
   const showSidebar = workspaceRoot != null && sidebarOpen;
   const activeFilePath = activeTab?.kind === "file" ? activeTab.path : null;
+  // The document this window is editing — never a file that isn't one.
+  const activeDocPath = activeUnsupported ? null : activeFilePath;
   // Presence: tell the engines which document this window is editing (a
   // file, or nothing) so other devices see "editing Projects/plan.md". The
   // Rust side decides which connected workspace, if any, it concerns.
   useEffect(() => {
-    void cloudSetActivity(activeFilePath).catch(() => {});
-  }, [activeFilePath]);
+    void cloudSetActivity(activeDocPath).catch(() => {});
+  }, [activeDocPath]);
   // Leases: the same report is this Mac's claim on the
   // document, and the status says which documents another Mac holds. One of
   // those opens view-only under a banner with *Take over*; it is advisory, so
   // nothing here refuses a write — the editor simply stops taking input, and
   // goes live again the moment the status says the lease moved.
-  const activeLease = useMemo(() => leaseFor(cloudStatuses, activeFilePath), [cloudStatuses, activeFilePath]);
+  const activeLease = useMemo(() => leaseFor(cloudStatuses, activeDocPath), [cloudStatuses, activeDocPath]);
   const activeLeaseRef = useRef(activeLease);
   activeLeaseRef.current = activeLease;
   const leased = activeLease != null;
   const takeOverActive = useCallback(() => {
     const held = activeLeaseRef.current;
-    if (held && activeFilePath) void cloudTakeOver(held.status.root, activeFilePath).catch(() => {});
-  }, [activeFilePath]);
+    if (held && activeDocPath) void cloudTakeOver(held.status.root, activeDocPath).catch(() => {});
+  }, [activeDocPath]);
   // An owner took this Mac's access to a workspace away. The engine has
   // already deleted the copy here — the folder, and
   // what Doklin kept for it — so this window lets go of it: its tabs close,
@@ -4887,6 +4919,7 @@ export default function App() {
         setHistoryRoot(null);
         setDeletedFor(null);
         forgetStoredSession(e.root);
+        forgetTreeView(e.root);
         sessionWorkspaceRoot = null;
         setWorkspaceRoot(null);
         selectSidebarEntries([]);
@@ -5017,14 +5050,14 @@ export default function App() {
   // shows the new one's history and drops the old one's preview.
   useEffect(() => {
     historyForRef.current = historyFor;
-    historyTargetRef.current = activeTab?.kind === "file" ? activeTab.path : null;
+    historyTargetRef.current = activeDocPath;
     const open = historyTargetRef.current;
     if (historyFor && open && open !== historyFor) {
       setHistoryFor(open);
       setVersionPreview(null);
       setHistoryToken((t) => t + 1);
     }
-  }, [activeTab, historyFor]);
+  }, [activeDocPath, historyFor]);
 
   // The open note relative to the workspace: what the Live chip publishes
   // and whose presence the facepile shows. Null for an untitled note or a
@@ -5042,7 +5075,7 @@ export default function App() {
   // html-only documents render in the iframe alone; there is no markdown
   // version to edit, so the editor never mounts and the MD side is disabled.
   const activeIsHtmlDoc = activeTab?.kind === "file" && isHtmlPath(activeTab.path);
-  const showHtmlView = docView === "html" && !activeMissing;
+  const showHtmlView = docView === "html" && !activeNoDoc;
   // The active document's rendition path, derived the way loadActiveContent
   // derives htmlPathRef (an html tab is its own rendition; an md tab uses the
   // existing sibling). The PDF export button needs it at render time, and
@@ -5060,7 +5093,7 @@ export default function App() {
   const splitTab = split ? tabs.find((t) => t.id === split.tabId) ?? null : null;
   const effectiveSplit = split && splitTab ? split : null;
   const focusedSide: PaneSide = effectiveSplit ? otherSide(effectiveSplit.side) : "left";
-  const canSplit = activeTab != null && !activeMissing;
+  const canSplit = activeTab != null && !activeNoDoc;
   // No hooks below this line: a hook after the early return crashes React
   // ("rendered more hooks than during the previous render") the moment
   // `ready` flips, unmounting the whole app.
@@ -5078,18 +5111,22 @@ export default function App() {
     const paneTab = focused ? activeTab : splitTab;
     const paneView: DocView = focused ? docView : s!.view;
     const paneMissing = focused ? activeMissing : doc ? doc.missing : activeMissing;
+    // A file that is not a document: no editor, no rendition — the pane says so.
+    const paneUnsupported = paneTab != null && isUnsupportedTab(paneTab);
 
     // A same-document split pane on markdown is a read-only MIRROR of the
     // live editor (see the SplitPane comment).
     const isMirror = !focused && s != null && !s.doc && s.view === "md";
-    const showEditorHere = focused
-      ? activeTab != null && !activeMissing && !activeIsHtmlDoc
-      : isMirror
-        ? !activeMissing
-        : doc != null &&
-          s!.view === "md" &&
-          !doc.missing &&
-          !(doc.kind === "file" && isHtmlPath(doc.path));
+    const showEditorHere =
+      !paneUnsupported &&
+      (focused
+        ? activeTab != null && !activeMissing && !activeIsHtmlDoc
+        : isMirror
+          ? !activeMissing
+          : doc != null &&
+            s!.view === "md" &&
+            !doc.missing &&
+            !(doc.kind === "file" && isHtmlPath(doc.path)));
     const editorKey = focused
       ? `${activeTab?.id}:${editorSeqRef.current.get(activeTab?.id ?? "") ?? 0}`
       : isMirror
@@ -5174,7 +5211,7 @@ export default function App() {
           ref={side === "left" ? setLeftWrapEl : setRightWrapEl}
           onScroll={side === "left" ? scrollLeftWrap : scrollRightWrap}
         >
-          {focused && findOpen && activeTab && !activeMissing && docView === "md" && (
+          {focused && findOpen && activeTab && !activeNoDoc && docView === "md" && (
             <FindBar
               query={findQuery}
               onQueryChange={setFindQuery}
@@ -5310,6 +5347,13 @@ export default function App() {
               onCloseTab={() => void closeTab(paneTab.id)}
             />
           )}
+          {paneTab && paneUnsupported && !paneMissing && (
+            <UnsupportedFileState
+              path={paneTab.path}
+              onReveal={() => void revealInFinder(paneTab.path)}
+              onTrash={() => void deleteEntry(paneTab.path, "file")}
+            />
+          )}
           {/* Only when NO document is open (the welcome screen). An open note —
               even an empty untitled one — shows the bare editor, like an
               untitled tab in VS Code. */}
@@ -5338,7 +5382,7 @@ export default function App() {
       onOpenFolder={openFolderPicker}
       onOpenFileNewWindow={() => void openFileInNewWindow()}
       onOpenFolderNewWindow={() => void openFolderInNewWindow()}
-      canCopyWithComments={activeTab != null}
+      canCopyWithComments={activeTab != null && !activeNoDoc}
       onCopyWithComments={() => void copyWithComments()}
       update={update}
       onOpenExternal={openExternal}
@@ -5392,7 +5436,7 @@ export default function App() {
         live={livePaths}
         leading={showSidebar ? undefined : titleLead}
         trailing={
-          activeTab && !activeMissing ? (
+          activeTab && !activeNoDoc ? (
             <>
               {/* Who else is in this note: their faces, from the
                   workspace's presence. */}
@@ -6321,6 +6365,39 @@ function MissingFileState({
           </button>
           <button className="missing-file-btn" onClick={onCloseTab}>
             Close tab
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Shown in place of the editor when the active tab's file is not a document
+// (a click on a greyed row in the tree opens one). Nothing reads it; it can
+// still be found in Finder, or trashed here or with ⌘⌫ like any file.
+function UnsupportedFileState({
+  path,
+  onReveal,
+  onTrash,
+}: {
+  path: string;
+  onReveal: () => void;
+  onTrash: () => void;
+}) {
+  return (
+    <div className="missing-file" data-testid="unsupported-file">
+      <div className="missing-file-card">
+        <div className="missing-file-title">Unsupported file format</div>
+        <div className="missing-file-path">{path}</div>
+        <div className="missing-file-hint">
+          Doklin opens markdown and HTML files. You can still rename, move or delete this one.
+        </div>
+        <div className="missing-file-actions">
+          <button className="missing-file-btn" onClick={onReveal}>
+            Reveal in Finder
+          </button>
+          <button className="missing-file-btn" onClick={onTrash} data-testid="unsupported-trash">
+            Move to Trash
           </button>
         </div>
       </div>

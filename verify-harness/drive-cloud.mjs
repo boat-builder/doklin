@@ -461,6 +461,7 @@ step(
 );
 
 /* 9d — a note inside the published folder: the pill knows its nested address */
+await page.locator('[data-tree-path="/docs/Projects"]').click(); // folders start closed
 await page.locator('[data-tree-path="/docs/Projects/plan.md"]').click();
 await poll(async () => (await page.locator(".ProseMirror h1").first().textContent())?.includes("Plan"));
 await poll(async () => (await tid("live-chip").getAttribute("data-state")) === "publish");
