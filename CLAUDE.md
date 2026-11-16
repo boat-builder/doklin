@@ -53,6 +53,7 @@ Read a doc only when the change is in its area.
 | `ios/`, `scripts/ios-colors.mjs` | `docs/ios.md` |
 | `.github/workflows/`, updater | `docs/release.md` |
 | Building live sync (deferred, not built): the Durable Object doorbell | `docs/live-sync-plan.md` |
+| Building the iPhone redesign (not built): tabs, Home, search, tree, the editor | `docs/ios-redesign-plan.md` |
 
 Docs hold rules, shared formats and traps — nothing else. Update one when a
 change alters those; never add history, "as built" notes or test walkthroughs.
