@@ -323,12 +323,11 @@ struct InlineText: View {
                 piece.backgroundColor = Theme.mark
             case .current?:
                 piece.backgroundColor = Theme.mark
-                piece.underlineStyle = .thick
-                piece.underlineColor = Theme.warnInk
+                piece.underlineStyle = Text.LineStyle(pattern: .solid, color: Theme.warnInk)
             case .added?:
                 piece.backgroundColor = Theme.accentWash
             case .removed?:
-                piece.strikethroughStyle = .single
+                piece.strikethroughStyle = Text.LineStyle(pattern: .solid, color: Theme.text2)
                 piece.foregroundColor = Theme.text2
             case nil:
                 break
