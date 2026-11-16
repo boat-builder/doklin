@@ -12,16 +12,19 @@
 //
 //   node cloud-worker/test/run.mjs --bundle cloud-worker/dist/doklin-cloud-worker.js
 //
-// the same suite runs against a bundle scripts/bundle-worker.mjs wrote (the
-// mermaid asset then serves instead of answering 503).
+// the same suite runs against a bundle scripts/bundle-worker.mjs wrote, with
+// the web directory it wrote beside it served in front of the worker the way
+// Cloudflare serves it (test/assets.mjs): the fonts, icons, og.png and the
+// mermaid module then answer instead of 404ing.
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { build } from "vite";
+import { withAssets } from "./assets.mjs";
 import { FakeCache, FakeR2 } from "./fake-r2.mjs";
 import { FakeD1, brokenD1 } from "./fake-d1.mjs";
 import { PIXEL_PNG, SEED_FILES, SEED_PUBLIC, WIDE_TABLE, fidOf, seedThroughApi } from "./seed.mjs";
@@ -39,11 +42,15 @@ let worker;
 /** The same worker as a module of its own: a second isolate, with the schema
  *  runner's per-isolate memory blank. `tag` only has to be new each time. */
 let anotherIsolate;
+/** The web directory beside the bundle (scripts/bundle-worker.mjs), or null for a source compile. */
+const webDir = bundlePath ? path.join(path.dirname(path.resolve(bundlePath)), "doklin-cloud-web") : null;
+/** The tag the worker's pages carry: the web directory's mermaid build, or "dev". */
+const webTag = webDir ? (readdirSync(path.join(webDir, "__web")).find((d) => d !== "fonts") ?? "dev") : "dev";
 if (bundlePath) {
   const href = pathToFileURL(path.resolve(bundlePath)).href;
-  ({ default: worker } = await import(href));
-  anotherIsolate = async (tag) => (await import(`${href}?isolate=${tag}`)).default;
-  console.log(`testing the bundle at ${bundlePath}`);
+  worker = withAssets((await import(href)).default, webDir);
+  anotherIsolate = async (tag) => withAssets((await import(`${href}?isolate=${tag}`)).default, webDir);
+  console.log(`testing the bundle at ${bundlePath}, its web directory in front`);
 } else {
   const out = await build({
     configFile: false,
@@ -1419,7 +1426,7 @@ await test("workspace: the totals follow the manifest", async () => {
   assert.equal(res.json.bytes, 42 * n);
 });
 
-await test("blobs: content-addressed round-trip, list, delete; a re-put is a no-op; bad hash, missing, too large", async () => {
+await test("blobs: content-addressed round-trip; a re-put is a no-op; nobody lists or deletes them (the sweep collects); bad hash, missing, too large", async () => {
   const content = "# hello\n\nsynced bytes";
   const hash = blobHash(content);
   const put = await call(`/api/blobs/f-doc1/${hash}`, {
@@ -1440,19 +1447,27 @@ await test("blobs: content-addressed round-trip, list, delete; a re-put is a no-
   assert.equal(got.headers.get("content-type"), "text/markdown");
   assert.equal(got.headers.get("cache-control"), "no-store");
 
-  const list = await call("/api/blobs/f-doc1", { token: OWNER });
-  assert.equal(list.status, 200);
-  assert.ok(list.json.blobs.some((b) => b.hash === hash && b.size === content.length && b.uploaded));
-  assert.deepEqual((await call("/api/blobs/f-nothing", { token: OWNER })).json, { blobs: [] });
+  assert.equal((await call("/api/blobs/f-doc1", { token: OWNER })).status, 404, "no inventory to list");
+
+  // A re-upload of the same bytes is a push about to name the copy again:
+  // it is stored again, so the sweep's day starts over. Other bytes at the
+  // address change nothing.
+  const stored = fake.store.get(`blobs/f-doc1/${hash}`);
+  stored.uploaded = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+  await call(`/api/blobs/f-doc1/${hash}`, { method: "PUT", token: MEMBER, body: "different bytes, same address" });
+  assert.ok(Date.now() - fake.store.get(`blobs/f-doc1/${hash}`).uploaded.getTime() > 2 * 24 * 60 * 60 * 1000, "other bytes leave its age alone");
+  const back = await call(`/api/blobs/f-doc1/${hash}`, { method: "PUT", token: MEMBER, headers: { "content-type": "text/markdown" }, body: content });
+  assert.equal(back.json.existed, true);
+  assert.ok(Date.now() - fake.store.get(`blobs/f-doc1/${hash}`).uploaded.getTime() < 60_000, "the same bytes start its day over");
+  assert.equal((await call(`/api/blobs/f-doc1/${hash}`, { token: MEMBER })).text, content);
 
   assert.equal((await call("/api/blobs/f-doc1/NOTHEX", { token: OWNER })).status, 400);
   assert.equal((await call("/api/blobs/Bad%20Id/" + hash, { token: OWNER })).status, 400);
   assert.equal((await call("/api/blobs", { token: OWNER })).status, 404);
   assert.equal((await call(`/api/blobs/f-doc1/${"0".repeat(16)}`, { token: OWNER })).status, 404);
 
-  const del = await call(`/api/blobs/f-doc1/${hash}`, { method: "DELETE", token: OWNER });
-  assert.equal(del.status, 200);
-  assert.equal((await call(`/api/blobs/f-doc1/${hash}`, { token: OWNER })).status, 404);
+  assert.equal((await call(`/api/blobs/f-doc1/${hash}`, { method: "DELETE", token: OWNER })).status, 405, "not even the superadmin deletes one");
+  assert.equal((await call(`/api/blobs/f-doc1/${hash}`, { token: MEMBER })).text, content, "it is still there");
 
   const tooBig = new Uint8Array(25 * 1024 * 1024 + 1);
   const rejected = await call(`/api/blobs/f-doc1/${"a".repeat(16)}`, { method: "PUT", token: OWNER, body: tooBig });
@@ -2006,7 +2021,6 @@ await test("spaces: a space syncs like the workspace does — its own manifest, 
   assert.ok(!fake.store.has(`blobs/f-budget01/${hash}`), "and nowhere the shared workspace reaches");
   assert.equal((await call(`/api/blobs/f-budget01/${hash}`, { token: MEMBER })).status, 404, "asking the shared workspace for it by id finds nothing");
   assert.equal((await finance(`/blobs/f-budget01/${hash}`, { token: MEMBER })).text, body);
-  assert.deepEqual((await finance("/blobs/f-budget01", { token: MEMBER })).json.blobs.map((b) => b.hash), [hash]);
 
   const next = manifest(1, { "f-budget01": fileEntry("Budget.md", 1, body) }, { name: "Finance" });
   const put = await finance("/manifest", { method: "PUT", ...jo, headers: { "x-base-etag": etag0 }, body: next });
@@ -2230,13 +2244,63 @@ await test("poll: a database that fails past the sign-in costs presence, leases 
 /* ---------- The public surface ---------- */
 
 const pub = (path, init = {}) => call(path, { device: null, ...init });
-const rawGet = async (path, init = {}) => {
-  const res = await worker.fetch(new Request(`https://notes.example.com${path}`, init), env);
+const rawGet = async (path, init = {}, bindings = env) => {
+  const res = await worker.fetch(new Request(`https://notes.example.com${path}`, init), bindings);
   return { status: res.status, headers: res.headers, bytes: Buffer.from(await res.arrayBuffer()) };
 };
 const between = (text, a, b) => text.indexOf(a) >= 0 && text.indexOf(b) > text.indexOf(a);
 
-await test(`public: the landing page, robots, icons, the OG image, the mermaid asset (${bundlePath ? "served from the bundle" : "503 unbundled"}); an empty folder page; anything else a 404 page`, async () => {
+/** The web directory beside a bundle, through the asset layer in front of it. */
+async function webDirectory(fonts) {
+  const robots = await pub("/robots.txt");
+  assert.equal(robots.status, 200);
+  assert.match(robots.text, /User-agent: \*/);
+  const ico = await rawGet("/favicon.ico");
+  assert.equal(ico.status, 200);
+  assert.equal(ico.headers.get("content-type"), "image/x-icon");
+  assert.match(ico.headers.get("cache-control"), /max-age=604800, immutable/);
+  assert.ok(ico.bytes.equals(readFileSync(path.join(workerDir, "..", "public", "favicon.ico"))), "the app's own favicon");
+  const apple = await rawGet("/apple-touch-icon.png");
+  assert.equal(apple.headers.get("content-type"), "image/png");
+  assert.ok(apple.bytes.equals(readFileSync(path.join(workerDir, "..", "public", "apple-touch-icon.png"))), "the app's own icon");
+  const og = await rawGet("/og.png");
+  assert.equal(og.status, 200);
+  assert.equal(og.headers.get("content-type"), "image/png");
+  assert.equal(og.bytes.subarray(0, 8).toString("hex"), "89504e470d0a1a0a", "a PNG");
+  assert.ok(og.bytes.length > 10000, "the real image, not a placeholder");
+  assert.equal((await pub("/_headers")).status, 404, "the rules file is read, never served");
+
+  // The mermaid module, at the tag the worker's pages carry (the diagram
+  // test below checks a page asks for it there) — and only there.
+  const tags = readdirSync(path.join(webDir, "__web")).filter((d) => d !== "fonts");
+  assert.equal(tags.length, 1, "one mermaid build in the web directory");
+  const [tag] = tags;
+  assert.match(tag, /^[0-9a-f]{12}$/, "a content tag");
+  const mermaid = await pub(`/__web/${tag}/mermaid.js`);
+  assert.equal(mermaid.status, 200);
+  assert.match(mermaid.headers.get("content-type"), /javascript/);
+  assert.equal(mermaid.headers.get("cache-control"), "public, max-age=31536000, immutable", "one Cache-Control rule matches");
+  assert.equal(mermaid.headers.get("x-robots-tag"), "noindex");
+  assert.ok(mermaid.text.includes("mermaidConfig") && mermaid.text.includes("finishMermaidSvg"), "with the app's diagram grammar");
+  assert.equal(createHash("sha256").update(mermaid.bytes).digest("hex").slice(0, 12), tag, "the tag is the module's hash");
+  assert.equal((await pub("/__web/abc123/mermaid.js")).status, 404, "another tag names nothing");
+
+  // The fonts the app bundles, byte for byte.
+  for (const [family, file] of fonts) {
+    const vendored = readFileSync(path.join(workerDir, "..", "src", "assets", "fonts", family, file));
+    const font = await rawGet(`/__web/fonts/${file}`);
+    assert.equal(font.status, 200, file);
+    assert.equal(font.headers.get("content-type"), "font/woff2");
+    assert.equal(font.headers.get("cache-control"), "public, max-age=604800, immutable");
+    assert.ok(font.bytes.equals(vendored), `${file}: the app's own file`);
+  }
+  assert.equal((await rawGet("/__web/fonts/inter-latin-opsz-normal.woff2", { method: "HEAD" })).bytes.length, 0);
+  for (const p of ["/__web/fonts/nope.woff2", "/__web/fonts/", "/__web/fonts/inter/inter-latin-opsz-normal.woff2"]) {
+    assert.equal((await pub(p)).status, 404, p);
+  }
+}
+
+await test(`public: the landing page; robots, icons, the OG image, fonts and the mermaid module (${bundlePath ? "from the web directory" : "404s: a source compile has no web directory"}); an empty folder page; anything else a 404 page`, async () => {
   // The map the validation test left names a root page whose blob never
   // arrived: the domain root IS that page, and it is not there yet.
   const root = await pub("/");
@@ -2247,48 +2311,21 @@ await test(`public: the landing page, robots, icons, the OG image, the mermaid a
   assert.equal(head.status, 404);
   assert.equal(head.bytes.length, 0, "HEAD carries no body");
 
-  const robots = await pub("/robots.txt");
-  assert.equal(robots.status, 200);
-  assert.match(robots.text, /User-agent: \*/);
-  const ico = await pub("/favicon.ico");
-  assert.equal(ico.status, 200);
-  assert.equal(ico.headers.get("content-type"), "image/x-icon");
-  assert.match(ico.headers.get("cache-control"), /immutable/);
-  assert.equal((await pub("/apple-touch-icon.png")).headers.get("content-type"), "image/png");
-  const og = await rawGet("/og.png");
-  assert.equal(og.status, 200);
-  assert.equal(og.headers.get("content-type"), "image/png");
-  assert.equal(og.bytes.subarray(0, 8).toString("hex"), "89504e470d0a1a0a", "a PNG");
-  assert.ok(og.bytes.length > 10000, "the real image, not a placeholder");
-
-  const mermaid = await pub("/__web/abc123/mermaid.js");
-  if (bundlePath) {
-    assert.equal(mermaid.status, 200, "the bundle carries the mermaid module");
-    assert.match(mermaid.headers.get("content-type"), /javascript/);
-    assert.match(mermaid.headers.get("cache-control"), /immutable/);
-    assert.match(mermaid.headers.get("etag"), /^"[0-9a-f]{12}"$/, "the build's content tag");
-    assert.ok(mermaid.text.includes("mermaidConfig") && mermaid.text.includes("finishMermaidSvg"), "with the app's diagram grammar");
-  } else {
-    assert.equal(mermaid.status, 503, "this compile carries no assets; the bundle script splices them in");
-  }
-
-  // The fonts the app bundles, byte for byte, from the worker itself.
-  for (const [family, file] of [
+  const fonts = [
     ["inter", "inter-latin-opsz-normal.woff2"],
     ["literata", "literata-latin-opsz-italic.woff2"],
     ["roboto-mono", "roboto-mono-latin-ext-wght-normal.woff2"],
-  ]) {
-    const vendored = readFileSync(path.join(workerDir, "..", "src", "assets", "fonts", family, file));
-    const font = await rawGet(`/__web/fonts/${file}`);
-    assert.equal(font.status, 200, file);
-    assert.equal(font.headers.get("content-type"), "font/woff2");
-    assert.match(font.headers.get("cache-control"), /immutable/);
-    assert.ok(font.bytes.equals(vendored), `${file}: the app's own file`);
+  ];
+  const assetPaths = ["/robots.txt", "/favicon.ico", "/apple-touch-icon.png", "/og.png", "/__web/abc123/mermaid.js", ...fonts.map(([, f]) => `/__web/fonts/${f}`)];
+  // What reaches the worker at those paths names nothing: the web directory
+  // answers them on a domain, and the worker 404s without reading the bucket.
+  const noBucket = { ...env, DATA: new Proxy({}, { get: () => () => { throw new Error("the bucket was read"); } }) };
+  for (const p of [...assetPaths, "/__web/x/app.js"]) {
+    const served = bundlePath && p !== "/__web/abc123/mermaid.js" && p !== "/__web/x/app.js";
+    assert.equal((await rawGet(p, {}, noBucket)).status, served ? 200 : 404, p);
   }
-  assert.equal((await rawGet("/__web/fonts/inter-latin-opsz-normal.woff2", { method: "HEAD" })).bytes.length, 0);
-  for (const p of ["/__web/fonts/nope.woff2", "/__web/fonts/", "/__web/fonts/inter/inter-latin-opsz-normal.woff2"]) {
-    assert.equal((await pub(p)).status, 404, p);
-  }
+
+  if (bundlePath) await webDirectory(fonts);
 
   // The map the validation test left: a folder page over a folder with
   // nothing in it, and a note whose blob was never uploaded.
@@ -2485,8 +2522,10 @@ await test("public: column widths come from the meta sidecar under the app's own
 
   const diagram = await pub("/diagram");
   assert.ok(diagram.text.includes('<code class="language-mermaid">flowchart LR'), "the source stays a code block for readers without scripts");
-  assert.match(diagram.text, /import\("\/__web\/[a-z0-9]+\/mermaid\.js"\)/, "the hydrator imports the tagged module");
-  if (!bundlePath) assert.ok(diagram.text.includes("/__web/dev/mermaid.js"), "a source compile tags its module dev");
+  const asked = diagram.text.match(/import\("(\/__web\/[a-z0-9]+\/mermaid\.js)"\)/)?.[1];
+  assert.ok(asked, "the hydrator imports the tagged module");
+  if (bundlePath) assert.equal((await rawGet(asked)).status, 200, "at the path the web directory serves it");
+  else assert.equal(asked, "/__web/dev/mermaid.js", "a source compile tags its module dev");
   assert.ok(diagram.text.includes("mermaid.initialize(mod.mermaidConfig())"), "the app's diagram grammar, from the page's own palette");
   assert.ok(diagram.text.includes("mod.finishMermaidSvg(svg)"), "finished as the app finishes it");
 
@@ -2536,7 +2575,7 @@ await test("public: the root page serves at /; renders cache under the manifest'
   try {
     const first = await pub("/sizes");
     assert.equal(first.headers.get("cache-control"), "no-cache", "the browser is never told to keep a page");
-    assert.deepEqual(cache.puts, [`https://cache.doklin/${seedEtag}/sizes`], "keyed by the manifest's etag and the path");
+    assert.deepEqual(cache.puts, [`https://cache.doklin/${webTag}/${seedEtag}/sizes`], "keyed by the web tag, the manifest's etag and the path");
     assert.equal(cache.store.get(cache.puts[0]).headers.get("cache-control"), "public, max-age=86400", "the cache keeps it for a day");
     const again = await pub("/sizes");
     assert.equal(cache.hits, 1, "the second read is a cache hit");
@@ -2548,8 +2587,8 @@ await test("public: the root page serves at /; renders cache under the manifest'
     assert.equal(cache.puts.length, 2, "an address nobody holds is not kept: a space could claim it without this manifest moving");
     assert.equal((await pub("/sizes/nope")).status, 404);
     assert.equal(cache.puts.length, 3, "a 404 under an address this manifest holds is cached too");
-    assert.equal((await pub("/robots.txt")).status, 200);
-    assert.equal(cache.puts.length, 3, "statics never go through the cache");
+    assert.equal((await pub("/robots.txt")).status, bundlePath ? 200 : 404);
+    assert.equal(cache.puts.length, 3, "an asset path never goes through the cache");
 
     // The manifest moves: every URL gets a new key, and nothing stale can be served.
     const current = JSON.parse((await call("/api/manifest", { token: OWNER })).text);
@@ -2561,7 +2600,7 @@ await test("public: the root page serves at /; renders cache under the manifest'
     assert.equal(moved.status, 200);
     const renamed = await pub("/sizes");
     assert.ok(renamed.text.includes("<title>Measurements</title>"), "the new title, not the cached page");
-    assert.equal(cache.puts[cache.puts.length - 1], `https://cache.doklin/${moved.json.etag}/sizes`);
+    assert.equal(cache.puts[cache.puts.length - 1], `https://cache.doklin/${webTag}/${moved.json.etag}/sizes`);
     assert.equal(cache.hits, 1, "nothing under the old key was served");
   } finally {
     delete globalThis.caches;
@@ -4868,7 +4907,7 @@ await test("addresses: an address is one space's for the whole domain — the se
   globalThis.caches = { default: cache };
   try {
     await pub("/budget");
-    assert.deepEqual(cache.puts, [`https://cache.doklin/${put1.json.etag}@${books.id}/budget`]);
+    assert.deepEqual(cache.puts, [`https://cache.doklin/${webTag}/${put1.json.etag}@${books.id}/budget`]);
     await pub("/budget");
     assert.equal(cache.hits, 1);
   } finally {
@@ -5524,6 +5563,117 @@ await test("commit: a stored manifest that still lists a picture — the file, i
   assert.deepEqual(db.rows("SELECT slug FROM addresses WHERE slug LIKE 'old-%' ORDER BY slug").map((r) => r.slug), ["old-folder", "old-home"], "whose address is given up");
   assert.ok(fake.store.has(`blobs/f-legacypic/${picHash}`), "its bytes are left for the collector: a write deletes only what it made");
   assert.equal((await putManifest({ ...after, seq: after.seq + 1 })).status, 200, "what it wrote is a manifest a Mac's PUT takes");
+});
+
+/* ---------- The daily sweep (sweep.ts) ---------- */
+
+await test("sweep: the cron deletes every copy its manifest does not name once it is a day old — replaced, deleted, never named, a picture — in every section; a fresh upload, a named copy, the version store and a section whose manifest can't be read are left alone", async () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const bucket = new FakeR2();
+  const bindings = { ...env, DATA: bucket };
+  const put = async (key, body, age) => {
+    await bucket.put(key, body);
+    bucket.store.get(key).uploaded = new Date(Date.now() - age);
+  };
+  const old = DAY + 60_000;
+  const files = (entries) => Object.fromEntries(entries.map(([fid, p, seed]) => [fid, { ...fileEntry(p, 2, seed), by: "m-x" }]));
+  const copy = (prefix, fid, seed) => `${prefix}blobs/${fid}/${blobHash(seed)}`;
+
+  // The shared workspace.
+  await put("manifest.json", JSON.stringify(manifest(5, files([["f-plan", "Plan.md", "v2"], ["f-pic", "pic.png", "png"]]), { tombstones: { "f-gone": { path: "Gone.md", rev: 3, ts: 1, by: "m-x" } } })), 0);
+  await put(copy("", "f-plan", "v2"), "v2", old);
+  await put(copy("", "f-plan", "v1"), "v1", old);
+  await put(copy("", "f-gone", "gone"), "gone", old);
+  await put(copy("", "f-runaway", "lost"), "lost", old);
+  await put(copy("", "f-pic", "png"), "png", old);
+  await put(copy("", "f-new", "fresh"), "fresh", DAY - 60_000);
+  await put("versions/blobs/" + "a".repeat(64), "kept by its own collector", old);
+  // A person's Private, a restricted folder with no manifest yet, and one
+  // whose manifest is garbage.
+  const P = "spaces/p-0000000a/";
+  await put(P + "manifest.json", JSON.stringify(manifest(1, files([["f-mine", "Mine.md", "m2"]]))), 0);
+  await put(copy(P, "f-mine", "m2"), "m2", old);
+  await put(copy(P, "f-mine", "m1"), "m1", old);
+  const S = "spaces/s-0000000b/";
+  await put(copy(S, "f-half", "half"), "half", old);
+  const BAD = "spaces/s-0000000c/";
+  await put(BAD + "manifest.json", "{not json", 0);
+  await put(copy(BAD, "f-kept", "k"), "k", old);
+
+  const logged = [];
+  const log = console.log;
+  console.log = (line) => logged.push(line);
+  try {
+    await worker.scheduled({ cron: "17 3 * * *", scheduledTime: Date.now() }, bindings, { waitUntil() {} });
+  } finally {
+    console.log = log;
+  }
+  const has = (key) => bucket.store.has(key);
+  assert.ok(has(copy("", "f-plan", "v2")), "the copy the manifest names stays");
+  assert.ok(!has(copy("", "f-plan", "v1")), "a replaced version goes");
+  assert.ok(!has(copy("", "f-gone", "gone")), "a deleted file's copy goes");
+  assert.ok(!has(copy("", "f-runaway", "lost")), "an upload no manifest ever named goes");
+  assert.ok(!has(copy("", "f-pic", "png")), "a picture is not held, as the worker reads a manifest");
+  assert.ok(has(copy("", "f-new", "fresh")), "an upload under a day old waits for its manifest");
+  assert.ok(has("versions/blobs/" + "a".repeat(64)), "the version store is not the sweep's");
+  assert.ok(has(copy(P, "f-mine", "m2")) && !has(copy(P, "f-mine", "m1")), "a space is swept against its own manifest");
+  assert.ok(!has(copy(S, "f-half", "half")), "a section with no manifest names nothing");
+  assert.ok(has(copy(BAD, "f-kept", "k")), "a manifest that can't be read leaves its section alone");
+  assert.ok(has("manifest.json") && has(P + "manifest.json"), "nothing but copies is touched");
+  assert.deepEqual(logged, ["sweep: 6 copies deleted; 3 of 4 sections swept, 1 with an unreadable manifest left alone"]);
+
+  // A second run finds nothing more.
+  console.log = () => {};
+  try {
+    await worker.scheduled({}, bindings, { waitUntil() {} });
+  } finally {
+    console.log = log;
+  }
+  const copies = [...bucket.store.keys()].filter((k) => /^(spaces\/[^/]+\/)?blobs\//.test(k)).sort();
+  assert.deepEqual(copies, [copy("", "f-new", "fresh"), copy("", "f-plan", "v2"), copy(P, "f-mine", "m2"), copy(BAD, "f-kept", "k")].sort(), "a second run takes nothing more");
+});
+
+await test("sweep: a run makes at most 40 calls to the bucket (Workers Free allows 50), and starts each day at another section, so a bucket too big for one run is swept over the days that follow", async () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const bucket = new FakeR2();
+  let calls = 0;
+  const counted = new Proxy(bucket, {
+    get(target, prop) {
+      const v = target[prop];
+      if (typeof v !== "function") return v;
+      return (...a) => {
+        calls += 1;
+        return v.apply(target, a);
+      };
+    },
+  });
+  const bindings = { ...env, DATA: counted };
+  // Sixty spaces with no manifest, each holding one old upload: three calls
+  // each (list, manifest, delete) — more than one run's worth.
+  const ids = Array.from({ length: 60 }, (_, i) => `s-${String(i).padStart(8, "0")}`);
+  for (const id of ids) {
+    await bucket.put(`spaces/${id}/blobs/f-orphan/${"b".repeat(16)}`, "x");
+    bucket.store.get(`spaces/${id}/blobs/f-orphan/${"b".repeat(16)}`).uploaded = new Date(Date.now() - 2 * DAY);
+  }
+  const left = () => [...bucket.store.keys()].filter((k) => k.includes("/blobs/")).length;
+  const realNow = Date.now;
+  const log = console.log;
+  console.log = () => {};
+  const perRun = [];
+  try {
+    for (let day = 0; day < 10 && left() > 0; day++) {
+      Date.now = () => realNow() + day * DAY;
+      calls = 0;
+      await worker.scheduled({}, bindings, { waitUntil() {} });
+      perRun.push(calls);
+    }
+  } finally {
+    Date.now = realNow;
+    console.log = log;
+  }
+  assert.ok(perRun.every((n) => n <= 40), `every run within 40 calls: ${perRun}`);
+  assert.ok(perRun.length > 1, "one run could not reach them all");
+  assert.equal(left(), 0, `all swept within ${perRun.length} days`);
 });
 
 await test("wipe: the superadmin's, confirmed, empties the bucket and frees the domain for a new binding", async () => {

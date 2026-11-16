@@ -131,7 +131,7 @@ struct FakeWorker {
 struct Section {
     manifest: Manifest,
     etag: u64,
-    blobs: HashMap<(String, String), (Vec<u8>, u64)>,
+    blobs: HashMap<(String, String), Vec<u8>>,
     racer: Option<Manifest>,
     versions_index: Option<VersionsIndex>,
     versions_etag: u64,
@@ -837,7 +837,7 @@ impl Remote for FakeRemote {
             let mut b = this.be.lock().unwrap();
             b.blob_gets += 1;
             let sec = this.section(&mut b, caller)?;
-            sec.blobs.get(&key).map(|(bytes, _)| bytes.clone()).ok_or(RemoteError::NotFound)
+            sec.blobs.get(&key).cloned().ok_or(RemoteError::NotFound)
         }
     }
 
@@ -854,32 +854,7 @@ impl Remote for FakeRemote {
             let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
             b.blob_puts += 1;
-            this.section(&mut b, caller)?.blobs.entry(key).or_insert((bytes, 0));
-            Ok(())
-        }
-    }
-
-    fn list_blobs(&self, file_id: &str) -> impl std::future::Future<Output = RemoteResult<Vec<(String, u64)>>> + Send {
-        let this = self.clone();
-        let fid = file_id.to_string();
-        async move {
-            let caller = this.ready()?;
-            let mut b = this.be.lock().unwrap();
-            let sec = this.section(&mut b, caller)?;
-            Ok(sec.blobs.iter().filter(|((f, _), _)| *f == fid).map(|((_, h), (_, up))| (h.clone(), *up)).collect())
-        }
-    }
-
-    fn delete_blob(&self, file_id: &str, hash: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send {
-        let this = self.clone();
-        let key = (file_id.to_string(), hash.to_string());
-        async move {
-            let mut b = this.be.lock().unwrap();
-            b.requests += 1;
-            this.usage.count();
-            if let Some(sec) = this.section_ungated(&mut b) {
-                sec.blobs.remove(&key);
-            }
+            this.section(&mut b, caller)?.blobs.entry(key).or_insert(bytes);
             Ok(())
         }
     }
@@ -1679,7 +1654,7 @@ async fn concurrent_distinct_files_converge_via_cas_retry() {
         m.seq += 1;
         let bytes = b"from the racer\n".to_vec();
         let hash = hash16(&bytes);
-        be2.blobs.insert(("f-racer".into(), hash.clone()), (bytes.clone(), 0));
+        be2.blobs.insert(("f-racer".into(), hash.clone()), bytes.clone());
         m.files.insert(
             "f-racer".into(),
             ManifestFile {
@@ -4949,7 +4924,7 @@ fn worker_would_write<T>(be: &SharedWorker, change: impl FnOnce(&mut WorkerTx) -
         return (value, None);
     }
     for (key, bytes) in tx.staged {
-        b.blobs.entry(key).or_insert((bytes, 0));
+        b.blobs.entry(key).or_insert(bytes);
     }
     tx.m.seq += 1;
     (value, Some(tx.m))
@@ -4977,7 +4952,7 @@ fn worker_writes_in<T>(be: &SharedWorker, space: &str, change: impl FnOnce(&mut 
     let value = change(&mut tx);
     if tx.dirty {
         for (key, bytes) in tx.staged {
-            section.blobs.entry(key).or_insert((bytes, 0));
+            section.blobs.entry(key).or_insert(bytes);
         }
         tx.m.seq += 1;
         section.manifest = tx.m;

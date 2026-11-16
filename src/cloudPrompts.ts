@@ -23,6 +23,10 @@
 
 export const WORKER_BUNDLE_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js";
+/** The files public pages ask for, which Cloudflare serves beside the worker
+ *  without running it; the archive unpacks to doklin-cloud-web/. */
+export const WORKER_WEB_URL =
+  "https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-web.tar.gz";
 /** scripts/doklin-cloud-update.sh, attached to every release beside the bundle. */
 export const WORKER_UPDATE_SCRIPT_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-update.sh";
@@ -162,6 +166,10 @@ function wranglerToml(
     `compatibility_date = "${compatibilityDate}"`,
     `account_id = "<from whoami>"`,
     routingLines(domain),
+    `[assets]`,
+    `directory = "doklin-cloud-web"`,
+    `[triggers]`,
+    `crons = ["17 3 * * *"]`,
     `[[r2_buckets]]`,
     `binding = "DATA"`,
     `bucket_name = "${bucket}"`,
@@ -173,10 +181,12 @@ function wranglerToml(
   ].join("\n");
 }
 
-const FETCH_STEP = `Make an empty working directory and download the worker — one ready-to-deploy file, attached to every Doklin release:
+const FETCH_STEP = `Make an empty working directory and download the worker — one ready-to-deploy file — and the web files its pages ask for, both attached to every Doklin release:
    mkdir doklin-cloud && cd doklin-cloud
    curl -fsSL ${WORKER_BUNDLE_URL} -o doklin-cloud-worker.js
-   If that download 404s, clone ${REPO_URL}, run \`pnpm install && node scripts/bundle-worker.mjs\` in the clone, and copy cloud-worker/dist/doklin-cloud-worker.js into the working directory.`;
+   curl -fsSL ${WORKER_WEB_URL} -o doklin-cloud-web.tar.gz
+   tar -xzf doklin-cloud-web.tar.gz
+   The last line makes a doklin-cloud-web directory beside the worker. If a download 404s, clone ${REPO_URL}, run \`pnpm install && node scripts/bundle-worker.mjs\` in the clone, and copy cloud-worker/dist/doklin-cloud-worker.js and the cloud-worker/dist/doklin-cloud-web directory into the working directory.`;
 
 const LOGIN_STEP =
   "Run `npx -y wrangler@4 whoami`. If it says you're not logged in, run `npx -y wrangler@4 login` and ask me to finish the sign-in in the browser window it opens; then run whoami again and note the account id it prints.";

@@ -35,10 +35,10 @@
 //                                    400 on garbage, 426 on a schema this worker predates,
 //                                    409 {taken: [slug]} when its public map names an address
 //                                    another space holds (addresses.ts)
-//   GET    /api/blobs/<fid>          {blobs: [{hash, size, uploaded}]} — the inventory GC diffs
 //   GET    /api/blobs/<fid>/<hash>   the bytes
-//   PUT    /api/blobs/<fid>/<hash>   store bytes (immutable — a re-PUT of the same hash is a no-op)
-//   DELETE /api/blobs/<fid>/<hash>   garbage-collect an unreferenced revision
+//   PUT    /api/blobs/<fid>/<hash>   store bytes (immutable — a re-PUT of the same hash is a no-op).
+//                                    Nobody deletes one: the daily sweep collects what no
+//                                    manifest names (sweep.ts)
 //   GET    /api/versions/index       the version store's index + x-versions-etag; 404 when none
 //   PUT    /api/versions/index       x-base-etag required ("*" creates); 412 + etag on a lost race
 //   GET    /api/versions/snapshots/<id>   the gzip'd workspace state
@@ -150,7 +150,6 @@ import {
   SPACE_ID_RE,
   WORKSPACE_KEY,
   blobKey,
-  blobPrefix,
   validFolderName,
   validName,
   validPath,
@@ -726,13 +725,9 @@ async function sync(request: Request, env: Env, url: URL, rest: string[]): Promi
     return methodNotAllowed();
   }
 
-  if (section === "blobs" && (rest.length === 2 || rest.length === 3)) {
+  if (section === "blobs" && rest.length === 3) {
     const fileId = rest[1];
     if (!ID_RE.test(fileId)) return json({ error: "invalid file id" }, 400);
-    if (rest.length === 2) {
-      if (method !== "GET") return methodNotAllowed();
-      return listBlobs(env, fileId);
-    }
     const hash = rest[2];
     if (!BLOB_HASH_RE.test(hash)) return json({ error: "invalid blob hash" }, 400);
     return blob(request, env, fileId, hash);
@@ -920,24 +915,7 @@ async function putManifest(request: Request, env: Env): Promise<Response> {
 
 /* ---------- Blobs ---------- */
 
-/** The blob inventory for one file — what GC diffs against the manifest's live references. */
-async function listBlobs(env: Env, fileId: string): Promise<Response> {
-  const blobs: { hash: string; size: number; uploaded: string | null }[] = [];
-  let cursor: string | undefined;
-  do {
-    const batch = await env.DATA.list({ prefix: blobPrefix(fileId), cursor });
-    for (const obj of batch.objects) {
-      blobs.push({
-        hash: obj.key.slice(obj.key.lastIndexOf("/") + 1),
-        size: obj.size,
-        uploaded: obj.uploaded instanceof Date ? obj.uploaded.toISOString() : null,
-      });
-    }
-    cursor = batch.truncated ? batch.cursor : undefined;
-  } while (cursor);
-  return json({ blobs });
-}
-
+/** One stored copy of a file: read it, or store it. */
 async function blob(request: Request, env: Env, fileId: string, hash: string): Promise<Response> {
   const key = blobKey(fileId, hash);
   if (request.method === "GET") {
@@ -954,17 +932,15 @@ async function blob(request: Request, env: Env, fileId: string, hash: string): P
   if (request.method === "PUT") {
     const buf = await request.arrayBuffer();
     if (buf.byteLength > MAX_FILE_BYTES) return json({ error: "file too large" }, 413);
-    // Content-addressed, so a hash that is already stored IS these bytes:
-    // create-only makes the re-upload a no-op instead of a rewrite.
-    const put = await env.DATA.put(key, buf, {
-      httpMetadata: { contentType: request.headers.get("content-type") || "application/octet-stream" },
-      onlyIf: { etagDoesNotMatch: "*" },
-    });
+    // Content-addressed, so a stored copy is never rewritten with other
+    // bytes: create-only. The same bytes again are a push about to name this
+    // copy — a file back to an earlier version — so they are stored again,
+    // and its day starts over: the daily sweep (sweep.ts) cannot take it
+    // before the manifest write that names it lands.
+    const httpMetadata = { contentType: request.headers.get("content-type") || "application/octet-stream" };
+    const put = await env.DATA.put(key, buf, { httpMetadata, onlyIf: { etagDoesNotMatch: "*" } });
+    if (!put && (await sha256Hex(new Uint8Array(buf))).startsWith(hash)) await env.DATA.put(key, buf, { httpMetadata });
     return json({ stored: true, existed: !put, hash, size: buf.byteLength });
-  }
-  if (request.method === "DELETE") {
-    await env.DATA.delete(key);
-    return json({ deleted: true });
   }
   return methodNotAllowed();
 }

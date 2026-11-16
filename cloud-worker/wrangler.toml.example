@@ -6,7 +6,9 @@
 # and domain), replace the placeholders, then from this directory:
 #
 #   curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js \
-#        -o doklin-cloud-worker.js                            # or: node scripts/bundle-worker.mjs
+#        -o doklin-cloud-worker.js                            # or: node scripts/bundle-worker.mjs,
+#   curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-web.tar.gz \
+#        | tar -xz                                            # which writes both to dist/
 #   npx -y wrangler@4 r2 bucket create doklin-notes-example-com   # the bucket must exist BEFORE deploy
 #   npx -y wrangler@4 d1 create doklin-notes-example-com          # prints the database_id below
 #   npx -y wrangler@4 secret put OWNER_TOKEN                     # 32 random bytes, hex — the app mints it
@@ -30,6 +32,17 @@ routes = [{ pattern = "notes.example.com", custom_domain = true }]
 # https://doklin-<name>.<your-subdomain>.workers.dev (wrangler prints it):
 #   workers_dev = true
 #   (and no `routes` line)
+
+# The files public pages ask for — fonts, icons, the mermaid module — which
+# Cloudflare serves without running the worker. The release archive unpacks
+# to this directory.
+[assets]
+directory = "doklin-cloud-web"
+
+# Once a day the worker deletes stored copies no manifest has named for a day
+# (src/sweep.ts). The account has five cron triggers on Workers Free; this is one.
+[triggers]
+crons = ["17 3 * * *"]
 
 [[r2_buckets]]
 binding = "DATA"                          # the worker reads env.DATA — leave as is

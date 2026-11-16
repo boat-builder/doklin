@@ -1,8 +1,8 @@
-// Assets the bundle carries beside the worker's own code, spliced in by
-// scripts/bundle-worker.mjs: the standalone mermaid module public pages
-// hydrate their ```mermaid blocks with (served at /__web/<tag>/mermaid.js,
-// immutable, content-tagged — `tag` is a short hash of the module). The
-// checked-in copy is empty so plain-node consumers (test/run.mjs) can compile
-// the worker without building mermaid; every deployable artifact gets the
-// real thing.
-export const WEB_ASSETS: { tag: string; mermaid: string } | null = null;
+// The tag of the web directory a release serves beside the worker:
+// scripts/bundle-worker.mjs builds that directory and splices its tag in
+// here. Cloudflare answers the directory's files without running the worker
+// — the fonts, the icons, og.png, robots.txt, and the mermaid module at
+// /__web/<tag>/mermaid.js, where the tag is a short hash of the module, so a
+// build that changes it changes its address. A worker compiled from source
+// (test/run.mjs) has no web directory, and its pages ask for "dev".
+export const WEB_TAG: string = "dev";

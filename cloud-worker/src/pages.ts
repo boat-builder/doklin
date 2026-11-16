@@ -6,7 +6,7 @@
 // a workspace holds only documents (`syncs`, layout.ts). public.ts decides
 // which of these a request means; render.ts turns the result into HTML.
 
-import { WEB_ASSETS } from "./assets";
+import { WEB_TAG } from "./assets";
 import { notFoundPage } from "./static";
 import { nestedUrl, type DirPage, type PublicMap } from "./publicMap";
 import {
@@ -42,9 +42,6 @@ const HTML_HEADERS = {
 };
 
 const html = (body: string, status = 200): Response => new Response(body, { status, headers: HTML_HEADERS });
-
-/** The tag the mermaid module serves under: the bundle's content hash, or "dev" in a source-compiled worker. */
-const mermaidTag = (): string => WEB_ASSETS?.tag ?? "dev";
 
 export type NoteOptions = {
   url: URL;
@@ -102,7 +99,7 @@ export async function notePage(ws: Workspace, pub: PublicMap, loc: Located, o: N
 
   const tcols = (await ws.meta(stemOf(path)))?.tcols ?? [];
   const bodyHtml = markdownHtml(body, { tcols, links: linkResolver(ws, pub, dirOf(path), o.dirSlug) });
-  return html(notePageHtml({ meta, crumb: o.crumb, hasHtml, bodyHtml, mermaidTag: mermaidTag() }));
+  return html(notePageHtml({ meta, crumb: o.crumb, hasHtml, bodyHtml, mermaidTag: WEB_TAG }));
 }
 
 /** Resolve a link written inside a note (`./plan.md`, `../x/y.md`) to a workspace path, or null when it isn't one. */

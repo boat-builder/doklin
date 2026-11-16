@@ -794,7 +794,6 @@ impl<R: Remote> Engine<R> {
             }
         }
         let mut changed: Vec<String> = Vec::new();
-        let mut cycled: BTreeSet<String> = BTreeSet::new();
         let mut failure: Option<RemoteError> = None;
         // A second round is for what the first one set off: a page whose
         // address another section has just let go of, a file another
@@ -807,10 +806,7 @@ impl<R: Remote> Engine<R> {
             };
             for id in ids {
                 match self.cycle_unit(&id, &moves, hold_new).await {
-                    Ok(paths) => {
-                        changed.extend(paths);
-                        cycled.insert(id);
-                    }
+                    Ok(paths) => changed.extend(paths),
                     // A space that answers "not found" is one this person is
                     // not in any more, or one that is gone. Which, the next
                     // poll says; until then it is left exactly as it is.
@@ -856,15 +852,6 @@ impl<R: Remote> Engine<R> {
                 // What the app wrote has gone — the express lane never waits.
                 self.touched.clear();
                 self.set_status(self.settled_phase(), None);
-                for id in &cycled {
-                    let Some(want) = self.units.get(id).filter(|u| u.gc_due()).map(|u| u.gc_pending()) else {
-                        continue;
-                    };
-                    let budget = lock(&self.pacer).take(want);
-                    if let Some(unit) = self.units.get_mut(id) {
-                        unit.gc_blobs(budget).await;
-                    }
-                }
                 if !changed.is_empty() {
                     // Something arrived from another device, so the versioner
                     // has (or is about to have) new snapshots worth sending.

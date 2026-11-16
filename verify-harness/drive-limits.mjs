@@ -94,6 +94,8 @@ const status = (over = {}, usage = {}) => ({
 const footer = async () => ({
   text: await text("sync-status"),
   tone: ((await tid("sync-status").getAttribute("class")) ?? "").replace("sync-status ", ""),
+  // Whether the words fit the sidebar's default width, or lose their end to the ellipsis.
+  whole: await tid("sync-status").locator(".sync-status-text").evaluate((el) => el.scrollWidth <= el.clientWidth),
 });
 const openPanel = async () => {
   if ((await dialog("Cloud").count()) === 1) return;
@@ -134,13 +136,20 @@ await setStatuses([status({ phase: "syncing" }, { mode: "bulk-waits", cause: "de
 await new Promise((r) => setTimeout(r, 1000));
 const waitsDuringPass = await footer();
 await page.locator(".side-footer").screenshot({ path: SHOTS + "limits-01-footer-waits.png" });
+// A long count fits too.
+await setStatuses([status({}, { mode: "bulk-waits", cause: "device", resumesAt: RESUMES, waiting: 12400, liftable: true })]);
+await poll(async () => (await text("sync-status")).startsWith("12,400"));
+const longWait = await footer();
 step(
-  "footer: this Mac's wait reads '412 changes wait until <05:30>' in amber, through a pass too",
-  waitsFooter.text === `412 changes wait until ${CLOCK}` &&
+  "footer: this Mac's wait reads '412 held until <05:30>' in amber, whole at the default width (12,400 too), through a pass too; the tooltip says it in full",
+  waitsFooter.text === `412 held until ${CLOCK}` &&
     waitsFooter.tone === "is-warn" &&
+    waitsFooter.whole &&
+    longWait.text === `12,400 held until ${CLOCK}` &&
+    longWait.whole &&
     waitsDuringPass.text === waitsFooter.text &&
     waitsTitle.startsWith(`412 changes wait until ${CLOCK} · `),
-  `${waitsFooter.text} (${waitsFooter.tone}) / ${waitsTitle}`,
+  `${waitsFooter.text} (${waitsFooter.tone}, whole ${waitsFooter.whole}) / ${longWait.text} (whole ${longWait.whole}) / ${waitsTitle}`,
 );
 
 await setStatuses([status({}, { mode: "bulk-waits", cause: "device", resumesAt: RESUMES, waiting: 412, liftable: true })]);

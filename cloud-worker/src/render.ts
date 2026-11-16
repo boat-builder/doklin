@@ -407,7 +407,7 @@ ${footerHtml(p.meta.hostname)}
 
 /**
  * The diagram renderer, injected only into pages whose markdown carries a
- * ```mermaid block. It imports the mermaid module the worker serves (the
+ * ```mermaid block. It imports the mermaid module the domain serves (the
  * app's mermaidConfig and finishMermaidSvg ride along in it, so diagrams are
  * drawn in the app's drawing grammar, from this page's palette — light and
  * dark) and swaps each code block for its rendered SVG.

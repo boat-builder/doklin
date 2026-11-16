@@ -4,7 +4,8 @@
 //
 //   workspace.json              the binding: one domain, one workspace (written create-only)
 //   manifest.json               the workspace manifest, updated by compare-and-swap on its etag
-//   blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256
+//   blobs/<fileId>/<hash>       immutable file content, addressed by (a prefix of) its sha256;
+//                               a day after no manifest names it, the daily sweep takes it (sweep.ts)
 //   versions/index.json         the mirrored version store's retained set (versions.ts)
 //   versions/snapshots/<id>     one workspace state, gzip'd; immutable
 //   versions/blobs/<hash>       one file's content, gzip'd; immutable
@@ -27,7 +28,6 @@ export const VERSION_SNAPSHOTS_PREFIX = "versions/snapshots/";
 export const VERSION_BLOBS_PREFIX = "versions/blobs/";
 export const SPACES_PREFIX = "spaces/";
 
-export const blobPrefix = (fileId: string): string => `${BLOBS_PREFIX}${fileId}/`;
 export const blobKey = (fileId: string, hash: string): string => `${BLOBS_PREFIX}${fileId}/${hash}`;
 export const versionSnapshotKey = (id: string): string => `${VERSION_SNAPSHOTS_PREFIX}${id}.json.gz`;
 export const versionBlobKey = (hash: string): string => `${VERSION_BLOBS_PREFIX}${hash}`;

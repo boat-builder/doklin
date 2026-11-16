@@ -1,21 +1,15 @@
-// Responses that need no workspace: the static assets, the landing page and
-// the 404 page. Out of public.ts so pages.ts (which answers 404 for a file
-// that is gone) can use them without an import cycle.
+// Responses that need no workspace: the landing page and the 404 page. Out
+// of public.ts so pages.ts (which answers 404 for a file that is gone) can use
+// them without an import cycle. The files a page asks for — fonts, icons,
+// og.png, robots.txt, the mermaid module — are not the worker's: Cloudflare
+// serves them from the web directory beside it (scripts/bundle-worker.mjs).
 
-import { WEB_ASSETS } from "./assets";
-import { APPLE_TOUCH_PNG_B64, FAVICON_ICO_B64 } from "./favicons";
 import { escapeHtml } from "./http";
-import { OG_PNG_B64 } from "./og";
-import { FONT_PRELOAD, PAGE_THEME, fontBytes } from "./theme";
+import { FONT_PRELOAD, PAGE_THEME } from "./theme";
 
 const DOWNLOAD_URL =
   "https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg";
 const REPO_URL = "https://github.com/boat-builder/doklin";
-
-const decode = (b64: string): Uint8Array => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-const FAVICON_ICO = decode(FAVICON_ICO_B64);
-const APPLE_TOUCH = decode(APPLE_TOUCH_PNG_B64);
-const OG_PNG = decode(OG_PNG_B64);
 
 const FAVICON_LINKS = `<link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">`;
@@ -97,54 +91,4 @@ export function notFoundPage(): Response {
 <p class="muted">This page doesn't exist or is no longer published.</p>`,
     404,
   );
-}
-
-export function robotsTxt(): Response {
-  return new Response("User-agent: *\nAllow: /\n", {
-    headers: { "content-type": "text/plain; charset=utf-8" },
-  });
-}
-
-function assetResponse(bytes: Uint8Array, contentType: string): Response {
-  return new Response(bytes, {
-    headers: { "content-type": contentType, "cache-control": "public, max-age=604800, immutable" },
-  });
-}
-
-export const favicon = (): Response => assetResponse(FAVICON_ICO, "image/x-icon");
-export const appleTouchIcon = (): Response => assetResponse(APPLE_TOUCH, "image/png");
-/** One static Open Graph image for the whole site — og:title carries the words. */
-export const ogImage = (): Response => assetResponse(OG_PNG, "image/png");
-
-/**
- * A font file at /__web/fonts/<file> — the very files the app bundles
- * (theme.ts). Addressed by name like the icons, so cached for the same week.
- */
-export function fontFile(file: string): Response | null {
-  const bytes = fontBytes(file);
-  return bytes ? assetResponse(bytes, "font/woff2") : null;
-}
-
-/**
- * The standalone mermaid module at /__web/<tag>/mermaid.js. Any tag serves
- * the CURRENT build: the immutable cache is content-keyed by the tag a page
- * requested, and a mismatched tag only means an older page, which still gets
- * working code and re-tags on its next load. The build's own tag rides
- * along as the etag.
- */
-export function mermaidModule(): Response {
-  if (!WEB_ASSETS) {
-    return new Response("web assets not bundled — build with scripts/bundle-worker.mjs", {
-      status: 503,
-      headers: { "content-type": "text/plain; charset=utf-8" },
-    });
-  }
-  return new Response(WEB_ASSETS.mermaid, {
-    headers: {
-      "content-type": "text/javascript; charset=utf-8",
-      "cache-control": "public, max-age=31536000, immutable",
-      etag: `"${WEB_ASSETS.tag}"`,
-      "x-robots-tag": "noindex",
-    },
-  });
 }

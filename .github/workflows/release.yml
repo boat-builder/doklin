@@ -418,12 +418,21 @@ jobs:
           echo "=== latest.json ==="; cat release-assets/latest.json
           ls -la release-assets
 
-      # The cloud worker, bundled to one file and attached to the release at
+      # The cloud worker, bundled to one file, and the web files its pages ask
+      # for (which Cloudflare serves beside it without running it), attached
+      # to the release at
       #   https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js
-      # — the URL the app's setup prompt and the update script fetch, so nobody
-      # clones or builds anything to deploy a domain.
-      - name: Bundle cloud worker (release asset)
-        run: node scripts/bundle-worker.mjs release-assets/doklin-cloud-worker.js
+      #   https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-web.tar.gz
+      # — the URLs the app's setup prompt and the update script fetch, so nobody
+      # clones or builds anything to deploy a domain. The archive unpacks to
+      # doklin-cloud-web/; COPYFILE_DISABLE keeps macOS's ._ files out of it.
+      - name: Bundle cloud worker (release assets)
+        run: |
+          set -euo pipefail
+          node scripts/bundle-worker.mjs cloud-worker/dist/doklin-cloud-worker.js
+          cp cloud-worker/dist/doklin-cloud-worker.js release-assets/doklin-cloud-worker.js
+          COPYFILE_DISABLE=1 tar -czf release-assets/doklin-cloud-web.tar.gz -C cloud-worker/dist doklin-cloud-web
+          tar -tzf release-assets/doklin-cloud-web.tar.gz
 
       # The update script, beside it at
       #   https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-update.sh

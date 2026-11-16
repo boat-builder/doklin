@@ -38,7 +38,7 @@ synced manifest, rendered by the worker from the synced files.
 
 | Area | Where |
 | --- | --- |
-| Worker | `cloud-worker/src/`; bundled to one file by `scripts/bundle-worker.mjs`, released as `doklin-cloud-worker.js` |
+| Worker | `cloud-worker/src/`; bundled to one file by `scripts/bundle-worker.mjs`, released as `doklin-cloud-worker.js` beside its static assets, `doklin-cloud-web.tar.gz` |
 | Engine crate | `engine/`: `host.rs` `Core`, `Setup`, `Host` · `paths.rs` paths as written down · `command.rs` every command by name · `cloud/` · `versions/` ([versioning.md](versioning.md)) · `ffi/` the C interface for the iPhone ([ios.md](ios.md)) |
 | Engine | `engine/src/cloud/`: `mod.rs` manager, commands · `engine.rs` task, poll, presence, status, sections · `unit.rs` one section's cycle · `space.rs` sections on disk · `remote.rs` `Remote` + `HttpRemote` · `pace.rs` request count, allowances, bulk lane · `flows.rs` bind, download, wipe · `merge.rs` · `scan.rs` · `bus.rs` · `config.rs` · `invite.rs` · `manifest.rs` wire types · `status.rs` · `versions.rs` version mirror · `tests.rs` in-memory worker |
 | Mac app's side | `src-tauri/src/engine.rs` its `Setup` and `Host` · `cloud.rs`, `versions.rs` one Tauri command per engine command · `edits.rs` the edit bus (`Core::touched`) |
@@ -93,7 +93,7 @@ synced manifest, rendered by the worker from the synced files.
 
 **Pacing** (`pace.rs`; the numbers are the worker's, `limits` in `/api/meta` and every poll, per the plan setting — the engine has none of its own):
 - Every request with a bearer is counted in `HttpRemote::auth`, per UTC day, in `<state_dir>/usage.json`; every 15 min one carries `x-doklin-used`, and the poll's `limits.fleetToday` is everyone's sum.
-- Express lane: polls, manifest reads/writes, and a cycle's transfers while ≤ 50 (`EXPRESS`). Past that, the bulk lane: a batch (100 files / 8 MB) a cycle from a token bucket (200, refilling at `bulkPerSecond`); the app's own edits (the edit bus) always go express. Downloads too: what a cycle cannot take is `owed` (persisted), never pushed over or read as deleted until it arrives. The mirror and blob GC draw on the same bucket.
+- Express lane: polls, manifest reads/writes, and a cycle's transfers while ≤ 50 (`EXPRESS`). Past that, the bulk lane: a batch (100 files / 8 MB) a cycle from a token bucket (200, refilling at `bulkPerSecond`); the app's own edits (the edit bus) always go express. Downloads too: what a cycle cannot take is `owed` (persisted), never pushed over or read as deleted until it arrives. The mirror draws on the same bucket.
 - Modes: `bulk-waits` (this device past `deviceBulk`, liftable for the day by `cloud_lift_wait`; or everyone past `fleetBulkWaits`, not liftable) — bulk waits for 00:00 UTC; `slow` (past `deviceCeiling` or `fleetSlow`) — no bulk, a poll and a pass a minute at most.
 - A worker whose `/api/meta` carries no `limits` predates them: `worker-outdated` until it is updated.
 - A connect or a join is a person's own act and is not paced.
@@ -120,7 +120,7 @@ synced manifest, rendered by the worker from the synced files.
 - A missing root (unmounted, renamed) touches nothing: phase `error`.
 - After a merge the stored disk snapshot is left stale on purpose so the next scan re-hashes and pushes the merged bytes. Refreshing it silently drops the push.
 - Tombstones expire after 30 days: `TOMBSTONE_TTL_MS` in `engine.rs` ⇄ `commit.ts`. **Change both.** A move keeps `mtime` in both (`staged.moves` ⇄ `Tx.move`).
-- Blob GC: every 20th cycle, unreferenced revisions older than a day only (a racing pusher may have uploaded ahead of its CAS).
+- No device deletes a stored copy (`blobs/<fid>/<hash>`): the worker's daily sweep does (`cloud-worker/src/sweep.ts`, a cron trigger), taking every copy its section's manifest doesn't name once it is a day old (`SWEEP_MIN_AGE_MS`). A push uploads before its manifest write, so `UPLOADED_TTL_MS` (12 h) stays inside that day — **change both**. A re-upload of a stored copy's own bytes stores it again, so a file back to an old version restarts that copy's day. Trap: a copy named in the second between a sweep's listing and its delete is still lost; a download of it 404s until the file's next edit.
 - `426` on PUT → `worker-outdated`: sync pauses, probing `/api/meta` each poll until a newer worker answers.
 - `by` is a member id (`ENTITY_ID_RE`, `members.ts`) or an agent id (`AGENT_ID_RE`, `agents.ts`). An unknown id refetches the directory at most every 5 min (`DIRECTORY_MIN_GAP`); an id it cannot name shows as it stands.
 
@@ -150,6 +150,6 @@ synced manifest, rendered by the worker from the synced files.
 - `WORKER_VERSION` is the one thing read off a worker about what it does: no feature list, nothing gated on one. The engine, app and CLI expect every route and field of the version they were built with.
 - Neither side must work with the other's next release; a skewed pair must say so (badge, `worker-outdated`, `426`) and never corrupt. So retired routes and fields are deleted, not kept.
 - Move `COMPATIBILITY_DATE` only on purpose: it changes every new deploy's runtime.
-- Bundle < 3 MB gzipped (the script fails past it; mermaid is most of it). The checked-in `cloud-worker/src/assets.ts` stays empty (`WEB_ASSETS` is `null`); the bundle script splices mermaid in.
+- Bundle < 3 MB gzipped (the script fails past it). What public pages ask for — fonts, icons, the mermaid module — is not in it: the script writes it to `doklin-cloud-web/` beside the worker, which Cloudflare serves as static assets. The checked-in `cloud-worker/src/assets.ts` says `WEB_TAG = "dev"`; the bundle script splices in the build's tag (the mermaid module's hash).
 - **Update** = `scripts/doklin-cloud-update.sh <endpoint>` (release asset; `updateCommands`). Names from the endpoint (`deploymentNames`); confirms worker, bucket and D1 database exist first (deploying a missing name creates a second worker) and creates nothing; done when unauthenticated `/api/meta` answers `401`. Overrides `WORKER_NAME=`, `BUCKET_NAME=`, `D1_NAME=`. No secret.
 - **Setup prompt** checks names are free first (a same-name deploy silently replaces a worker) and that `/api/meta`'s `d1` is a number. **Teardown** runs after the wipe, never forces a non-empty bucket. `wrangler.toml` is never committed. `verify-harness/cloudprompts.test.mjs` pins prompts and script to the naming rule and compatibility date.

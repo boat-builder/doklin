@@ -42,7 +42,7 @@ At `releases/latest/download/<name>`. A rename breaks its consumers, including d
 | `Doklin-<version>-macos-arm64.dmg` | archival |
 | `Doklin-macos-arm64.dmg` (copied after stapling) | `DOWNLOAD_URL` in `cloud-worker/src/static.ts` |
 | `Doklin.app.tar.gz`, `latest.json` | updater |
-| `doklin-cloud-worker.js` | `src/cloudPrompts.ts`, `scripts/doklin-cloud-update.sh` |
+| `doklin-cloud-worker.js`, `doklin-cloud-web.tar.gz` (unpacks to `doklin-cloud-web/`) | `src/cloudPrompts.ts`, `scripts/doklin-cloud-update.sh` |
 | `doklin-cloud-update.sh`, `install-doklin.sh` | `src/cloudPrompts.ts` |
 | `doklin-linux-x64`, `doklin-linux-arm64`, `doklin-macos-arm64`, `SHA256SUMS` | `scripts/install-doklin.sh` |
 

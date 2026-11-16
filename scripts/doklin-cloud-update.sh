@@ -11,7 +11,8 @@
 #
 # Why a script and not an agent prompt, when setup and teardown are prompts:
 # the update is one deterministic sequence with no judgement in it — fetch the
-# worker, confirm the names, write wrangler.toml, deploy over the same name.
+# worker and its web files, confirm the names, write wrangler.toml, deploy over
+# the same name.
 # The app's "Update the worker" card hands an agent these same two commands.
 #
 # It is a code-only redeploy: the R2 bucket, the D1 database, the OWNER_TOKEN
@@ -39,6 +40,10 @@
 set -u
 
 BUNDLE_URL="https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js"
+# The files public pages ask for (fonts, icons, the mermaid module), which
+# Cloudflare serves beside the worker without running it. The archive unpacks
+# to doklin-cloud-web/.
+WEB_URL="https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-web.tar.gz"
 # cloud-worker/src/version.ts is the source of this date; the test pins them
 # together. Moving it changes runtime behaviour — do it there, on purpose.
 COMPATIBILITY_DATE="2025-05-05"
@@ -120,6 +125,7 @@ fi
 derive_names "$target"
 
 command -v curl >/dev/null 2>&1 || die "curl not found."
+command -v tar >/dev/null 2>&1 || die "tar not found."
 # npx runs wrangler; node reads the JSON `wrangler d1 list` prints.
 command -v npx >/dev/null 2>&1 ||
   die "npx not found. Install Node.js from https://nodejs.org, then re-run this."
@@ -130,17 +136,20 @@ say "Updating the Doklin worker serving $ENDPOINT"
 say "  worker \"$WORKER\" · bucket \"$BUCKET\" · database \"$DATABASE\""
 say ""
 
-# ---------- 1. the worker, from the latest release ----------
+# ---------- 1. the worker and its web files, from the latest release ----------
 
 work=$(mktemp -d) || die "couldn't make a working directory"
 trap 'rm -rf "$work"' EXIT INT TERM
 cd "$work" || die "couldn't enter $work"
 
-say "Downloading the worker…"
+say "Downloading the worker and its web files…"
 curl -fsSL "$BUNDLE_URL" -o doklin-cloud-worker.js || die "download failed: $BUNDLE_URL
        If it 404s, clone https://github.com/boat-builder/doklin, run
        \`pnpm install && node scripts/bundle-worker.mjs\` there, and re-run this
        script from a directory holding the built doklin-cloud-worker.js."
+curl -fsSL "$WEB_URL" -o doklin-cloud-web.tar.gz || die "download failed: $WEB_URL"
+tar -xzf doklin-cloud-web.tar.gz || die "couldn't unpack doklin-cloud-web.tar.gz"
+[ -f doklin-cloud-web/_headers ] || die "doklin-cloud-web.tar.gz didn't hold the web files."
 
 # ---------- 2. the Cloudflare login, and which account ----------
 #
@@ -304,6 +313,8 @@ else
   routes="workers_dev = true"
 fi
 
+# [assets] is the web directory Cloudflare serves without running the worker;
+# [triggers] the daily sweep of stored copies no manifest names.
 # The two [[ratelimits]] blocks are the worker's loop catchers (DEVICE_LIMIT,
 # AGENT_LIMIT): the same numbers as the setup prompt's wrangler.toml
 # (src/cloudPrompts.ts) — the test holds the two together.
@@ -313,6 +324,10 @@ main = "doklin-cloud-worker.js"
 compatibility_date = "$COMPATIBILITY_DATE"
 account_id = "$CLOUDFLARE_ACCOUNT_ID"
 $routes
+[assets]
+directory = "doklin-cloud-web"
+[triggers]
+crons = ["17 3 * * *"]
 [[r2_buckets]]
 binding = "DATA"
 bucket_name = "$BUCKET"

@@ -1,7 +1,9 @@
 // What the day's Cloudflare limits do to a workspace's sync, and the
-// many-new-documents question, in the Mac's words (`syncWords` and the Cloud
-// panel, src/cloud.ts) — change both. Every number is the engine's
-// (`CloudStatus.usage`, from the domain's `limits`); none is typed here.
+// many-new-documents question, in the Mac's words (the Cloud panel's and the
+// footer tooltip's — `waitWords`, `usageWords`, src/cloud.ts) — change both.
+// The sync line spans the screen, so it keeps the whole words the Mac's
+// footer shortens. Every number is the engine's (`CloudStatus.usage`, from
+// the domain's `limits`); none is typed here.
 
 import Foundation
 
