@@ -1,15 +1,16 @@
-//! The credentials file — the one thing this program keeps.
+//! The credentials file — the one secret this program keeps.
 //!
 //! `~/.config/doklin/credentials.json` (`$XDG_CONFIG_HOME` honoured), mode
 //! 0600 in a 0700 directory: one entry per domain, each holding the token a
 //! `doklin login` left on this machine. There is deliberately no other place
 //! a credential can come from — no environment variable, no flag, no
 //! keychain — so there is one thing to protect and one thing to remove.
+//! Beside it, kept the same way, is the count of requests (usage.rs).
 
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -55,7 +56,7 @@ impl Default for Credentials {
     }
 }
 
-fn config_dir() -> Result<PathBuf, Failure> {
+pub fn config_dir() -> Result<PathBuf, Failure> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(xdg).join("doklin"));
     }
@@ -82,16 +83,19 @@ pub fn load() -> Result<Credentials, Failure> {
         .map_err(|e| Failure::other(format!("{} is not a credentials file ({}) — remove it and log in again", file.display(), e)))
 }
 
-/// Write the whole file, readable by this user alone, through a temp file
-/// so a crash never leaves half a login.
+/// Write the whole file, so a crash never leaves half a login.
 pub fn save(creds: &Credentials) -> Result<(), Failure> {
-    let dir = config_dir()?;
+    write_private(&config_dir()?, "credentials.json", &serde_json::to_vec_pretty(creds).unwrap_or_default())
+}
+
+/// Write the whole of `dir/name`, readable by this user alone (0600 in a
+/// 0700 directory), through a temp file of this process's own, so neither a
+/// crash nor a second `doklin` writing at the same moment leaves half a file.
+pub fn write_private(dir: &Path, name: &str, body: &[u8]) -> Result<(), Failure> {
     let fail = |what: &str, e: std::io::Error| Failure::other(format!("could not {} {}: {}", what, dir.display(), e));
-    fs::create_dir_all(&dir).map_err(|e| fail("create", e))?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|e| fail("protect", e))?;
-    let file = dir.join("credentials.json");
-    let tmp = dir.join("credentials.json.tmp");
-    let body = serde_json::to_vec_pretty(creds).unwrap_or_default();
+    fs::create_dir_all(dir).map_err(|e| fail("create", e))?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| fail("protect", e))?;
+    let tmp = dir.join(format!("{}.{}.tmp", name, std::process::id()));
     let mut out = fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -99,9 +103,9 @@ pub fn save(creds: &Credentials) -> Result<(), Failure> {
         .mode(0o600)
         .open(&tmp)
         .map_err(|e| fail("write in", e))?;
-    out.write_all(&body).and_then(|_| out.write_all(b"\n")).map_err(|e| fail("write in", e))?;
+    out.write_all(body).and_then(|_| out.write_all(b"\n")).map_err(|e| fail("write in", e))?;
     drop(out);
-    fs::rename(&tmp, &file).map_err(|e| fail("write in", e))
+    fs::rename(&tmp, dir.join(name)).map_err(|e| fail("write in", e))
 }
 
 /// The other way in, on a Mac: the Doklin app logs its own `doklin` in to

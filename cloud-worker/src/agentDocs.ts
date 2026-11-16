@@ -8,9 +8,10 @@
 //   DELETE /api/agent/doc?path=&v=[&dry=1]
 //   POST   /api/agent/move                                 {from, to, dryRun?}
 //
-// One route serves documents and plain files alike, because only the worker
-// can tell which a path names (documents.ts, `locate`): the CLI sends what
-// was typed and is told what it turned out to be.
+// Every path names a document (documents.ts, `locate`) — by its stem or by a
+// version's full name — or, for a move, a folder: the CLI sends what was
+// typed and is told what it turned out to be. Nothing else syncs, so nothing
+// else is here (`syncs`, layout.ts).
 //
 // Every change goes through `commit` (commit.ts), so a document's files land
 // in one manifest write or not at all, and the public map is kept true in
@@ -32,7 +33,6 @@ import {
   basename,
   docExists,
   docRow,
-  fileRow,
   htmlBehind,
   listTree,
   locate,
@@ -54,22 +54,14 @@ import { mirrorAfter } from "./search";
 import { CRITIC_BLOCK_RE, parseSpans, stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, metaIsEmpty, parseEntityMeta, serializeEntityMeta } from "../../src/metaFile";
 
+/** Every kind of file that syncs (`syncs`, layout.ts). */
 const CONTENT_TYPES: Record<string, string> = {
   md: "text/markdown; charset=utf-8",
   markdown: "text/markdown; charset=utf-8",
   mdown: "text/markdown; charset=utf-8",
   mkd: "text/markdown; charset=utf-8",
   html: "text/html; charset=utf-8",
-  txt: "text/plain; charset=utf-8",
-  json: "application/json",
   jsonl: "application/json",
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  svg: "image/svg+xml",
-  pdf: "application/pdf",
 };
 
 /** What a blob is stored as — the engine's own table (`content_type_for`, scan.rs). */
@@ -168,7 +160,7 @@ export async function getTree(c: Call): Promise<Response> {
     const tree = await openTree(inSection(c, at));
     if (!tree) return notBound();
     const listing = listTree(tree.manifest, url.origin, dir, deep);
-    const nothing = listing.folders.length + listing.documents.length + listing.files.length === 0;
+    const nothing = listing.folders.length + listing.documents.length === 0;
     // A section is there with nothing in it; any other folder is its files.
     if (nothing && !sameName(dir, at.mount)) return json({ error: `there is no folder "${dir}"` }, 404);
     return json(listing);
@@ -178,7 +170,7 @@ export async function getTree(c: Call): Promise<Response> {
   const all = await places.all();
   if (all === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
   const sections = all.filter((s) => (at === "restricted" ? s.kind === "restricted" : s.kind !== "shared"));
-  let listing: Listing = { dir, folders: [], documents: [], files: [] };
+  let listing: Listing = { dir, folders: [], documents: [] };
   if (at === null) {
     const tree = await openTree(c);
     if (!tree) return notBound();
@@ -203,11 +195,9 @@ export async function getTree(c: Call): Promise<Response> {
     const inside = listTree(tree.manifest, url.origin, s.mount, true);
     listing.folders.push(...inside.folders);
     listing.documents.push(...inside.documents);
-    listing.files.push(...inside.files);
   }
   listing.folders.sort(byName);
   listing.documents.sort((a, b) => byName(a.path, b.path));
-  listing.files.sort((a, b) => byName(a.path, b.path));
   // Said, never left out silently: list one of these on its own.
   return json({ ...listing, ...(notListed.length > 0 ? { notListed } : {}) });
 }
@@ -216,8 +206,8 @@ export async function getTree(c: Call): Promise<Response> {
  * Where a link to a page leads, as this agent's person names the path. A
  * link (engine/src/cloud/link.rs) names its workspace, the space its file is
  * in ("" the shared workspace) and the file's id — never a path, so that a
- * rename keeps it and no folder's name is in it. A document comes back as
- * the tree names it (its stem), a plain file in full.
+ * rename keeps it and no folder's name is in it. Only documents sync, so a
+ * file found is one: it comes back as the tree names it, by its stem.
  *
  * A space this person is not in, a file deleted, one that never was and a
  * link from another workspace on this domain are all one answer, the same
@@ -246,16 +236,15 @@ export async function getFind(c: Call): Promise<Response> {
   if (!tree) return notBound();
   const file = tree.manifest.files[fid];
   if (!file || file.path.toLowerCase().endsWith(META_SUFFIX)) return nothing;
-  const named = nameOf(file.path);
-  if (named.version === null) return json({ kind: "file", path: file.path });
-  const alone = new Index(tree.manifest.files).doc(named.stem).mds.length <= 1;
-  return json({ kind: "document", path: alone ? named.stem : file.path });
+  const { stem } = nameOf(file.path);
+  const alone = new Index(tree.manifest.files).doc(stem).mds.length <= 1;
+  return json({ path: alone ? stem : file.path });
 }
 
 /** Which version a read means: the one asked for, else the markdown, else the html. */
-function versionToRead(at: Extract<Named, { kind: "document" }>, typed: string): { version: Version; entry: Entry } | Refusal {
+function versionToRead(at: Named, typed: string): { version: Version; entry: Entry } | Refusal {
   const { doc } = at;
-  if (!docExists(doc)) return new Refusal(404, `there is no document or file at "${typed}"`);
+  if (!docExists(doc)) return new Refusal(404, `there is no document at "${typed}"`);
   const version: Version = at.asked ?? (doc.md ? "md" : "html");
   const entry = version === "md" ? doc.md : doc.html;
   if (entry) return { version, entry };
@@ -274,20 +263,9 @@ export async function getDoc(c: Call): Promise<Response> {
   const index = new Index(ws.manifest.files);
   const at = locate(index, path, flag);
   if (at instanceof Refusal) return refuse(at);
-  const wantInfo = url.searchParams.get("info") === "1";
 
-  if (at.kind === "file") {
-    if (!at.entry) return json({ error: `there is no document or file at "${path}"` }, 404);
-    if (wantInfo) {
-      const names = await namesOf(env);
-      const row = fileRow(ws.manifest, url.origin, at.entry);
-      return json({ kind: "file", ...row, ...(row.by && names.has(row.by) ? { byName: names.get(row.by) } : {}) });
-    }
-    return content(env, at.entry, { kind: "file", path: at.entry.file.path }, false);
-  }
-
-  if (wantInfo) {
-    if (!docExists(at.doc)) return json({ error: `there is no document or file at "${path}"` }, 404);
+  if (url.searchParams.get("info") === "1") {
+    if (!docExists(at.doc)) return json({ error: `there is no document at "${path}"` }, 404);
     return json(await docInfo(env, ws.manifest, url.origin, at.doc));
   }
   const picked = versionToRead(at, path);
@@ -295,16 +273,16 @@ export async function getDoc(c: Call): Promise<Response> {
   return content(
     env,
     picked.entry,
-    { kind: "document", path: at.doc.stem, version: picked.version, htmlBehind: htmlBehind(at.doc) },
+    { path: at.doc.stem, version: picked.version, htmlBehind: htmlBehind(at.doc) },
     picked.version === "md" && url.searchParams.get("clean") === "1",
   );
 }
 
-/** A file's bytes, with what the caller needs to know about them in headers. */
+/** A version's bytes, with what the caller needs to know about them in headers. */
 async function content(
   env: Env,
   entry: Entry,
-  what: { kind: "document" | "file"; path: string; version?: Version; htmlBehind?: boolean },
+  what: { path: string; version: Version; htmlBehind: boolean },
   clean: boolean,
 ): Promise<Response> {
   const obj = await env.DATA.get(blobKey(entry.fid, entry.file.hash));
@@ -312,12 +290,12 @@ async function content(
   const headers: Record<string, string> = {
     "content-type": contentTypeOf(entry.file.path),
     "cache-control": "no-store",
-    "x-doklin-kind": what.kind,
+    "x-doklin-kind": "document",
     "x-doklin-path": headerText(what.path),
     "x-doklin-file": headerText(entry.file.path),
     "x-doklin-rev": String(entry.file.rev),
+    "x-doklin-version": what.version,
   };
-  if (what.version) headers["x-doklin-version"] = what.version;
   if (what.htmlBehind) headers["x-doklin-html-behind"] = "1";
   if (clean) return new Response(stripComments(await obj.text()), { headers });
   return new Response(obj.body, { headers: { ...headers, "content-length": String(obj.size) } });
@@ -403,7 +381,7 @@ export async function putDoc(c: Call): Promise<Response> {
       const index = new Index(tx.files);
       const at = locate(index, path, flag);
       if (at instanceof Refusal) return at;
-      const value = at.kind === "file" ? await writeFile(tx, index, at, bytes, pre, force) : await writeVersion(tx, index, at, bytes, pre, force);
+      const value = await writeVersion(tx, index, at, bytes, pre, force);
       if (!(value instanceof Refusal)) keepPublic(tx);
       return value;
     },
@@ -417,37 +395,10 @@ export async function putDoc(c: Call): Promise<Response> {
 
 type Written = Record<string, unknown> & { created: boolean };
 
-async function writeFile(
-  tx: Tx,
-  index: Index,
-  at: Extract<Named, { kind: "file" }>,
-  bytes: Uint8Array,
-  pre: Precondition,
-  force: boolean,
-): Promise<Written | Refusal> {
-  const refusal = checkRevision(pre, force, at.entry, at.path);
-  if (refusal) return refusal;
-  const path = at.entry ? at.entry.file.path : index.spelled(at.path);
-  if (!at.entry) {
-    const place = index.placeProblem(path);
-    if (place) return new Refusal(409, place);
-  }
-  const before = at.entry?.file.hash;
-  const file = await tx.write(at.entry?.fid ?? newFileId(), path, bytes, contentTypeOf(path));
-  return {
-    kind: "file",
-    path: file.path,
-    rev: file.rev,
-    size: file.size,
-    created: !at.entry,
-    ...(before === file.hash ? { unchanged: true } : {}),
-  };
-}
-
 async function writeVersion(
   tx: Tx,
   index: Index,
-  at: Extract<Named, { kind: "document" }>,
+  at: Named,
   bytes: Uint8Array,
   pre: Precondition,
   force: boolean,
@@ -615,13 +566,8 @@ export async function deleteDoc(c: Call): Promise<Response> {
       const index = new Index(tx.files);
       const at = locate(index, path, flag);
       if (at instanceof Refusal) return at;
-      if (at.kind === "file") {
-        if (!at.entry) return new Refusal(404, `there is no document or file at "${path}"`);
-        tx.remove(at.entry.fid);
-        return { kind: "file", path: at.entry.file.path, stillPublic: ownPages(tx.m, url.origin, [at.entry.fid]) };
-      }
       const { doc } = at;
-      if (!docExists(doc)) return new Refusal(404, `there is no document or file at "${path}"`);
+      if (!docExists(doc)) return new Refusal(404, `there is no document at "${path}"`);
       // A version is removed only when the flag says so: `rm plan.md` means
       // the document, exactly as `mv plan.md` does.
       return flag ? removeVersion(tx, doc, flag) : removeDocument(tx, doc, url.origin);
@@ -713,7 +659,7 @@ const trimSlashes = (p: string): string => p.replace(/^\/+|\/+$/g, "");
 
 /** What a move takes with it. */
 type Picked = {
-  kind: "document" | "file" | "folder";
+  kind: "document" | "folder";
   /** The path it was named by, without its slashes. */
   from: string;
   moving: Entry[];
@@ -721,15 +667,13 @@ type Picked = {
 };
 
 /** What `rawFrom` names, as something that moves: a document whole — both
- *  versions and its comments — whatever extension was typed, a plain file, or
- *  a folder. */
+ *  versions and its comments — whatever extension was typed, or a folder. */
 function pick(index: Index, rawFrom: string): Picked | Refusal {
   const fromFolder = rawFrom.endsWith("/");
   const from = trimSlashes(rawFrom);
   const at = fromFolder ? null : locate(index, from, null);
   if (at instanceof Refusal) return at;
-  if (at && at.kind === "file" && at.entry) return { kind: "file", from, moving: [at.entry], doc: null };
-  if (at && at.kind === "document" && docExists(at.doc)) {
+  if (at && docExists(at.doc)) {
     const doc = at.doc;
     return { kind: "document", from, moving: [doc.md, doc.html, doc.meta].filter((e): e is Entry => e !== null), doc };
   }
@@ -751,12 +695,7 @@ function route(there: Index, picked: Picked, to: string, into: boolean): Route |
   const { kind, from, moving, doc } = picked;
   const plan: Route["plan"] = [];
   let label: Route["label"];
-  if (kind === "file") {
-    const entry = moving[0];
-    const dest = there.spelled(into ? `${to}/${basename(entry.file.path)}` : to);
-    plan.push({ fid: entry.fid, to: dest });
-    label = { from: entry.file.path, to: dest };
-  } else if (doc) {
+  if (doc) {
     const stem = there.spelled(into ? `${to}/${basename(doc.stem)}` : nameOf(to).stem);
     if (doc.md) plan.push({ fid: doc.md.fid, to: `${stem}${doc.md.file.path.slice(doc.stem.length)}` });
     if (doc.html) plan.push({ fid: doc.html.fid, to: `${stem}.html` });
@@ -794,7 +733,7 @@ function route(there: Index, picked: Picked, to: string, into: boolean): Route |
 const within = (path: string, folder: string): boolean =>
   sameName(path, folder) || path.toLowerCase().startsWith(`${folder.toLowerCase()}/`);
 
-/** Move or rename a document, a plain file or a folder inside one section. */
+/** Move or rename a document or a folder inside one section. */
 function move(tx: Tx, rawFrom: string, rawTo: string, section: Section): Record<string, unknown> | Refusal {
   const index = new Index(tx.files);
   const picked = pick(index, rawFrom);
@@ -951,11 +890,6 @@ async function moveAcross(c: Call, source: Section, dest: Section, rawFrom: stri
 export function documentAt(index: Index, path: string): Doc | Refusal {
   const at = locate(index, path, null);
   if (at instanceof Refusal) return at;
-  if (at.kind === "file") {
-    return at.entry
-      ? new Refusal(400, `${at.entry.file.path} is a plain file, not a document`)
-      : new Refusal(404, `there is no document at "${path}"`);
-  }
   if (!docExists(at.doc)) return new Refusal(404, `there is no document at "${path}"`);
   return at.doc;
 }

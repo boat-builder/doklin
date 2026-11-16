@@ -17,6 +17,9 @@
 //     Mac moves its clean copy to the Trash and keeps an edited one;
 //   · `seq` goes up by one, and the manifest still passes `validateManifest`
 //     — the same check a Mac's PUT goes through;
+//   · nothing outside `syncs` (layout.ts) is in it: a file, tombstone or page
+//     of one that the stored manifest still lists is left out, as the engine
+//     leaves it out of the manifests it writes;
 //   · an address the change adds to the public map is claimed before the
 //     manifest is stored, and one it drops is let go after (addresses.ts).
 //
@@ -33,7 +36,7 @@ import { claimAddresses, releaseAddresses, takenError, type Claim } from "./addr
 import { randomHex, sha256Hex } from "./crypto";
 import type { Env } from "./env";
 import { MANIFEST_KEY, MAX_FILE_BYTES, MAX_MANIFEST_BYTES, blobKey } from "./layout";
-import { validateManifest, type Manifest, type ManifestFile } from "./manifest";
+import { validateManifest, withoutUnsynced, type Manifest, type ManifestFile } from "./manifest";
 import { mounted, unmounted } from "./mount";
 import { noteEtag, spaceOf } from "./spaces";
 
@@ -216,19 +219,21 @@ export async function commit<T>(
   for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
     const obj = await env.DATA.get(MANIFEST_KEY);
     if (!obj) return new Refusal(404, "this domain holds no workspace yet");
-    let parsed: unknown;
+    let raw: unknown;
     try {
-      parsed = await obj.json();
+      raw = await obj.json();
     } catch {
-      parsed = null;
+      raw = null;
     }
+    const parsed = withoutUnsynced(raw);
     if (validateManifest(parsed, inSpace) !== null) {
       return new Refusal(409, "this workspace's manifest is not one this worker can change — open it in Doklin first");
     }
     const tx = new Tx(env, mounted(parsed as Manifest, mount), by);
     const before = named(tx.m);
     lastSeen = before;
-    const addresses = new Set(Object.keys(tx.m.public ?? {}));
+    // As stored: a page left out above is an address this write gives up.
+    const addresses = new Set(Object.keys((raw as Manifest).public ?? {}));
 
     const value = await change(tx);
     if (value instanceof Refusal) {

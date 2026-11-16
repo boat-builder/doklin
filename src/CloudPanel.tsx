@@ -7,29 +7,43 @@
 // somebody sent, or a code from another device of your own), create one from
 // this folder on a domain of your own, or recover one with its Cloudflare
 // account after every device is gone. Connected: the workspace and its phase, sync now /
-// pause, who else is here, the held mass-deletion waiting for a word, the
-// worker's version against this app's, adding a device, disconnect, and the
+// pause, who else is here, the held mass-deletion and the held new documents
+// waiting for a word, what the day's Cloudflare limits are doing (and lifting
+// this Mac's own wait), the worker's version against this app's, today's
+// requests and the Cloudflare plan, adding a device, disconnect, and the
 // danger zone: erase everything on the domain (which frees it), then the
 // teardown prompt for the agent. Who is in the workspace, their devices and
 // its agents are the workspace menu's (PeopleDialog.tsx).
 //
-// What only the superadmin may do — the worker, the danger zone — is hidden
-// from everyone else by the same table the domain decides with (`mayOn`).
+// What only the superadmin may do — the worker, the plan, the danger zone —
+// is hidden from everyone else by the same table the domain decides with
+// (`mayOn`).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BUNDLED_WORKER_VERSION,
+  addsQuestion,
+  cloudConfirmAdds,
   cloudConfirmDeletes,
   cloudDisconnect,
+  cloudLiftWait,
   cloudPause,
+  cloudSetPlan,
   cloudSyncNow,
   cloudWipe,
   mayOn,
   phaseLine,
+  planName,
+  sendingWords,
+  usageLine,
+  usageState,
   versionsLine,
   timeAgo,
+  waitWords,
   workerAhead,
   workerBehind,
+  type CloudPendingAddsEvent,
+  type CloudPlan,
   type CloudStatus,
 } from "./cloud";
 import { useDismiss } from "./dismiss";
@@ -57,12 +71,21 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const MAX_LISTED_PATHS = 8;
 
+/** What changing the plan does, said before it is changed. The iPhone asks
+ *  with the same words (ios/DoklinKit/Sources/DoklinKit/Models/Limits.swift)
+ *  — change both. */
+const PLAN_CONFIRM: Record<CloudPlan, string> = {
+  paid: "Doklin stops pacing sync for Cloudflare’s free daily requests. Choose this only once the account is on Workers Paid, or Cloudflare stops every request once today’s are used up.",
+  free: "Doklin paces sync to stay inside Cloudflare’s free daily requests: big changes may wait until the next day.",
+};
+
 type View = "main" | "wipe" | "teardown";
 
 export default function CloudPanel({
   root,
   cloud,
   pendingDeletePaths,
+  pendingAdds,
   onClose,
   onConnect,
   onRecover,
@@ -80,6 +103,9 @@ export default function CloudPanel({
   cloud: CloudStatus | null;
   /** The paths of the held deletions, from the last event (may be empty after a relaunch). */
   pendingDeletePaths: string[];
+  /** The held new documents' folders, from the last event for this workspace
+   *  (null after a relaunch: the status still has the count). */
+  pendingAdds: CloudPendingAddsEvent | null;
   onClose: () => void;
   onConnect: () => void;
   /** Every device is gone: get back in with the Cloudflare account — the
@@ -105,6 +131,10 @@ export default function CloudPanel({
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  // The plan a press asked for, waiting for its confirmation.
+  const [askPlan, setAskPlan] = useState<CloudPlan | null>(null);
+  // A command in flight whose button should not be pressed twice.
+  const [busy, setBusy] = useState<"lift" | "adds" | "plan" | null>(null);
   const [wipeInput, setWipeInput] = useState("");
   const [wiping, setWiping] = useState(false);
   // Captured before the wipe: the status is gone once the domain is empty.
@@ -136,12 +166,15 @@ export default function CloudPanel({
     }
   }, []);
 
-  const act = useCallback(async (f: () => Promise<unknown>) => {
+  const act = useCallback(async (f: () => Promise<unknown>, what: typeof busy = null) => {
     setError(null);
+    if (what) setBusy(what);
     try {
       await f();
     } catch (e) {
       setError(errText(e));
+    } finally {
+      if (what) setBusy(null);
     }
   }, []);
 
@@ -278,6 +311,21 @@ export default function CloudPanel({
     const pages = cloud.public.length;
     // The superadmin's, hidden from everyone else (`mayOn`).
     const manages = mayOn(cloud, "workspace.manage");
+    const usage = usageState(cloud.usage);
+    const plan = cloud.usage.plan;
+    // Nothing held on this Mac's own allowance is nothing to say; everyone's
+    // being near the limit is worth saying either way.
+    const waits = usage.kind === "waits" && (usage.waiting > 0 || usage.cause === "fleet") ? usage : null;
+    const after = (until: string | null) => (until ? `after ${until}` : "once Cloudflare’s day starts again");
+    // Only the superadmin can say the account moved to Workers Paid.
+    const planHint =
+      manages && plan !== "paid"
+        ? "If the Cloudflare account moves to Workers Paid, say so under Cloudflare plan below and these limits lift."
+        : null;
+    // The folders come from the event that asked; an event for another count
+    // is an older question, so only the count is said.
+    const adds = cloud.pendingAdds;
+    const addsFolders = pendingAdds && pendingAdds.count === adds ? pendingAdds.folders : null;
     body = (
       <>
         <div className="cloud-head">
@@ -321,6 +369,56 @@ export default function CloudPanel({
         {cloud.phase === "offline" && (
           <p className="cloud-hint">Couldn’t reach {cloud.domain} — sync retries on its own.</p>
         )}
+        {cloud.phase === "limited" && (
+          <p className="cloud-hint cloud-warn" data-testid="limited">
+            {cloud.error ?? "Today’s Cloudflare requests are used up."}
+            {manages &&
+              plan !== "paid" &&
+              " Moving the Cloudflare account to Workers Paid lifts it within half an hour — then set the plan below to match."}
+          </p>
+        )}
+
+        {waits && (
+          <div className="cloud-card cloud-card--attention" data-testid="usage-waits" data-cause={waits.cause}>
+            <div className="cloud-card-title">
+              {waits.waiting > 0
+                ? waitWords(waits.waiting, waits.until)
+                : `Big changes wait${waits.until ? ` until ${waits.until}` : ""}`}
+            </div>
+            <p className="cloud-hint">
+              {waits.cause === "device"
+                ? "This Mac has sent its share of big changes for today."
+                : "Everyone on this workspace together is near today’s Cloudflare limit."}{" "}
+              The rest go out {after(waits.until)}, so nothing else on this workspace slows down.
+            </p>
+            {waits.cause === "fleet" && planHint && <p className="cloud-hint">{planHint}</p>}
+            {waits.cause === "device" && cloud.usage.liftable && (
+              <div className="modal-buttons">
+                <button
+                  className="modal-btn is-primary"
+                  data-testid="lift-wait"
+                  disabled={busy === "lift"}
+                  onClick={() => void act(() => cloudLiftWait(cloud.root), "lift")}
+                >
+                  {waits.waiting === 1 ? "Send it now" : "Send them now"}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        {usage.kind === "sending" && (
+          <div className="cloud-card" data-testid="usage-sending">
+            <div className="cloud-card-title">{sendingWords(usage.waiting)}</div>
+          </div>
+        )}
+        {usage.kind === "slow" && (
+          <p className="cloud-hint cloud-warn" data-testid="usage-slow">
+            {plan === "paid"
+              ? "Sync is slower for the rest of today because this Mac has sent an unusual number of requests — edits still go out, about once a minute."
+              : "Sync is slower for the rest of today to stay inside Cloudflare’s free requests — edits still go out, about once a minute."}
+            {cloud.usage.cause === "fleet" && planHint && ` ${planHint}`}
+          </p>
+        )}
 
         {cloud.phase === "pending-deletes" && (
           <div className="cloud-card cloud-card--attention" data-testid="pending-deletes">
@@ -348,6 +446,43 @@ export default function CloudPanel({
                 onClick={() => void act(() => cloudConfirmDeletes(cloud.root))}
               >
                 Delete them on {cloud.domain}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {cloud.phase === "pending-adds" && (
+          <div className="cloud-card cloud-card--attention" data-testid="pending-adds">
+            <div className="cloud-card-title">{addsQuestion(adds, addsFolders, cloud.name)}</div>
+            <p className="cloud-hint">
+              Sync asks before sending this many new documents at once. Not now keeps them on this
+              Mac, and Doklin asks again when another new document lands there or you press Sync now.
+            </p>
+            {addsFolders && addsFolders.length > 1 && (
+              <ul className="cloud-paths">
+                {addsFolders.map((f) => (
+                  <li key={f.path}>
+                    {f.path || cloud.name} — {f.count.toLocaleString()}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="modal-buttons">
+              <button
+                className="modal-btn is-primary"
+                data-testid="confirm-adds"
+                disabled={busy === "adds"}
+                onClick={() => void act(() => cloudConfirmAdds(cloud.root, true), "adds")}
+              >
+                {adds === 1 ? "Sync it" : "Sync them"}
+              </button>
+              <button
+                className="modal-btn"
+                data-testid="decline-adds"
+                disabled={busy === "adds"}
+                onClick={() => void act(() => cloudConfirmAdds(cloud.root, false), "adds")}
+              >
+                Not now
               </button>
             </div>
           </div>
@@ -431,6 +566,63 @@ export default function CloudPanel({
           </button>
           {pages === 0 && <span className="cloud-hint">Nothing is published yet.</span>}
         </div>
+
+        <div className="cloud-section-label">Cloudflare</div>
+        <p className="cloud-hint" data-testid="usage-line">
+          {usageLine(cloud.usage)}
+        </p>
+        {(manages || plan) && (
+          <>
+            <div className="cloud-plan-row" data-testid="plan-row">
+              <span className="cloud-plan-label">Cloudflare plan:</span>
+              {manages ? (
+                <div className="view-toggle" role="radiogroup" aria-label="Cloudflare plan">
+                  {(["free", "paid"] as const).map((p) => (
+                    <button
+                      key={p}
+                      role="radio"
+                      aria-checked={plan === p}
+                      className={`view-toggle-seg ${plan === p ? "is-active" : ""}`}
+                      data-testid={`plan-${p}`}
+                      disabled={busy === "plan"}
+                      onClick={() => setAskPlan(p === plan ? null : p)}
+                    >
+                      {planName(p)}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                plan && (
+                  <span className="cloud-plan-value" data-testid="plan-value">
+                    {planName(plan)}
+                  </span>
+                )
+              )}
+            </div>
+            <p className="cloud-hint">Workers Paid lifts the daily limits; the worker still slows a device that loops.</p>
+            {manages && askPlan && askPlan !== plan && (
+              <span className="cloud-inline-confirm" data-testid="plan-confirm">
+                <span className="cloud-hint">{PLAN_CONFIRM[askPlan]}</span>
+                <button
+                  className="modal-btn is-primary"
+                  data-testid="plan-yes"
+                  disabled={busy === "plan"}
+                  onClick={() =>
+                    void act(async () => {
+                      await cloudSetPlan(cloud.root, askPlan);
+                      setAskPlan(null);
+                    }, "plan")
+                  }
+                >
+                  Switch to {planName(askPlan)}
+                </button>
+                <button className="modal-btn" disabled={busy === "plan"} onClick={() => setAskPlan(null)}>
+                  Cancel
+                </button>
+              </span>
+            )}
+          </>
+        )}
 
         <div className="cloud-section-label">This Mac</div>
         <div className="cloud-actions">

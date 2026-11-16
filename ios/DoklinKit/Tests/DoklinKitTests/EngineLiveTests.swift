@@ -80,7 +80,6 @@ final class EngineLiveTests: XCTestCase {
         let home = try workspace.files.text("Home.md")
         XCTAssertTrue(home.hasPrefix("# Home"), home)
         XCTAssertTrue(workspace.files.exists("Projects/Roadmap/Ship the boat.md"))
-        XCTAssertTrue(workspace.files.exists("Projects/assets/pic.png"))
         try await synced(device, root)
 
         // The sign-in is in the keeper, by workspace id, and nowhere on disk;
@@ -166,6 +165,7 @@ final class EngineLiveTests: XCTestCase {
         let agents = AgentsModel(workspace: workspace)
         let added = await agents.add(name: "Kit bot", scopes: AgentScope.usual)
         XCTAssertTrue(added, agents.problem ?? "")
+        XCTAssertNil(agents.problem)
         XCTAssertTrue(agents.login?.login.line.hasPrefix("doklin login ") ?? false)
         let bot = try XCTUnwrap(agents.mine.first { $0.name == "Kit bot" })
         XCTAssertEqual(bot.scopes, ["read", "comment", "edit"])

@@ -4,14 +4,16 @@
 // stem: `plan.md`, its optional `plan.html` rendition, and `plan.meta.jsonl`
 // holding its comment threads (src/metaFile.ts). The app has always treated
 // them as one thing. Here that becomes the only view an agent gets: one name,
-// up to two *versions* — markdown and html — and never the sidecar.
+// up to two *versions* — markdown and html — and never the sidecar. There is
+// nothing else to get: those are the only files Doklin syncs (`syncs`,
+// layout.ts).
 //
 // Everything in this file is a pure reading of the manifest: which files make
 // up the document a path names, which version a request means, what a folder
 // holds. Nothing here reads a blob or writes anything.
 
 import { Refusal } from "./commit";
-import { validPath } from "./layout";
+import { UNSYNCED_SENTENCE, validPath } from "./layout";
 import type { Manifest, ManifestFile } from "./manifest";
 import { nestedUrl } from "./publicMap";
 import { MD_EXT_RE, basename, dirOf, isHtmlPath, isMarkdownPath } from "./workspace";
@@ -37,7 +39,9 @@ const TMP_SUFFIX = ".doklin-sync-tmp";
 const HTML_BEHIND_SLACK_MS = 2000;
 
 /** Why a path cannot be used, or null. Stricter than the manifest's own
- *  grammar: these are the paths a Mac's scan would never see. */
+ *  grammar: these are the paths a Mac's scan would never see. A path that
+ *  names a file which is not a document is `locate`'s to refuse: this one
+ *  also checks folders, whose names may have dots. */
 export function pathProblem(path: string): string | null {
   if (!validPath(path)) {
     return "that is not a path in a workspace — use forward slashes, with no leading slash and no . or .. segments";
@@ -174,31 +178,27 @@ export class Index {
   }
 }
 
-/** What a path names: a document (which may not exist yet) or a plain file. */
-export type Named =
-  | {
-      kind: "document";
-      doc: Doc;
-      /** The version the request picked — by flag or by extension — if it picked one. */
-      asked: Version | null;
-      /** Where a markdown or an html version of it would be created. */
-      mdPath: string;
-      htmlPath: string;
-    }
-  | { kind: "file"; path: string; entry: Entry | null };
+/** The document a path names, which may not exist yet. */
+export type Named = {
+  doc: Doc;
+  /** The version the request picked — by flag or by extension — if it picked one. */
+  asked: Version | null;
+  /** Where a markdown or an html version of it would be created. */
+  mdPath: string;
+  htmlPath: string;
+};
 
 /**
- * Resolve a path, and an optional version flag, to what they name.
+ * Resolve a path, and an optional version flag, to the document they name.
  *
  *   Projects/plan        the document, whichever versions it has
  *   Projects/plan.md     the document, and its markdown version
  *   Projects/plan.html   the document, and its html version
- *   Projects/chart.png   a plain file
+ *   Projects/chart.png   refused: not a document, and Doklin syncs nothing else
  *
- * A full name beats a stem: when a plain file sits at exactly the path asked
- * for, that is what the path means. For something that does not exist yet,
- * a name with an extension of its own is a plain file and anything else is a
- * document — unless a version flag says otherwise.
+ * A name with an extension of its own that is not a document's is refused —
+ * unless a document or a folder has that name (`v1.2` for `v1.2.md`, or a
+ * folder called `v1.2`), or a version flag says it is one.
  */
 export function locate(index: Index, path: string, flag: Version | null): Named | Refusal {
   const problem = pathProblem(path);
@@ -208,14 +208,11 @@ export function locate(index: Index, path: string, flag: Version | null): Named 
   if (asked instanceof Refusal) return asked;
   const doc = index.doc(named.stem);
 
-  if (named.version === null) {
-    const exact = index.at(path);
-    if (exact && !docExists(doc)) {
-      if (asked) return new Refusal(400, `${exact.file.path} is a plain file — it has no versions`);
-      return { kind: "file", path: exact.file.path, entry: exact };
-    }
-    if (exact && !asked) return { kind: "file", path: exact.file.path, entry: exact };
-    if (!docExists(doc) && !asked && hasExtension(path)) return { kind: "file", path, entry: null };
+  if (named.version === null && !asked && hasExtension(path) && !docExists(doc) && !index.isFolder(path)) {
+    return new Refusal(
+      400,
+      `${UNSYNCED_SENTENCE} — "${basename(path)}" is neither. Name a document: plan, plan.md or plan.html.`,
+    );
   }
 
   if (named.version === "md") {
@@ -229,7 +226,6 @@ export function locate(index: Index, path: string, flag: Version | null): Named 
     });
   }
   return {
-    kind: "document",
     doc,
     asked,
     mdPath: doc.md?.file.path ?? (named.version === "md" ? path : `${doc.stem}.md`),
@@ -260,9 +256,7 @@ export type DocRow = {
   public?: string[];
 };
 
-export type FileRow = { path: string; public?: string[] } & Omit<VersionInfo, "file">;
-
-export type Listing = { dir: string; folders: string[]; documents: DocRow[]; files: FileRow[] };
+export type Listing = { dir: string; folders: string[]; documents: DocRow[] };
 
 const versionInfo = (e: Entry): VersionInfo => ({
   file: basename(e.file.path),
@@ -280,9 +274,6 @@ export function htmlBehind(doc: Doc): boolean {
   return md !== undefined && html !== undefined && md - html > HTML_BEHIND_SLACK_MS;
 }
 
-/** File types a published folder serves by their exact path (pages.ts). */
-const SERVED_AS_FILE = /\.(html|png|jpe?g|gif|webp|avif|svg|pdf)$/i;
-
 /**
  * Every address a file is public at: a page of its own, the domain root when
  * that page is the home page, and its place inside each published folder that
@@ -298,7 +289,8 @@ export function addressesOf(m: Manifest, origin: string, fids: readonly string[]
       if (entry.root) out.push(`${origin}/`);
       out.push(`${origin}/${slug}`);
     } else if (entry.path === "" || path.startsWith(`${entry.path}/`)) {
-      if (isMarkdownPath(path) || SERVED_AS_FILE.test(path)) out.push(`${origin}${nestedUrl({ slug, entry }, path)}`);
+      // A note at its name, an html document at its exact path (pages.ts).
+      if (isMarkdownPath(path) || isHtmlPath(path)) out.push(`${origin}${nestedUrl({ slug, entry }, path)}`);
     }
   }
   return out;
@@ -315,12 +307,6 @@ export function docRow(m: Manifest, origin: string, doc: Doc): DocRow {
     ...(htmlBehind(doc) ? { htmlBehind: true as const } : {}),
     ...(addresses.length > 0 ? { public: addresses } : {}),
   };
-}
-
-export function fileRow(m: Manifest, origin: string, e: Entry): FileRow {
-  const { file: _name, ...info } = versionInfo(e);
-  const addresses = addressesOf(m, origin, [e.fid], e.file.path);
-  return { path: e.file.path, ...info, ...(addresses.length > 0 ? { public: addresses } : {}) };
 }
 
 const byName = (a: string, b: string): number => a.localeCompare(b, undefined, { sensitivity: "base" });
@@ -343,20 +329,19 @@ export function documentsUnder(index: Index, dir: string): Doc[] {
 }
 
 /**
- * What a folder holds: its folders, its documents and its plain files. Not
- * deep, only what sits directly in it; deep, everything beneath it. Built
- * from the manifest alone, so it costs no blob read — and so a folder with
- * nothing in it does not exist here, because it does not exist there.
+ * What a folder holds: its folders and its documents. Not deep, only what
+ * sits directly in it; deep, everything beneath it. Built from the manifest
+ * alone, so it costs no blob read — and so a folder with nothing in it does
+ * not exist here, because it does not exist there.
  */
 export function listTree(m: Manifest, origin: string, dir: string, deep: boolean): Listing {
   const index = new Index(m.files);
   const prefix = dir ? `${dir.toLowerCase()}/` : "";
   const folders = new Map<string, string>();
   const documents: DocRow[] = [];
-  const files: FileRow[] = [];
   const seenDocs = new Set<string>();
 
-  for (const [fid, file] of Object.entries(m.files)) {
+  for (const file of Object.values(m.files)) {
     const lower = file.path.toLowerCase();
     if (prefix && !lower.startsWith(prefix)) continue;
     const rel = file.path.slice(prefix.length);
@@ -369,30 +354,25 @@ export function listTree(m: Manifest, origin: string, dir: string, deep: boolean
     if (!deep && segs.length > 1) continue;
     if (lower.endsWith(META_SUFFIX)) continue;
 
-    if (isMarkdownPath(file.path) || isHtmlPath(file.path)) {
-      const { stem } = nameOf(file.path);
-      if (seenDocs.has(stem.toLowerCase())) continue;
-      seenDocs.add(stem.toLowerCase());
-      const doc = index.doc(stem);
-      if (doc.mds.length > 1) {
-        // Two markdown files with one stem are two documents that have to be
-        // named in full; the html beside them belongs to neither by name.
-        for (const md of doc.mds) {
-          documents.push(docRow(m, origin, { stem: md.file.path, md, mds: [md], html: null, meta: null }));
-        }
-        if (doc.html) documents.push(docRow(m, origin, { stem: doc.html.file.path, md: null, mds: [], html: doc.html, meta: null }));
-        continue;
+    const { stem } = nameOf(file.path);
+    if (seenDocs.has(stem.toLowerCase())) continue;
+    seenDocs.add(stem.toLowerCase());
+    const doc = index.doc(stem);
+    if (doc.mds.length > 1) {
+      // Two markdown files with one stem are two documents that have to be
+      // named in full; the html beside them belongs to neither by name.
+      for (const md of doc.mds) {
+        documents.push(docRow(m, origin, { stem: md.file.path, md, mds: [md], html: null, meta: null }));
       }
-      documents.push(docRow(m, origin, doc));
-    } else {
-      files.push(fileRow(m, origin, { fid, file }));
+      if (doc.html) documents.push(docRow(m, origin, { stem: doc.html.file.path, md: null, mds: [], html: doc.html, meta: null }));
+      continue;
     }
+    documents.push(docRow(m, origin, doc));
   }
   return {
     dir,
     folders: [...folders.values()].sort(byName),
     documents: documents.sort((a, b) => byName(a.path, b.path)),
-    files: files.sort((a, b) => byName(a.path, b.path)),
   };
 }
 

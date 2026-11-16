@@ -5,19 +5,29 @@
 //! A refusal from the worker is a sentence written to be acted on, so it is
 //! passed through word for word; what this module adds is which exit code
 //! the refusal means.
+//!
+//! Every request is counted before it goes (usage.rs), and none goes past
+//! the domain's allowance. A `429` is waited out once; Cloudflare's page for
+//! an account past today's requests stops at once. Either is exit 8.
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::creds::domain_of;
-use crate::Failure;
+use crate::text::{midnight_utc, now_ms};
+use crate::{usage, Failure};
 
 /// The largest answer worth holding: a file is capped at 25 MB by the worker.
 const MAX_ANSWER_BYTES: u64 = 32 * 1024 * 1024;
 
+/// The longest a `429` is waited out before its one retry — and the wait
+/// when it says no time of its own.
+const MAX_WAIT: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy)]
 pub enum Body<'a> {
     Json(&'a Value),
     Bytes(&'a [u8]),
@@ -25,7 +35,7 @@ pub enum Body<'a> {
 
 pub struct Reply {
     pub status: u16,
-    /// The `x-doklin-*` headers, by name, percent-decoded.
+    /// The `x-doklin-*` headers and `retry-after`, by name, percent-decoded.
     pub headers: HashMap<String, String>,
     pub bytes: Vec<u8>,
 }
@@ -76,12 +86,64 @@ impl Client {
             url.push('=');
             url.push_str(&encode(value));
         }
+        // `x-doklin-used` rides a signed-in request: the worker files the
+        // count under its token. Never a login's, which holds no token yet,
+        // or the one going away, whose row would go on counting today
+        // beside the new one's.
+        let reports = self.token.is_some() && route != "login";
+        let mut waited = false;
+        loop {
+            let used = usage::count(self.domain(), reports)?;
+            let reply = self.once(method, &url, headers, body, used)?;
+            // ureq's own line between an answer and a refusal.
+            if reply.status < 400 {
+                return Ok(reply);
+            }
+            match classify(reply.status, reply.header("retry-after"), &reply.bytes) {
+                Answer::Refusal => return Err(self.refusal(reply)),
+                Answer::DailyLimit => {
+                    return Err(Failure {
+                        status: Some(reply.status),
+                        ..Failure::limited(format!(
+                            "today's Cloudflare requests for {} are used up — it answers again at {}",
+                            self.domain(),
+                            midnight_utc(now_ms())
+                        ))
+                    })
+                }
+                Answer::SlowDown(wait) if !waited => {
+                    if std::io::stderr().is_terminal() {
+                        eprintln!("doklin: {} asked this machine to slow down — asking again in {} s…", self.domain(), wait.as_secs());
+                    }
+                    std::thread::sleep(wait);
+                    waited = true;
+                }
+                Answer::SlowDown(_) => {
+                    return Err(Failure {
+                        status: Some(reply.status),
+                        detail: serde_json::from_slice(&reply.bytes).ok(),
+                        ..Failure::limited(format!(
+                            "{} says this machine is sending too many requests — wait a minute before the next one",
+                            self.domain()
+                        ))
+                    })
+                }
+            }
+        }
+    }
+
+    /// The request itself, once, and whatever the domain answered to it.
+    /// `used` is the count it reports, when it is the one that does.
+    fn once(&self, method: &str, url: &str, headers: &[(&str, &str)], body: Option<Body>, used: Option<u64>) -> Result<Reply, Failure> {
         let mut req = self
             .agent
-            .request(method, &url)
+            .request(method, url)
             .set("x-doklin-client", concat!("cli/", env!("CARGO_PKG_VERSION")));
         if let Some(token) = &self.token {
             req = req.set("authorization", &format!("Bearer {}", token));
+        }
+        if let Some(n) = used {
+            req = req.set("x-doklin-used", &n.to_string());
         }
         for (name, value) in headers {
             req = req.set(name, value);
@@ -92,8 +154,7 @@ impl Client {
             None => req.call(),
         };
         match sent {
-            Ok(res) => read(res),
-            Err(ureq::Error::Status(_, res)) => Err(self.refusal(read(res)?)),
+            Ok(res) | Err(ureq::Error::Status(_, res)) => read(res),
             Err(ureq::Error::Transport(t)) => Err(Failure::other(format!("could not reach {}: {}", self.domain(), t))),
         }
     }
@@ -133,11 +194,35 @@ impl Client {
     }
 }
 
+/// What a non-2xx answer is, before it is a refusal.
+#[derive(Debug, PartialEq)]
+enum Answer {
+    /// Cloudflare's own page for an account past today's requests (error
+    /// 1027). Its status is not documented, so it is known by its body: not
+    /// JSON, and it names the error.
+    DailyLimit,
+    /// `429`: wait this long, then ask once more.
+    SlowDown(Duration),
+    /// The worker's own refusal.
+    Refusal,
+}
+
+fn classify(status: u16, retry_after: Option<&str>, body: &[u8]) -> Answer {
+    if serde_json::from_slice::<Value>(body).is_err() && body.windows(4).any(|w| w == b"1027") {
+        return Answer::DailyLimit;
+    }
+    if status == 429 {
+        let said = retry_after.and_then(|s| s.trim().parse::<u64>().ok()).map(Duration::from_secs);
+        return Answer::SlowDown(said.unwrap_or(MAX_WAIT).min(MAX_WAIT));
+    }
+    Answer::Refusal
+}
+
 fn read(res: ureq::Response) -> Result<Reply, Failure> {
     let status = res.status();
     let mut headers = HashMap::new();
     for name in res.headers_names() {
-        if name.starts_with("x-doklin-") {
+        if name.starts_with("x-doklin-") || name == "retry-after" {
             if let Some(value) = res.header(&name) {
                 headers.insert(name.clone(), decode(value));
             }
@@ -180,4 +265,42 @@ pub fn decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WORKER_429: &[u8] = "{\"error\":\"This device is sending too many requests — it will slow down by itself.\"}".as_bytes();
+
+    #[test]
+    fn a_429_is_waited_out_for_what_it_says_never_more_than_a_minute() {
+        let wait = |after: Option<&str>| classify(429, after, WORKER_429);
+        assert_eq!(wait(Some("60")), Answer::SlowDown(Duration::from_secs(60)));
+        assert_eq!(wait(Some(" 5 ")), Answer::SlowDown(Duration::from_secs(5)));
+        assert_eq!(wait(Some("0")), Answer::SlowDown(Duration::ZERO));
+        assert_eq!(wait(Some("600")), Answer::SlowDown(MAX_WAIT));
+        // No time, or one this program does not read (an HTTP date): the longest wait.
+        assert_eq!(wait(None), Answer::SlowDown(MAX_WAIT));
+        assert_eq!(wait(Some("Wed, 18 Nov 2026 07:28:00 GMT")), Answer::SlowDown(MAX_WAIT));
+        assert_eq!(classify(429, Some("1"), b""), Answer::SlowDown(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn cloudflare_s_daily_limit_page_is_known_by_its_body_whatever_its_status() {
+        for status in [429, 500, 503, 530, 403] {
+            assert_eq!(classify(status, None, b"error code: 1027"), Answer::DailyLimit, "{}", status);
+        }
+        let page = b"<!DOCTYPE html><html><head><title>Error 1027 | Worker exceeded free tier daily request limit</title></head></html>";
+        assert_eq!(classify(429, Some("60"), page), Answer::DailyLimit, "never waited out: nothing changes before 00:00 UTC");
+    }
+
+    #[test]
+    fn everything_else_is_the_worker_s_refusal() {
+        // The worker's JSON may hold the digits — a revision, a size — and is still its own sentence.
+        assert_eq!(classify(409, None, br#"{"error":"the document is at revision 1027 now"}"#), Answer::Refusal);
+        assert_eq!(classify(502, None, b"<html><body>Bad gateway</body></html>"), Answer::Refusal);
+        assert_eq!(classify(404, None, b""), Answer::Refusal);
+        assert_eq!(classify(401, None, br#"{"error":"unauthorized"}"#), Answer::Refusal);
+    }
 }

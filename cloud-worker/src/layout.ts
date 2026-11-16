@@ -73,9 +73,14 @@ export const MAX_NAME_LEN = 80;
 export const MAX_EMAIL_LEN = 254;
 export const MAX_TITLE_LEN = 300;
 export const MAX_DESC_LEN = 600;
-/** How long a beat keeps a device "here". The engine beats every 45 s, so
- *  one lost beat is survivable and two are not. */
+/** The shortest a beat keeps a device "here", and how long one holds that
+ *  says nothing: a beat says how long it holds (`ttl`, presence.ts), clamped
+ *  to these two. */
 export const PRESENCE_TTL_MS = 90_000;
+/** The longest: a device polling seldom (idle, in the background) stays
+ *  listed as around, and one that quit without saying so drops out within
+ *  this. */
+export const MAX_PRESENCE_TTL_MS = 15 * 60_000;
 /* The version store's caps. A snapshot is a gzip'd map of the whole
    workspace, so it is bounded by the manifest's own file ceiling; a version
    blob is one file and gets the same cap as a synced one. */
@@ -83,6 +88,27 @@ export const MAX_VERSIONS_INDEX_BYTES = 1024 * 1024;
 export const MAX_VERSION_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 export const MAX_VERSION_BLOB_BYTES = MAX_FILE_BYTES;
 export const MAX_VERSION_SNAPSHOTS = 2000;
+
+/** What a file's name has to end in for Doklin to sync it: a markdown or an
+ *  html document, or a document's comments (`<stem>.meta.jsonl`). Lowercased
+ *  ASCII-only, as the engine lowercases it. */
+const SYNCED_SUFFIXES = [".md", ".markdown", ".mdown", ".mkd", ".html", ".meta.jsonl"] as const;
+
+/**
+ * Whether Doklin syncs the file at `path`. Everything else — a picture, a
+ * PDF, a script an agent wrote, a cloned repository's sources — stays on its
+ * device: no manifest PUT may name one (manifest.ts), the worker's own writes
+ * drop any a stored manifest still lists (commit.ts), and the document API
+ * and the public pages never see one (workspace.ts). Mirrored by the engine
+ * (`syncs`, engine/src/lib.rs): change both.
+ */
+export function syncs(path: string): boolean {
+  const name = path.slice(path.lastIndexOf("/") + 1).replace(/[A-Z]/g, (c) => c.toLowerCase());
+  return SYNCED_SUFFIXES.some((suffix) => name.length > suffix.length && name.endsWith(suffix));
+}
+
+/** What a path outside `syncs` is told, wherever it is refused. */
+export const UNSYNCED_SENTENCE = "Doklin syncs markdown and html documents only";
 
 /** A path relative to the workspace root: forward slashes, no traversal, bounded depth and length. */
 export function validPath(p: unknown): p is string {

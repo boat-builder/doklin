@@ -90,6 +90,15 @@ pub async fn call(core: &Arc<Core>, name: &str, args: Value) -> Result<Value, St
         "cloud_sync_now" => json(cloud::cloud_sync_now(core, a.get("root")?)?),
         "cloud_pause" => json(cloud::cloud_pause(core, a.get("root")?, a.get("paused")?)?),
         "cloud_confirm_deletes" => json(cloud::cloud_confirm_deletes(core, a.get("root")?)?),
+        "cloud_confirm_adds" => json(cloud::cloud_confirm_adds(core, a.get("root")?, a.get("sync")?)?),
+        "cloud_lift_wait" => json(cloud::cloud_lift_wait(core, a.get("root")?)?),
+        "cloud_set_plan" => json(cloud::cloud_set_plan(core, a.get("root")?, a.get("plan")?).await?),
+        "cloud_set_focus" => json(cloud::cloud_set_focus(
+            core,
+            &a.or("window", "main".to_string())?,
+            a.get("folder")?,
+            a.get("focused")?,
+        )?),
         "cloud_set_activity" => {
             json(cloud::cloud_set_activity(core, &a.or("window", "main".to_string())?, a.get("path")?)?)
         }

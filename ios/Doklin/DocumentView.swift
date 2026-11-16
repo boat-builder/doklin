@@ -250,7 +250,7 @@ struct DocumentView: View {
                 Label("Share the text", systemImage: "square.and.arrow.up")
             }
         }
-        if workspace.status != nil, workspace.audience(of: model.path) != .nowhere {
+        if workspace.status != nil, model.isNote || model.kind == .html, workspace.audience(of: model.path) != .nowhere {
             Button {
                 copyLink()
             } label: {

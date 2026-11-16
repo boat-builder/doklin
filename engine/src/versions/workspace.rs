@@ -113,10 +113,12 @@ pub fn disk_paths(store: &Store) -> Result<BTreeSet<String>, String> {
     Ok(scan_local(&store.root, shared_skip(&store.root)).map_err(|_| too_large())?.into_keys().collect())
 }
 
-fn too_large() -> String {
+/// Why a folder has no history: the scan that versions it gave up.
+pub(crate) fn too_large() -> String {
     format!(
-        "this folder holds more than {} files — too large to keep versions of",
-        crate::cloud::scan::MAX_SYNC_ENTRIES
+        "this folder holds more than {} documents, or more than {} files in all — too large to keep versions of",
+        crate::cloud::scan::MAX_SYNC_ENTRIES,
+        crate::cloud::scan::MAX_WALK_ENTRIES
     )
 }
 

@@ -39,6 +39,9 @@
       // writing a file, then emits `cloud-applied`. One folder, Projects,
       // holds plan.md.
       window.__treeFiles = ["notes.md", "other.md", "third.md"];
+      // Files Doklin neither opens nor syncs: listed (greyed) only when the
+      // sidebar shows every file.
+      window.__otherFiles = ["photo.png"];
       window.__treeCalls = 0;
       const projectsNode = (root) => ({
         kind: "dir",
@@ -92,7 +95,7 @@
         }
         return null;
       };
-      const treeFor = (path) => {
+      const treeFor = (path, all = false) => {
         if (path.endsWith("/Projects")) return projectsNode(path.slice(0, -"/Projects".length));
         return {
           kind: "dir",
@@ -101,6 +104,7 @@
           children: [
             ...(window.__sections?.projectsGone ? [] : [projectsNode(path)]),
             ...window.__treeFiles.map((f) => ({ kind: "file", name: f, path: `${path}/${f}` })),
+            ...(all ? window.__otherFiles.map((f) => ({ kind: "file", name: f, path: `${path}/${f}`, supported: false })) : []),
             ...sectionNodes(path),
           ],
         };
@@ -148,6 +152,20 @@
         // What the status's `versions` field carries: the version store's
         // mirror, or null before the domain has answered.
         versionsMirror: { mirrored: 0, cloud: 0, lastMirrorMs: null, horizonDays: null },
+        // What the status's `usage` carries: today's requests and what the
+        // day's limits are doing. A drive replaces it to script a mode.
+        usage: {
+          mode: "normal",
+          cause: null,
+          today: 0,
+          fleetToday: null,
+          cap: 100000,
+          plan: "free",
+          resumesAt: null,
+          waiting: 0,
+          liftable: false,
+          lifted: false,
+        },
         wipeResult: 42,
         // The invite the redeem door is scripted with. The engine does the
         // real parsing and the real trade (engine/src/cloud/invite.rs);
@@ -386,6 +404,8 @@
         lastSyncMs: Date.now(),
         error: null,
         pendingDeletes: 0,
+        pendingAdds: 0,
+        usage: { ...window.__cloud.usage },
         // What this Mac signs with here: the person the domain says it is.
         me: window.__cloud.me,
         meId: window.__cloud.people.me,
@@ -465,7 +485,7 @@
               );
             case "list_md_tree": {
               window.__treeCalls += 1;
-              return Promise.resolve(treeFor(args.path));
+              return Promise.resolve(treeFor(args.path, !!args.all));
             }
             case "stat_file": {
               const c = window.__fs.get(args.path);
@@ -565,6 +585,29 @@
             case "cloud_confirm_deletes":
               patchStatus(args.root, { phase: "idle", pendingDeletes: 0 });
               return Promise.resolve(null);
+            // Either answer ends the question: sent, or left on this Mac.
+            case "cloud_confirm_adds":
+              patchStatus(args.root, { phase: "idle", pendingAdds: 0 });
+              return Promise.resolve(null);
+            // The lift holds for the day: nothing waits, and it is not offered again.
+            case "cloud_lift_wait": {
+              const s = window.__cloud.statuses.find((x) => x.root === args.root);
+              if (s) {
+                patchStatus(args.root, {
+                  usage: { ...s.usage, mode: "normal", cause: null, liftable: false, lifted: true },
+                });
+              }
+              return Promise.resolve(null);
+            }
+            case "cloud_set_plan": {
+              const s = window.__cloud.statuses.find((x) => x.root === args.root);
+              if (s) {
+                patchStatus(args.root, {
+                  usage: { ...s.usage, plan: args.plan, cap: args.plan === "paid" ? null : 100000 },
+                });
+              }
+              return Promise.resolve(null);
+            }
             case "cloud_check_worker":
               patchStatus(args.root, { phase: "idle", workerVersion: window.__cloud.workerVersion, error: null });
               return Promise.resolve(null);

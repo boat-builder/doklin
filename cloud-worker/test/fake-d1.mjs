@@ -76,20 +76,27 @@ export class FakeD1 {
   }
 
   /** All or nothing, the way D1's batch is — and, the way D1's is, a read
-   *  inside one answers its rows (the presence beat ends on one). */
-  async batch(statements) {
-    this.db.exec("BEGIN");
-    try {
-      const out = [];
-      for (const statement of statements) {
-        out.push(await (/^\s*SELECT/i.test(statement.sql) ? statement.all() : statement.run()));
+   *  inside one answers its rows (the presence beat ends on one). One at a
+   *  time, as D1 runs them: two requests' batches never share a transaction
+   *  (a usage report in `waitUntil` lands while the next request runs). */
+  batch(statements) {
+    const run = async () => {
+      this.db.exec("BEGIN");
+      try {
+        const out = [];
+        for (const statement of statements) {
+          out.push(await (/^\s*SELECT/i.test(statement.sql) ? statement.all() : statement.run()));
+        }
+        this.db.exec("COMMIT");
+        return out;
+      } catch (err) {
+        this.db.exec("ROLLBACK");
+        throw err;
       }
-      this.db.exec("COMMIT");
-      return out;
-    } catch (err) {
-      this.db.exec("ROLLBACK");
-      throw err;
-    }
+    };
+    const turn = (this.turn ?? Promise.resolve()).then(run, run);
+    this.turn = turn.catch(() => {});
+    return turn;
   }
 
   /* ---------- what tests look at ---------- */

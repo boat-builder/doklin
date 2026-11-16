@@ -130,6 +130,22 @@ function routingLines(domain: string | null): string {
     : "workers_dev = true";
 }
 
+/** The worker's loop catchers (`DEVICE_LIMIT`, `AGENT_LIMIT`,
+ *  cloud-worker/src/api.ts): a person's device, or an agent's machine, past
+ *  its block's requests a minute is a loop, and is told 429. The numbers live
+ *  here and in scripts/doklin-cloud-update.sh, the other writer of this file;
+ *  verify-harness/cloudprompts.test.mjs holds the two to each other. */
+const RATE_LIMITS = [
+  `[[ratelimits]]`,
+  `name = "DEVICE_LIMIT"`,
+  `namespace_id = "1001"`,
+  `simple = { limit = 600, period = 60 }`,
+  `[[ratelimits]]`,
+  `name = "AGENT_LIMIT"`,
+  `namespace_id = "1002"`,
+  `simple = { limit = 120, period = 60 }`,
+];
+
 /** The config the setup prompt writes verbatim. Two fill-ins, both captured
  *  by an earlier step and neither guessable: the account id from `whoami`,
  *  and the database id `d1 create` prints. */
@@ -153,6 +169,7 @@ function wranglerToml(
     `binding = "DB"`,
     `database_name = "${database}"`,
     `database_id = "<from d1 create>"`,
+    ...RATE_LIMITS,
   ].join("\n");
 }
 

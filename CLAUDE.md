@@ -15,7 +15,7 @@ pnpm build && pnpm lint                        # typecheck + build the frontend,
 (cd engine && cargo test --workspace)          # Rust: the sync engine, versions, the C interface
 cd src-tauri && cargo test --lib               # Rust: the Mac app's own (tree, untitled, pdf)
 pnpm typecheck:worker && pnpm test:worker      # the cloud worker
-(cd cli && cargo build --release)              # the CLI
+(cd cli && cargo build --release && cargo test) # the CLI
 node verify-harness/drive-ios.mjs             # the iOS app's core against a harness worker
 node verify-harness/drive-ios.mjs --app       # the iOS app in a simulator (a Mac with Xcode)
 ```

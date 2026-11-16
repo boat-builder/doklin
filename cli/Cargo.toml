@@ -1,6 +1,6 @@
 [package]
 name = "doklin-cli"
-version = "0.1.113"
+version = "0.1.114"
 description = "Work with a Doklin workspace from anywhere, through its own domain"
 edition = "2021"
 publish = false
@@ -16,6 +16,8 @@ ureq = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gethostname = "0.5"
+# The local time zone (`localtime_r`), to say when a day's allowance comes back.
+libc = "0.2"
 
 [profile.release]
 opt-level = "z"

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 use super::manifest::{PublicKind, SpaceKind};
+use super::pace::{Cause, Mode, Plan};
 use super::remote::{AgentRecord, InviteRecord, MemberRecord, DeviceRecord, WorkspaceRecord};
 
 /// `CloudStatus[]` — the whole model, on every change.
@@ -20,6 +21,10 @@ pub const EV_APPLIED: &str = "cloud-applied";
 pub const EV_CONFLICT: &str = "cloud-conflict";
 /// `{root, count, total, paths}`.
 pub const EV_PENDING_DELETES: &str = "cloud-pending-deletes";
+/// `{root, count, folders: [{path, count}]}` — this many new documents
+/// appeared in one pass and wait for a yes (`cloud_confirm_adds`). Folders
+/// workspace-relative, most first, at most five.
+pub const EV_PENDING_ADDS: &str = "cloud-pending-adds";
 /// `{root, name, path}` — a restricted folder left this Mac: this person was
 /// taken out of it, or it was deleted. `path` is where it was,
 /// workspace-relative.
@@ -41,8 +46,14 @@ pub enum Phase {
     Offline,
     Paused,
     PendingDeletes,
+    /// The many-new-documents valve is holding: they stay on this device
+    /// until the person says (`cloud_confirm_adds`).
+    PendingAdds,
     Revoked,
     WorkerOutdated,
+    /// Cloudflare's daily requests for the account are used up: nothing is
+    /// sent until 00:00 UTC but a probe every half hour.
+    Limited,
     Error,
 }
 
@@ -58,6 +69,10 @@ pub struct CloudStatus {
     pub last_sync_ms: Option<u64>,
     pub error: Option<String>,
     pub pending_deletes: u32,
+    /// New documents the valve is holding.
+    pub pending_adds: u32,
+    /// What this device has spent today, and what that means for its sync.
+    pub usage: UsageStatus,
     /// What this Mac signs work with here, in words: the person the domain
     /// says it is, empty until it has said. What a surface compares a `by`
     /// against to know whether somebody *else* did a thing.
@@ -91,6 +106,31 @@ pub struct CloudStatus {
     /// and the restricted folders they are in — that have a folder on this
     /// Mac.
     pub spaces: Vec<SpaceStatus>,
+}
+
+/// `CloudStatus.usage`: this device's requests today on this domain, and
+/// the mode they put its sync in (`super::pace`).
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageStatus {
+    pub mode: Mode,
+    /// Whose spending put it there: this device's, or everyone's together.
+    pub cause: Option<Cause>,
+    pub today: u64,
+    pub fleet_today: Option<u64>,
+    /// The account's daily requests; None on Workers Paid, or before the
+    /// domain has said.
+    pub cap: Option<u64>,
+    pub plan: Option<Plan>,
+    /// The next 00:00 UTC (epoch ms), while the mode is not `normal` or the
+    /// phase is `limited`: when what waits goes again.
+    pub resumes_at: Option<u64>,
+    /// Changes held back: uploads not sent and downloads owed.
+    pub waiting: u32,
+    /// This device's own allowance is what holds them, and its person has
+    /// not lifted it today (`cloud_lift_wait`).
+    pub liftable: bool,
+    pub lifted: bool,
 }
 
 /// One section of the workspace that only some people have.

@@ -7,11 +7,13 @@
 // in the section its path names.
 //
 //   POST   /api/agent/login       NO BEARER — {code, host?} → 201 {token, agent, workspace,
-//                                 version}; 401 when the code is unknown, used or
+//                                 version, limits}; 401 when the code is unknown, used or
 //                                 expired. One of the two routes above the gate (api.ts).
 //   DELETE /api/agent/login       this token revokes itself (204)
 //   GET    /api/agent/me          {agent, person: {id, name} | null, scopes, sections: [folder],
-//                                 workspace, version}
+//                                 workspace, version, limits}
+//
+// `limits` (limits.ts) is what the CLI keeps its daily allowance by.
 //
 //   read       GET    /api/agent/tree?dir=&deep=1
 //              GET    /api/agent/doc?path=&v=[&clean=1][&info=1]
@@ -75,6 +77,7 @@ import { sha256Hex } from "./crypto";
 import type { Env } from "./env";
 import { json, readJsonObject } from "./http";
 import { validName } from "./layout";
+import { readLimits } from "./limits";
 import { HASH_RE } from "./members";
 import { can } from "./roles";
 import { getSearch } from "./search";
@@ -115,7 +118,8 @@ export async function agentLogin(request: Request, env: Env): Promise<Response> 
     return json({ error: "that login code is not valid — it has been used already, or it ran out. Ask for a new one." }, 401);
   }
   const { id, name, scopes } = result.agent;
-  return json({ token: result.token, agent: { id, name }, scopes, ...(await about(env)) }, 201);
+  const [rest, limits] = await Promise.all([about(env), readLimits(env)]);
+  return json({ token: result.token, agent: { id, name }, scopes, ...rest, limits }, 201);
 }
 
 /* ---------- The routes an agent's token is answered on ---------- */
@@ -171,7 +175,7 @@ export async function handleAgent(
   }
   if (route === "me") {
     if (method !== "GET") return methodNotAllowed();
-    const [person, sections, rest] = await Promise.all([places.who(), places.all(), about(env)]);
+    const [person, sections, rest, limits] = await Promise.all([places.who(), places.all(), about(env), readLimits(env)]);
     return json({
       agent: { id: who.id, name: who.name },
       person,
@@ -179,6 +183,7 @@ export async function handleAgent(
       // Where it can work besides the shared workspace, as folders.
       sections: (sections ?? []).filter((s) => s.mount !== "").map((s) => s.mount),
       ...rest,
+      limits,
     });
   }
 

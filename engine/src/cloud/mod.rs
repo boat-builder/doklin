@@ -19,6 +19,7 @@
 //!               only place a code is ever in the clear
 //! link.rs       a link to a page — the grammar of what *Copy link* copies
 //! merge.rs      the three-way merge and conflict copies
+//! pace.rs       the request counter, the daily allowances, the bulk lane
 //! scan.rs       the local walk, hashing, atomic writes
 //! bus.rs        the edit bus (every write command → the engine)
 //! config.rs     cloud.json, the marker, endpoints and names
@@ -36,6 +37,7 @@ pub mod invite;
 pub mod link;
 pub mod manifest;
 mod merge;
+pub mod pace;
 pub mod remote;
 // The versioner reuses the local walk, the hashing and the atomic write
 // (scan) and the event sink (status) — see ../versions/.
@@ -146,6 +148,9 @@ pub(crate) struct ManagerInner {
     /// so the freshest report wins when two windows share a workspace.
     activity: HashMap<String, (Option<String>, u64)>,
     activity_seq: u64,
+    /// The windows that have focus now, and the folder each shows (if any):
+    /// what makes a workspace's engine poll at its quickest.
+    focus: HashMap<String, Option<String>>,
     /// Every workspace taken off this Mac since the app started
     /// (`access_removed`). An event says so as it happens, but an engine can
     /// hear it on first contact — before any window is listening — so a
@@ -179,6 +184,7 @@ pub fn init(core: &Arc<Core>) {
         statuses: Arc::new(Mutex::new(Default::default())),
         activity: HashMap::new(),
         activity_seq: 0,
+        focus: HashMap::new(),
         removed: Vec::new(),
     };
     for ws in &file.workspaces {
@@ -231,6 +237,8 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
     let root = PathBuf::from(&ws.root);
     let state_dir = state_dir(&inner.data_dir, &ws.ws_id);
     let _ = std::fs::create_dir_all(state_dir.join("base"));
+    // Every request the engine sends is counted here, across restarts.
+    let usage = pace::Usage::at(&state_dir);
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<EngineCmd>();
     let (watcher, fs_rx) = watch_folder(core, &root, "cloud");
@@ -256,7 +264,10 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
                 Box::new(move |changed| spaces_changed(&core, changed))
             }),
         },
-        Arc::new(HttpRemote::new(&ws.endpoint, &ws.token, &inner.device.id, &core.client)),
+        Arc::new(
+            HttpRemote::new(&ws.endpoint, &ws.token, &inner.device.id, &core.client)
+                .counted(usage),
+        ),
         core.sync_events(),
         inner.statuses.clone(),
     );
@@ -1187,6 +1198,67 @@ pub fn cloud_pause(core: &Arc<Core>, root: String, paused: bool) -> Result<(), S
     with_inner(core, |inner| {
         if let Some(h) = inner.engines.get(&root) {
             let _ = h.tx.send(EngineCmd::Pause(paused));
+        }
+        Ok(())
+    })
+}
+
+/// The many-new-documents question, answered: `sync` true sends them (and
+/// lifts this device's bulk wait for the day), false leaves them on this
+/// device until more arrive or *Sync now*.
+pub fn cloud_confirm_adds(core: &Arc<Core>, root: String, sync: bool) -> Result<(), String> {
+    with_inner(core, |inner| {
+        if let Some(h) = inner.engines.get(&root) {
+            let _ = h.tx.send(EngineCmd::ConfirmAdds(sync));
+        }
+        Ok(())
+    })
+}
+
+/// *Send them now*: this device's big changes go today after all, past its
+/// own daily allowance. Never past its ceiling, nor everyone's limits.
+pub fn cloud_lift_wait(core: &Arc<Core>, root: String) -> Result<(), String> {
+    with_inner(core, |inner| {
+        if let Some(h) = inner.engines.get(&root) {
+            let _ = h.tx.send(EngineCmd::LiftWait);
+        }
+        Ok(())
+    })
+}
+
+/// The Cloudflare plan the domain's account is on — `free` or `paid` — which
+/// every limit is derived from. The superadmin's to say (`workspace.manage`).
+pub async fn cloud_set_plan(core: &Arc<Core>, root: String, plan: String) -> Result<(), String> {
+    if plan != "free" && plan != "paid" {
+        return Err("A plan is Free or Workers Paid.".to_string());
+    }
+    let call = workspace_call(core, &root)?;
+    call.remote.set_plan(&plan).await.map_err(|e| match e {
+        remote::RemoteError::Forbidden => "Only the superadmin can change the Cloudflare plan.".to_string(),
+        other => flows::describe(&call.domain, other.into()),
+    })?;
+    // The engine reads the new limits off the domain, as it reads them always.
+    with_inner(core, |inner| {
+        if let Some(h) = inner.engines.get(&root) {
+            let _ = h.tx.send(EngineCmd::Probe);
+        }
+        Ok(())
+    })
+}
+
+/// A window gained focus or lost it; `folder` is the folder it shows, if
+/// any. Every engine then hears whether a focused window shows its
+/// workspace — what its poll's cadence follows.
+pub fn cloud_set_focus(core: &Arc<Core>, window: &str, folder: Option<String>, focused: bool) -> Result<(), String> {
+    with_inner(core, |inner| {
+        if focused {
+            inner.focus.insert(window.to_string(), folder);
+        } else {
+            inner.focus.remove(window);
+        }
+        for h in inner.engines.values() {
+            let seen = inner.focus.values().flatten().any(|f| Path::new(f).starts_with(&h.root));
+            let _ = h.tx.send(EngineCmd::Focus(seen));
         }
         Ok(())
     })

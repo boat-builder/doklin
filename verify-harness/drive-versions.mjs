@@ -604,6 +604,8 @@ await page.evaluate(() => {
       lastSyncMs: Date.now(),
       error: null,
       pendingDeletes: 0,
+      pendingAdds: 0,
+      usage: { mode: "normal", cause: null, today: 0, fleetToday: null, cap: 100000, plan: "free", resumesAt: null, waiting: 0, liftable: false, lifted: false },
       workerVersion: 3,
       versions: { mirrored: 4, cloud: 212, lastMirrorMs: Date.now(), horizonDays: null },
       public: [],

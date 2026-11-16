@@ -8,7 +8,9 @@ final class PublishingTests: XCTestCase {
     private func status(phase: String = "idle", lastSyncMs: Int? = 1_000, me: String = "Ada", pages: String = "[]") throws -> CloudStatus {
         let json = """
         {"root":"/w","domain":"notes.example.com","endpoint":"https://notes.example.com","wsId":"w1","name":"Notes",
-         "phase":"\(phase)","lastSyncMs":\(lastSyncMs.map(String.init) ?? "null"),"error":null,"pendingDeletes":0,"me":"\(me)",
+         "phase":"\(phase)","lastSyncMs":\(lastSyncMs.map(String.init) ?? "null"),"error":null,"pendingDeletes":0,"pendingAdds":0,
+         "usage":{"mode":"normal","cause":null,"today":0,"fleetToday":null,"cap":null,"plan":null,"resumesAt":null,"waiting":0,"liftable":false,"lifted":false},
+         "me":"\(me)",
          "meId":"m1","can":["work"],"workerVersion":17,"public":\(pages),"presence":[],"leases":[],"spaces":[]}
         """
         return try JSONDecoder().decode(CloudStatus.self, from: Data(json.utf8))

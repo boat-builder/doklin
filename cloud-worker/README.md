@@ -1,7 +1,8 @@
 # Doklin cloud worker — wire contract
 
-Per domain: a Worker, an R2 bucket (`DATA`), a D1 database (`DB`), the
-secret `OWNER_TOKEN` (the domain's key). Rules and engine: [docs/cloud.md](../docs/cloud.md);
+Per domain: a Worker, an R2 bucket (`DATA`), a D1 database (`DB`), two
+rate-limit bindings (`DEVICE_LIMIT`, `AGENT_LIMIT`), the secret `OWNER_TOKEN`
+(the domain's key). Rules and engine: [docs/cloud.md](../docs/cloud.md);
 pages: [docs/cloud-publishing.md](../docs/cloud-publishing.md); people,
 agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.md).
 
@@ -10,6 +11,8 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 - `/api/*`: `Authorization: Bearer <token>`, JSON. No CORS, cookies, sessions. Bad bearer → `401`.
 - A bearer somebody took away (person removed, device signed out; its hash is in `removed_tokens`) → `401 {error, "removed": true}`. That body alone has the device delete its copy; every other unknown bearer (a wiped domain's, or one nobody ever held) is a bare `401`.
 - Engine sends `x-doklin-device: <deviceId>` (presence, `createdBy`; must match `ID_RE`) and `x-doklin-client: <app version>` (logs only). CLI sends `x-doklin-client: cli/<version>`; the iPhone's engine sends `ios/<version>`.
+- `x-doklin-used: <integer>` — the caller's requests today (UTC day) on this domain; any authenticated route, at most every 15 min. Upserted after the answer (`ctx.waitUntil`) into `usage` under the caller's `tokenId`, replacing its last report; a report within a minute of the last is not written; a malformed header is ignored. `fleetToday` = today's sum.
+- Loop catchers, right after `authenticate`: `DEVICE_LIMIT` (a person's device) and `AGENT_LIMIT` (an agent's machine), keyed by `tokenId`, numbers in `wrangler.toml`'s `[[ratelimits]]`. Over → `429 {error: "This device is sending too many requests — it will slow down by itself."}` + `Retry-After: 60`, before anything else is done (its `x-doklin-used` included). Approximate, a loop catcher only: the refused request has been counted against the account already. A binding the env lacks is not checked.
 - Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → **the key**, nobody's sign-in: `GET /api/meta` and `POST /api/auth/recover` only, `403` elsewhere (`handleKey`, `api.ts`). `dka_…` → `agent_tokens` → `agent`; else `tokens` → the person's role, read every request: `superadmin` when the `superadmin` row names them, else `members.role` (`owner` | `member`).
 - Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work`, `people.see`, `agents.own` and `devices.own`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `pages.manage`; the superadmin also `people.recover` and `workspace.manage`.
 - Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. A route the role may not use → `403 {error}`, naming who may (`refusal`, `roles.ts`).
@@ -22,18 +25,22 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 ```
 GET  /api/meta  {version, workspace: {id,name,createdAt,createdBy}|null, d1: schema|null,
      you: {role, can: [actions], tokenId, memberId, email, name}, superadmin: {id, name}|null,
-     people: [{id, name}]}; people = members then agents. With the key: {version, workspace,
-     d1}. Runs the D1 migration (once per isolate).
+     people: [{id, name}], limits}; people = members then agents. With the key: {version,
+     workspace, d1}. Runs the D1 migration (once per isolate).
 POST /api/workspace  superadmin; {name, deviceName?} → 201 {id, name, createdAt, createdBy,
      manifestEtag}; 409 {workspace} when bound
 GET  /api/workspace  {id, name, createdAt, createdBy, files, bytes}
 GET  /api/poll  {manifestEtag, presence: {<deviceId>: {memberId, name, path?, space?, ts}},
-     leases: [{path, space?, deviceId, memberId, name, until}]|null, spaces: [space]|null};
-     writes nothing. spaces = the caller's. path/space are absent, and a lease unlisted, for a
-     space the caller is not in; no space = the shared workspace
-POST /api/poll  same answer; body {name, path?, space?, take?} | {leave: true} records the beat
-     (needs x-doklin-device); a space the caller is not in = no path. D1 failure → presence {},
-     leases null, spaces null, etag still answered
+     leases: [{path, space?, deviceId, memberId, name, until}]|null, spaces: [space]|null,
+     limits}; writes nothing. spaces = the caller's. path/space are absent, and a lease
+     unlisted, for a space the caller is not in; no space = the shared workspace
+POST /api/poll  same answer; body {name, path?, space?, take?, ttl?} | {leave: true} records the
+     beat (needs x-doklin-device); a space the caller is not in = no path. ttl (ms) = how long
+     the beat holds, clamped to [90 s, 15 min], missing or not a number = 90 s; the presence row
+     and the lease it claims hold until now + ttl. D1 failure → presence {}, leases null, spaces
+     null, the Free limits with fleetToday null, etag still answered
+PUT  /api/settings/plan  superadmin (`workspace.manage`); {plan: "free"|"paid"} → {limits};
+     400 another plan; 503 D1 down
 GET  /api/manifest[?since=e]  body + x-manifest-etag; 304 unchanged
 PUT  /api/manifest  x-base-etag (428 without) → {etag, seq} + x-manifest-etag; 412 {etag} lost
      race; 400 invalid; 426 other manifest version; 413 > 4 MB; 409 {error, taken: [slug]} when
@@ -48,8 +55,27 @@ GET|PUT|DELETE /api/versions/snapshots/<id>  PUT create-only ({existed: true} on
 GET  /api/versions/blobs[?cursor=c]  {blobs: [{hash, size, uploaded}], cursor?} — one page
 GET|PUT|DELETE /api/versions/blobs/<hash>  PUT create-only; 413 > 25 MB
 POST /api/admin/wipe  superadmin; {"confirm":"wipe"}; batched, repeat until remaining:false; the
-     last round empties every D1 table but meta and spent_keys. Frees the domain.
+     last round empties every D1 table but meta, spent_keys, settings and usage (the account's,
+     not the workspace's). Frees the domain.
 ```
+
+## Limits (`src/limits.ts` ⇄ `Limits`, `engine/src/cloud/pace.rs`; the CLI reads `cliDaily`)
+
+`limits.ts` is the one source of these numbers; clients hold none of their own.
+`limits` is in `GET /api/meta` (with `you`), every poll answer, `GET
+/api/agent/me`, `POST /api/agent/login`'s `201` and `PUT /api/settings/plan`'s
+answer:
+
+```
+{plan: "free"|"paid", cap, bulkPerSecond, deviceBulk, deviceCeiling, fleetBulkWaits,
+ fleetSlow, cliDaily, manyNew, fleetToday}
+```
+
+`null` = no such limit on this plan. `deviceBulk` and `deviceCeiling` count all
+of a device's requests today. `fleetToday` = everyone's reported requests today
+(`usage`), `null` when D1 could not say; public page views and other Workers on
+the account are not in it. The plan is `settings.plan`, `free` until the
+superadmin says otherwise; D1 down → the Free numbers and `fleetToday: null`.
 
 ## Spaces (`src/spaces.ts`, `src/api.ts`)
 
@@ -155,29 +181,29 @@ cover every section, opening at most 8 spaces a request (`notListed`,
 
 ```
 POST   login  no bearer; {code, host?} → 201 {token, agent: {id, name}, scopes, workspace: {id,
-       name}|null, version}; 400 not a code; 401 unknown/used/expired (identical); 503
+       name}|null, version, limits}; 400 not a code; 401 unknown/used/expired (identical); 503
 DELETE login  revoke this token (204)
-GET    me     {agent, person: {id, name}|null, scopes, sections: [folder], workspace, version}
+GET    me     {agent, person: {id, name}|null, scopes, sections: [folder], workspace, version,
+       limits}
 read:
-GET tree?dir=&deep=1  {dir, folders, documents: [{path, md?, html?, htmlBehind?, public?}],
-    files: [{path, rev, size, changed, by, public?}]}; a version is {file, rev, size, changed,
-    by}; 404 empty
-GET doc?path=&v=md|html[&clean=1][&info=1]  bytes + x-doklin-kind (document|file), -path, -file,
-    -rev, -version, -html-behind: 1; values percent-encoded. clean=1 strips markers; info=1 →
-    JSON row + {kind, comments}, byName
+GET tree?dir=&deep=1  {dir, folders, documents: [{path, md?, html?, htmlBehind?, public?}]}; a
+    version is {file, rev, size, changed, by}; 404 empty
+GET doc?path=&v=md|html[&clean=1][&info=1]  bytes + x-doklin-kind: document, -path, -file, -rev,
+    -version, -html-behind: 1; values percent-encoded. clean=1 strips markers; info=1 → JSON
+    row + {kind, comments}, byName
 GET comments?path=  {path, threads: [{id, version, on, line?|tag?, orphaned?, comments: [{author, at, body}]}]}
-GET find?workspace=&space=&file=  {kind: document|file, path}: where a link to a page leads (space ""
-    = shared); a document by its stem. 404 for every page this agent cannot open, alike
+GET find?workspace=&space=&file=  {path}: where a link to a page leads (space "" = shared), the
+    document by its stem. 404 for every page this agent cannot open, alike
 GET search?q=&dir=&limit=  {query, dir, results: [{path, version, matches: [{line?, text}],
     moreLines?, inComments?}], total, truncated?, notSearched?, sectionsNotSearched?} | 202
     {indexing, pending}; limit ≤ 30
-GET pages  {pages: [{slug, url, kind: document|file|folder, path, title?, desc?, home?, by?, byName?,
+GET pages  {pages: [{slug, url, kind: document|folder, path, title?, desc?, home?, by?, byName?,
     at, missing?}], notListed?}
 edit:
-PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → {kind, path, version?,
+PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → {kind, path, version,
        file, rev, size, created, unchanged?, htmlBehind?}; 409 {rev}; 413 > 25 MB
 DELETE doc?path=&v=[&dry=1]  document, or one version → {kind, path, versions, stillPublic, threadsRemoved?}
-POST   move {from, to, dryRun?}  document/file/folder; to ending in / = into → {kind, from, to,
+POST   move {from, to, dryRun?}  document/folder; to ending in / = into → {kind, from, to,
        files, unpublished?}. Between two sections: ≤ 16 files, written where they go (new
        file ids) before they are removed with a tombstone `to`; pages re-claimed after, and
        `unpublished` lists addresses that could not be
@@ -186,8 +212,8 @@ POST   comments {path, on, body, v?} → 201 {path, thread, version, on, line?|t
        {path, thread, body} → 200 {path, thread, version, comments}
 DELETE comments?path=&thread= → {path, thread, version, removed}
 publish:
-PUT    pages {path, slug?, title?, desc?}  document, picture/PDF, folder/ or "/" → 201 {slug, url,
-       kind, path, documents, created}
+PUT    pages {path, slug?, title?, desc?}  document, folder/ or "/" → 201 {slug, url, kind, path,
+       documents, created}
 DELETE pages?path= | ?slug= → {stopped: [...]}
 ```
 
@@ -201,7 +227,13 @@ DELETE pages?path= | ?slug= → {stopped: [...]}
 | `slug_taken` | 409 | slug in use |
 | `comments` | 400 | a write would drop, change or add a comment marker, or lose an html thread's element; `threads`, `added` |
 
-Also `400`: hidden, ignored, temp-suffix or sidecar paths. `409`: case-insensitive collision.
+There are no plain files: only documents sync (`syncs`, `src/layout.ts`). A
+path is a document's stem (`plan`) or a version's full name (`plan.md`,
+`plan.html`); a name with another extension that names no document and no
+folder → `400 {error: "Doklin syncs markdown and html documents only — …"}`,
+on every route (a version flag makes it a stem: `v1.2` + `v=md` is `v1.2.md`).
+Also `400`: hidden, ignored, temp-suffix or sidecar paths. `409`:
+case-insensitive collision.
 
 ## Public routes (`src/public.ts`; no auth; GET/HEAD, else 405)
 
@@ -210,7 +242,8 @@ Also `400`: hidden, ignored, temp-suffix or sidecar paths. `409`: case-insensiti
 /<slug>                 note: <stem>.html framed when present, else markdown; ?v=md markdown
 /<slug>/raw             html rendition verbatim, CSP sandbox
 /<dirSlug>              folder table of contents
-/<dirSlug>/<rel/path>   nested note (md extension dropped, case-insensitive), …/raw, or image/PDF/html
+/<dirSlug>/<rel/path>   nested note (md extension dropped, case-insensitive), …/raw, or an html document
+                        by exact path; nothing else is served
                         a slug the shared map lacks is looked up in `addresses` and served from
                         that space (cache key carries its etag and id); held by nobody → 404, uncached
 /og.png · /robots.txt · /favicon.ico · /apple-touch-icon.png
@@ -265,17 +298,26 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
 - PUT checks ids, hashes, relative paths (no traversal), one path per file
   case-insensitively, rev/size ranges, slug grammar and reserved words,
   reference shape, ≤ 1 `root` (none in a space). Never existence. Merge semantics are the engine's.
+- Only documents: every file, tombstone and `file` public entry names a path
+  `syncs` takes (`src/layout.ts` ⇄ `engine/src/lib.rs`, **change both**): the
+  last segment, ASCII-lowercased, longer than and ending in `.md` `.markdown`
+  `.mdown` `.mkd` `.html` or `.meta.jsonl`. Anything else → `400` with a
+  sentence. The worker's own writes (`src/commit.ts`) leave out such entries a
+  stored manifest still has — giving up the address of a page they drop — and
+  every read (`src/workspace.ts`) treats them as absent.
 - Other `version` → `426`, sentence names which side is behind.
 
-## D1 (`src/schema.ts`, schema 9)
+## D1 (`src/schema.ts`, schema 10)
 
 ```sql
 meta         (key PK, schema_version)          survives wipe
 members      (id m-…, email UNIQUE normalized, name, role, created_at, last_seen_at, disabled)
 tokens       (hash PK, id t-…, member_id → members CASCADE, device_id, device_name, created_at)
 invites      (hash PK, id i-…, member_id → members CASCADE, created_at, expires_at)
-presence     (device_id PK, member_id, device_name, space_id '' = shared, path?, ts)
+presence     (device_id PK, member_id, device_name, space_id '' = shared, path?, ts, until)
+             read and swept by until (the beat's ttl from ts)
 leases       ((space_id, path) PK, path lowercased, device_id, member_id, device_name, until)
+             until = the claiming beat's
 agents       (id a-…, name, scopes, created_at, last_used_at, member_id)
 agent_codes  (hash PK, id c-…, agent_id → agents CASCADE, created_at, expires_at)
 agent_tokens (hash PK, id t-…, agent_id → agents CASCADE, host, created_at)
@@ -287,15 +329,19 @@ removed_tokens (hash PK, removed_at)    credentials an owner took away; emptied 
 spaces        (id s-…|p-…, kind, name, created_by, created_at, etag)   etag = its manifest's
 space_members ((member_id, space_id) PK, added_by, added_at)
 addresses     (slug PK, space_id)       which space a public address is; '' = shared
+settings      (key PK, value)           key plan: free | paid; a wipe keeps it
+usage         (who PK, day, requests, at)  who = tokenId, day = floor(ms / 86400000); one report a
+                                        credential, yesterday's swept by the next; a wipe keeps it
 ```
 
 `members.disabled = 1` is a removed person: no tokens, not listed, still in
 `/api/meta` `people`. `hash` columns are `sha256(token or code)`. Migrations: ordered `STEPS` run
 on `/api/meta`, idempotent `CREATE … IF NOT EXISTS`, then `UPDATE meta SET
 schema_version = <to> WHERE key = 'schema' AND schema_version = <the version read>`
-so concurrent isolates converge. A table that holds data never changes shape by
-`DROP`: a step that adds a column to one adds it only when a read of it fails
-(`ALTER TABLE … ADD COLUMN` is not idempotent). Updates ship no migrations
+so concurrent isolates converge. A table whose rows are worth keeping never
+changes shape by `DROP`: a step that adds a column to one adds it only when a
+read of it fails (`ALTER TABLE … ADD COLUMN` is not idempotent). One that holds
+only what lapses in minutes (`presence`) is dropped and made again. Updates ship no migrations
 directory: add a step, never a wrangler migration. A step that has shipped is
 never renumbered or removed: a database stores only the number it reached, so a
 number that changes meaning makes the runner skip a step it never ran.
@@ -315,6 +361,12 @@ npx -y wrangler@4 deploy
 curl -fsS -H "Authorization: Bearer $KEY" https://notes.example.com/api/meta     # d1 must be a number
 sh doklin-cloud-update.sh https://notes.example.com       # update (release asset)
 ```
+
+`wrangler.toml` carries two `[[ratelimits]]` blocks, `DEVICE_LIMIT` and
+`AGENT_LIMIT` (namespaces `1001`, `1002`): the setup prompt, the update script
+and the example write the same ones, held together by
+`verify-harness/cloudprompts.test.mjs`. A namespace is the account's, so two
+domains on one account share it; their keys (token ids) never meet.
 
 Names: `notes.example.com` → `doklin-notes-example-com`; workers.dev name
 `sherin-notes` → `doklin-sherin-notes` (`resourceName`, `src/cloudPrompts.ts`).

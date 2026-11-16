@@ -168,6 +168,10 @@ pub struct PollResponse {
     /// could not answer, which means "change nothing".
     #[serde(default)]
     pub spaces: Option<Vec<SpaceEntry>>,
+    /// The domain's plan's limits, with everyone's spending today
+    /// (`super::pace`).
+    #[serde(default)]
+    pub limits: Option<super::pace::Limits>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,8 +255,10 @@ pub enum Beat {
     /// is the Mac's; the worker knows whose it is from the bearer. A path
     /// claims that document's lease and lets go of any other; `take` claims
     /// it from whoever holds it. `space` is the section the path is in, None
-    /// for the shared workspace.
-    Here { name: String, space: Option<String>, path: Option<String>, take: bool },
+    /// for the shared workspace. `ttl` is how long it holds, in ms: until
+    /// the next beat is expected, with room for one to be lost — a device
+    /// polling every five minutes stays listed between its beats.
+    Here { name: String, space: Option<String>, path: Option<String>, take: bool, ttl: u64 },
     /// The last poll a quitting engine makes.
     Leave,
 }
@@ -261,8 +267,8 @@ impl Beat {
     /// The request body, exactly as the worker reads it.
     pub fn body(&self) -> serde_json::Value {
         match self {
-            Beat::Here { name, space, path: Some(path), take } => {
-                let mut body = serde_json::json!({ "name": name, "path": path });
+            Beat::Here { name, space, path: Some(path), take, ttl } => {
+                let mut body = serde_json::json!({ "name": name, "path": path, "ttl": ttl });
                 if let Some(space) = space {
                     body["space"] = serde_json::json!(space);
                 }
@@ -271,7 +277,7 @@ impl Beat {
                 }
                 body
             }
-            Beat::Here { name, path: None, .. } => serde_json::json!({ "name": name }),
+            Beat::Here { name, path: None, ttl, .. } => serde_json::json!({ "name": name, "ttl": ttl }),
             Beat::Leave => serde_json::json!({ "leave": true }),
         }
     }

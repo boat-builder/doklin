@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::manifest::{Beat, Manifest, PollResponse, PublicKind, SpaceEntry};
+use super::pace::{Limits, Usage};
 use super::versions::VersionsIndex;
 
 /* ---------- What the worker knows ---------- */
@@ -56,6 +57,10 @@ pub struct Meta {
     /// The People list — addresses, devices, roles — is a route of its own.
     #[serde(default)]
     pub people: Vec<Person>,
+    /// The domain's plan's limits (`super::pace`), for a bearer that is
+    /// somebody's sign-in. A worker that answers none predates them.
+    #[serde(default)]
+    pub limits: Option<Limits>,
 }
 
 /// Who the bearer is. `member_id` is the id this Mac's work is signed with.
@@ -303,6 +308,12 @@ pub enum RemoteError {
     /// `409 {taken}` on a manifest: these public addresses are another
     /// section's on this domain, so the manifest naming them was not stored.
     Taken(Vec<String>),
+    /// `429`: the worker's loop catcher says this device is sending too
+    /// much. The number is how many seconds it asked for (`Retry-After`).
+    Slowed(u64),
+    /// Cloudflare's own page for an account past its daily requests (error
+    /// 1027): nothing on this domain answers until 00:00 UTC.
+    DailyLimit,
     Other(String),
 }
 
@@ -318,6 +329,8 @@ impl std::fmt::Display for RemoteError {
             RemoteError::Outdated(m) => write!(f, "worker outdated: {}", m),
             RemoteError::AlreadyBound(w) => write!(f, "already bound to \"{}\"", w.name),
             RemoteError::Taken(slugs) => write!(f, "already taken on this domain: {}", slugs.join(", ")),
+            RemoteError::Slowed(_) => write!(f, "the domain asked this device to slow down"),
+            RemoteError::DailyLimit => write!(f, "today's Cloudflare requests are used up"),
             RemoteError::Other(m) => write!(f, "{}", m),
         }
     }
@@ -331,6 +344,9 @@ pub type RemoteResult<T> = Result<T, RemoteError>;
 /// `impl Future + Send` (rather than plain `async fn`) so the engine's task
 /// stays spawnable on the multithreaded runtime.
 pub trait Remote: Send + Sync + 'static {
+    /// What this remote — and every space remote made from it — has sent
+    /// today: counted as each request goes out.
+    fn usage(&self) -> &Usage;
     fn meta(&self) -> impl std::future::Future<Output = RemoteResult<Meta>> + Send;
     fn bind(
         &self,
@@ -547,6 +563,9 @@ pub struct HttpRemote {
     /// `spaces/<id>/` when this remote is one space's (`Remote::space`), and
     /// empty for the shared workspace: what the sync routes sit under.
     scope: String,
+    /// Where each request is counted. A remote made for one command, before
+    /// a workspace has sync state, counts into a counter nobody keeps.
+    usage: Usage,
 }
 
 impl HttpRemote {
@@ -560,7 +579,13 @@ impl HttpRemote {
             device_id: device_id.to_string(),
             app: app.to_string(),
             scope: String::new(),
+            usage: Usage::default(),
         }
+    }
+
+    /// The same remote, counting into `usage` — the workspace's own count.
+    pub fn counted(self, usage: Usage) -> Self {
+        HttpRemote { usage, ..self }
     }
 
     fn url(&self, tail: &str) -> String {
@@ -582,9 +607,16 @@ impl HttpRemote {
             .header("x-doklin-client", &self.app)
     }
 
-    /// The bearer, plus the attribution headers.
+    /// The bearer, plus the attribution headers — and the one place every
+    /// request with a bearer is counted. Every so often one also says how
+    /// many this device has sent today (`x-doklin-used`), which is how the
+    /// domain knows what everyone together has spent.
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        self.tags(req).header("authorization", format!("Bearer {}", self.token))
+        let req = self.tags(req).header("authorization", format!("Bearer {}", self.token));
+        match self.usage.count() {
+            Some(used) => req.header("x-doklin-used", used.to_string()),
+            None => req,
+        }
     }
 }
 
@@ -694,6 +726,20 @@ impl HttpRemote {
         self.revoke(&format!("agents/{}/tokens", agent_id), token_id).await
     }
 
+    /// `PUT /api/settings/plan`: the Cloudflare plan the domain's account is
+    /// on, which the worker derives every limit from. The superadmin's.
+    pub async fn set_plan(&self, plan: &str) -> RemoteResult<()> {
+        let body = serde_json::to_vec(&json!({ "plan": plan })).unwrap_or_default();
+        let res = self
+            .auth(self.client.put(self.url("settings/plan")))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(transport_err)?;
+        expect_status(res).await.map(|_| ())
+    }
+
     /// `GET /api/pages`: every public address on the domain, whichever
     /// section published the page — an owner's to read.
     pub async fn list_every_page(&self) -> RemoteResult<EveryPages> {
@@ -738,14 +784,6 @@ fn body_error(v: &serde_json::Value) -> Option<String> {
     v.get("error").and_then(|e| e.as_str()).map(String::from)
 }
 
-/// The worker's own sentence for a status whose body carries one, so what
-/// the user reads is what the worker said ("this domain has no database —
-/// update the worker") rather than a code with a sentence stapled to it.
-async fn worker_sentence(res: reqwest::Response, fallback: &str) -> RemoteError {
-    let v = res.json::<serde_json::Value>().await.unwrap_or_default();
-    RemoteError::Other(body_error(&v).unwrap_or_else(|| fallback.to_string()))
-}
-
 /// `{ "<key>": [...] }` — the shape every identity list answers with. A key
 /// that is missing reads as an empty list: a domain with nobody on it and a
 /// domain that named the array differently are not worth telling apart here,
@@ -768,55 +806,74 @@ async fn read_space(res: reqwest::Response) -> RemoteResult<SpaceEntry> {
 }
 
 async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response> {
-    match res.status().as_u16() {
-        200..=299 | 304 => Ok(res),
-        400 => Err(worker_sentence(res, "the domain refused that").await),
-        401 => {
-            // Two refusals share the status, and only the body tells them
-            // apart: `removed: true` is said of a credential an owner took
-            // away, and of nothing else. Anything that is not exactly that —
-            // no body, a proxy's page — is the ordinary one.
-            let v = res.json::<serde_json::Value>().await.unwrap_or_default();
-            Err(match v.get("removed").and_then(|r| r.as_bool()) {
-                Some(true) => RemoteError::Removed,
-                _ => RemoteError::Unauthorized,
-            })
-        }
-        403 => Err(RemoteError::Forbidden),
-        404 => Err(RemoteError::NotFound),
+    let status = res.status().as_u16();
+    if matches!(status, 200..=299 | 304) {
+        return Ok(res);
+    }
+    let retry_after = res
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let body = res.text().await.unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    // Cloudflare answers for an account past its daily requests before the
+    // worker runs, with a page of its own. Its status is not documented, so
+    // it is known by what it says.
+    if v.is_null() && names_daily_limit(&body) {
+        return Err(RemoteError::DailyLimit);
+    }
+    // The worker's own sentence for a status whose body carries one, so what
+    // the user reads is what the worker said ("this domain has no database —
+    // update the worker") rather than a code with a sentence stapled to it.
+    let said = |fallback: &str| body_error(&v).unwrap_or_else(|| fallback.to_string());
+    Err(match status {
+        400 => RemoteError::Other(said("the domain refused that")),
+        // Two refusals share the status, and only the body tells them apart:
+        // `removed: true` is said of a credential an owner took away, and of
+        // nothing else. Anything that is not exactly that — no body, a
+        // proxy's page — is the ordinary one.
+        401 => match v.get("removed").and_then(|r| r.as_bool()) {
+            Some(true) => RemoteError::Removed,
+            _ => RemoteError::Unauthorized,
+        },
+        403 => RemoteError::Forbidden,
+        404 => RemoteError::NotFound,
         409 => {
-            let v = res.json::<serde_json::Value>().await.unwrap_or_default();
             let taken: Option<Vec<String>> = v.get("taken").cloned().and_then(|t| serde_json::from_value(t).ok());
             match v.get("workspace").cloned().and_then(|w| serde_json::from_value(w).ok()) {
-                Some(record) => Err(RemoteError::AlreadyBound(record)),
+                Some(record) => RemoteError::AlreadyBound(record),
                 None => match taken.filter(|slugs| !slugs.is_empty()) {
-                    Some(slugs) => Err(RemoteError::Taken(slugs)),
-                    None => Err(RemoteError::Other(body_error(&v).unwrap_or_else(|| "conflict".into()))),
+                    Some(slugs) => RemoteError::Taken(slugs),
+                    None => RemoteError::Other(said("conflict")),
                 },
             }
         }
-        412 => Err(RemoteError::Conflict),
-        426 => {
-            let v = res.json::<serde_json::Value>().await.unwrap_or_default();
-            Err(RemoteError::Outdated(
-                body_error(&v).unwrap_or_else(|| "the worker predates this app's manifest".into()),
-            ))
-        }
+        412 => RemoteError::Conflict,
+        426 => RemoteError::Outdated(said("the worker predates this app's manifest")),
+        429 => RemoteError::Slowed(retry_after.unwrap_or(60)),
         // Identity is the database, so a deployment with no `DB` binding says
         // so here rather than pretending nobody has been invited.
-        503 => Err(worker_sentence(res, "the domain is unavailable").await),
-        code => {
-            let body = res.text().await.unwrap_or_default();
-            let detail = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| body_error(&v))
-                .unwrap_or_else(|| body.chars().take(200).collect());
-            Err(RemoteError::Other(format!("http {}: {}", code, detail)))
-        }
-    }
+        503 => RemoteError::Other(said("the domain is unavailable")),
+        code => RemoteError::Other(format!(
+            "http {}: {}",
+            code,
+            body_error(&v).unwrap_or_else(|| body.chars().take(200).collect())
+        )),
+    })
+}
+
+/// Cloudflare's error page for error 1027 — an account's Workers past their
+/// daily requests ("error code: 1027", "Error 1027").
+pub(crate) fn names_daily_limit(body: &str) -> bool {
+    body.contains("1027")
 }
 
 impl Remote for HttpRemote {
+    fn usage(&self) -> &Usage {
+        &self.usage
+    }
+
     fn meta(&self) -> impl std::future::Future<Output = RemoteResult<Meta>> + Send {
         async move {
             let res = self.auth(self.client.get(self.url("meta"))).send().await.map_err(transport_err)?;

@@ -3,8 +3,8 @@
 // agent, the update prompt that only asks an agent to run
 // scripts/doklin-cloud-update.sh, and the "no step the agent has to invent"
 // check. The script is held to the same
-// naming rule and the same compatibility date as the prompts, by running its
-// `--names` mode and reading the worker's source. The other line the app
+// naming rule, the same compatibility date and the same rate-limit blocks as
+// the prompts, by running its `--names` mode and reading the worker's source. The other line the app
 // hands out — the one that installs the `doklin` command — is held to the
 // release that serves it, and scripts/install-doklin.sh is run against a
 // release made up on the spot. Run:
@@ -310,6 +310,28 @@ eq(
   ok(text.includes("d1 list --json"), "the id comes from the account, never from a guess");
   ok(!/d1 create/.test(text), "a missing database is refused, never created");
   ok(/no D1 database named/.test(text), "…and says which name it looked for");
+
+  // The loop catchers: the script writes the same [[ratelimits]] blocks as
+  // the setup prompt — names, namespaces and numbers — and so does the
+  // template a deploy by hand starts from. Their names are the ones the
+  // worker reads.
+  const ratelimits = (toml) =>
+    [...toml.matchAll(/^\[\[ratelimits\]\]\nname = "(\w+)"\nnamespace_id = "(\d+)"\nsimple = \{ limit = (\d+), period = (\d+) \}$/gm)].map(
+      (m) => m.slice(1).join(" "),
+    );
+  const setup = (target) =>
+    buildSetupPrompt({ target, key: KEY, workspaceName: "Notes", workerVersion: 1, compatibilityDate: DATE });
+  const fromPrompt = ratelimits(setup({ kind: "domain", domain: "notes.example.com" }));
+  eq(fromPrompt.length, 2, `the setup prompt writes both blocks: ${JSON.stringify(fromPrompt)}`);
+  eq(JSON.stringify(ratelimits(setup({ kind: "workers-dev", name: "sherin-notes" }))), JSON.stringify(fromPrompt), "on a workers.dev address too");
+  eq(JSON.stringify(ratelimits(text)), JSON.stringify(fromPrompt), "the script writes the prompt's blocks, verbatim");
+  const example = fs.readFileSync(path.join(repoRoot, "cloud-worker", "wrangler.toml.example"), "utf8");
+  eq(JSON.stringify(ratelimits(example)), JSON.stringify(fromPrompt), "…and so does the template");
+  eq(new Set(fromPrompt.map((b) => b.split(" ")[1])).size, 2, "each binding has a namespace of its own");
+  const envSource = fs.readFileSync(path.join(repoRoot, "cloud-worker", "src", "env.ts"), "utf8");
+  for (const name of fromPrompt.map((b) => b.split(" ")[0])) {
+    ok(new RegExp(`^\\s+${name}\\?: RateLimit;$`, "m").test(envSource), `the worker reads ${name}`);
+  }
 }
 
 /* ---------- teardown ---------- */

@@ -17,12 +17,13 @@ use super::config::{
     WorkspaceEntry,
 };
 use super::engine::{
-    next_wake, Engine, EngineCmd, EngineConfig, Exit, PublishRequest, DIRECTORY_MIN_GAP, ACTIVITY_FRESH,
-    POLL_INTERVAL, PRESENCE_BEAT,
+    Engine, EngineCmd, EngineConfig, Exit, PublishRequest, DIRECTORY_MIN_GAP, ACTIVITY_FRESH, POLL_AWAY,
+    POLL_BACKGROUND, POLL_INTERVAL, PRESENCE_BEAT,
 };
 use super::flows::{bind_domain, seed_download, seed_upload, wipe_all, FlowError};
 use super::invite;
 use super::manifest::*;
+use super::pace::{Cause, Limits, Mode, Plan, Usage};
 use super::remote::*;
 use super::scan::{hash16, now_ms, random_id, scan_local};
 use super::space::{self, RESERVED_DIRS};
@@ -102,6 +103,19 @@ struct FakeWorker {
     /// Not a worker at all: whatever answers at this address now tells every
     /// caller its access was removed — an address that changed hands.
     says_removed_to_all: bool,
+    /// The plan's limits as `/api/meta` and the poll answer them; None plays
+    /// a worker from before them.
+    limits: Option<Limits>,
+    /// Cloudflare's daily limit: every request gets its error page.
+    daily_limit: bool,
+    /// Every blob a device put up — what "a lost race re-sends nothing" is
+    /// counted in.
+    blob_puts: u64,
+    /// This many manifest writes are cut short, the way a dropped connection
+    /// or a quit app cuts them.
+    fail_manifest_puts: u32,
+    /// The worker's loop catcher: this many requests are answered `429`.
+    slowed: u32,
     /// Agent id -> name. All the engine ever learns of
     /// an agent: `/api/meta` lists them after the people, so an `a-` id in a
     /// manifest gets a name the same way an `m-` id does.
@@ -236,9 +250,25 @@ type SharedWorker = Arc<Mutex<FakeWorker>>;
 /// A worker set up the way every domain is: Ada traded the domain's key for
 /// her first device's sign-in (`OWNER_TOKEN`), which made her the superadmin.
 fn fake_worker() -> SharedWorker {
-    let be = Arc::new(Mutex::new(FakeWorker { worker_version: 1, ..Default::default() }));
+    let be = Arc::new(Mutex::new(FakeWorker { worker_version: 1, limits: Some(free_limits()), ..Default::default() }));
     trade_key(&be, OWNER_TOKEN, "ada@example.com", "Ada");
     be
+}
+
+/// The Free plan's numbers, as cloud-worker/src/limits.ts has them.
+fn free_limits() -> Limits {
+    Limits {
+        plan: Plan::Free,
+        cap: Some(100_000),
+        bulk_per_second: 4.0,
+        device_bulk: Some(10_000),
+        device_ceiling: 15_000,
+        fleet_bulk_waits: Some(60_000),
+        fleet_slow: Some(85_000),
+        cli_daily: 5_000,
+        many_new: 200,
+        fleet_today: Some(0),
+    }
 }
 
 /// Somebody trading a fresh key with their address: the person — made if
@@ -298,6 +328,8 @@ struct FakeRemote {
     /// The space the sync calls are aimed at (`Remote::space`); None for the
     /// shared workspace.
     space: Option<String>,
+    /// This device's count, as `HttpRemote` keeps it.
+    usage: Usage,
 }
 
 impl FakeRemote {
@@ -307,7 +339,13 @@ impl FakeRemote {
 
     /// A device holding a token somebody redeemed.
     fn with_token(be: &SharedWorker, device_id: &str, token: &str) -> Self {
-        FakeRemote { be: be.clone(), device_id: device_id.to_string(), token: token.to_string(), space: None }
+        FakeRemote {
+            be: be.clone(),
+            device_id: device_id.to_string(),
+            token: token.to_string(),
+            space: None,
+            usage: Usage::default(),
+        }
     }
 
     /// The section this remote is aimed at, behind the gate the worker puts
@@ -335,10 +373,18 @@ impl FakeRemote {
         let mut be = self.be.lock().unwrap();
         be.requests += 1;
         if be.offline {
-            Err(RemoteError::Offline("fake worker down".into()))
-        } else {
-            Ok(())
+            return Err(RemoteError::Offline("fake worker down".into()));
         }
+        // Reached the domain: counted, as `HttpRemote::auth` counts it.
+        self.usage.count();
+        if be.daily_limit {
+            return Err(RemoteError::DailyLimit);
+        }
+        if be.slowed > 0 {
+            be.slowed -= 1;
+            return Err(RemoteError::Slowed(60));
+        }
+        Ok(())
     }
 
     /// Offline, then the bearer. Every gated route goes through here, so a
@@ -401,6 +447,10 @@ impl FakeRemote {
 }
 
 impl Remote for FakeRemote {
+    fn usage(&self) -> &Usage {
+        &self.usage
+    }
+
     fn meta(&self) -> impl std::future::Future<Output = RemoteResult<Meta>> + Send {
         let this = self.clone();
         async move {
@@ -431,7 +481,8 @@ impl Remote for FakeRemote {
                 .map(|m| Person { id: m.id.clone(), name: m.name.clone() })
                 .chain(b.agents.iter().map(|(id, name)| Person { id: id.clone(), name: name.clone() }))
                 .collect();
-            Ok(Meta { version: b.worker_version, workspace: b.bound.clone(), you, superadmin, people })
+            let limits = b.limits.clone();
+            Ok(Meta { version: b.worker_version, workspace: b.bound.clone(), you, superadmin, people, limits })
         }
     }
 
@@ -471,6 +522,7 @@ impl Remote for FakeRemote {
                     presence: BTreeMap::new(),
                     leases: None,
                     spaces: None,
+                    limits: b.limits.clone().map(|l| Limits { fleet_today: None, ..l }),
                 });
             }
             let now = now_ms();
@@ -490,7 +542,7 @@ impl Remote for FakeRemote {
                     b.presence.remove(&me);
                     b.leases.retain(|_, l| l.device_id != me);
                 }
-                Some(Beat::Here { name, space, path, take }) => {
+                Some(Beat::Here { name, space, path, take, ttl }) => {
                     // A beat naming a space this person is not in is a beat
                     // with no path.
                     let (space, path) = match space {
@@ -526,7 +578,7 @@ impl Remote for FakeRemote {
                                     device_id: me,
                                     member_id: member_id.clone(),
                                     name,
-                                    until: now + 90_000,
+                                    until: now + ttl.clamp(90_000, 900_000),
                                 },
                             );
                         }
@@ -547,7 +599,8 @@ impl Remote for FakeRemote {
                 })
                 .collect();
             let spaces = Some(b.spaces.iter().filter(|(id, _)| mine.contains(*id)).map(|(id, sp)| sp.entry(id)).collect());
-            Ok(PollResponse { manifest_etag: b.etag_str(), presence, leases, spaces })
+            let limits = b.limits.clone();
+            Ok(PollResponse { manifest_etag: b.etag_str(), presence, leases, spaces, limits })
         }
     }
 
@@ -739,6 +792,10 @@ impl Remote for FakeRemote {
         async move {
             let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
+            if b.fail_manifest_puts > 0 {
+                b.fail_manifest_puts -= 1;
+                return Err(RemoteError::Offline("cut short".into()));
+            }
             b.put_manifest_calls += 1;
             if b.reject_schema {
                 return Err(RemoteError::Outdated(format!(
@@ -796,6 +853,7 @@ impl Remote for FakeRemote {
         async move {
             let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
+            b.blob_puts += 1;
             this.section(&mut b, caller)?.blobs.entry(key).or_insert((bytes, 0));
             Ok(())
         }
@@ -818,6 +876,7 @@ impl Remote for FakeRemote {
         async move {
             let mut b = this.be.lock().unwrap();
             b.requests += 1;
+            this.usage.count();
             if let Some(sec) = this.section_ungated(&mut b) {
                 sec.blobs.remove(&key);
             }
@@ -1369,7 +1428,10 @@ fn device_as(
             trash: None,
             on_spaces: None,
         },
-        Arc::new(FakeRemote::with_token(be, &format!("d-{}", name.to_lowercase()), token)),
+        Arc::new(FakeRemote {
+            usage: Usage::at(state.path()),
+            ..FakeRemote::with_token(be, &format!("d-{}", name.to_lowercase()), token)
+        }),
         events.clone(),
         statuses.clone(),
     );
@@ -3674,7 +3736,8 @@ async fn a_stranger_here_is_shown_as_their_mac_and_asked_about_once() {
 }
 
 /// The beat is presence, not sync: a poll that fails takes its beat with it
-/// and the next poll owes it again — no retry loop, no extra request.
+/// and the next poll owes it again — no retry loop, no extra request. The
+/// next poll is the retry clock's: 15 s, then 30, each ±20 %.
 #[tokio::test(start_paused = true)]
 async fn a_beat_lost_with_its_poll_rides_the_next_one() {
     let be = fake_worker();
@@ -3691,7 +3754,7 @@ async fn a_beat_lost_with_its_poll_rides_the_next_one() {
     assert_eq!(be.lock().unwrap().requests - before, 2, "two polls refused, nothing hammering behind them");
     be.lock().unwrap().offline = false;
     be.lock().unwrap().polls.clear();
-    tokio::time::sleep(POLL_INTERVAL).await;
+    tokio::time::sleep(Duration::from_secs(40)).await;
     assert!(
         matches!(be.lock().unwrap().polls.first(), Some(Some(Beat::Here { .. }))),
         "the first poll back carries the beat it owed"
@@ -3995,15 +4058,18 @@ fn bus_routes_a_touch_to_the_engine_whose_root_holds_it() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn next_wake_prefers_the_touch_settle() {
+async fn the_wake_prefers_the_touch_settle() {
+    let be = fake_worker();
+    let a = device("Alice", &be);
     let now = tokio::time::Instant::now();
     let poll = now + Duration::from_secs(15);
-    assert_eq!(next_wake(poll, None, None), poll);
-    assert_eq!(next_wake(poll, Some(now), None), now + Duration::from_secs(5));
-    assert_eq!(next_wake(poll, Some(now), Some(now)), now + Duration::from_millis(1500));
-    assert_eq!(next_wake(poll, None, Some(now)), now + Duration::from_millis(1500));
+    let wake = |fs, touch| a.engine.wake_at(poll, fs, touch, None);
+    assert_eq!(wake(None, None), poll);
+    assert_eq!(wake(Some(now), None), now + Duration::from_secs(5));
+    assert_eq!(wake(Some(now), Some(now)), now + Duration::from_millis(1500));
+    assert_eq!(wake(None, Some(now)), now + Duration::from_millis(1500));
     let late = now + Duration::from_secs(20);
-    assert_eq!(next_wake(poll, Some(late), None), poll, "the poll comes first when the hint is far off");
+    assert_eq!(wake(Some(late), None), poll, "the poll comes first when the hint is far off");
 }
 
 #[test]
@@ -6327,4 +6393,471 @@ async fn a_link_opens_only_for_the_people_who_can_see_its_page() {
     let mut air = person_on(&be, "Alice", "Air").await;
     air.sync().await;
     assert_eq!(air.engine.follow(diary.space.as_deref(), &diary.file).as_deref(), Some("Private/diary.md"));
+}
+
+/* ---------- Release 1: what syncs, the runaway, pacing, the valves ---------- */
+
+/// Start a device's engine task, the way the app does. Answers the command
+/// sender, the task and what the test still needs of the device.
+fn run_device(a: Device) -> (tokio::sync::mpsc::UnboundedSender<EngineCmd>, tokio::task::JoinHandle<Exit>, StatusTable, String, Arc<Collected>, tempfile::TempDir) {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    std::mem::forget(fs_tx); // a watcher that never fires, and never closes
+    let key = a.root.path().to_string_lossy().to_string();
+    let Device { engine, root, _state, statuses, events, .. } = a;
+    std::mem::forget(_state);
+    let task = tokio::spawn(engine.run(cmd_rx, fs_rx));
+    (cmd_tx, task, statuses, key, events, root)
+}
+
+fn status_of(statuses: &StatusTable, key: &str) -> CloudStatus {
+    statuses.lock().unwrap()[key].clone()
+}
+
+/// The same device again, from the folder and the sync state it left: a
+/// restart.
+fn restart(a: Device, be: &SharedWorker) -> Device {
+    let Device { root, _state, .. } = a;
+    let name = "Alice";
+    device_at(name, be, root, _state)
+}
+
+#[test]
+fn only_markdown_html_and_comments_sync() {
+    for yes in ["a.md", "A/B.MD", "x.markdown", "x.mdown", "x.mkd", "page.html", "notes.meta.jsonl"] {
+        assert!(crate::syncs(yes), "{yes} syncs");
+    }
+    for no in ["a.py", "pic.png", "doc.pdf", "data.csv", ".md", "x.htm", "notes.jsonl", "md", "readme"] {
+        assert!(!crate::syncs(no), "{no} stays on its device");
+    }
+}
+
+#[tokio::test]
+async fn a_script_a_picture_and_a_pdf_never_reach_the_worker() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("notes.md", "# notes\n");
+    a.write("notes.meta.jsonl", "{\"v\":1}\n");
+    a.write("page.html", "<h1>page</h1>\n");
+    a.write("tool.py", "print('hi')\n");
+    a.write("pic.png", "not really a png\n");
+    a.write("doc.pdf", "%PDF-1.4\n");
+    a.cycle().await;
+    let mut paths: Vec<String> = manifest_of(&be).files.values().map(|f| f.path.clone()).collect();
+    paths.sort();
+    assert_eq!(paths, vec!["notes.md", "notes.meta.jsonl", "page.html"]);
+    assert_eq!(be.lock().unwrap().blob_puts, 3);
+
+    // An agent writing more scripts costs nothing at all.
+    let before = be.lock().unwrap().requests;
+    a.write("tool2.py", "print('again')\n");
+    a.engine.pass(super::engine::Which::Dirty).await.unwrap();
+    assert_eq!(be.lock().unwrap().requests, before, "a .py is invisible: no cycle, no request");
+    assert_eq!(a.read("tool.py").as_deref(), Some("print('hi')\n"), "and it stays where it is");
+}
+
+#[tokio::test]
+async fn a_cloned_repository_syncs_its_markdown_and_nothing_else() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    for i in 0..5_100 {
+        a.write(&format!("repo/src/m{}.rs", i), "fn main() {}\n");
+    }
+    for i in 0..40 {
+        a.write(&format!("repo/docs/d{}.md", i), &format!("doc {}\n", i));
+    }
+    a.cycle().await;
+    assert_eq!(a.phase(), Phase::Idle, "{:?}", a.status().error);
+    assert_eq!(manifest_of(&be).files.len(), 40);
+}
+
+#[tokio::test]
+async fn a_picture_from_before_the_rule_leaves_the_state_and_stays_on_disk() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("notes.md", "# notes\n");
+    a.write("pic.png", "old bytes\n");
+    a.cycle().await;
+    // What an app from before the rule left: the picture in the manifest
+    // and in this device's state.
+    let png = ManifestFile { path: "pic.png".into(), rev: 1, hash: hash16(b"old bytes\n"), size: 10, mtime: 1, by: "m-1".into() };
+    {
+        let mut b = be.lock().unwrap();
+        b.manifest.files.insert("f-png".into(), png.clone());
+        b.etag += 1;
+    }
+    let unit = a.engine.shared_mut();
+    unit.state.files.insert(
+        "f-png".into(),
+        super::unit::FileState { path: "pic.png".into(), rev: 1, hash: png.hash.clone(), size: 10, mtime_ms: 1 },
+    );
+    unit.persist_state();
+
+    let mut a = restart(a, &be);
+    assert!(!a.engine.shared().state.files.contains_key("f-png"), "forgotten on load");
+    a.cycle().await;
+    assert_eq!(a.read("pic.png").as_deref(), Some("old bytes\n"), "the file on disk is never touched");
+    assert!(!manifest_of(&be).files.contains_key("f-png"), "the first write cleans the manifest");
+    assert!(manifest_of(&be).tombstones.is_empty(), "with no tombstone: nobody deletes anything");
+
+    // A new device holding its own pic.png meets a manifest that still names
+    // one: it neither downloads it nor trashes its own.
+    {
+        let mut b = be.lock().unwrap();
+        b.manifest.files.insert("f-png".into(), png);
+        b.etag += 1;
+    }
+    let mut c = device("Cy", &be);
+    c.write("pic.png", "Cy's own picture\n");
+    c.cycle().await;
+    assert_eq!(c.read("pic.png").as_deref(), Some("Cy's own picture\n"));
+    assert_eq!(c.read("notes.md").as_deref(), Some("# notes\n"));
+}
+
+#[tokio::test]
+async fn a_lost_race_mid_push_resends_no_blob() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("seed.md", "seed\n");
+    a.cycle().await;
+    for i in 0..3 {
+        a.write(&format!("new{}.md", i), &format!("new {}\n", i));
+    }
+    {
+        let mut b = be.lock().unwrap();
+        let mut raced = b.manifest.clone();
+        raced.seq += 1;
+        b.racer = Some(raced);
+    }
+    let before = be.lock().unwrap().blob_puts;
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().blob_puts - before, 3, "each new file's bytes went up once");
+    assert_eq!(manifest_of(&be).files.len(), 4);
+    assert!(a.engine.shared().state.pending_new.is_empty(), "won, so nothing is pending");
+}
+
+#[tokio::test]
+async fn a_push_cut_short_resumes_after_a_restart_with_the_same_ids() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("seed.md", "seed\n");
+    a.cycle().await;
+    for i in 0..3 {
+        a.write(&format!("new{}.md", i), &format!("new {}\n", i));
+    }
+    be.lock().unwrap().fail_manifest_puts = 1;
+    assert!(a.engine.cycle().await.is_err());
+    let ids: BTreeMap<String, String> = a.engine.shared().state.pending_new.clone();
+    assert_eq!(ids.len(), 3);
+    let sent = be.lock().unwrap().blob_puts;
+
+    let mut a = restart(a, &be);
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().blob_puts, sent, "nothing went up twice");
+    let m = manifest_of(&be);
+    for (path, fid) in &ids {
+        assert_eq!(m.files.get(fid).map(|f| f.path.as_str()), Some(path.as_str()), "{path} kept its id");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_big_push_lands_in_batches_while_a_colleague_saves_between() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    b.write("bob.md", "bob\n");
+    b.cycle().await;
+    for i in 0..150 {
+        a.write(&format!("bulk/n{:03}.md", i), &format!("note {}\n", i));
+    }
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).files.len(), 101, "one batch of a hundred");
+    assert_eq!(a.status().usage.waiting, 50);
+
+    b.write("bob.md", "bob, edited between the batches\n");
+    b.cycle().await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+    a.cycle().await;
+    let m = manifest_of(&be);
+    assert_eq!(m.files.len(), 151);
+    assert!(m.files.values().any(|f| f.path == "bob.md" && f.rev == 2), "Bob's save stands");
+    assert_eq!(a.status().usage.waiting, 0);
+    assert_eq!(be.lock().unwrap().blob_puts, 150 + 2, "no blob sent twice");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_big_download_survives_a_stop_halfway() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    for i in 0..160 {
+        a.write(&format!("n{:03}.md", i), &format!("note {}\n", i));
+    }
+    a.cycle().await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).files.len(), 160);
+
+    let mut b = device("Bob", &be);
+    let gets = be.lock().unwrap().blob_gets;
+    b.cycle().await;
+    assert_eq!(b.files().len(), 100, "one batch down");
+    assert_eq!(b.status().usage.waiting, 60);
+    let Device { root, _state, .. } = b;
+    let mut b = device_at("Bob", &be, root, _state);
+    b.cycle().await;
+    assert_eq!(b.files().len(), 160, "the rest after a restart");
+    assert_eq!(be.lock().unwrap().blob_gets - gets, 160, "nothing downloaded twice");
+    assert!(b.events.of(EV_CONFLICT).is_empty());
+    assert_eq!(b.status().usage.waiting, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn many_new_documents_wait_for_a_yes() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("kept.md", "kept\n");
+    a.cycle().await;
+    for i in 0..210 {
+        a.write(&format!("Projects/foo/n{:03}.md", i), &format!("note {}\n", i));
+    }
+    a.cycle().await;
+    assert_eq!(a.phase(), Phase::PendingAdds);
+    assert_eq!(a.status().pending_adds, 210);
+    assert_eq!(manifest_of(&be).files.len(), 1, "held");
+    let asked = a.events.of(EV_PENDING_ADDS);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0]["count"], 210);
+    assert_eq!(asked[0]["folders"][0]["path"], "Projects/foo");
+
+    // Edits still go, and the question is not asked again.
+    a.write("kept.md", "kept, edited\n");
+    a.cycle().await;
+    assert!(manifest_of(&be).files.values().any(|f| f.path == "kept.md" && f.rev == 2));
+    assert_eq!(a.events.of(EV_PENDING_ADDS).len(), 1);
+
+    // Not now: they stay, until more arrive.
+    a.engine.confirm_adds(false);
+    assert_eq!(a.phase(), Phase::Idle);
+    a.cycle().await;
+    assert_eq!(a.phase(), Phase::Idle);
+    assert_eq!(manifest_of(&be).files.len(), 1);
+    a.write("Projects/foo/one-more.md", "one more\n");
+    a.cycle().await;
+    assert_eq!(a.phase(), Phase::PendingAdds, "asked again");
+    assert_eq!(a.events.of(EV_PENDING_ADDS).len(), 2);
+
+    // Sync them: they go, a batch at a time, and the question is over.
+    a.engine.confirm_adds(true);
+    for _ in 0..4 {
+        a.cycle().await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+    }
+    assert_eq!(manifest_of(&be).files.len(), 212);
+    assert_eq!(a.phase(), Phase::Idle);
+    assert_eq!(a.status().pending_adds, 0);
+}
+
+#[tokio::test]
+async fn past_its_allowance_a_device_sends_its_own_edits_and_holds_the_rest_until_lifted() {
+    let be = fake_worker();
+    be.lock().unwrap().limits = Some(Limits { device_bulk: Some(1), ..free_limits() });
+    let mut a = device("Alice", &be);
+    a.write("mine.md", "mine\n");
+    a.cycle().await;
+    let usage = a.status().usage;
+    assert_eq!((usage.mode, usage.cause), (Mode::BulkWaits, Some(Cause::Device)));
+    assert!(usage.liftable && !usage.lifted);
+    assert!(usage.resumes_at.is_some());
+
+    for i in 0..120 {
+        a.write(&format!("bulk/n{:03}.md", i), &format!("note {}\n", i));
+    }
+    a.write("mine.md", "mine, edited\n");
+    a.engine.touch_activity("mine.md");
+    a.cycle().await;
+    let m = manifest_of(&be);
+    assert!(m.files.values().any(|f| f.path == "mine.md" && f.rev == 2), "a person's own edit goes");
+    assert_eq!(m.files.len(), 1, "the rest waits");
+    assert_eq!(a.status().usage.waiting, 120);
+
+    a.engine.lift_wait();
+    a.cycle().await;
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).files.len(), 121);
+    let usage = a.status().usage;
+    assert_eq!(usage.mode, Mode::Normal);
+    assert!(usage.lifted && !usage.liftable);
+}
+
+#[tokio::test]
+async fn everyone_near_the_limit_holds_bulk_work_and_nobody_can_lift_it() {
+    let be = fake_worker();
+    be.lock().unwrap().limits = Some(Limits { fleet_today: Some(61_000), ..free_limits() });
+    let mut a = device("Alice", &be);
+    a.write("a.md", "a\n");
+    a.cycle().await;
+    let usage = a.status().usage;
+    assert_eq!((usage.mode, usage.cause), (Mode::BulkWaits, Some(Cause::Fleet)));
+    assert!(!usage.liftable);
+    assert_eq!(usage.fleet_today, Some(61_000));
+    assert_eq!(usage.cap, Some(100_000));
+    assert_eq!(usage.plan, Some(Plan::Free));
+    a.engine.lift_wait();
+    assert!(!a.status().usage.lifted);
+
+    be.lock().unwrap().limits = Some(Limits { fleet_today: Some(90_000), ..free_limits() });
+    a.engine.poll_for_test().await;
+    a.cycle().await;
+    assert_eq!(a.status().usage.mode, Mode::Slow);
+    assert_eq!(a.engine.poll_gap(), POLL_BACKGROUND, "a poll a minute at most");
+}
+
+#[tokio::test]
+async fn a_worker_from_before_the_limits_holds_the_sync_until_it_is_updated() {
+    let be = fake_worker();
+    be.lock().unwrap().limits = None;
+    let mut a = device("Alice", &be);
+    a.write("a.md", "a\n");
+    a.engine.probe_worker().await;
+    assert_eq!(a.phase(), Phase::WorkerOutdated);
+    a.engine.cycle().await.unwrap();
+    assert!(manifest_of(&be).files.is_empty());
+
+    {
+        let mut b = be.lock().unwrap();
+        b.limits = Some(free_limits());
+        b.worker_version += 1;
+    }
+    a.engine.probe_worker().await;
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).files.len(), 1);
+}
+
+#[tokio::test]
+async fn the_count_of_requests_outlives_a_restart() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("a.md", "a\n");
+    a.cycle().await;
+    let today = a.status().usage.today;
+    assert!(today >= 3, "a probe, a fetch, a blob and a write: {today}");
+    let mut a = restart(a, &be);
+    a.cycle().await;
+    assert!(a.status().usage.today > today);
+}
+
+#[tokio::test]
+async fn a_429_says_so_and_leaves_the_phase() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("a.md", "a\n");
+    a.cycle().await;
+    be.lock().unwrap().slowed = 1;
+    a.write("b.md", "b\n");
+    assert!(matches!(a.engine.cycle().await, Err(RemoteError::Slowed(60))));
+    assert_eq!(a.phase(), Phase::Idle);
+    assert_eq!(a.status().error.as_deref(), Some("The domain asked this Mac to slow down."));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_daily_limit_holds_everything_but_a_probe_every_half_hour() {
+    let be = fake_worker();
+    let (cmd_tx, task, statuses, key, _events, root) = run_device(device("Alice", &be));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    be.lock().unwrap().daily_limit = true;
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let status = status_of(&statuses, &key);
+    assert_eq!(status.phase, Phase::Limited);
+    assert!(status.error.as_deref().unwrap().starts_with("Today's Cloudflare requests are used up. Sync resumes at "));
+    assert!(status.usage.resumes_at.is_some());
+
+    let before = be.lock().unwrap().requests;
+    std::fs::write(root.path().join("typed.md"), "typed\n").unwrap();
+    cmd_tx.send(EngineCmd::Touched("typed.md".into())).unwrap();
+    tokio::time::sleep(Duration::from_secs(25 * 60)).await;
+    assert_eq!(be.lock().unwrap().requests, before, "nothing goes");
+    tokio::time::sleep(Duration::from_secs(6 * 60)).await;
+    assert_eq!(be.lock().unwrap().requests, before + 1, "one probe at the half hour");
+
+    be.lock().unwrap().daily_limit = false;
+    tokio::time::sleep(Duration::from_secs(31 * 60)).await;
+    assert_eq!(status_of(&statuses, &key).phase, Phase::Idle);
+    assert!(manifest_of(&be).files.values().any(|f| f.path == "typed.md"), "and what waited went");
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_retry_clock_backs_off_while_the_domain_is_unreachable() {
+    let be = fake_worker();
+    let (cmd_tx, task, statuses, key, _events, _root) = run_device(device("Alice", &be));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    be.lock().unwrap().offline = true;
+    let before = be.lock().unwrap().requests;
+    tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+    let tried = be.lock().unwrap().requests - before;
+    assert!((4..=8).contains(&tried), "15 s, 30 s, 1 min, 2 min, 5 min apart — not forty polls: {tried}");
+    be.lock().unwrap().offline = false;
+    tokio::time::sleep(Duration::from_secs(11 * 60)).await;
+    assert_eq!(status_of(&statuses, &key).phase, Phase::Idle);
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn polls_follow_attention() {
+    let be = fake_worker();
+    let (cmd_tx, task, _statuses, _key, _events, _root) = run_device(device("Alice", &be));
+    let polls = |be: &SharedWorker| be.lock().unwrap().polls.len();
+    let last_ttl = |be: &SharedWorker| {
+        be.lock().unwrap().polls.iter().rev().find_map(|p| match p {
+            Some(Beat::Here { ttl, .. }) => Some(*ttl),
+            _ => None,
+        })
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let start = polls(&be);
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(polls(&be) - start, 4, "every 15 s while focused and in use");
+    assert_eq!(last_ttl(&be), Some(112_500), "a beat holds two and a half beats");
+
+    cmd_tx.send(EngineCmd::Focus(false)).unwrap();
+    tokio::time::sleep(Duration::from_secs(16)).await;
+    let start = polls(&be);
+    tokio::time::sleep(Duration::from_secs(240)).await;
+    assert_eq!(polls(&be) - start, 4, "a minute apart in the background");
+    assert_eq!(last_ttl(&be), Some(150_000));
+
+    tokio::time::sleep(AWAY_SOON).await;
+    let start = polls(&be);
+    tokio::time::sleep(POLL_AWAY * 4).await;
+    assert_eq!(polls(&be) - start, 4, "five minutes apart once nobody has been here for half an hour");
+    assert_eq!(last_ttl(&be), Some(750_000));
+
+    // Away from the last poll by more than a quick poll's gap.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let start = polls(&be);
+    cmd_tx.send(EngineCmd::Focus(true)).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(polls(&be) - start, 1, "focus catches up at once");
+    tokio::time::sleep(POLL_INTERVAL * 2).await;
+    assert_eq!(polls(&be) - start, 3, "and is back to every 15 s");
+    cmd_tx.send(EngineCmd::Shutdown).unwrap();
+    task.await.unwrap();
+}
+
+/// Long enough, after the background polls above, for half an hour of
+/// nothing to have passed since the device was last used.
+const AWAY_SOON: Duration = Duration::from_secs(30 * 60);
+
+#[tokio::test]
+async fn a_picture_cannot_be_published() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("pic.png", "png\n");
+    a.write("page.html", "<p>page</p>\n");
+    a.cycle().await;
+    let refused = a.publish("pic.png", PublicKind::File, None).unwrap_err();
+    assert_eq!(refused, "Only markdown and html documents can be published.");
+    assert!(a.publish("page.html", PublicKind::File, None).is_ok());
 }
