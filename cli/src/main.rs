@@ -108,14 +108,14 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "ls",
         usage: "doklin ls [folder] [--deep]",
-        about: "What a folder holds: its folders and its documents, with their versions and public addresses. --deep lists everything beneath it.",
+        about: "What a folder holds: its folders and its documents, with their versions. --deep lists everything beneath it.",
         accepts: Accepts { values: &[], switches: &["deep"] },
         run: commands::ls,
     },
     Command {
         name: "info",
         usage: "doklin info <doc>",
-        about: "A document's versions — revision, size, who changed it and when — its comment threads and its public addresses.",
+        about: "A document's versions — revision, size, who changed it and when — its comment threads, its link and its public addresses.",
         accepts: Accepts { values: &[], switches: &[] },
         run: commands::info,
     },

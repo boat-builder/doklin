@@ -30,6 +30,7 @@ import { Refusal, newFileId, type Tx } from "./commit";
 import {
   Index,
   VERSION_WORD,
+  addressesOf,
   basename,
   docExists,
   docRow,
@@ -38,6 +39,7 @@ import {
   locate,
   nameOf,
   pathProblem,
+  primaryOf,
   type Doc,
   type Entry,
   type Listing,
@@ -51,6 +53,7 @@ import { ID_RE, MAX_FILE_BYTES, SPACE_ID_RE, blobKey } from "./layout";
 import type { Manifest, PublicEntry } from "./manifest";
 import { listDirectory } from "./members";
 import { mirrorAfter } from "./search";
+import { sharedEnv, spaceOf } from "./spaces";
 import { CRITIC_BLOCK_RE, parseSpans, stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, metaIsEmpty, parseEntityMeta, serializeEntityMeta } from "../../src/metaFile";
 
@@ -159,7 +162,7 @@ export async function getTree(c: Call): Promise<Response> {
   if (at && at !== "restricted") {
     const tree = await openTree(inSection(c, at));
     if (!tree) return notBound();
-    const listing = listTree(tree.manifest, url.origin, dir, deep);
+    const listing = listTree(tree.manifest, dir, deep);
     const nothing = listing.folders.length + listing.documents.length === 0;
     // A section is there with nothing in it; any other folder is its files.
     if (nothing && !sameName(dir, at.mount)) return json({ error: `there is no folder "${dir}"` }, 404);
@@ -174,7 +177,7 @@ export async function getTree(c: Call): Promise<Response> {
   if (at === null) {
     const tree = await openTree(c);
     if (!tree) return notBound();
-    listing = listTree(tree.manifest, url.origin, "", deep);
+    listing = listTree(tree.manifest, "", deep);
     // The two folders a workspace keeps for itself, when there is something
     // behind them for this person.
     for (const s of sections) {
@@ -192,7 +195,7 @@ export async function getTree(c: Call): Promise<Response> {
     }
     const tree = await openTree(inSection(c, s));
     if (!tree) continue;
-    const inside = listTree(tree.manifest, url.origin, s.mount, true);
+    const inside = listTree(tree.manifest, s.mount, true);
     listing.folders.push(...inside.folders);
     listing.documents.push(...inside.documents);
   }
@@ -306,16 +309,24 @@ export async function namesOf(env: Env): Promise<Map<string, string>> {
   return new Map(((await listDirectory(env)) ?? []).map((p) => [p.id, p.name]));
 }
 
-/** Everything known about a document without reading its text. */
+/**
+ * Everything known about a document without reading its text — and what a
+ * link to it names (engine/src/cloud/link.rs): its workspace, its section
+ * ("" the shared workspace) and the file people open, the markdown when it
+ * has one. The ids, never the link: its form is the CLI's to write.
+ */
 async function docInfo(env: Env, m: Manifest, origin: string, doc: Doc): Promise<Record<string, unknown>> {
-  const [names, metaText] = await Promise.all([
+  const [names, metaText, workspace] = await Promise.all([
     namesOf(env),
     doc.meta
       ? env.DATA.get(blobKey(doc.meta.fid, doc.meta.file.hash)).then((o) => (o ? o.text() : ""))
       : Promise.resolve(""),
+    readWorkspace(sharedEnv(env)),
   ]);
   const meta = parseEntityMeta(metaText);
-  const row = docRow(m, origin, doc);
+  const row = docRow(doc);
+  const addresses = addressesOf(m, origin, doc);
+  const opened = primaryOf(doc);
   const named = <T extends { by: string | null }>(v: T | undefined) =>
     v ? { ...v, ...(v.by && names.has(v.by) ? { byName: names.get(v.by) } : {}) } : undefined;
   return {
@@ -324,6 +335,8 @@ async function docInfo(env: Env, m: Manifest, origin: string, doc: Doc): Promise
     ...(row.md ? { md: named(row.md) } : {}),
     ...(row.html ? { html: named(row.html) } : {}),
     comments: meta.mthreads.length + meta.hthreads.length,
+    ...(addresses.length > 0 ? { public: addresses } : {}),
+    ...(workspace && opened ? { linkTo: { workspace: workspace.id, space: spaceOf(env), file: opened.fid } } : {}),
   };
 }
 
@@ -817,7 +830,8 @@ async function moveAcross(c: Call, source: Section, dest: Section, rawFrom: stri
   );
   if (arrived instanceof Refusal) return refuse(arrived);
   const { label } = arrived.value;
-  const answer = { kind: picked.kind, ...label, files: picked.moving.length };
+  // New file ids where it went: a link to it from before finds nothing.
+  const answer = { kind: picked.kind, ...label, files: picked.moving.length, newLinks: true };
   if (dryRun) return json({ ...answer, moved: false });
   await mirrorAfter(there, arrived);
 

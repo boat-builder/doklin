@@ -19,6 +19,7 @@ You work as one person's agent, and see what they see. A path says where a thing
 
 Wherever a command takes a document, it also takes a link to one, as people copy it
 in the app (https://doklin.cc/open#…); the command then runs in that link's workspace.
+`info` gives a document's link.
 
 Getting in
   login <domain> <code>        log this machine in, with the line you were given
@@ -28,7 +29,7 @@ Getting in
 
 Reading
   ls [folder] [--deep]         what a folder holds
-  info <doc>                   a document's versions, comments and public addresses
+  info <doc>                   a document's versions, comments, link and public addresses
   read <doc>                   a document's text              [--md|--html] [--clean] [-o file]
   search <text>                documents by name or text      [--in folder] [--limit n]
   comments <doc>               the comment threads on a document
@@ -353,6 +354,9 @@ What matters here
     it is, or the write is refused (doklin help comments).
   · To say something about a document without changing it, comment on it:
     doklin comment <doc> --on "<words in it>" -m "<what you think>"
+  · To point your person at a document, give its link from doklin info, not its
+    path: it opens in their Doklin app, for whoever can see the document. It is
+    not public — publishing is. A move to another section gives it a new link.
   · Publishing makes a document readable by anyone. Do it only when asked, and
     look at a folder with --dry-run first (doklin help publishing).
   · A diagram is a ```svg drawing you place by hand, in the theme's colours —

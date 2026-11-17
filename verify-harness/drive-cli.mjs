@@ -645,7 +645,7 @@ await check("whoami: the workspace, the agent, what it may do and the worker's v
   };
 });
 
-await check("ls: folders, and documents with their versions and public addresses — never a sidecar, never a plain file", async () => {
+await check("ls: folders, and documents with their versions — no address, never a sidecar, never a plain file", async () => {
   const root = (await doklin(editorBox, ["ls"])).json;
   const projects = (await doklin(editorBox, ["ls", "Projects"])).json;
   const slashed = (await doklin(editorBox, ["ls", "/Projects/"])).json;
@@ -659,12 +659,10 @@ await check("ls: folders, and documents with their versions and public addresses
     "the root's folders": same(root.folders, ["Private", "Projects"]) && root.dir === "",
     "the root's documents": same(root.documents.map((d) => d.path), ["Comments", "Diagram", "Home", "Ideas", "Scratch", "Sizes"]),
     "a listing is folders and documents, nothing else": same(Object.keys(root).sort(), ["dir", "documents", "folders"]),
-    "Home is public at / and /home": same(home.public, [`${WORKER}/`, `${WORKER}/home`]),
-    "Scratch is not public": doc(root, "Scratch").public === undefined,
+    "a row says no address, public or link: info does": same(Object.keys(home).sort(), ["md", "path"]) && same(Object.keys(plan).sort(), ["html", "md", "path"]),
     "a version's facts": home.md.file === "Home.md" && home.md.rev === 1 && home.md.size === Buffer.byteLength(SEED_FILES["Home.md"]) && home.html === undefined,
     "Projects' folders": same(projects.folders, ["Projects/Roadmap"]) && projects.dir === "Projects",
     "plan has both versions, in step": plan.md.file === "plan.md" && plan.html.file === "plan.html" && plan.htmlBehind === undefined,
-    "plan's addresses: its own page, and inside the published folder": same(plan.public, [`${WORKER}/plan`, `${WORKER}/projects/plan`]),
     "status has only markdown": doc(projects, "Projects/status").md.rev === 1 && doc(projects, "Projects/status").html === undefined,
     "slashes around a folder are forgiven": same(slashed, projects),
     "--deep is folders and documents too": same(Object.keys(deepProjects).sort(), ["dir", "documents", "folders"]) && deepProjects.documents.some((d) => d.path === "Projects/Roadmap/Paint it"),
@@ -679,15 +677,24 @@ await check("ls: a folder that is not there is exit 3; a hidden or an ignored on
   ignored: refused(await doklin(editorBox, ["ls", "node_modules"]), 2, /does not sync/),
 }));
 
-await check("info: a document's versions, comment threads and addresses — by its name or either file's; a plain file is refused", async () => {
+await check("info: a document's versions, comment threads, link and public addresses — by its name or either file's; a plain file is refused", async () => {
   const plan = (await doklin(editorBox, ["info", "Projects/plan"])).json;
   const byHtml = (await doklin(editorBox, ["info", "Projects/plan.html"])).json;
   const byMd = (await doklin(editorBox, ["info", "Projects/plan.md", "--json"])).json;
   const comments = (await doklin(editorBox, ["info", "Comments"])).json;
+  const home = (await doklin(editorBox, ["info", "Home"])).json;
+  const scratch = (await doklin(editorBox, ["info", "Scratch"])).json;
+  const ws = (await (await owner("/api/meta")).json()).workspace.id;
+  const words = (await doklin(editorBox, ["info", "Scratch"], { tty: true })).out;
   return {
     "a document": plan.kind === "document" && plan.path === "Projects/plan" && plan.md.rev === 1 && plan.html.rev === 1 && plan.comments === 0,
     "each version's size": plan.md.size === Buffer.byteLength(SEED_FILES["Projects/plan.md"]) && plan.html.size === Buffer.byteLength(SEED_FILES["Projects/plan.html"]),
-    "its addresses": same(plan.public, [`${WORKER}/plan`, `${WORKER}/projects/plan`]),
+    "its addresses: its own page, and inside the published folder": same(plan.public, [`${WORKER}/plan`, `${WORKER}/projects/plan`]),
+    "Home is public at / and /home": same(home.public, [`${WORKER}/`, `${WORKER}/home`]),
+    "Scratch is not public": scratch.public === undefined,
+    "its link, as the app copies it: the markdown's": plan.link === `https://doklin.cc/open#d=${encodeURIComponent(DOMAIN)}&w=${ws}&f=${fidOf("Projects/plan.md")}`,
+    "only the link, not the ids it is written from": plan.linkTo === undefined,
+    "a person reads it beside the addresses": /\n  link {6}https:\/\/doklin\.cc\/open#\S+\n  public {4}no\n/.test(words),
     "the same document by either file's name": same(byHtml, plan) && same(byMd, plan),
     "its comment threads are counted": comments.comments === 1,
     "a plain file is bad usage that names what syncs": refused(await doklin(editorBox, ["info", "Projects/assets/pic.png"]), 2, /^Doklin syncs markdown and html documents only — "pic\.png" is neither/),
@@ -1106,7 +1113,7 @@ await check("publish: a document gets an address that answers at once; publishin
   const pages = await published();
   const bySlug = (slug) => pages.find((p) => p.slug === slug) ?? {};
   const mine = bySlug(alphaPage.slug);
-  const row = (await doklin(editorBox, ["ls", "Drive"])).json.documents.find((d) => d.path === "Drive/alpha");
+  const addresses = (await doklin(editorBox, ["info", "Drive/alpha"])).json.public;
   return {
     "the answer": first.code === 0 && /^[a-z2-9]{8}$/.test(alphaPage.slug) && same(first.json, { slug: alphaPage.slug, url: `${WORKER}/${alphaPage.slug}`, kind: "document", path: "Drive/alpha", documents: ["Drive/alpha"], created: true }),
     "publishing answered 201": asked(from)[0] === "PUT pages → 201",
@@ -1117,7 +1124,7 @@ await check("publish: a document gets an address that answers at once; publishin
     "published lists it, with who and when": mine.kind === "document" && mine.path === "Drive/alpha" && mine.url === alphaPage.url && mine.by === editor.id && mine.byName === "Editor bot" && Math.abs(Date.now() - mine.at) < 60_000,
     "…and its title and description": bySlug("beta-page").title === "Beta, in public" && bySlug("beta-page").desc === "What beta is about",
     "the pages that were there": bySlug("home").home === true && bySlug("ghost").missing === true && bySlug("projects").kind === "folder" && bySlug("projects").path === "Projects",
-    "ls shows the address": same(row.public, [alphaPage.url]),
+    "info shows the address": same(addresses, [alphaPage.url]),
   };
 });
 
@@ -1129,7 +1136,7 @@ await check("publish: an address already taken is a conflict (exit 5); one that 
   const before = (await published()).some((p) => p.slug === "drive");
   const real = await doklin(editorBox, ["publish", "Drive/", "--slug", "drive"]);
   const after = (await published()).find((p) => p.slug === "drive") ?? {};
-  const row = (await doklin(editorBox, ["ls", "Drive"])).json.documents.find((d) => d.path === "Drive/alpha");
+  const addresses = (await doklin(editorBox, ["info", "Drive/alpha"])).json.public;
   // Every document in the folder, the html-only one among them.
   const inFolder = ["Drive/Café notes ☕", "Drive/alpha", "Drive/beta", "Drive/page", "Drive/poster"];
   return {
@@ -1141,7 +1148,7 @@ await check("publish: an address already taken is a conflict (exit 5); one that 
     "the folder is published": real.code === 0 && real.json.created === true && real.json.url === `${WORKER}/drive` && same([...real.json.documents].sort(), inFolder),
     "published lists the folder": after.kind === "folder" && after.path === "Drive" && after.byName === "Editor bot",
     // In the order of their addresses, and the page's own is a random one.
-    "a document in it has two addresses now": same([...row.public].sort(), [alphaPage.url, `${WORKER}/drive/alpha`].sort()),
+    "a document in it has two addresses now": same([...addresses].sort(), [alphaPage.url, `${WORKER}/drive/alpha`].sort()),
     "the address inside the folder answers": (await fetch(`${WORKER}/drive/beta`)).status === 200,
   };
 });
@@ -1177,6 +1184,28 @@ await check("mv: a document moves whole — both versions and its comments — w
     "what the folder holds now": same(old.documents.map((d) => d.path), ["Drive/Old/alpha2", "Drive/Old/gamma"]) && same(old.folders, []),
     "a move is not an edit: the text is the same": text.out === "# Alpha\n\nThe boat leaves in July if the paint dries.\n\nThe boat was teal.\n",
     "a renamed document's page follows it too": (await published()).find((p) => p.slug === "beta-page")?.path === "Drive/Old/gamma" && (await fetch(`${WORKER}/beta-page`)).status === 200,
+  };
+});
+
+await check("mv: into another section, a document gets a new link — the answer says links from before stop opening it, and info gives the new one; inside a section its link stays", async () => {
+  const made = await doklin(editorBox, ["write", "Drive/linked"], { input: "# Linked\n" });
+  const before = (await doklin(editorBox, ["info", "Drive/linked"])).json.link;
+  const dry = await doklin(editorBox, ["mv", "Drive/linked", "Private/", "--dry-run"]);
+  const words = (await doklin(editorBox, ["mv", "Drive/linked", "Private/"], { tty: true })).out;
+  const stale = await doklin(editorBox, ["read", before]);
+  const after = (await doklin(editorBox, ["info", "Private/linked"])).json.link;
+  const opened = await doklin(editorBox, ["read", after]);
+  const renamed = await doklin(editorBox, ["mv", "Private/linked", "Private/kept"]);
+  const kept = (await doklin(editorBox, ["info", "Private/kept"])).json.link;
+  const back = await doklin(editorBox, ["mv", "Private/kept", "Drive/"]);
+  return {
+    "written, with a link": made.code === 0 && typeof before === "string",
+    "a dry run says it would": dry.code === 0 && dry.json.newLinks === true && dry.json.moved === false,
+    "a person is told links from before stop opening it": words.includes("It is in another section now, so links to it from before the move no longer open it — doklin info gives its new link."),
+    "a link from before opens nothing": refused(stale, 3, /no page at that link/),
+    "info gives the new one, in Private's section": after !== before && /&s=p-[0-9a-f]+&/.test(after) && opened.code === 0 && opened.out === "# Linked\n" && opened.meta.path === "Private/linked",
+    "a move inside the section keeps it, and says nothing of links": renamed.code === 0 && renamed.json.newLinks === undefined && kept === after,
+    "out again is a new link too": back.code === 0 && back.json.newLinks === true,
   };
 });
 
@@ -1461,8 +1490,8 @@ if (!canTty) {
         whoami.out.includes("It may read, comment, edit and publish.") &&
         whoami.out.includes("It sees the shared workspace, and Private/.") &&
         /Worker version \d+\./.test(whoami.out),
-      ls: ls.out.includes("Projects/Roadmap/\n") && /Projects\/plan  \[md · html\]  public: http/.test(ls.out) && ls.out.includes("Projects/status  [md]"),
-      info: info.out.includes("Projects/plan — a document") && /markdown\s+plan\.md  revision 2 · \d+ B · changed .* by Editor bot/.test(info.out) && /comments\s+none/.test(info.out) && /public\s+http/.test(info.out),
+      ls: ls.out.includes("Projects/Roadmap/\n") && ls.out.includes("Projects/plan  [md · html]\n") && ls.out.includes("Projects/status  [md]") && !ls.out.includes("http"),
+      info: info.out.includes("Projects/plan — a document") && /markdown\s+plan\.md  revision 2 · \d+ B · changed .* by Editor bot/.test(info.out) && /comments\s+none/.test(info.out) && /link\s+https:\/\/doklin\.cc\/open#/.test(info.out) && /public\s+http/.test(info.out),
       read: read.out.includes("The halyard needs splicing.") && /Scratch · markdown · revision \d+/.test(read.out),
       write: write.code === 0 && write.out.includes("Created the markdown version of Drive/typed — revision 1."),
       "write --dry-run": dryWrite.out.includes("Would replace the markdown version of Drive/typed, making it revision 2."),

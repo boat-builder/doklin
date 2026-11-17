@@ -256,15 +256,6 @@ fn versions_of(row: &Value) -> String {
     format!("[{}{}]", have.join(" · "), behind)
 }
 
-fn public_of(row: &Value) -> String {
-    let urls = strings(&row["public"]);
-    if urls.is_empty() {
-        String::new()
-    } else {
-        format!("  public: {}", urls.join(", "))
-    }
-}
-
 pub fn ls(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     args.at_most(1)?;
     let s = session(ctx)?;
@@ -280,7 +271,7 @@ pub fn ls(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
             lines.push(format!("{}/", folder));
         }
         for doc in v["documents"].as_array().into_iter().flatten() {
-            lines.push(format!("{}  {}{}", text(doc, "path"), versions_of(doc), public_of(doc)));
+            lines.push(format!("{}  {}", text(doc, "path"), versions_of(doc)));
         }
         let unlisted = strings(&v["notListed"]);
         if !unlisted.is_empty() {
@@ -313,7 +304,14 @@ pub fn info(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let path = args.need(0, "which document — doklin info <doc>")?;
     args.at_most(1)?;
     let s = session(ctx)?;
-    let v = s.client.send("GET", "doc", &[("path", path), ("info", "1")], &[], None)?.json()?;
+    let mut v = s.client.send("GET", "doc", &[("path", path), ("info", "1")], &[], None)?.json()?;
+    // The domain names what a link to the document names; the link is written here.
+    if let Some(row) = v.as_object_mut() {
+        if let Some(to) = row.remove("linkTo") {
+            let link = PageLink::new(s.ws.domain(), text(&to, "workspace"), text(&to, "space"), text(&to, "file"));
+            row.insert("link".to_string(), Value::String(link.url()));
+        }
+    }
     ctx.answer(&v, || {
         let mut lines = vec![format!("{} — a document", text(&v, "path"))];
         if let Some(md) = v.get("md") {
@@ -325,6 +323,9 @@ pub fn info(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         }
         let threads = v["comments"].as_u64().unwrap_or(0) as usize;
         lines.push(format!("  {:<9} {}", "comments", if threads == 0 { "none".to_string() } else { plural(threads, "thread", "threads") }));
+        if let Some(link) = v.get("link").and_then(Value::as_str) {
+            lines.push(format!("  {:<9} {}", "link", link));
+        }
         let urls = strings(&v["public"]);
         lines.push(format!("  {:<9} {}", "public", if urls.is_empty() { "no".to_string() } else { urls.join(", ") }));
         lines.join("\n")
@@ -540,6 +541,15 @@ pub fn mv(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         let unpublished = strings(&v["unpublished"]);
         if !unpublished.is_empty() {
             out.push_str(&format!(" It is no longer public at {} — publish it again.", list(&unpublished)));
+        }
+        // A section of its own gives it new file ids, and so new links.
+        if v.get("newLinks").and_then(Value::as_bool) == Some(true) {
+            out.push_str(match (text(&v, "kind") == "folder", ctx.dry_run) {
+                (false, false) => " It is in another section now, so links to it from before the move no longer open it — doklin info gives its new link.",
+                (true, false) => " It is in another section now, so links to what is in it from before the move no longer open anything — doklin info gives each document's new link.",
+                (false, true) => " It would go to another section, so links to it from before the move would stop opening it.",
+                (true, true) => " It would go to another section, so links to what is in it would stop opening anything.",
+            });
         }
         out
     });

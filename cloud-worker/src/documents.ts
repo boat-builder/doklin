@@ -252,8 +252,6 @@ export type DocRow = {
   html?: VersionInfo;
   /** The html version is older than the markdown it was made from. */
   htmlBehind?: true;
-  /** Every address it is public at. */
-  public?: string[];
 };
 
 export type Listing = { dir: string; folders: string[]; documents: DocRow[] };
@@ -275,12 +273,15 @@ export function htmlBehind(doc: Doc): boolean {
 }
 
 /**
- * Every address a file is public at: a page of its own, the domain root when
- * that page is the home page, and its place inside each published folder that
- * covers it. `fids` is every file that is "it" — a document's two versions
- * share one address.
+ * Every address a document is public at: a page of its own, the domain root
+ * when that page is the home page, and its place inside each published folder
+ * that covers it. Its two versions share one address.
  */
-export function addressesOf(m: Manifest, origin: string, fids: readonly string[], path: string): string[] {
+export function addressesOf(m: Manifest, origin: string, doc: Doc): string[] {
+  const primary = primaryOf(doc);
+  if (!primary) return [];
+  const path = primary.file.path;
+  const fids = [doc.md?.fid, doc.html?.fid].filter((f): f is string => f !== undefined);
   const out: string[] = [];
   for (const slug of Object.keys(m.public ?? {}).sort()) {
     const entry = m.public![slug];
@@ -296,16 +297,12 @@ export function addressesOf(m: Manifest, origin: string, fids: readonly string[]
   return out;
 }
 
-export function docRow(m: Manifest, origin: string, doc: Doc): DocRow {
-  const primary = primaryOf(doc);
-  const fids = [doc.md?.fid, doc.html?.fid].filter((f): f is string => f !== undefined);
-  const addresses = primary ? addressesOf(m, origin, fids, primary.file.path) : [];
+export function docRow(doc: Doc): DocRow {
   return {
     path: doc.stem,
     ...(doc.md ? { md: versionInfo(doc.md) } : {}),
     ...(doc.html ? { html: versionInfo(doc.html) } : {}),
     ...(htmlBehind(doc) ? { htmlBehind: true as const } : {}),
-    ...(addresses.length > 0 ? { public: addresses } : {}),
   };
 }
 
@@ -334,7 +331,7 @@ export function documentsUnder(index: Index, dir: string): Doc[] {
  * alone, so it costs no blob read — and so a folder with nothing in it does
  * not exist here, because it does not exist there.
  */
-export function listTree(m: Manifest, origin: string, dir: string, deep: boolean): Listing {
+export function listTree(m: Manifest, dir: string, deep: boolean): Listing {
   const index = new Index(m.files);
   const prefix = dir ? `${dir.toLowerCase()}/` : "";
   const folders = new Map<string, string>();
@@ -362,12 +359,12 @@ export function listTree(m: Manifest, origin: string, dir: string, deep: boolean
       // Two markdown files with one stem are two documents that have to be
       // named in full; the html beside them belongs to neither by name.
       for (const md of doc.mds) {
-        documents.push(docRow(m, origin, { stem: md.file.path, md, mds: [md], html: null, meta: null }));
+        documents.push(docRow({ stem: md.file.path, md, mds: [md], html: null, meta: null }));
       }
-      if (doc.html) documents.push(docRow(m, origin, { stem: doc.html.file.path, md: null, mds: [], html: doc.html, meta: null }));
+      if (doc.html) documents.push(docRow({ stem: doc.html.file.path, md: null, mds: [], html: doc.html, meta: null }));
       continue;
     }
-    documents.push(docRow(m, origin, doc));
+    documents.push(docRow(doc));
   }
   return {
     dir,
