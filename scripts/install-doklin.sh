@@ -10,6 +10,7 @@
 #   doklin-linux-x64      Linux, x86_64    (static, musl — any distribution)
 #   doklin-linux-arm64    Linux, aarch64   (static, musl)
 #   doklin-macos-arm64    macOS, Apple Silicon
+#   doklin-macos-x64      macOS, Intel          (intel-mac)
 #   SHA256SUMS            what each of them must hash to
 #
 # Where it goes: $DOKLIN_INSTALL_DIR when set; otherwise /usr/local/bin when
@@ -48,7 +49,6 @@ case "$(uname -m)" in
   aarch64 | arm64) arch=arm64 ;;
   *) die "there is no doklin for $(uname -m) — it is built for x86_64 and arm64." ;;
 esac
-[ "$os-$arch" != "macos-x64" ] || die "there is no doklin for Intel Macs — Apple Silicon only."
 ASSET="doklin-$os-$arch"
 
 BUNDLED=""
