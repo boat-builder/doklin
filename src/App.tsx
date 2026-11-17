@@ -2343,12 +2343,23 @@ export default function App() {
 
   // *Copy link* on a file: the link that opens it in Doklin, and who that is
   // for. A file made a moment ago is synced first, so this can take a beat.
+  // The clipboard write starts inside the click, handed the link still on its
+  // way: WebKit refuses a write that starts only once the link is back ("The
+  // request is not allowed by the user agent…"), as the click no longer
+  // counts by then. Nothing may be awaited before `clipboard.write`.
   const copyPageLink = useCallback(
     async (path: string) => {
+      const link = cloudLink(path);
+      const written = navigator.clipboard.write([
+        new ClipboardItem({
+          "text/plain": link.then((l) => new Blob([l.url], { type: "text/plain" })),
+        }),
+      ]);
       try {
-        const link = await cloudLink(path);
-        await navigator.clipboard.writeText(link.url);
-        pushToast("done", `Link copied. ${link.who}`);
+        // A refused link refuses the write too, but only after it, so the
+        // toast gives the link's own reason.
+        const [{ who }] = await Promise.all([link, written]);
+        pushToast("done", `Link copied. ${who}`);
       } catch (e) {
         pushToast("error", `Couldn't copy a link to ${basename(path)}: ${errText(e)}.`);
       }
