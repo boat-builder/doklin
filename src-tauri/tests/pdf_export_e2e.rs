@@ -9,6 +9,9 @@
 //! An ENGINE_VERSION bump is a rendering change — re-run this suite (and
 //! eyeball a real rendition) before shipping it.
 
+// intel-mac: PDF export is not built for Intel.
+#![cfg(not(target_arch = "x86_64"))]
+
 use std::path::{Path, PathBuf};
 
 use doklin_lib::pdf_export::run_export;
