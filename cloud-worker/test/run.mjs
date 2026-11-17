@@ -4005,7 +4005,7 @@ await test("pages: publishing is an entry in the public map — it answers at on
     at: entry.at,
   });
   const row = (await api("/api/agent/tree?dir=Pub")).json.documents.find((d) => d.path === "Pub/note");
-  assert.deepEqual(row.public, [`${ORIGIN}/my-note`], "and a listing shows it on the document");
+  assert.equal(row.public, undefined, "a listing says no address: a document's info does");
   assert.deepEqual((await api(docUrl("Pub/note", "", "&info=1"))).json.public, [`${ORIGIN}/my-note`]);
 
   // The domain's home page is chosen in the app; an agent sees it, and republishing leaves it be.
@@ -4084,11 +4084,14 @@ await test("pages: publishing is an entry in the public map — it answers at on
   const deepFolder = await publish({ path: "Pub/Sub/Deep", slug: "deep-folder" });
   assert.deepEqual([deepFolder.status, deepFolder.json.kind, deepFolder.json.documents], [201, "folder", ["Pub/Sub/Deep/deeper"]], "a folder named without its slash");
   assert.equal((await publish({ path: "Pub/Sub/", slug: "sub-folder" })).json.written, false);
-  // Whatever a listing then shows as public under the folder is what the dry run named.
-  const under = (await api("/api/agent/tree?dir=Pub/Sub&deep=1")).json.documents;
-  assert.deepEqual(under.filter((d) => d.public?.some((u) => u.startsWith(`${ORIGIN}/sub-folder/`))).map((d) => d.path), dry.json.documents);
-  assert.deepEqual(under.find((d) => d.path === "Pub/Sub/Deep/deeper").public, [`${ORIGIN}/deep-folder/deeper`, `${ORIGIN}/sub-folder/Deep/deeper`]);
-  assert.deepEqual(under.find((d) => d.path === "Pub/Sub/standalone").public, [`${ORIGIN}/sub-folder/standalone.html`]);
+  // Whatever is then public under the folder is what the dry run named.
+  const under = new Map();
+  for (const d of (await api("/api/agent/tree?dir=Pub/Sub&deep=1")).json.documents) {
+    under.set(d.path, (await api(docUrl(d.path, "", "&info=1"))).json.public ?? []);
+  }
+  assert.deepEqual([...under].filter(([, urls]) => urls.some((u) => u.startsWith(`${ORIGIN}/sub-folder/`))).map(([p]) => p), dry.json.documents);
+  assert.deepEqual(under.get("Pub/Sub/Deep/deeper"), [`${ORIGIN}/deep-folder/deeper`, `${ORIGIN}/sub-folder/Deep/deeper`]);
+  assert.deepEqual(under.get("Pub/Sub/standalone"), [`${ORIGIN}/sub-folder/standalone.html`]);
   // The whole workspace is the folder "/".
   const allEtag = etagNow();
   const all = await publish({ path: "/", dryRun: true });
@@ -5327,12 +5330,12 @@ await test("sections: a move between sections writes where it goes first and lea
   const [oldFid] = entryAt(spaceManifest(mine), "notes/idea.md");
   const dry = await move(pat, { from: "Private/notes/idea", to: "Shared/", dryRun: true });
   assert.equal(dry.status, 200, dry.text);
-  assert.deepEqual(dry.json, { kind: "document", from: "Private/notes/idea", to: "Shared/idea", files: 2, moved: false });
+  assert.deepEqual(dry.json, { kind: "document", from: "Private/notes/idea", to: "Shared/idea", files: 2, newLinks: true, moved: false });
   assert.ok(pathsOf(spaceManifest(mine)).includes("notes/idea.md") && !pathsOf(storedManifest()).includes("Shared/idea.md"), "a dry run moved nothing");
 
   const out = await move(pat, { from: "Private/notes/idea", to: "Shared/" });
   assert.equal(out.status, 200, out.text);
-  assert.deepEqual(out.json, { kind: "document", from: "Private/notes/idea", to: "Shared/idea", files: 2 });
+  assert.deepEqual(out.json, { kind: "document", from: "Private/notes/idea", to: "Shared/idea", files: 2, newLinks: true });
   const shared = storedManifest();
   assert.ok(pathsOf(shared).includes("Shared/idea.md") && pathsOf(shared).includes("Shared/idea.meta.jsonl"), "the note and its comments");
   const [newFid, landed] = entryAt(shared, "Shared/idea.md");
@@ -5377,7 +5380,7 @@ await test("sections: a move between sections writes where it goes first and lea
   await put(pat, "Private/trip/b", "# B\n");
   const folder = await move(pat, { from: "Private/trip", to: "Shared/Trips/2026" });
   assert.equal(folder.status, 200, folder.text);
-  assert.deepEqual(folder.json, { kind: "folder", from: "Private/trip", to: "Shared/Trips/2026", files: 2 });
+  assert.deepEqual(folder.json, { kind: "folder", from: "Private/trip", to: "Shared/Trips/2026", files: 2, newLinks: true });
   assert.ok(["Shared/Trips/2026/a.md", "Shared/Trips/2026/b.md"].every((x) => pathsOf(storedManifest()).includes(x)));
 
   // What does not move.
@@ -5411,6 +5414,21 @@ await test("find: a link's ids lead an agent to the path its person names — an
   const [shared] = entryAt(storedManifest(), "Linked/shared.md");
   const [deal] = entryAt(spaceManifest(DEALS.id), "linked.md");
   const [mine] = entryAt(spaceManifest(privateOf(PAT)), "linked.md");
+
+  // What a link names is in a document's info, and leads back to it.
+  const linkTo = async (api, path) => (await api(docUrl(path, "", "&info=1"))).json.linkTo;
+  assert.deepEqual(await linkTo(alice, "Linked/shared"), { workspace: ws, space: "", file: shared });
+  assert.deepEqual(await linkTo(quinn, "Restricted/Deals/linked"), { workspace: ws, space: DEALS.id, file: deal });
+  assert.deepEqual(await linkTo(pat, "Private/linked"), { workspace: ws, space: privateOf(PAT), file: mine });
+  for (const [api, path] of [[alice, "Linked/shared"], [quinn, "Restricted/Deals/linked"], [pat, "Private/linked"]]) {
+    const { space, file } = await linkTo(api, path);
+    assert.deepEqual((await find(api, file, space)).json, { path }, `${path} round-trips`);
+  }
+  // The file people open: the markdown when there is one, else the html.
+  assert.equal((await put(pat, "Linked/shared.html", "<p>Shared</p>")).status, 201);
+  assert.equal((await linkTo(pat, "Linked/shared.html")).file, shared, "named by its html, it is still the markdown's");
+  assert.equal((await put(pat, "Linked/page.html", "<p>Page</p>")).status, 201);
+  assert.equal((await linkTo(pat, "Linked/page")).file, entryAt(storedManifest(), "Linked/page.html")[0]);
 
   // A document as the tree names it, in the section the link says.
   assert.deepEqual((await find(alice, shared)).json, { path: "Linked/shared" });

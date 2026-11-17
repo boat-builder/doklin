@@ -1,12 +1,16 @@
 //! A link to a page — what *Copy link* copies in the app — taken wherever a
-//! document is, so a person can hand an agent the link itself. The format is
-//! written down in engine/src/cloud/link.rs (`PAGE`, `SCHEME`, the keys):
-//! change both. A link names ids, never a path; the domain says where they
-//! lead (`GET find`), so nothing here knows what a section is.
+//! document is, so a person can hand an agent the link itself, and written
+//! from the ids a document's info names, so an agent can hand one back. The
+//! format is written down in engine/src/cloud/link.rs (`PAGE`, `SCHEME`, the
+//! keys): change both. A link names ids, never a path; the domain says where
+//! they lead (`GET find`), so nothing here knows what a section is.
+
+/// The address a link is sent as, before its `#`.
+const PAGE: &str = "https://doklin.cc/open";
 
 /// The addresses a link has before its `#`: as it is sent, and as the page
 /// at doklin.cc hands it to the app.
-const HEADS: &[&str] = &["https://doklin.cc/open", "http://doklin.cc/open", "doklin://open"];
+const HEADS: &[&str] = &[PAGE, "http://doklin.cc/open", FOR_APP];
 
 /// What the app is handed a link as.
 const FOR_APP: &str = "doklin://open";
@@ -23,6 +27,24 @@ pub struct PageLink {
 }
 
 impl PageLink {
+    /// The link to a file of a workspace on `domain`, in `space` ("" — the
+    /// shared workspace — has no `s`).
+    pub fn new(domain: &str, ws_id: &str, space: &str, file: &str) -> PageLink {
+        let domain = domain.to_ascii_lowercase();
+        let mut pairs = vec![("d", domain.as_str()), ("w", ws_id)];
+        if !space.is_empty() {
+            pairs.push(("s", space));
+        }
+        pairs.push(("f", file));
+        let fragment = pairs.iter().map(|(k, v)| format!("{}={}", k, crate::http::encode(v))).collect::<Vec<_>>().join("&");
+        PageLink { domain, ws_id: ws_id.to_string(), space: space.to_string(), file: file.to_string(), fragment }
+    }
+
+    /// The link as it is sent.
+    pub fn url(&self) -> String {
+        format!("{}#{}", PAGE, self.fragment)
+    }
+
     /// The link in `text`, with the spaces and angle brackets a chat or a
     /// mail puts around one left off; None for anything else.
     pub fn parse(text: &str) -> Option<PageLink> {
@@ -83,6 +105,18 @@ mod tests {
         }
         let port = PageLink::parse("https://doklin.cc/open#d=127.0.0.1%3A8787&w=w-0a1b2c3d4e5f&f=f-9c8b7a6d5e4f").unwrap();
         assert_eq!(port.domain, "127.0.0.1:8787");
+    }
+
+    #[test]
+    fn a_link_is_written_as_the_app_writes_it() {
+        assert_eq!(PageLink::new("notes.example.com", "w-0a1b2c3d4e5f", "s-1a2b3c4d", "f-9c8b7a6d5e4f").url(), SENT);
+        let shared = PageLink::new("Notes.Example.com", "w-0a1b2c3d4e5f", "", "f-9c8b7a6d5e4f");
+        assert_eq!(shared.url(), "https://doklin.cc/open#d=notes.example.com&w=w-0a1b2c3d4e5f&f=f-9c8b7a6d5e4f");
+        let port = PageLink::new("127.0.0.1:8787", "w-0a1b2c3d4e5f", "p-1a2b3c4d", "f-9c8b7a6d5e4f");
+        assert_eq!(port.url(), "https://doklin.cc/open#d=127.0.0.1%3A8787&w=w-0a1b2c3d4e5f&s=p-1a2b3c4d&f=f-9c8b7a6d5e4f");
+        for link in [shared, port] {
+            assert_eq!(PageLink::parse(&link.url()), Some(link));
+        }
     }
 
     #[test]

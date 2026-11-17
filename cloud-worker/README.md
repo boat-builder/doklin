@@ -196,11 +196,11 @@ DELETE login  revoke this token (204)
 GET    me     {agent, person: {id, name}|null, scopes, sections: [folder], workspace, version,
        limits}
 read:
-GET tree?dir=&deep=1  {dir, folders, documents: [{path, md?, html?, htmlBehind?, public?}]}; a
+GET tree?dir=&deep=1  {dir, folders, documents: [{path, md?, html?, htmlBehind?}]}; a
     version is {file, rev, size, changed, by}; 404 empty
 GET doc?path=&v=md|html[&clean=1][&info=1]  bytes + x-doklin-kind: document, -path, -file, -rev,
     -version, -html-behind: 1; values percent-encoded. clean=1 strips markers; info=1 → JSON
-    row + {kind, comments}, byName
+    row + {kind, comments, public?, linkTo: {workspace, space, file}}, byName
 GET comments?path=  {path, threads: [{id, version, on, line?|tag?, orphaned?, comments: [{author, at, body}]}]}
 GET find?workspace=&space=&file=  {path}: where a link to a page leads (space "" = shared), the
     document by its stem. 404 for every page this agent cannot open, alike
@@ -214,9 +214,9 @@ PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → 
        file, rev, size, created, unchanged?, htmlBehind?}; 409 {rev}; 413 > 25 MB
 DELETE doc?path=&v=[&dry=1]  document, or one version → {kind, path, versions, stillPublic, threadsRemoved?}
 POST   move {from, to, dryRun?}  document/folder; to ending in / = into → {kind, from, to,
-       files, unpublished?}. Between two sections: ≤ 16 files, written where they go (new
-       file ids) before they are removed with a tombstone `to`; pages re-claimed after, and
-       `unpublished` lists addresses that could not be
+       files, newLinks?, unpublished?}. Between two sections (`newLinks: true`): ≤ 16 files,
+       written where they go (new file ids) before they are removed with a tombstone `to`;
+       pages re-claimed after, and `unpublished` lists addresses that could not be
 comment:
 POST   comments {path, on, body, v?} → 201 {path, thread, version, on, line?|tag?}
        {path, thread, body} → 200 {path, thread, version, comments}
