@@ -148,13 +148,41 @@ class UITestCase: XCTestCase {
         expect(row, "\(item) in Settings").tap()
     }
 
-    /// Edit the note on screen, with the caret after its last line.
+    /* ---------- Typing ---------- */
+
+    /// Give a field the keyboard, by a tap in its middle or at `point` of
+    /// it. A tap made while its screen is still settling — a sheet coming
+    /// up, the editor fading in, the first screen after a removal — can land
+    /// before the field takes the keyboard, and what is typed then has
+    /// nowhere to go: tap again until it has it.
+    func focus(_ field: XCUIElement, at point: CGVector? = nil) {
+        for _ in 0..<5 {
+            if let point { field.coordinate(withNormalizedOffset: point).tap() } else { field.tap() }
+            for _ in 0..<8 {
+                if (field.value(forKey: "hasKeyboardFocus") as? Bool) == true { return }
+                Thread.sleep(forTimeInterval: 0.25)
+            }
+        }
+    }
+
+    func type(_ words: String, into field: XCUIElement) {
+        focus(field)
+        field.typeText(words)
+    }
+
+    /// Edit the note on screen, with the caret after its last line. The
+    /// editor opens with its caret on the block that was being read. A tap
+    /// after the last line gives it the keyboard and moves the caret there —
+    /// but one made while the editor is still coming up can take the
+    /// keyboard and leave the caret where it was, so ⌘↓ then takes it to the
+    /// end of the note.
     @discardableResult
     func editAtTheEnd() -> XCUIElement {
         marked("edit").tap()
         expect(text(containing: "other devices see it view-only"), "the editor, ready")
         let editor = expect(app.webViews.textViews.firstMatch, "the editor")
-        editor.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.97)).tap()
+        focus(editor, at: CGVector(dx: 0.97, dy: 0.97))
+        editor.typeKey(.downArrow, modifierFlags: .command)
         return editor
     }
 
@@ -168,15 +196,7 @@ class UITestCase: XCTestCase {
             removeFromThisPhone()
             _ = marked("line").waitForExistence(timeout: 10)
         }
-        let field = expect(marked("line"), "the line field")
-        // Just after a removal the first screen is still settling, and a tap
-        // can land before the field takes the keyboard.
-        for _ in 0..<6 {
-            field.tap()
-            if (field.value(forKey: "hasKeyboardFocus") as? Bool) == true { break }
-            Thread.sleep(forTimeInterval: 1)
-        }
-        field.typeText(line)
+        type(line, into: expect(marked("line"), "the line field"))
         marked("join").tap()
         expect(marked("workspace-menu"), "Home, once joined", timeout: 60)
         browse()

@@ -578,6 +578,7 @@ svg { flex: none; }
 @media (prefers-reduced-motion: no-preference) {
   .node::before { animation: travel 4.4s ease-in-out infinite; }
   .hub-left .node:nth-child(2)::before { animation-delay: 1.6s; }
+  .hub-left .node:nth-child(3)::before { animation-delay: 4s; }
   .hub-right .node:nth-child(1)::before { animation-delay: 0.8s; }
   .hub-right .node:nth-child(2)::before { animation-delay: 2.4s; }
   /* A public link reads out of the knowledge base: its dot runs the other way. */

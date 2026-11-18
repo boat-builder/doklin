@@ -63,11 +63,6 @@ final class PeopleUITests: UITestCase {
         if knob.exists { knob.tap() } else { toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap() }
     }
 
-    private func type(_ text: String, into field: XCUIElement) {
-        field.tap()
-        field.typeText(text)
-    }
-
     /// Wait for something to be on screen, where a finger can reach it.
     private func inView(_ element: XCUIElement, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
         let shown = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true"), object: element)
@@ -203,8 +198,7 @@ final class PeopleUITests: UITestCase {
         marked("entry-Finance").press(forDuration: 1.0)
         expect(app.buttons["Rename"], "Rename on the restricted folder").tap()
         let name = expect(app.alerts.textFields.firstMatch, "the new name's field")
-        name.tap()
-        name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 12) + "Money")
+        type(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 12) + "Money", into: name)
         app.alerts.buttons["Rename"].tap()
         // Its access is the domain's: offered once the domain has the new name.
         let money = expect(marked("entry-Money"), "the folder, renamed")
