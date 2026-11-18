@@ -47,7 +47,7 @@ Read a doc only when the change is in its area.
 | App shell, `src/backend.ts`, saving, tabs, windows, editor, frontmatter | `docs/architecture.md` |
 | `engine/` (not `versions/`), `src-tauri/src/engine.rs`, `src/cloud.ts`, sync | `docs/cloud.md` |
 | Publishing, public pages | `docs/cloud-publishing.md` |
-| People, spaces, leases, agents, document API, `cli/` | `docs/cloud-people-agents.md` |
+| People, spaces, leases, agents, document API, a browser's sign-in and routes, `cli/` | `docs/cloud-people-agents.md` |
 | Worker routes, bucket, D1, manifest format | `cloud-worker/README.md` |
 | `engine/src/versions/`, history | `docs/versioning.md` |
 | `pdf_export.rs` | `docs/pdf-export.md` |

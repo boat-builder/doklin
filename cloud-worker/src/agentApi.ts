@@ -50,7 +50,7 @@
 
 import { inSection, refuse, type AgentCaller, type Call } from "./agentCall";
 import { deleteComment, getComments, postComment } from "./agentComments";
-import { deleteDoc, getDoc, getFind, getTree, postMove, putDoc } from "./agentDocs";
+import { deleteDoc, getDoc, getFind, getSearch, getTree, postMove, putDoc } from "./agentDocs";
 import { deletePage, getPages, putPage } from "./agentPages";
 import { Places } from "./agentPlace";
 import {
@@ -80,7 +80,6 @@ import { validName } from "./layout";
 import { readLimits } from "./limits";
 import { HASH_RE } from "./members";
 import { can } from "./roles";
-import { getSearch } from "./search";
 import { WORKER_VERSION } from "./version";
 
 const methodNotAllowed = (): Response => json({ error: "method not allowed" }, 405);

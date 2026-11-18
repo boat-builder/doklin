@@ -14,12 +14,12 @@
 // thread can never be half-made.
 
 import { change, notBound, openTree, refuse, type Call } from "./agentCall";
-import { contentTypeOf, documentAt, versionFlag } from "./agentDocs";
+import { documentAt } from "./agentDocs";
 import { Refusal, newFileId, type Tx } from "./commit";
-import { Index, askedVersion, type Doc, type Version } from "./documents";
+import { Index, askedVersion, versionFlag, type Doc, type Version } from "./documents";
 import { json, readJsonObject } from "./http";
 import { ANCHOR_TEXT_LEN, anchorResolves, elementsOf, elementsStartingWith, normalizeText } from "./htmlText";
-import { blobKey } from "./layout";
+import { blobKey, contentTypeOf } from "./layout";
 import { mirrorAfter } from "./search";
 import {
   CRITIC_BLOCK_RE,

@@ -4063,6 +4063,7 @@ fn slug_grammar_and_uniqueness() {
     assert!(!valid_slug("Plan"), "lowercase only");
     assert!(!valid_slug("my page"));
     assert!(!valid_slug("api"), "reserved");
+    assert!(!valid_slug("app"), "the browser version's address");
     assert!(!valid_slug("robots.txt"));
     assert!(!valid_slug(&"a".repeat(65)));
     assert!(valid_slug(&"a".repeat(64)));

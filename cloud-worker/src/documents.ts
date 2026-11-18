@@ -78,6 +78,14 @@ export function askedVersion(path: string, flag: Version | null): Version | null
   return flag ?? typed;
 }
 
+/** A version as a request names one — `md`, `html`, or nothing — or a refusal
+ *  when it is anything else. */
+export function versionFlag(raw: unknown): Version | null | Refusal {
+  if (raw === null || raw === undefined || raw === "") return null;
+  if (raw === "md" || raw === "html") return raw;
+  return new Refusal(400, 'a version is "md" or "html"');
+}
+
 /** Whether a name carries an extension of its own (`chart.png`, not `plan`). */
 const hasExtension = (path: string): boolean => /[^.]\.[^./]+$/.test(basename(path));
 

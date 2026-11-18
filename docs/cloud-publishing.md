@@ -9,8 +9,8 @@ worker renders synced blobs on request. See also [cloud.md](cloud.md).
 - A file entry holds the fileId (a rename carries the page) and a `path` snapshot (a deleted-and-recreated file at that path re-binds). It names a document's file — its markdown, else its html: a page of anything else is refused (`syncs`, `layout.ts`), so a picture or a PDF is never a page. A folder entry (`""` = whole workspace) publishes every note under it — no membership list; the engine re-points it when all its files moved to one new prefix in one cycle.
 - An entry outlives its file: 404 while gone, back when the file is; stopping is explicit. `root: true` whose file is gone → `/` serves the landing page.
 - Offline publishing: the engine queues `public_ops` in its state and `fold_public` folds them into the next won CAS (re-point renames, re-bind dead entries, apply ops, re-point folders).
-- Slug grammar `^[a-z0-9][a-z0-9-]{2,63}$` and reserved words live in `layout.ts`, `manifest.rs`, `src/cloud.ts`; the random-slug alphabet (8 of `abcdefghjkmnpqrstuvwxyz23456789`) in `manifest.rs` and `agentPages.ts`. **Change all.** Custom slugs are checked against the manifest locally; two devices racing one slug: the loser gets a suffix.
-- Anyone who may write the manifest may publish: members always, agents with `publish` — from any section their person can see, into that section's map.
+- Slug grammar `^[a-z0-9][a-z0-9-]{2,63}$` and reserved words live in `layout.ts`, `manifest.rs`, `src/cloud.ts` and the iPhone's `Publishing.swift`; the random-slug alphabet (8 of `abcdefghjkmnpqrstuvwxyz23456789`) in `manifest.rs` and `publishing.ts`. **Change all.** `app` is reserved for the browser version: every public address starts with a slug, so nothing is ever published under `/app`. Custom slugs are checked against the manifest locally; two devices racing one slug: the loser gets a suffix.
+- Anyone who may write the manifest may publish: members always (from a browser too, `webPages.ts`), agents with `publish` — from any section their person can see, into that section's map. The rules an entry keeps are written once for the worker's own publishing (`publishing.ts`).
 - `CloudStatus.public` = manifest + unsynced ops, of every section this Mac holds; `alive` false when the file is gone or a folder holds no synced file.
 - Each section has its own map. The page at `/` is chosen from the shared workspace's only; a space's map naming a `root` is refused.
 - An owner can stop any page on the domain (`/api/pages`), but only a person in its section can open or re-publish its file.
@@ -42,6 +42,7 @@ HTML written into a note's markdown is drawn as written, on the origin the works
 - No page carries an inline script, and none may: `script-src` has no hash, nonce or `'self'`. Browser code a page needs goes in the mermaid module. `'self'` would let a note run any script the domain serves.
 - The policy is set on the way out (`deliver`), never where a page is drawn: it names the request's origin, and the cache key names no host.
 - Every answer of the worker's (`index.ts`) and every static file (`_headers`) is `X-Content-Type-Options: nosniff`, so a stored file is never loaded as a script or a stylesheet.
+- The same origin answers signed-in browsers ([cloud-people-agents.md](cloud-people-agents.md) *A browser*), and their cookie goes with every request a page makes. A page reaching nothing with it rests on two lines of this policy: `default-src 'none'` (a page fetches nothing) and the one-address `script-src`. Loosen either and a note can act as whoever is reading it.
 
 ## Cache
 

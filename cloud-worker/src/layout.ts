@@ -46,7 +46,11 @@ export const SNAPSHOT_ID_RE = /^\d{13}-[a-z0-9][a-z0-9_-]{2,63}$/;
 export const VERSION_HASH_RE = /^[a-f0-9]{64}$/;
 /** A public page's slug: the one path segment under the domain. */
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
-/** Slugs the worker's own routes speak for. Several cannot match SLUG_RE anyway; the set says what is taken. */
+/** Slugs the worker's own routes speak for. Several cannot match SLUG_RE
+ *  anyway; the set says what is taken. `app` is the browser version's: every
+ *  public address starts with a slug, so no page can be anywhere under /app.
+ *  Mirrored by the engine (`RESERVED_SLUGS`, engine/src/cloud/manifest.rs),
+ *  the app (src/cloud.ts) and the iPhone (Publishing.swift): change all four. */
 export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "api",
   "__web",
@@ -56,6 +60,7 @@ export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "favicon.ico",
   "apple-touch-icon.png",
   "join",
+  "app",
 ]);
 
 /* Caps. The app has matching limits on what it is willing to walk
@@ -106,6 +111,20 @@ export function syncs(path: string): boolean {
   const name = path.slice(path.lastIndexOf("/") + 1).replace(/[A-Z]/g, (c) => c.toLowerCase());
   return SYNCED_SUFFIXES.some((suffix) => name.length > suffix.length && name.endsWith(suffix));
 }
+
+/** What each kind of file that syncs is stored as. */
+const CONTENT_TYPES: Record<string, string> = {
+  md: "text/markdown; charset=utf-8",
+  markdown: "text/markdown; charset=utf-8",
+  mdown: "text/markdown; charset=utf-8",
+  mkd: "text/markdown; charset=utf-8",
+  html: "text/html; charset=utf-8",
+  jsonl: "application/json",
+};
+
+/** What a blob is stored as — the engine's own table (`content_type_for`, scan.rs). */
+export const contentTypeOf = (path: string): string =>
+  CONTENT_TYPES[path.slice(path.lastIndexOf(".") + 1).toLowerCase()] ?? "application/octet-stream";
 
 /** What a path outside `syncs` is told, wherever it is refused. */
 export const UNSYNCED_SENTENCE = "Doklin syncs markdown and html documents only";

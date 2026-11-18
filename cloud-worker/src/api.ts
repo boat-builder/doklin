@@ -1,10 +1,11 @@
-// The authenticated API — everything the engine says to the worker.
-// JSON in, JSON out, a bearer on
-// every request; the engine is the only caller, so there is no CORS and no
-// preflight. Every request also carries `x-doklin-device` (attribution for
-// presence and the binding) and `x-doklin-client` (the app version, for
-// the logs — nothing reads it); now and then, `x-doklin-used` (the caller's
-// requests today, limits.ts).
+// The authenticated API — everything the engine says to the worker, and what
+// the browser version says to it (web.ts).
+// JSON in, JSON out, a bearer on every request — or, from a browser, the
+// cookie that is its sign-in (auth.ts). Every caller is the engine or a page
+// this domain served, so there is no CORS and no preflight. Every request
+// also carries `x-doklin-device` (attribution for presence and the binding)
+// and `x-doklin-client` (the app version, for the logs — nothing reads it);
+// now and then, `x-doklin-used` (the caller's requests today, limits.ts).
 //
 // A bearer that sends too much is a loop, and is told so with a 429 before
 // anything else is done (`DEVICE_LIMIT`, `AGENT_LIMIT`).
@@ -36,7 +37,8 @@
 //                                    400 on garbage, 426 on a schema this worker predates,
 //                                    409 {taken: [slug]} when its public map names an address
 //                                    another space holds (addresses.ts)
-//   GET    /api/blobs/<fid>/<hash>   the bytes
+//   GET    /api/blobs/<fid>/<hash>   the bytes — a browser may keep them for good: a copy
+//                                    never changes under its address
 //   PUT    /api/blobs/<fid>/<hash>   store bytes (immutable — a re-PUT of the same hash is a no-op).
 //                                    Nobody deletes one: the daily sweep collects what no
 //                                    manifest names (sweep.ts)
@@ -96,12 +98,14 @@
 //                                    alone (409); sign one device out, effective on its next
 //                                    request (204). Never the calling one (409)
 //   DELETE /api/auth/session         a device ending its own sign-in (204): it is forgotten, and
-//                                    told to delete nothing
+//                                    told to delete nothing. A browser's cookie goes with it,
+//                                    and what that browser kept
 //
 //   A credential an owner took away — a person removed, a Mac signed out — is answered
 //   `401 {error, removed: true}` on every route from then on, where any other bearer nobody
 //   holds is a bare 401. The difference is the app's cue to delete that Mac's copy
-//   of the workspace, so it is only ever said of a token `removed_tokens` remembers.
+//   of the workspace, so it is only ever said of a token `removed_tokens` remembers. A
+//   browser is told the same, with the headers that end its sign-in there (auth.ts).
 //
 //   Spaces — a restricted folder, or the caller's Private (spaces.ts). Anyone here may make
 //   one; a space answers the people in it and is a 404 to everybody else, owners included.
@@ -131,10 +135,17 @@
 //   *      /api/agent/…              an agent's token only: the document API
 //   *      /api/auth/agents…         anyone; their own agents — an owner sees everyone's and
 //                                    may remove any
+//
+//   The browser version. A browser's sign-in is answered under /api/web and on the few
+//   routes above that web.ts lists, and on nothing else (403); nobody else's credential
+//   is answered under /api/web.
+//
+//   POST   /api/web/session          NO CREDENTIAL — the third route above the gate
+//   *      /api/web/…                a browser's sign-in only: listed in web.ts
 
 import { claimAddresses, releaseAddresses, takenError } from "./addresses";
 import { agentLogin, handleAgent, handleAgentAdmin } from "./agentApi";
-import { authenticate, keyHashOf, type Auth } from "./auth";
+import { NO_SESSION_COOKIE, SIGNED_OUT, authenticate, keyHashOf, sessionCookie, sessionOf, type Auth } from "./auth";
 import { randomHex } from "./crypto";
 import { readManifestTotals, readWorkspace, type WorkspaceRecord } from "./bucket";
 import type { Env } from "./env";
@@ -198,6 +209,7 @@ import {
   spaceOf,
 } from "./spaces";
 import { WORKER_VERSION } from "./version";
+import { browserMay, handleWeb, signIn } from "./web";
 import { handleVersions } from "./versions";
 
 const JSON_OBJECT = { httpMetadata: { contentType: "application/json" } };
@@ -235,6 +247,11 @@ export async function handleApi(
     return agentLogin(request, env);
   }
 
+  // And the third: signing in is how a browser gets its cookie.
+  if (request.method === "POST" && parts.length === 3 && parts[1] === "web" && parts[2] === "session") {
+    return signIn(request, env);
+  }
+
   // The domain's key is nobody's sign-in: it is answered on the probe and on
   // the trade that makes one, and on nothing else.
   const keyHash = await keyHashOf(request, env);
@@ -242,11 +259,16 @@ export async function handleApi(
 
   const auth = await authenticate(request, env);
   // Said only of a credential the database remembers an owner taking away:
-  // the Mac that hears `removed` deletes its copy of the workspace.
-  if (auth === "removed") return json({ error: "your access to this workspace was removed", removed: true }, 401);
+  // the Mac that hears `removed` deletes its copy of the workspace. A browser
+  // that hears it is told to drop what it kept too; one whose cookie is
+  // simply nobody's is told to drop the cookie.
+  const session = sessionOf(request) !== null;
+  if (auth === "removed") {
+    return json({ error: "your access to this workspace was removed", removed: true }, 401, session ? SIGNED_OUT : {});
+  }
   // Never a 401: a database that cannot answer has refused nobody.
   if (auth === "unavailable") return unavailable(env);
-  if (!auth) return json({ error: "unauthorized" }, 401);
+  if (!auth) return json({ error: "unauthorized" }, 401, session ? { "set-cookie": NO_SESSION_COOKIE } : {});
 
   // A loop, caught: a person's device past what a person does in a minute,
   // or an agent's machine past what a tool does. Approximate, and only ever
@@ -284,6 +306,21 @@ export async function handleApi(
     return json({ error: "the document API is for agents — add one in Doklin, under Agents" }, 403);
   }
 
+  // A browser's sign-in and the browser version's routes belong to each
+  // other the same way. A browser holds no copy of the workspace and builds
+  // no manifest, so it has no business where one is put; and what it may not
+  // reach, a page that got script onto this domain could not reach either.
+  if (section === "web" ? !auth.browser : auth.browser && !browserMay(method, parts)) {
+    return json(
+      {
+        error: auth.browser
+          ? "that is not done from a browser — it is done in the Doklin app"
+          : "these routes are the browser version's — an app syncs through the others",
+      },
+      403,
+    );
+  }
+
   // The probe: liveness, the credential, the version and "is this domain
   // bound" in one call — what the setup wizard asks before touching anything.
   if (section === "meta" && parts.length === 2) {
@@ -308,15 +345,14 @@ export async function handleApi(
       findSuperadmin(env),
       readLimits(env),
     ]);
-    return json({
-      version: WORKER_VERSION,
-      workspace,
-      d1,
-      you: whoIs(auth),
-      superadmin,
-      people: people ?? [],
-      limits,
-    });
+    // A browser is handed its cookie again: its lifetime starts over each
+    // time the app starts, so one in use never runs out.
+    const again = auth.browser ? sessionOf(request) : null;
+    return json(
+      { version: WORKER_VERSION, workspace, d1, you: whoIs(auth), superadmin, people: people ?? [], limits },
+      200,
+      again ? { "set-cookie": sessionCookie(again) } : {},
+    );
   }
 
   // Which Cloudflare plan the account is on — the superadmin's to say, since
@@ -347,8 +383,10 @@ export async function handleApi(
   // The work itself — the poll, the manifest, the blobs, the version store,
   // and the spaces, which are those three again. Both roles hold it today; a
   // role that did not would stop here.
-  const working = ["poll", "manifest", "blobs", "versions", "spaces"].includes(section);
+  const working = ["poll", "manifest", "blobs", "versions", "spaces", "web"].includes(section);
   if (working && !can(auth.role, "work")) return notAllowed("work");
+
+  if (section === "web") return handleWeb(request, env, url, ctx, parts, auth);
 
   if (section === "poll" && parts.length === 2) {
     if (method !== "GET" && method !== "POST") return methodNotAllowed();
@@ -478,7 +516,7 @@ async function joinWithInvite(request: Request, env: Env): Promise<Response> {
   const deviceId = typeof body.deviceId === "string" && ID_RE.test(body.deviceId) ? body.deviceId : null;
   const deviceName = typeof body.deviceName === "string" ? body.deviceName : null;
 
-  const redeemed = await redeemInvite(env, await sha256Hex(code), deviceId, deviceName);
+  const redeemed = await redeemInvite(env, await sha256Hex(code), { id: deviceId, name: deviceName, browser: false });
   if (redeemed === null) return unavailable(env);
   if (redeemed === "unknown" || redeemed === "expired") return json({ error: "that code is not valid" }, 401);
   return json({ token: redeemed.token, tokenId: redeemed.tokenId, member: redeemed.member }, 201);
@@ -564,7 +602,7 @@ async function handleAuth(request: Request, env: Env, parts: string[], auth: Aut
   if (kind === "session" && id === undefined) {
     if (method !== "DELETE") return methodNotAllowed();
     const gone = await endSession(env, auth.tokenId);
-    return gone === null ? noDatabase() : new Response(null, { status: 204 });
+    return gone === null ? noDatabase() : new Response(null, { status: 204, headers: auth.browser ? SIGNED_OUT : {} });
   }
 
   // `join` only ever answers POST, and that one is handled above the gate.
@@ -922,11 +960,16 @@ async function blob(request: Request, env: Env, fileId: string, hash: string): P
   if (request.method === "GET") {
     const obj = await env.DATA.get(key);
     if (!obj) return json({ error: "not found" }, 404);
+    // A stored copy never changes under its address, so a browser keeps it
+    // for good and never asks again — its own copy only (`private`), and only
+    // for the sign-in it was read with (`vary`): after a sign-out the same
+    // address is asked of the worker again, and refused.
     return new Response(obj.body, {
       headers: {
         "content-type": obj.httpMetadata?.contentType || "application/octet-stream",
         "content-length": String(obj.size),
-        "cache-control": "no-store",
+        "cache-control": "private, max-age=31536000, immutable",
+        vary: "Cookie, Authorization",
       },
     });
   }

@@ -164,10 +164,10 @@ public enum Publishing {
     /* ---------- Addresses ---------- */
 
     /// What an address may be, and the ones the worker's own routes speak
-    /// for: the rule src/cloud.ts, the engine (manifest.rs) and the worker
-    /// (layout.ts) check — change all.
+    /// for — `app` is the browser version's: the rule src/cloud.ts, the
+    /// engine (manifest.rs) and the worker (layout.ts) check — change all four.
     private static let slugGrammar = try! NSRegularExpression(pattern: "\\A[a-z0-9][a-z0-9-]{2,63}\\z")
-    static let reservedSlugs: Set<String> = ["api", "__web", "raw", "og.png", "robots.txt", "favicon.ico", "apple-touch-icon.png", "join"]
+    static let reservedSlugs: Set<String> = ["api", "__web", "raw", "og.png", "robots.txt", "favicon.ico", "apple-touch-icon.png", "join", "app"]
 
     /// Why a typed address cannot be one, in a sentence; nil when it can.
     /// The engine refuses the same, in its own words.

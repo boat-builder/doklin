@@ -3,7 +3,8 @@
 //
 // Two surfaces:
 //   /api/*      the engine's — bearer auth, JSON; see api.ts for the routes —
-//               and, under /api/agent, an agent's (agentApi.ts)
+//               and, under /api/agent, an agent's (agentApi.ts); under
+//               /api/web, a signed-in browser's (web.ts)
 //   everything  the visitor's — no auth, GET/HEAD only; see public.ts
 //   else
 // and one daily run, the cron trigger wrangler.toml declares: the sweep of

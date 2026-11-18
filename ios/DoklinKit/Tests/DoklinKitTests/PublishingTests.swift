@@ -95,10 +95,11 @@ final class PublishingTests: XCTestCase {
         XCTAssertEqual(Publishing.slugProblem(String(repeating: "x", count: 65)), grammar)
         XCTAssertEqual(Publishing.slugProblem("API"), "“api” is taken by the site itself.")
         XCTAssertEqual(Publishing.slugProblem("join"), "“join” is taken by the site itself.")
+        XCTAssertEqual(Publishing.slugProblem("app"), "“app” is taken by the site itself.")
 
         let suggested: [(String, String)] = [
             ("Notes", "notes"), ("Q3 Plans & Ideas", "q3-plans-ideas"), ("Café Menü", "cafe-menu"), ("AI", "ai-notes"),
-            ("", "notes"), ("api", "api-notes"), ("---", "notes"), ("日本語 notes", "notes"), ("Ünïcødé — Straße", "u-ni-c-de-stra-e"),
+            ("", "notes"), ("api", "api-notes"), ("App", "app-notes"), ("---", "notes"), ("日本語 notes", "notes"), ("Ünïcødé — Straße", "u-ni-c-de-stra-e"),
             (String(repeating: "a", count: 63) + " b", String(repeating: "a", count: 63) + "-"),
         ]
         for (name, slug) in suggested { XCTAssertEqual(Publishing.suggestSlug(name), slug, name) }

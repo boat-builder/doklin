@@ -676,6 +676,16 @@ export async function deleteInvite(env: Env, id: string): Promise<boolean | null
   });
 }
 
+/**
+ * What a browser's sign-in starts with. A browser is a device, and its token
+ * a row of `tokens` like any other's — but it is carried by a cookie no
+ * script can read and answered on fewer routes (web.ts), and that has to stay
+ * true of the token itself: one lifted out of a browser's cookie store and
+ * sent as a Mac would send it is refused, because of how it starts
+ * (auth.ts). The prefix is inside what is hashed, so it cannot be taken off.
+ */
+export const BROWSER_TOKEN_PREFIX = "dkw_";
+
 export type Redeemed = { token: string; tokenId: string; member: Member };
 
 /** What a redeem can come to: the token, or the reason there isn't one.
@@ -691,12 +701,14 @@ export type RedeemResult = Redeemed | "expired" | "unknown";
  * The token is minted here, 256 bits, and returned exactly once; the database
  * keeps only its sha256. That matters because a person's token is not a
  * limited account — and, on an owner's row, it is an owner's.
+ *
+ * A browser's is a row like any device's, and says what it is in its first
+ * characters (`BROWSER_TOKEN_PREFIX`).
  */
 export async function redeemInvite(
   env: Env,
   codeHash: string,
-  deviceId: string | null,
-  deviceName: string | null,
+  device: { id: string | null; name: string | null; browser: boolean },
   now = Date.now(),
 ): Promise<RedeemResult | null> {
   return withDb(env, async (db) => {
@@ -716,14 +728,14 @@ export async function redeemInvite(
       return "expired" as RedeemResult;
     }
 
-    const token = randomHex(32);
+    const token = `${device.browser ? BROWSER_TOKEN_PREFIX : ""}${randomHex(32)}`;
     const tokenId = `t-${randomHex(4)}`;
     await db.batch([
       db
         .prepare(
           "INSERT OR REPLACE INTO tokens (hash, id, member_id, device_id, device_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(await sha256Hex(token), tokenId, row.id, deviceId, validName(deviceName, "A device"), now),
+        .bind(await sha256Hex(token), tokenId, row.id, device.id, validName(device.name, device.browser ? "A browser" : "A device"), now),
       db.prepare("DELETE FROM invites WHERE hash = ?").bind(codeHash),
       // From here somebody has signed in as this person (`Member.lastSeenAt`).
       db.prepare("UPDATE members SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at IS NULL").bind(now, row.id),

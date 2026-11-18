@@ -1,11 +1,12 @@
 // The worker as a writer of the manifest.
 //
-// An agent has no engine and no copy of the folder, so its changes are
-// made here — and made exactly the way a Mac makes them: new content goes up
-// as immutable blobs, then the manifest is replaced by compare-and-swap on
-// its etag. A Mac cannot tell an agent's write from another Mac's, which is
-// the point: its next poll sees a new etag and its ordinary cycle applies it
-// (engine/src/cloud/engine.rs, `apply_remote`).
+// An agent has no engine and no copy of the folder, and neither has a person
+// in a browser, so their changes are made here — and made exactly the way a
+// Mac makes them: new content goes up as immutable blobs, then the manifest
+// is replaced by compare-and-swap on its etag. A Mac cannot tell one of
+// these writes from another Mac's, which is the point: its next poll sees a
+// new etag and its ordinary cycle applies it (engine/src/cloud/engine.rs,
+// `apply_remote`).
 //
 // What every change here keeps, because that cycle reads it:
 //
@@ -23,9 +24,10 @@
 //   · an address the change adds to the public map is claimed before the
 //     manifest is stored, and one it drops is let go after (addresses.ts).
 //
-// A change to a space is made under the names its person uses (`mount`,
-// mount.ts): the transaction sees `Private/notes/plan.md`, and what is
-// checked and stored is the space's own `notes/plan.md`.
+// An agent's change to a space is made under the names its person uses
+// (`mount`, mount.ts): the transaction sees `Private/notes/plan.md`, and what
+// is checked and stored is the space's own `notes/plan.md`. A browser names a
+// space's paths as the space stores them: its changes are mounted at "".
 //
 // A lost race is nearly always another device's unrelated write, so the loop
 // re-reads and re-applies rather than failing. That is why a caller's own

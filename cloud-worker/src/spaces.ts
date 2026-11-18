@@ -88,6 +88,21 @@ export function sharedEnv(env: Env): Env {
 /** The space `env` is scoped to; "" is the shared workspace. */
 export const spaceOf = (env: Env): string => env.SPACE?.id ?? "";
 
+/** A section of the workspace as somewhere to work: its part of the bucket,
+ *  and the folder its paths are under as the caller names them — "" when the
+ *  caller names them as the section stores them. */
+export type Where = {
+  /** "" the shared workspace; a space's id otherwise. */
+  space: string;
+  mount: string;
+  env: Env;
+};
+
+/** How many sections beside the shared workspace one request opens: each is
+ *  a read or two of the bucket, and a request has a budget of those. A route
+ *  that would need more says which it left out. */
+export const MAX_SECTIONS_READ = 8;
+
 /* ---------- Reading ---------- */
 
 export type SpaceRow = {

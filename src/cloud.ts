@@ -811,7 +811,10 @@ export const cloudNeedsAttention = (statuses: CloudStatus[]): boolean => statuse
 /** A slug's grammar — the same rule the engine, the worker and the iPhone
  *  (ios/DoklinKit/Sources/DoklinKit/Models/Publishing.swift) check; change all. */
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
-/** Slugs the worker's own routes speak for. */
+/** Slugs the worker's own routes speak for; `app` is the browser version's.
+ *  The engine's list (`RESERVED_SLUGS`, engine/src/cloud/manifest.rs), the
+ *  worker's (cloud-worker/src/layout.ts) and the iPhone's (Publishing.swift)
+ *  are this one: change all four. */
 export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "api",
   "__web",
@@ -821,6 +824,7 @@ export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "favicon.ico",
   "apple-touch-icon.png",
   "join",
+  "app",
 ]);
 
 /** Why a typed slug can't be one, or null when it can. The engine says the same
