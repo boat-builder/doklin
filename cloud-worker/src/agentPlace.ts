@@ -29,26 +29,14 @@ import { Refusal } from "./commit";
 import type { Env } from "./env";
 import { MAX_NAME_LEN } from "./layout";
 import { withDb } from "./schema";
-import { ensurePrivate, sharedEnv, spaceEnv } from "./spaces";
+import { ensurePrivate, sharedEnv, spaceEnv, type Where } from "./spaces";
 
 export const PRIVATE_FOLDER = "Private";
 export const RESTRICTED_FOLDER = "Restricted";
 
-/** How many sections beside the shared workspace one request opens: each is
- *  a read or two of the bucket, and a request has a budget of those. A route
- *  that would need more says which it left out. */
-export const MAX_SECTIONS_READ = 8;
-
-export type Section = {
-  /** "" the shared workspace; a space's id otherwise. */
-  space: string;
-  kind: "shared" | "private" | "restricted";
-  /** The folder it is at, as its person names paths: "", `Private`,
-   *  `Restricted/Finance`. */
-  mount: string;
-  /** Its part of the bucket. */
-  env: Env;
-};
+/** A section, and which kind it is. `mount` is the folder it is at, as its
+ *  person names paths: "", `Private`, `Restricted/Finance`. */
+export type Section = Where & { kind: "shared" | "private" | "restricted" };
 
 /** A name a folder on a Mac can carry (`sanitize_folder_name`,
  *  engine/src/cloud/config.rs — change both). */

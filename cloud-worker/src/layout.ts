@@ -38,6 +38,11 @@ export const spacePrefix = (spaceId: string): string => `${SPACES_PREFIX}${space
 export const ID_RE = /^[a-z0-9][a-z0-9_-]{2,63}$/;
 /** A space: `s-` a restricted folder, `p-` a person's Private. */
 export const SPACE_ID_RE = /^[sp]-[a-f0-9]{8}$/;
+/** A person: what a manifest's `by`, a space's people, presence and leases
+ *  name one by. An email never enters any of them. */
+export const MEMBER_ID_RE = /^m-[a-f0-9]{8}$/;
+/** An agent: what it signs its changes with. */
+export const AGENT_ID_RE = /^a-[a-f0-9]{8}$/;
 /** A content address: a hex prefix (16 characters and up) of the blob's sha256. */
 export const BLOB_HASH_RE = /^[a-f0-9]{16,64}$/;
 /** A mirrored snapshot: the millisecond it was taken, then the device that took it. */
@@ -46,7 +51,11 @@ export const SNAPSHOT_ID_RE = /^\d{13}-[a-z0-9][a-z0-9_-]{2,63}$/;
 export const VERSION_HASH_RE = /^[a-f0-9]{64}$/;
 /** A public page's slug: the one path segment under the domain. */
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
-/** Slugs the worker's own routes speak for. Several cannot match SLUG_RE anyway; the set says what is taken. */
+/** Slugs the worker's own routes speak for. Several cannot match SLUG_RE
+ *  anyway; the set says what is taken. `app` is the browser version's: every
+ *  public address starts with a slug, so no page can be anywhere under /app.
+ *  Mirrored by the engine (`RESERVED_SLUGS`, engine/src/cloud/manifest.rs),
+ *  the app (src/cloud.ts) and the iPhone (Publishing.swift): change all four. */
 export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "api",
   "__web",
@@ -56,7 +65,43 @@ export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "favicon.ico",
   "apple-touch-icon.png",
   "join",
+  "app",
 ]);
+
+// Crockford's base32: no I, no L, no O, no U — so a code cannot spell a word
+// and cannot be mistyped into a different valid one. I and L read back as 1,
+// O as 0, which is the whole reason he dropped them.
+const CROCKFORD = /^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{20}$/;
+
+/**
+ * A code as it is hashed: the twenty Crockford characters, uppercase, no
+ * prefix and no dashes. `dkln-K7QM2-9XVR4-8TBHN-3WGYD` and
+ * `dkln k7qm2 9xvr4 8tbhn 3wgyd` and the bare twenty all canonicalize to the
+ * same string, so a code that survived an autocorrect, a line wrap or a
+ * spreadsheet still redeems. Null when it is not a code.
+ *
+ * `prefix` is the four letters the code announces itself with, uppercase:
+ * `DKLN` for an invite, `DKLA` for an agent's login code (agents.ts). A code
+ * wearing the other kind's prefix is not a code here — the two are stored in
+ * different tables, and saying so at the door beats a lookup that misses.
+ *
+ * This is a wire contract, not a convenience: the app hashes the canonical
+ * form when it mints a code, and the worker hashes the canonical form when it
+ * redeems one. The two have to agree character for character.
+ */
+export function canonicalCode(raw: unknown, prefix: string): string | null {
+  if (typeof raw !== "string") return null;
+  const bare = raw.trim().toUpperCase().replace(/[^0-9A-Z]/g, "");
+  // The prefix only comes off a string long enough to have carried one. (A
+  // bare code can never begin with either prefix — L is not in the alphabet
+  // — but the length guard says so without depending on that.)
+  const body = bare.length === 24 && bare.startsWith(prefix) ? bare.slice(4) : bare;
+  const canonical = body.replace(/[IL]/g, "1").replace(/O/g, "0");
+  return CROCKFORD.test(canonical) ? canonical : null;
+}
+
+/** An invite code as it is hashed (see `canonicalCode`). */
+export const normalizeCode = (raw: unknown): string | null => canonicalCode(raw, "DKLN");
 
 /* Caps. The app has matching limits on what it is willing to walk
    (MAX_TREE_DEPTH / MAX_TREE_ENTRIES in src-tauri), so the worker never
@@ -73,6 +118,8 @@ export const MAX_NAME_LEN = 80;
 export const MAX_EMAIL_LEN = 254;
 export const MAX_TITLE_LEN = 300;
 export const MAX_DESC_LEN = 600;
+/** The most documents one search answers with (search.ts). */
+export const SEARCH_LIMIT_MAX = 30;
 /** The shortest a beat keeps a device "here", and how long one holds that
  *  says nothing: a beat says how long it holds (`ttl`, presence.ts), clamped
  *  to these two. */
@@ -106,6 +153,20 @@ export function syncs(path: string): boolean {
   const name = path.slice(path.lastIndexOf("/") + 1).replace(/[A-Z]/g, (c) => c.toLowerCase());
   return SYNCED_SUFFIXES.some((suffix) => name.length > suffix.length && name.endsWith(suffix));
 }
+
+/** What each kind of file that syncs is stored as. */
+const CONTENT_TYPES: Record<string, string> = {
+  md: "text/markdown; charset=utf-8",
+  markdown: "text/markdown; charset=utf-8",
+  mdown: "text/markdown; charset=utf-8",
+  mkd: "text/markdown; charset=utf-8",
+  html: "text/html; charset=utf-8",
+  jsonl: "application/json",
+};
+
+/** What a blob is stored as — the engine's own table (`content_type_for`, scan.rs). */
+export const contentTypeOf = (path: string): string =>
+  CONTENT_TYPES[path.slice(path.lastIndexOf(".") + 1).toLowerCase()] ?? "application/octet-stream";
 
 /** What a path outside `syncs` is told, wherever it is refused. */
 export const UNSYNCED_SENTENCE = "Doklin syncs markdown and html documents only";

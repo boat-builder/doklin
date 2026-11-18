@@ -23,7 +23,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::{find_window_for, spawn_open_window, spawn_window, AppReady, PendingInit, PendingOpen, WindowRegistry};
 
 /// The event a window gets when something was queued for it. Listened to in
-/// src/App.tsx — change both.
+/// src/mac/backend.ts — change both.
 const SHOWS_EVENT: &str = "window-shows";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -34,7 +34,7 @@ pub(crate) enum ShowKind {
 }
 
 /// One thing a window is asked to show. Mirrored by `WindowShow` in
-/// src/App.tsx — change both.
+/// src/backend.ts — change both.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct Show {
     path: String,

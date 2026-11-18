@@ -21,30 +21,7 @@
 
 import type { Env } from "./env";
 import { withDb } from "./schema";
-
-export type Plan = "free" | "paid";
-
-export type Limits = {
-  plan: Plan;
-  /** The account's requests a day; null on a plan with no such limit. */
-  cap: number | null;
-  /** How fast a device's bulk lane refills, in requests a second. */
-  bulkPerSecond: number;
-  /** A device's requests today — all of them, not only bulk — past which its bulk waits for tomorrow. */
-  deviceBulk: number | null;
-  /** A device's requests today past which it goes slow. */
-  deviceCeiling: number;
-  /** Everyone's requests today past which every device's bulk waits. */
-  fleetBulkWaits: number | null;
-  /** Everyone's requests today past which every device goes slow. */
-  fleetSlow: number | null;
-  /** One agent machine's requests a day. */
-  cliDaily: number;
-  /** New documents in one pass from which a device asks before syncing them. */
-  manyNew: number;
-  /** Everyone's requests today, as they reported them; null when the database could not say. */
-  fleetToday: number | null;
-};
+import type { Limits, Plan } from "./wire";
 
 const TABLE: Readonly<Record<Plan, Omit<Limits, "plan" | "fleetToday">>> = {
   free: {

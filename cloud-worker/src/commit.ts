@@ -1,11 +1,12 @@
 // The worker as a writer of the manifest.
 //
-// An agent has no engine and no copy of the folder, so its changes are
-// made here — and made exactly the way a Mac makes them: new content goes up
-// as immutable blobs, then the manifest is replaced by compare-and-swap on
-// its etag. A Mac cannot tell an agent's write from another Mac's, which is
-// the point: its next poll sees a new etag and its ordinary cycle applies it
-// (engine/src/cloud/engine.rs, `apply_remote`).
+// An agent has no engine and no copy of the folder, and neither has a person
+// in a browser, so their changes are made here — and made exactly the way a
+// Mac makes them: new content goes up as immutable blobs, then the manifest
+// is replaced by compare-and-swap on its etag. A Mac cannot tell one of
+// these writes from another Mac's, which is the point: its next poll sees a
+// new etag and its ordinary cycle applies it (engine/src/cloud/engine.rs,
+// `apply_remote`).
 //
 // What every change here keeps, because that cycle reads it:
 //
@@ -23,9 +24,10 @@
 //   · an address the change adds to the public map is claimed before the
 //     manifest is stored, and one it drops is let go after (addresses.ts).
 //
-// A change to a space is made under the names its person uses (`mount`,
-// mount.ts): the transaction sees `Private/notes/plan.md`, and what is
-// checked and stored is the space's own `notes/plan.md`.
+// An agent's change to a space is made under the names its person uses
+// (`mount`, mount.ts): the transaction sees `Private/notes/plan.md`, and what
+// is checked and stored is the space's own `notes/plan.md`. A browser names a
+// space's paths as the space stores them: its changes are mounted at "".
 //
 // A lost race is nearly always another device's unrelated write, so the loop
 // re-reads and re-applies rather than failing. That is why a caller's own
@@ -178,8 +180,9 @@ export const newFileId = (): string => `f-${randomHex(6)}`;
 /** `wrote` is false when the change left the manifest as it was, or was a
  *  dry run: nothing was stored and `etag` is the manifest's own. `manifest`
  *  is the manifest as this call left it, in its stored form — what `etag`
- *  names when it wrote. */
-export type Committed<T> = { value: T; etag: string; manifest: Manifest; wrote: boolean };
+ *  names when it wrote. `over` is the etag of the manifest the change was
+ *  made to: a caller that held that one knows nothing else moved. */
+export type Committed<T> = { value: T; etag: string; over: string; manifest: Manifest; wrote: boolean };
 
 /**
  * Apply `change` to the manifest and store the result, or answer why not.
@@ -242,7 +245,7 @@ export async function commit<T>(
     }
     if (!tx.changed) {
       await sweep(before);
-      return { value, etag: obj.etag, manifest: parsed as Manifest, wrote: false };
+      return { value, etag: obj.etag, over: obj.etag, manifest: parsed as Manifest, wrote: false };
     }
 
     const next = unmounted(tx.m, mount);
@@ -272,7 +275,7 @@ export async function commit<T>(
       await sweep(before);
       return refusal;
     }
-    if (opts.dryRun) return { value, etag: obj.etag, manifest: next, wrote: false };
+    if (opts.dryRun) return { value, etag: obj.etag, over: obj.etag, manifest: next, wrote: false };
 
     // Only a change to which addresses the map names is the registry's
     // business — an ordinary write asks it nothing.
@@ -306,7 +309,7 @@ export async function commit<T>(
       await sweep(named(next));
       if (claim) await releaseAddresses(env, claim.stale);
       await noteEtag(env, put.etag);
-      return { value, etag: put.etag, manifest: next, wrote: true };
+      return { value, etag: put.etag, over: obj.etag, manifest: next, wrote: true };
     }
   }
   await sweep(lastSeen);

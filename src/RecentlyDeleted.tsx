@@ -10,9 +10,9 @@
 // the Trash changes nothing here.
 
 import { useCallback, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { timeAgo } from "./cloud";
-import { versionsRestoreFile, type DeletedFile } from "./versions";
+import { type DeletedFile } from "./versions";
+import { backend, type Versions } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -37,15 +37,16 @@ export function restoredName(path: string, n = 1): string {
  *  something else lives there now — both survive, always. */
 export async function restoreTarget(root: string, rel: string): Promise<string> {
   const original = `${root}/${rel}`;
-  if (!(await invoke<boolean>("path_exists", { path: original }))) return original;
+  if (!(await backend.documents.exists(original))) return original;
   for (let n = 1; n < 100; n += 1) {
     const candidate = restoredName(original, n);
-    if (!(await invoke<boolean>("path_exists", { path: candidate }))) return candidate;
+    if (!(await backend.documents.exists(candidate))) return candidate;
   }
   return restoredName(original, Date.now());
 }
 
 export default function RecentlyDeleted({
+  store,
   root,
   files,
   onBackToFiles,
@@ -53,6 +54,8 @@ export default function RecentlyDeleted({
   onRestored,
   onError,
 }: {
+  /** The version store: what this reads and restores from. */
+  store: Versions;
   /** The workspace whose history this is — the store's display root. */
   root: string;
   /** What `versions_deleted` answered. The app owns the list: the sidebar's
@@ -74,7 +77,7 @@ export default function RecentlyDeleted({
       setBusy(file.path);
       try {
         const target = await restoreTarget(root, file.path);
-        await versionsRestoreFile(root, target, { ts: file.lastSeenMs, hash: file.hash });
+        await store.restoreFile(root, target, { ts: file.lastSeenMs, hash: file.hash });
         onRestored(target);
       } catch (e) {
         onError?.(`Couldn't bring that file back: ${errText(e)}`);
@@ -82,7 +85,7 @@ export default function RecentlyDeleted({
         setBusy(null);
       }
     },
-    [busy, root, onRestored, onError],
+    [busy, root, onRestored, onError, store],
   );
 
   return (

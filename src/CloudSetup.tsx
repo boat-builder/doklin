@@ -16,7 +16,7 @@
 //            this Mac's own, the workspace downloads, and it opens.
 //
 // Connect and recover end the same way: the key is traded, once, for this
-// Mac's own sign-in as the workspace's superadmin (`cloudRecover`) — the
+// Mac's own sign-in as the workspace's superadmin (`recover`) — the
 // person named here, who becomes it. Nothing keeps the key and nobody types
 // it: the app mints it, the agent sets it, the app spends it.
 //
@@ -34,7 +34,7 @@
 //
 // A Mac holds one copy of a domain's workspace, and every step after a trade
 // refuses a second — so before a code or a key is traded, the wizard asks
-// whether this Mac already has that domain (`cloudHeld`). If it does, the
+// whether this Mac already has that domain (`held`). If it does, the
 // card says where: a copy that syncs is opened instead, and one that has
 // stopped (its sign-in refused, its folder gone) is disconnected first, with
 // what is to be traded still unspent.
@@ -51,18 +51,6 @@ import { useDismiss } from "./dismiss";
 import {
   BUNDLED_WORKER_VERSION,
   WORKER_COMPATIBILITY_DATE,
-  cloudConnect,
-  cloudDisconnect,
-  cloudHeld,
-  cloudJoin,
-  cloudMarker,
-  cloudMintToken,
-  cloudParseInvite,
-  cloudProbe,
-  cloudRecover,
-  cloudRedeem,
-  cloudResume,
-  onCloudProgress,
   timeAgo,
   type CloudHeld,
   type CloudMarker,
@@ -79,6 +67,7 @@ import {
   targetProblem,
   type CloudTarget,
 } from "./cloudPrompts";
+import type { CloudSetup, CloudSync } from "./backend";
 
 export type CloudSetupMode = "connect" | "recover" | "redeem";
 /** A redeem or a recovery ends in a download or a resume: what the outcome
@@ -112,12 +101,17 @@ type Work = { how: CloudSetupOutcome; progress: CloudProgressEvent | null };
 type Joined = { endpoint: string; token: string; name: string };
 
 export default function CloudSetup({
+  setup,
+  sync,
   mode,
   root,
   onClose,
   onConnected,
   onOpen,
 }: {
+  setup: CloudSetup;
+  /** A copy held here that is in the way is let go of through it. */
+  sync: CloudSync;
   mode: CloudSetupMode;
   /** The open workspace folder, if any: what "connect" uploads, what "resume" adopts. */
   root: string | null;
@@ -168,7 +162,7 @@ export default function CloudSetup({
   useEffect(() => {
     if (!withKey) return;
     let live = true;
-    void cloudMintToken()
+    void setup.mintToken()
       .then((t) => {
         if (live && typeof t === "string" && t) setKey(t);
         else if (live) setKeyError("Couldn't make a key.");
@@ -179,17 +173,16 @@ export default function CloudSetup({
     return () => {
       live = false;
     };
-  }, [withKey]);
+  }, [withKey, setup]);
 
   // Upload / download progress while a flow runs.
-  useEffect(() => {
-    const un = onCloudProgress((e) => {
-      setWork((w) => (w ? { ...w, progress: e } : w));
-    });
-    return () => {
-      void un.then((f) => f()).catch(() => {});
-    };
-  }, []);
+  useEffect(
+    () =>
+      setup.onProgress((e) => {
+        setWork((w) => (w ? { ...w, progress: e } : w));
+      }),
+    [setup],
+  );
 
   const target: CloudTarget | null = useMemo(() => {
     if (targetKind === "domain") {
@@ -246,9 +239,9 @@ export default function CloudSetup({
       setProbing(true);
       try {
         const [result, marker, copy] = await Promise.all([
-          cloudProbe(at, bearer),
-          root ? cloudMarker(root).catch(() => null) : Promise.resolve(null),
-          cloudHeld(at),
+          setup.probe(at, bearer),
+          root ? setup.marker(root).catch(() => null) : Promise.resolve(null),
+          setup.held(at),
         ]);
         setProbed({ endpoint: at, result, marker });
         setHeld(copy ? { at, copy } : null);
@@ -258,7 +251,7 @@ export default function CloudSetup({
         setProbing(false);
       }
     },
-    [root],
+    [root, setup],
   );
   const probe = useCallback(() => probeWith(endpoint, key), [probeWith, endpoint, key]);
 
@@ -271,12 +264,12 @@ export default function CloudSetup({
   const signIn = useCallback(
     async (at: string): Promise<Joined> => {
       if (joined) return joined;
-      const r = await cloudRecover(at, key, personEmail.trim(), personName.trim() || null);
+      const r = await setup.recover(at, key, personEmail.trim(), personName.trim() || null);
       const got = { endpoint: r.endpoint, token: r.token, name: r.name || r.email };
       setJoined(got);
       return got;
     },
-    [joined, key, personEmail, personName],
+    [joined, key, personEmail, personName, setup],
   );
 
   /** Download the workspace at `at` into its own folder under ~/Doklin and
@@ -286,14 +279,14 @@ export default function CloudSetup({
       setError(null);
       setWork({ how: "join", progress: null });
       try {
-        onConnected(await cloudJoin(at, bearer), "join");
+        onConnected(await setup.join(at, bearer), "join");
       } catch (e) {
         setError(errText(e));
       } finally {
         setWork(null);
       }
     },
-    [onConnected],
+    [onConnected, setup],
   );
 
   const downloadHere = useCallback(async () => {
@@ -323,12 +316,12 @@ export default function CloudSetup({
     try {
       // Asked before the trade, which would refuse to spend the code on a
       // domain this Mac already has.
-      const copy = await cloudHeld(endpoint);
+      const copy = await setup.held(endpoint);
       if (copy) {
         setHeld({ at: endpoint, copy });
         return;
       }
-      const r = await cloudRedeem(endpoint, code);
+      const r = await setup.redeem(endpoint, code);
       got = { endpoint: r.endpoint, token: r.token, name: r.name || r.email };
       setJoined(got);
       setEndpointInput(r.endpoint);
@@ -345,7 +338,7 @@ export default function CloudSetup({
     // outcome card offers both, with the credential the code just bought.
     if (root) {
       try {
-        const [result, marker] = await Promise.all([cloudProbe(got.endpoint, got.token), cloudMarker(root)]);
+        const [result, marker] = await Promise.all([setup.probe(got.endpoint, got.token), setup.marker(root)]);
         if (marker && result.workspace && marker.wsId === result.workspace.id) {
           setProbed({ endpoint: got.endpoint, result, marker });
           return;
@@ -355,7 +348,7 @@ export default function CloudSetup({
       }
     }
     await download(got.endpoint, got.token);
-  }, [endpoint, code, download, root]);
+  }, [endpoint, code, download, root, setup]);
 
   /**
    * Disconnect the copy that has stopped syncing, then go on: a join trades
@@ -367,7 +360,7 @@ export default function CloudSetup({
     setError(null);
     setLettingGo(true);
     try {
-      await cloudDisconnect(heldCopy.root);
+      await sync.disconnect(heldCopy.root);
       setHeld(null);
     } catch (e) {
       setError(errText(e));
@@ -376,7 +369,7 @@ export default function CloudSetup({
       setLettingGo(false);
     }
     if (!withKey) await redeem();
-  }, [heldCopy, withKey, redeem]);
+  }, [heldCopy, withKey, redeem, sync]);
 
   /** One paste fills both boxes: the line as it was sent, the whole message
    *  around it, or one half on its own — whatever the engine can find in it. */
@@ -392,7 +385,7 @@ export default function CloudSetup({
         setCode(text);
       }
     };
-    void cloudParseInvite(text)
+    void setup.parseInvite(text)
       .then((p) => {
         if (p.endpoint) {
           setEndpointInput(p.endpoint);
@@ -424,7 +417,7 @@ export default function CloudSetup({
     if (!root || !probed) return;
     void run("connect", async () => {
       const got = await signIn(probed.endpoint);
-      await cloudConnect(root, got.endpoint, got.token, cleanName);
+      await setup.connect(root, got.endpoint, got.token, cleanName);
       return root;
     });
   };
@@ -432,7 +425,7 @@ export default function CloudSetup({
     if (!root || !probed) return;
     void run("resume", async () => {
       const got = await signIn(probed.endpoint);
-      await cloudResume(root, got.endpoint, got.token);
+      await setup.resume(root, got.endpoint, got.token);
       return root;
     });
   };

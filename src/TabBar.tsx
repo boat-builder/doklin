@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
 import ContextMenu from "./ContextMenu";
+import { backend } from "./backend";
+import { keys } from "./keys";
 import { dragWindowFromGap } from "./windowDrag";
 import { isUnsaved, isUnsupportedTab, tabLabel, type Tab } from "./tabs";
 
@@ -18,7 +20,8 @@ type Props = {
   dirty: boolean;
   onSwitch: (id: string) => void;
   onClose: (id: string) => void;
-  onNewNote: () => void;
+  /** A new untitled note; absent where the platform keeps none. */
+  onNewNote?: () => void;
   onReorder: (tabs: Tab[]) => void;
   // Dragging a tab DOWN out of the bar hands the gesture to the host (the
   // split-view drop zones): `onDragOut` streams pointer positions while the
@@ -259,7 +262,8 @@ export default function TabBar({
                 aria-label={
                   edited ? `Close ${tabLabel(t)} (unsaved changes)` : `Close ${tabLabel(t)}`
                 }
-                title="Close tab (⌘W)"
+                // In a window that is not the app's, ⌘W is the window's own.
+                title={backend.windows ? `Close tab (${keys("⌘W")})` : "Close tab"}
                 onClick={(e) => {
                   e.stopPropagation();
                   onClose(t.id);
@@ -271,14 +275,16 @@ export default function TabBar({
             </div>
           );
         })}
-        <button
-          className="tab-new"
-          onClick={onNewNote}
-          aria-label="New note"
-          title="New note (⌘N / ⌘T)"
-        >
-          <PlusIcon />
-        </button>
+        {onNewNote && (
+          <button
+            className="tab-new"
+            onClick={onNewNote}
+            aria-label="New note"
+            title={`New note (${keys("⌘N")} / ${keys("⌘T")})`}
+          >
+            <PlusIcon />
+          </button>
+        )}
       </div>
       {tabMenu && onHistory && (
         <ContextMenu

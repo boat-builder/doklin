@@ -8,15 +8,15 @@ agents, document API: [docs/cloud-people-agents.md](../docs/cloud-people-agents.
 
 ## Headers and auth
 
-- `/api/*`: `Authorization: Bearer <token>`, JSON. No CORS, cookies, sessions. Bad bearer → `401`.
+- `/api/*`: `Authorization: Bearer <token>`, JSON. No CORS. Bad bearer → `401`. The one cookie is a browser's sign-in (*Browser version*).
 - A bearer somebody took away (person removed, device signed out; its hash is in `removed_tokens`) → `401 {error, "removed": true}`. That body alone has the device delete its copy; every other unknown bearer (a wiped domain's, or one nobody ever held) is a bare `401`.
 - Engine sends `x-doklin-device: <deviceId>` (presence, `createdBy`; must match `ID_RE`) and `x-doklin-client: <app version>` (logs only). CLI sends `x-doklin-client: cli/<version>`; the iPhone's engine sends `ios/<version>`.
 - `x-doklin-used: <integer>` — the caller's requests today (UTC day) on this domain; any authenticated route, at most every 15 min. Upserted after the answer (`ctx.waitUntil`) into `usage` under the caller's `tokenId`, replacing its last report; a report within a minute of the last is not written; a malformed header is ignored. `fleetToday` = today's sum.
 - Loop catchers, right after `authenticate`: `DEVICE_LIMIT` (a person's device) and `AGENT_LIMIT` (an agent's machine), keyed by `tokenId`, numbers in `wrangler.toml`'s `[[ratelimits]]`. Over → `429 {error: "This device is sending too many requests — it will slow down by itself."}` + `Retry-After: 60`, before anything else is done (its `x-doklin-used` included). Approximate, a loop catcher only: the refused request has been counted against the account already. A binding the env lacks is not checked.
-- Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → **the key**, nobody's sign-in: `GET /api/meta` and `POST /api/auth/recover` only, `403` elsewhere (`handleKey`, `api.ts`). `dka_…` → `agent_tokens` → `agent`; else `tokens` → the person's role, read every request: `superadmin` when the `superadmin` row names them, else `members.role` (`owner` | `member`).
+- Bearer kinds (`src/auth.ts`): `OWNER_TOKEN` → **the key**, nobody's sign-in: `GET /api/meta` and `POST /api/auth/recover` only, `403` elsewhere (`handleKey`, `api.ts`). `dka_…` → `agent_tokens` → `agent`; `dkw_…` → a browser's sign-in, `401` as a bearer (*Browser version*); else `tokens` → the person's role, read every request: `superadmin` when the `superadmin` row names them, else `members.role` (`owner` | `member`).
 - Gating is `can(role, action)` over the one table in `src/roles.ts`: members hold `work`, `people.see`, `agents.own` and `devices.own`; owners also `people.invite`, `people.remove`, `people.roles`, `agents.manage`, `pages.manage`; the superadmin also `people.recover` and `workspace.manage`.
-- Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. A route the role may not use → `403 {error}`, naming who may (`refusal`, `roles.ts`).
-- No bearer, matched on method and path exactly: `POST /api/auth/join`, `POST /api/agent/login`. A join (an invite's code, or a device code) or a trade of the key (`recover`) is how a device gets its bearer.
+- Agent bearer off `/api/agent` → `403`; non-agent bearer on `/api/agent/*` → `403`. A browser's sign-in off `/api/web` and its few reads → `403`; anybody else's credential on `/api/web/*` → `403`. A route the role may not use → `403 {error}`, naming who may (`refusal`, `roles.ts`).
+- No bearer, matched on method and path exactly: `POST /api/auth/join`, `POST /api/agent/login`, `POST /api/web/session`. A join (an invite's code, or a device code) or a trade of the key (`recover`) is how a device gets its bearer; a browser's session takes the same codes.
 - No `DB` / D1 down: every bearer but the key → `503` (never `401`); `/api/meta` with the key still answers, `"d1": null`.
 - Unbound: `/api/poll`, `/api/manifest`, `GET /api/workspace` → `404 {"error":"not bound"}`.
 
@@ -46,7 +46,7 @@ GET  /api/manifest[?since=e]  body + x-manifest-etag; 304 unchanged
 PUT  /api/manifest  x-base-etag (428 without) → {etag, seq} + x-manifest-etag; 412 {etag} lost
      race; 400 invalid; 426 other manifest version; 413 > 4 MB; 409 {error, taken: [slug]} when
      the public map names an address another space holds
-GET    /api/blobs/<fid>/<hash>  bytes, content-type as uploaded
+GET    /api/blobs/<fid>/<hash>  bytes, content-type as uploaded; private, immutable (Browser version)
 PUT    /api/blobs/<fid>/<hash>  create-only → {stored, existed, hash, size}; 413 > 25 MB; the
                                 same bytes again are stored again (the sweep's day starts over)
 GET  /api/versions/index  index + x-versions-etag; 404 none
@@ -159,7 +159,7 @@ GET    /api/auth/devices  anyone; the caller's devices, an owner everyone's: {de
 DELETE /api/auth/devices/<id>  its person, or an owner but not one of the superadmin's (409); its
        hash goes to removed_tokens. Somebody else's is `404` to a member
 DELETE /api/auth/session  a device ending its own sign-in: its row, presence and lease go, nothing
-       goes to removed_tokens
+       goes to removed_tokens. A browser's answer also ends it there (Browser version)
 POST   /api/auth/agents  anyone; {name, scopes, codeHash, expiresAt ≤ 24 h} → 201 {agent}: the caller's
 GET    /api/auth/agents  anyone; the caller's agents, an owner everyone's: {agents: [{id, name, scopes,
        createdAt, lastUsedAt, memberId, mine, machines: [{id, host, createdAt}],
@@ -245,6 +245,72 @@ on every route (a version flag makes it a stem: `v1.2` + `v=md` is `v1.2.md`).
 Also `400`: hidden, ignored, temp-suffix or sidecar paths. `409`:
 case-insensitive collision.
 
+## Browser version (`src/web.ts`; a browser's sign-in only)
+
+A browser is a device: a row of `tokens`, listed and signed out with the
+rest. Its token starts `dkw_` (`BROWSER_TOKEN_PREFIX`, `members.ts`; inside
+what is hashed) and is never in a body: it is the cookie
+
+```
+__Host-doklin=<token>; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=34560000
+```
+
+set by `POST /api/web/session` and again by every `GET /api/meta` it
+authenticates (400 days from the app's last start).
+
+- The cookie counts only with no `Authorization` header and only on a request
+  the app's own script made (`ownScript`, `auth.ts`): `Sec-Fetch-Site:
+  same-origin`, `Sec-Fetch-Dest: empty`, `Sec-Fetch-Mode: cors | same-origin`.
+  Anything else carrying it (an `<img>`, a frame, a link, a ping, another
+  origin of the site) is nobody: `401`, cookie untouched. `POST
+  /api/web/session` asks the same of its caller: `403`.
+- `dkw_…` as a bearer → `401`. Any other token as the cookie → `401`.
+- Answered on `/api/web/*` and on `ALSO` (`web.ts`): `GET meta`, `GET|POST
+  poll`, `GET manifest`, `GET blobs/…`, the last two under `spaces/<id>/`,
+  `PUT spaces/private`, `GET pages`, `DELETE pages/<slug>` (both an owner's,
+  by role as for a Mac), `DELETE auth/session`. Everything else → `403`. **A route added to `ALSO` must change nothing on `GET`.**
+- Ended: `DELETE /api/auth/session` and `401 {removed: true}` answer a browser
+  with `Set-Cookie` (`Max-Age=0`) and `Clear-Site-Data: "cache", "storage"`. A
+  cookie that is nobody's → `401` + the `Set-Cookie` alone.
+- `GET blobs/…` → `Cache-Control: private, max-age=31536000, immutable`,
+  `Vary: Cookie, Authorization`, for every caller.
+
+A section is its id (`""`/absent the shared workspace, else a space the
+person is in; any other → `404`), a path is as that section stores it, never
+under `Private/` or `Restricted/`. Signed with the person's member id. Every
+change to documents answers `etag`, the section's manifest once it was made,
+and `over`, the manifest it was made to (a move between sections is more than
+one write and answers neither). Commit lost 5 times → `503`.
+
+```
+POST   session  no credential; {code, deviceId?, deviceName?} → 201 {tokenId, member} + the cookie;
+       400 not a code; 401 unknown/expired (identical); 403 not the app's own script; 503
+PUT    doc?space=&path=  {md?: {text, ifRev}, meta?: {text, ifRev}} → {md?, meta?, etag, over};
+       each saved file is {fid, …its entry in the manifest}. ONE manifest write. ifRev = the
+       revision read, null = the file must not exist yet. Either part moved on → 409 {part:
+       "md"|"meta", rev: now|null}, nothing written. `meta` is the sidecar's whole text. No marker
+       or anchor check: a thread is a person's to move or remove. An html page is never written
+       here (400). The same bytes are no revision: etag = over
+DELETE doc?space=&path=[&v=md|html]  the document, or one version of two (last_version → 409)
+DELETE folder?space=&path=  every file under it → {kind: "folder", path, files}; 404 none
+POST   move  {from: {space?, path}, to: {space?, path}, kind: "document"|"folder"} → {kind, from, to,
+       files}; to exactly `to`, never "into it". Across sections: newLinks, unpublished?, 16 files
+POST   copy  the same body → {kind, from, to, files}: every file written again at `to` as a new
+       file (new id, rev 1), in the same section or another; 16 files; 409 a name that is taken.
+       A copy takes no page and no link with it
+GET    search?q=&limit=  every section the person is in → {query, results: [{space, fid, path,
+       matches, moreLines?, inName?, inComments?}], total, truncated?, notSearched?: [{space, path}],
+       sectionsNotSearched?: [space]}; 202 {indexing, pending}
+PUT    pages  {space?, path, kind, slug?, title?, desc?} → 201|200 {slug, url, kind, path, documents,
+       created}; path "" + folder = the whole section
+DELETE pages?slug=  in whichever section of theirs holds it; elsewhere or nowhere → 404
+PUT    home  {slug | null} → {home}; a page of the shared workspace (another section's → 409)
+```
+
+Shared with the document API, never copied: `commit.ts`; `changes.ts`
+(removing a document or a version, moving in and across sections, copying,
+`keepPublic`); `publishing.ts`; `search.ts` (`searchIn`).
+
 ## Public routes (`src/public.ts`; no auth; GET/HEAD, else 405)
 
 ```
@@ -259,15 +325,33 @@ case-insensitive collision.
 anything else            404 page
 ```
 
+Every page above goes out under the page policy — `default-src 'none'`, scripts only
+from `<origin>/__web/<tag>/mermaid.js`, no forms, no `<base>`
+([docs/cloud-publishing.md](../docs/cloud-publishing.md)) — except an html document,
+which keeps `sandbox allow-scripts allow-popups`. Every response of the worker's, the
+API's included, carries `X-Content-Type-Options: nosniff`.
+
 Static assets, served by Cloudflare from `doklin-cloud-web/` without running
 the worker (free, uncounted; headers from its `_headers`, `cloud-worker/web/_headers`):
 
 ```
-/__web/<tag>/mermaid.js  immutable, content-tagged (the tag is spliced into the worker)
+/__web/<tag>/mermaid.js  immutable, content-tagged (the tag is spliced into the worker);
+                         the one script a public page runs
 /__web/fonts/<file>      the app's bundled fonts, a week
 /og.png · /favicon.ico · /apple-touch-icon.png   a week
 /robots.txt
+/app                     the browser version's page (`app.html`, served without its extension:
+                         Cloudflare's default `html_handling`); `no-cache`; its own policy:
+                         `script-src 'self'`, `connect-src 'self'`, `frame-ancestors 'none'`
+/app/assets/<name>-<hash>  its scripts, styles and fonts; immutable
+/app/gate.js             what the page runs first, as written (`src/web/gate.js`)
+/app/frame               the page an html document is shown in (`app/frame.html`); `no-cache`;
+                         `sandbox allow-scripts allow-popups; frame-ancestors 'self'`
 ```
+
+**No path may match two rules that set the same header**: Cloudflare joins
+them with a comma, and two policies joined are two policies, both enforced.
+`/app`, `/app/frame` and `/app/assets/*` are three rules that never meet.
 
 One of those paths that reaches the worker names nothing: a 404, no bucket read.
 
@@ -399,7 +483,8 @@ Teardown: app wipe, then `wrangler delete`, `wrangler d1 delete`, `wrangler r2 b
 ```sh
 pnpm typecheck:worker
 pnpm test:worker       # node cloud-worker/test/run.mjs [--bundle <file>]; fake R2, D1 on node:sqlite
-pnpm bundle:worker     # node scripts/bundle-worker.mjs [--no-mermaid] → cloud-worker/dist/ (worker + doklin-cloud-web/)
+pnpm bundle:worker     # node scripts/bundle-worker.mjs [--no-mermaid] [--no-app] → cloud-worker/dist/ (worker + doklin-cloud-web/)
 node verify-harness/serve-worker.mjs   # bundle over test/seed.mjs on :8787
 node verify-harness/drive-cli.mjs      # built cli/ against the worker
+node verify-harness/drive-web.mjs      # the browser version, built, in real browsers over https
 ```

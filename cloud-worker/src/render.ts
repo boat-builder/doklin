@@ -2,13 +2,15 @@
 // the app's own reading CSS, light and dark, column widths from the meta
 // sidecar as a <colgroup>, links between public notes rewritten, the folder
 // table of contents, the MD/HTML pill, the "back to the folder" crumb, and
-// the mermaid hydration script. Pure string work: what feeds it (pages.ts)
-// does the reading.
+// the tag that names the mermaid module. Pure string work: what feeds it
+// (pages.ts) does the reading.
 //
-// Everything renders without JavaScript. A ```svg drawing is drawn here,
-// through the app's own sanitizer (src/drawingSvg.ts); a mermaid diagram
-// keeps its source as a code block until the hydrator swaps the SVG in, and
-// stays a code block for a reader with scripts off.
+// Everything renders without JavaScript, and no page carries a script of its
+// own: the policy a page is served under (public.ts) runs the mermaid module
+// and nothing written into a page. A ```svg drawing is drawn here, through
+// the app's own sanitizer (src/drawingSvg.ts); a mermaid diagram keeps its
+// source as a code block until that module swaps the SVG in, and stays a
+// code block for a reader with scripts off.
 
 import { Marked, Renderer, type Tokens } from "marked";
 import { escapeHtml } from "./http";
@@ -256,7 +258,7 @@ ${p.hasHtml ? pillHtml(p.meta.pageUrl, "md") : ""}
 ${p.bodyHtml}
 </main>
 ${footerHtml(p.meta.hostname)}
-${p.bodyHtml.includes('class="language-mermaid"') ? mermaidHydrator(p.mermaidTag) : ""}
+${p.bodyHtml.includes('class="language-mermaid"') ? mermaidScript(p.mermaidTag) : ""}
 </body>
 </html>`;
 }
@@ -405,50 +407,17 @@ ${footerHtml(p.meta.hostname)}
 
 /* ---------- Mermaid ---------- */
 
+/** Where a domain serves the mermaid module of the web directory tagged `tag`. */
+export const mermaidModulePath = (tag: string): string => `/__web/${tag}/mermaid.js`;
+
 /**
- * The diagram renderer, injected only into pages whose markdown carries a
- * ```mermaid block. It imports the mermaid module the domain serves (the
- * app's mermaidConfig and finishMermaidSvg ride along in it, so diagrams are
- * drawn in the app's drawing grammar, from this page's palette — light and
- * dark) and swaps each code block for its rendered SVG.
- * A source that doesn't parse keeps its plain code block, and without
- * JavaScript the page still shows every source.
+ * The diagram script, on pages whose markdown carries a ```mermaid block
+ * and on no other: the module the domain serves
+ * (cloud-worker/web/mermaid-entry.ts), which swaps each code block for its
+ * drawn SVG. A tag that names an address, never a script written into the
+ * page — a page's policy (public.ts) runs that one address and nothing else.
  */
-function mermaidHydrator(tag: string): string {
-  const moduleUrl = `/__web/${tag}/mermaid.js`;
-  return `<script type="module">
-(async () => {
-  const codes = [...document.querySelectorAll("pre > code.language-mermaid")];
-  if (codes.length === 0) return;
-  let mod;
-  try { mod = await import(${JSON.stringify(moduleUrl)}); } catch { return; }
-  const mermaid = mod.default;
-  const spots = codes.map((code) => ({
-    source: code.textContent,
-    pre: code.parentElement,
-    holder: Object.assign(document.createElement("div"), { className: "dk-mermaid" }),
-  }));
-  let seq = 0;
-  const renderAll = async () => {
-    // Re-initialized per pass: the palette derives from the page's current
-    // colors, and the prefers-color-scheme listener below re-renders on flips.
-    mermaid.initialize(mod.mermaidConfig());
-    for (const spot of spots) {
-      try {
-        const { svg } = await mermaid.render("dk-mermaid-" + ++seq, spot.source);
-        spot.holder.innerHTML = mod.finishMermaidSvg(svg);
-        if (!spot.holder.isConnected) spot.pre.replaceWith(spot.holder);
-      } catch {
-        if (spot.holder.isConnected) spot.holder.replaceWith(spot.pre);
-      }
-    }
-    document.documentElement.dataset.mermaid = String(spots.filter((s) => s.holder.isConnected).length);
-  };
-  await renderAll();
-  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", renderAll);
-})();
-</script>`;
-}
+const mermaidScript = (tag: string): string => `<script type="module" src="${mermaidModulePath(tag)}"></script>`;
 
 /* ---------- Styles ---------- */
 

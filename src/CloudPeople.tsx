@@ -27,12 +27,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  cloudInvite,
-  cloudPeople,
-  cloudRevokeDevice,
-  cloudRevokePerson,
-  cloudSetRole,
-  cloudWithdrawInvite,
   may,
   mayInviteAgain,
   revealSoon,
@@ -44,6 +38,7 @@ import {
 } from "./cloud";
 import CloudAgents from "./CloudAgents";
 import CloudDevices from "./CloudDevices";
+import type { CloudAccess } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -69,19 +64,24 @@ const TABS: { tab: AccessTab; label: string }[] = [
 ];
 
 export default function CloudPeople({
+  access,
   root,
   name,
   domain,
+  toSend,
   tab,
   onTab,
   copy,
   copied,
 }: {
+  access: CloudAccess;
   /** The connected workspace's folder — every command is keyed by it. */
   root: string;
   /** What the workspace is called — what people are invited to and removed from. */
   name: string;
   domain: string;
+  /** An invite's line as it is sent (`inviteToSend`, cloud.ts). */
+  toSend: (line: string) => string;
   tab: AccessTab;
   onTab: (tab: AccessTab) => void;
   /** The dialog's clipboard helper, so "Copied ✓" reads the same everywhere. */
@@ -102,11 +102,11 @@ export default function CloudPeople({
 
   const load = useCallback(async () => {
     try {
-      setPeople(await cloudPeople(root));
+      setPeople(await access.people(root));
     } catch (e) {
       setError(errText(e));
     }
-  }, [root]);
+  }, [root, access]);
 
   useEffect(() => {
     void load();
@@ -142,7 +142,7 @@ export default function CloudPeople({
     setBusy(true);
     setError(null);
     try {
-      const invited = await cloudInvite(root, draft.email.trim(), draft.name.trim() || null, draft.days);
+      const invited = await access.invite(root, draft.email.trim(), draft.name.trim() || null, draft.days);
       // The one moment the code exists in the clear: nothing here writes it
       // down, and the domain kept only its sha256.
       setMinted(invited);
@@ -154,7 +154,7 @@ export default function CloudPeople({
     } finally {
       setBusy(false);
     }
-  }, [draft, root, load]);
+  }, [draft, root, load, access]);
 
   if (!people) {
     // A domain that could not be asked says so and offers nothing: an empty
@@ -228,7 +228,7 @@ export default function CloudPeople({
                   nobody, you included, can read it back.
                 </p>
                 <div className="modal-buttons">
-                  <button className="modal-btn is-primary" data-testid="copy-invite-line" onClick={() => copy("invite-line", minted.blob)}>
+                  <button className="modal-btn is-primary" data-testid="copy-invite-line" onClick={() => copy("invite-line", toSend(minted.blob))}>
                     {copied === "invite-line" ? "Copied ✓" : "Copy the line to send"}
                   </button>
                   <button className="modal-btn" onClick={() => copy("invite-code", minted.code)}>
@@ -378,7 +378,7 @@ export default function CloudPeople({
                                   className="modal-btn is-danger-solid"
                                   data-testid={`revoke-mac-yes-${d.id}`}
                                   disabled={busy}
-                                  onClick={() => void act(() => cloudRevokeDevice(root, d.id))}
+                                  onClick={() => void act(() => access.revokeDevice(root, d.id))}
                                 >
                                   Sign out
                                 </button>
@@ -415,7 +415,7 @@ export default function CloudPeople({
                               data-testid={`set-role-yes-${m.id}`}
                               disabled={busy}
                               onClick={() =>
-                                void act(() => cloudSetRole(root, m.id, m.role === "owner" ? "member" : "owner"))
+                                void act(() => access.setRole(root, m.id, m.role === "owner" ? "member" : "owner"))
                               }
                             >
                               {m.role === "owner" ? "Make a member" : "Make an owner"}
@@ -446,7 +446,7 @@ export default function CloudPeople({
                               className="modal-btn is-danger-solid"
                               data-testid={`remove-person-yes-${m.id}`}
                               disabled={busy}
-                              onClick={() => void act(() => cloudRevokePerson(root, m.id))}
+                              onClick={() => void act(() => access.revokePerson(root, m.id))}
                             >
                               Remove
                             </button>
@@ -503,7 +503,7 @@ export default function CloudPeople({
                           className="modal-btn is-danger-solid"
                           data-testid={`withdraw-yes-${i.id}`}
                           disabled={busy}
-                          onClick={() => void act(() => cloudWithdrawInvite(root, i.id))}
+                          onClick={() => void act(() => access.withdrawInvite(root, i.id))}
                         >
                           Withdraw
                         </button>
@@ -532,6 +532,7 @@ export default function CloudPeople({
       {canDevices && (
         <div className="cloud-stack" role="tabpanel" data-testid="pane-devices" hidden={showing !== "devices"}>
           <CloudDevices
+            access={access}
             root={root}
             name={name}
             domain={domain}
@@ -547,6 +548,7 @@ export default function CloudPeople({
       {canAgents && (
         <div className="cloud-stack" role="tabpanel" data-testid="pane-agents" hidden={showing !== "agents"}>
           <CloudAgents
+            access={access}
             root={root}
             domain={domain}
             people={members}

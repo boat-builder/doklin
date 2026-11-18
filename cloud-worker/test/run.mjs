@@ -1445,7 +1445,7 @@ await test("blobs: content-addressed round-trip; a re-put is a no-op; nobody lis
   assert.equal(got.status, 200);
   assert.equal(got.text, content, "the first upload stands");
   assert.equal(got.headers.get("content-type"), "text/markdown");
-  assert.equal(got.headers.get("cache-control"), "no-store");
+  assert.equal(got.headers.get("cache-control"), "private, max-age=31536000, immutable", "an address never holds other bytes, so a browser may keep them");
 
   assert.equal((await call("/api/blobs/f-doc1", { token: OWNER })).status, 404, "no inventory to list");
 
@@ -2282,6 +2282,9 @@ async function webDirectory(fonts) {
   assert.equal(mermaid.headers.get("cache-control"), "public, max-age=31536000, immutable", "one Cache-Control rule matches");
   assert.equal(mermaid.headers.get("x-robots-tag"), "noindex");
   assert.ok(mermaid.text.includes("mermaidConfig") && mermaid.text.includes("finishMermaidSvg"), "with the app's diagram grammar");
+  assert.ok(mermaid.text.includes("pre > code.language-mermaid"), "and it draws a page's diagrams itself: no page carries a script for it");
+  assert.equal(mermaid.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(robots.headers.get("x-content-type-options"), "nosniff", "every file the web directory serves");
   assert.equal(createHash("sha256").update(mermaid.bytes).digest("hex").slice(0, 12), tag, "the tag is the module's hash");
   assert.equal((await pub("/__web/abc123/mermaid.js")).status, 404, "another tag names nothing");
 
@@ -2292,6 +2295,7 @@ async function webDirectory(fonts) {
     assert.equal(font.status, 200, file);
     assert.equal(font.headers.get("content-type"), "font/woff2");
     assert.equal(font.headers.get("cache-control"), "public, max-age=604800, immutable");
+    assert.equal(font.headers.get("x-content-type-options"), "nosniff");
     assert.ok(font.bytes.equals(vendored), `${file}: the app's own file`);
   }
   assert.equal((await rawGet("/__web/fonts/inter-latin-opsz-normal.woff2", { method: "HEAD" })).bytes.length, 0);
@@ -2299,6 +2303,53 @@ async function webDirectory(fonts) {
     assert.equal((await pub(p)).status, 404, p);
   }
 }
+
+await test(`the browser version: ${bundlePath ? "its page, scripts and frame page from the web directory, each under its own policy" : "nothing at /app from a source compile, and no page of the workspace's either"}`, async () => {
+  if (!webDir) {
+    // No web directory: /app is nobody's. It is a reserved address, so the
+    // worker does not take it for a page's either.
+    assert.equal((await pub("/app")).status, 404);
+    assert.equal((await pub("/app/frame")).status, 404);
+    return;
+  }
+  const page = await pub("/app");
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type"), /text\/html/);
+  assert.equal(page.headers.get("cache-control"), "no-cache", "one Cache-Control rule matches, and it is not kept");
+  const policy = page.headers.get("content-security-policy");
+  assert.ok(!policy.includes(","), "one policy: two rules matching would be two, both enforced");
+  assert.match(policy, /(^|; )script-src 'self'(;|$)/, "script from this domain's files only");
+  assert.match(policy, /(^|; )frame-ancestors 'none'(;|$)/, "framed by nobody");
+  assert.equal(page.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(page.headers.get("x-robots-tag"), "noindex");
+  assert.ok(!/<script(?![^>]* src=)[^>]*>/.test(page.text), "the page carries no script of its own: its policy would refuse one");
+  for (const spelled of ["/app.html", "/app/"]) {
+    const sent = await rawGet(spelled);
+    assert.equal(sent.status, 307, spelled);
+    assert.equal(sent.headers.get("location"), "/app");
+  }
+
+  // Everything the page names is under /app/, and there.
+  const named = [...page.text.matchAll(/(?:src|href)="(\/app\/[^"]+)"/g)].map((m) => m[1]);
+  assert.ok(named.includes("/app/gate.js"), "the gate, by its own name");
+  const entry = named.find((n) => /^\/app\/assets\/.+\.js$/.test(n));
+  assert.ok(entry, "and the app's script, by its content's");
+  for (const file of named) assert.equal((await rawGet(file)).status, 200, file);
+  const script = await rawGet(entry);
+  assert.match(script.headers.get("content-type"), /javascript/);
+  assert.equal(script.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  assert.equal(script.headers.get("content-security-policy"), null, "a policy is a page's");
+  const gate = await pub("/app/gate.js");
+  assert.ok(gate.text === readFileSync(path.join(workerDir, "..", "src", "web", "gate.js"), "utf8"), "the gate as it was written: an old browser has to read it");
+  assert.doesNotThrow(() => new Function(gate.text), "and it is a script by itself");
+
+  // The page an html document is shown in: sandboxed, and nothing of the page's policy.
+  const frame = await pub("/app/frame");
+  assert.equal(frame.status, 200);
+  assert.equal(frame.headers.get("content-security-policy"), "sandbox allow-scripts allow-popups; frame-ancestors 'self'");
+  assert.equal(frame.headers.get("cache-control"), "no-cache");
+  assert.ok(frame.text.includes("frame-html") && frame.text.includes("frame-ready"), "it asks for the markup and becomes it");
+});
 
 await test(`public: the landing page; robots, icons, the OG image, fonts and the mermaid module (${bundlePath ? "from the web directory" : "404s: a source compile has no web directory"}); an empty folder page; anything else a 404 page`, async () => {
   // The map the validation test left names a root page whose blob never
@@ -2506,7 +2557,7 @@ await test("public: every page wears the app's own theme — its tokens light an
   assert.ok(!(await pub("/plan")).text.includes('rel="preload"'), "a framed rendition sets no type of its own, so fetches none");
 });
 
-await test("public: column widths come from the meta sidecar under the app's own table identity; comment markers are stripped; the hydrator rides only pages with a diagram", async () => {
+await test("public: column widths come from the meta sidecar under the app's own table identity; comment markers are stripped; the mermaid module is named only on pages with a diagram", async () => {
   const sizes = await pub("/sizes");
   assert.ok(
     sizes.text.includes('<table class="dk-cols"><colgroup><col style="width:260px"><col><col style="width:140px"></colgroup>'),
@@ -2522,12 +2573,10 @@ await test("public: column widths come from the meta sidecar under the app's own
 
   const diagram = await pub("/diagram");
   assert.ok(diagram.text.includes('<code class="language-mermaid">flowchart LR'), "the source stays a code block for readers without scripts");
-  const asked = diagram.text.match(/import\("(\/__web\/[a-z0-9]+\/mermaid\.js)"\)/)?.[1];
-  assert.ok(asked, "the hydrator imports the tagged module");
+  const asked = diagram.text.match(/<script type="module" src="(\/__web\/[a-z0-9]+\/mermaid\.js)"><\/script>\n<\/body>/)?.[1];
+  assert.ok(asked, "the page names the tagged module, which draws its diagrams");
   if (bundlePath) assert.equal((await rawGet(asked)).status, 200, "at the path the web directory serves it");
   else assert.equal(asked, "/__web/dev/mermaid.js", "a source compile tags its module dev");
-  assert.ok(diagram.text.includes("mermaid.initialize(mod.mermaidConfig())"), "the app's diagram grammar, from the page's own palette");
-  assert.ok(diagram.text.includes("mod.finishMermaidSvg(svg)"), "finished as the app finishes it");
 
   // Drawings are drawn by the worker itself, through the app's sanitizer:
   // no script needed, each with its own ids, nothing executable kept, and
@@ -2539,6 +2588,92 @@ await test("public: column widths come from the meta sidecar under the app's own
   const drawn = diagram.text.slice(diagram.text.indexOf('<figure class="dk-drawing">'), diagram.text.lastIndexOf("</figure>"));
   assert.ok(!drawn.includes("<script") && !drawn.includes("onclick") && !drawn.includes("alert("), "nothing executable survives");
   assert.ok(diagram.text.includes('<code class="language-svg">&lt;svg viewBox=&quot;0 0 760 80&quot;&gt;&lt;g&gt;&lt;/svg&gt;'), "a drawing that doesn't parse stays its source");
+});
+
+await test("public: every page the worker draws goes out under the page policy, which runs the mermaid module and nothing written into a note; an html document keeps its sandbox; every answer is nosniff", async () => {
+  const policy = (origin) =>
+    [
+      "default-src 'none'",
+      `script-src ${origin}/__web/${webTag}/mermaid.js`,
+      "style-src 'unsafe-inline'",
+      "img-src * data:",
+      "media-src *",
+      "font-src 'self'",
+      "frame-src *",
+      "form-action 'none'",
+      "base-uri 'none'",
+    ].join("; ");
+  const HERE = "https://notes.example.com";
+
+  // A note, a framed rendition, a folder, a nested note, the root, a 404,
+  // and an asset path that reached the worker: one policy.
+  for (const p of ["/", "/home", "/sizes", "/plan", "/plan?v=md", "/projects", "/projects/status", "/diagram", "/nope", "/projects/nope", "/__web/x/app.js"]) {
+    const res = await pub(p);
+    assert.equal(res.headers.get("content-security-policy"), policy(HERE), p);
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff", p);
+  }
+  const head = await rawGet("/home", { method: "HEAD" });
+  assert.equal(head.headers.get("content-security-policy"), policy(HERE), "HEAD says what GET says");
+
+  // No page carries a script of its own: the only one a page ever names is
+  // the module, and only where there is a diagram to draw.
+  for (const p of ["/", "/home", "/sizes", "/plan", "/plan?v=md", "/projects", "/nope"]) {
+    assert.ok(!(await pub(p)).text.includes("<script"), `${p}: no script`);
+  }
+
+  // HTML written into a note is drawn as written — the policy, not the
+  // renderer, is what keeps it from acting (drive-public.mjs watches a
+  // browser refuse each of these).
+  const diagram = await pub("/diagram");
+  assert.deepEqual(
+    diagram.text.match(/<script\b[^>]*>/g),
+    ["<script>", `<script type="module" src="/__web/${webTag}/mermaid.js">`],
+    "the note's own script tag, then the module's — and the policy names the second alone",
+  );
+  for (const written of ['onerror="document.documentElement.dataset.ran', 'href="javascript:void(', '<form id="written-form"', '<base href="https://example.com/">']) {
+    assert.ok(diagram.text.includes(written), written);
+  }
+
+  // An html document is the author's page, not the worker's: its sandbox,
+  // and never the page policy on top of it.
+  for (const p of ["/plan/raw", "/projects/plan/raw", "/projects/plan.html"]) {
+    const res = await pub(p);
+    assert.equal(res.headers.get("content-security-policy"), "sandbox allow-scripts allow-popups", p);
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff", p);
+  }
+
+  // The policy names the domain a request came to, so it is set on the way
+  // out: a page kept by the cache is kept without one, and answers on
+  // another domain under that domain's name.
+  const cache = new FakeCache();
+  globalThis.caches = { default: cache };
+  try {
+    const ask = (origin, p) => worker.fetch(new Request(`${origin}${p}`), env);
+    const first = await ask(HERE, "/diagram");
+    assert.equal(first.headers.get("content-security-policy"), policy(HERE));
+    assert.equal(cache.store.get(cache.puts[0]).headers.get("content-security-policy"), null, "kept without a policy");
+    const elsewhere = await ask("https://docs.example.net", "/diagram");
+    assert.equal(cache.hits, 1, "the same kept page");
+    assert.equal(elsewhere.headers.get("content-security-policy"), policy("https://docs.example.net"));
+    assert.equal((await ask(HERE, "/diagram")).headers.get("content-security-policy"), policy(HERE));
+    await ask(HERE, "/plan/raw");
+    const keptRaw = await ask(HERE, "/plan/raw");
+    assert.equal(cache.hits, 3);
+    assert.equal(keptRaw.headers.get("content-security-policy"), "sandbox allow-scripts allow-popups", "a kept document keeps its sandbox");
+  } finally {
+    delete globalThis.caches;
+  }
+
+  // The API's answers too: JSON, a stored file's bytes, a refusal.
+  const manifest = await call("/api/manifest", { token: OWNER });
+  assert.equal(manifest.headers.get("x-content-type-options"), "nosniff");
+  const [fid, entry] = Object.entries(manifest.json.files)[0];
+  const blob = await call(`/api/blobs/${fid}/${entry.hash}`, { token: OWNER });
+  assert.equal(blob.status, 200);
+  assert.equal(blob.headers.get("x-content-type-options"), "nosniff", "a stored file is never sniffed into a script");
+  assert.equal(blob.headers.get("content-security-policy"), null, "the page policy is a page's");
+  assert.equal((await call("/api/manifest")).headers.get("x-content-type-options"), "nosniff", "a 401");
+  assert.equal((await pub("/home", { method: "POST", body: "x" })).headers.get("x-content-type-options"), "nosniff", "a 405");
 });
 
 await test("public: links between notes rewrite to public URLs — inside the folder they were reached through first — or fall back to text; a picture in the workspace is its alt text; other links and pictures stay", async () => {
@@ -5788,6 +5923,592 @@ await test("sweep: a run makes at most 40 calls to the bucket (Workers Free allo
   assert.ok(perRun.every((n) => n <= 40), `every run within 40 calls: ${perRun}`);
   assert.ok(perRun.length > 1, "one run could not reach them all");
   assert.equal(left(), 0, `all swept within ${perRun.length} days`);
+});
+
+/* ---------- The browser version ---------- */
+
+/** What a browser adds, and no page can, to a request the app's own script
+ *  makes with `fetch`. */
+const OWN_SCRIPT = { "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty" };
+const BROWSER_DEVICE = "d-browser";
+/** A request as a signed-in browser makes one: no bearer, the cookie. */
+const browser = (path, { cookie, headers = {}, ...rest } = {}) =>
+  call(path, {
+    device: BROWSER_DEVICE,
+    ...rest,
+    headers: { ...OWN_SCRIPT, ...(cookie ? { cookie: `__Host-doklin=${cookie}` } : {}), ...headers },
+  });
+/** A code for another device of `token`'s own person, as their app mints one. */
+const codeFor = async (body, token) => {
+  const made = await call("/api/auth/devices/code", {
+    method: "POST",
+    token,
+    body: { codeHash: sha256(body), expiresAt: Date.now() + 60 * 60 * 1000 },
+  });
+  assert.equal(made.status, 201);
+  return code(body);
+};
+/** The token a `Set-Cookie` hands over. */
+const cookieOf = (res) => /^__Host-doklin=([^;]*);/.exec(res.headers.get("set-cookie") ?? "")?.[1] ?? null;
+const COOKIE_GONE = "__Host-doklin=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0";
+const sharedManifest = async () => (await call("/api/manifest", { token: OWNER })).json;
+const fileAt = (m, path) => Object.entries(m.files).find(([, f]) => f.path === path) ?? [null, null];
+const blobText = async (fid, hash, prefix = "") => (await call(`/api${prefix}/blobs/${fid}/${hash}`, { token: OWNER })).text;
+const SIDECAR = (id, body) =>
+  `{"doklin":"meta","v":1}\n{"t":"mthread","id":"${id}","comments":[{"author":"Sherin","at":1782900000000,"body":"${body}"}]}\n`;
+
+/** The owner's browser, signed in by the first test below. */
+let WEB;
+let WEB_TOKEN_ID;
+
+await test("web: a browser signs in with a code and is handed a cookie, never the token — only the app's own script is answered, and the token is a browser's wherever it turns up", async () => {
+  const typed = await codeFor("WEB00000000000000001", OWNER);
+  const body = { code: typed, deviceId: BROWSER_DEVICE, deviceName: "Chrome on Windows" };
+
+  // Another site, a form on a public page, a tool with no browser behind it.
+  for (const headers of [
+    {},
+    { ...OWN_SCRIPT, "sec-fetch-site": "cross-site" },
+    { ...OWN_SCRIPT, "sec-fetch-site": "same-site" },
+    { ...OWN_SCRIPT, "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+    { ...OWN_SCRIPT, "sec-fetch-mode": "no-cors" },
+  ]) {
+    const res = await call("/api/web/session", { method: "POST", body, headers });
+    assert.equal(res.status, 403, JSON.stringify(headers));
+    assert.equal(res.headers.get("set-cookie"), null);
+  }
+  assert.equal((await browser("/api/web/session", { method: "POST", body: { code: "nope" } })).status, 400);
+  const unknown = await browser("/api/web/session", { method: "POST", body: { code: code("WEB0000000000000000Z") } });
+  assert.equal(unknown.status, 401, "unknown and expired are one answer");
+  assert.equal(unknown.headers.get("set-cookie"), null);
+
+  const before = db.value("SELECT COUNT(*) FROM tokens");
+  const signed = await browser("/api/web/session", { method: "POST", body });
+  assert.equal(signed.status, 201, "…and none of the refusals above spent the code");
+  assert.deepEqual(Object.keys(signed.json).sort(), ["member", "tokenId"], "no token in the body: script never holds it");
+  assert.equal(signed.json.member.email, "sherin@example.com", "signed in as the person the code was for");
+  const set = signed.headers.get("set-cookie");
+  assert.ok(
+    /^__Host-doklin=dkw_[a-f0-9]{64}; Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=34560000$/.test(set),
+    `the cookie: ${set}`,
+  );
+  WEB = cookieOf(signed);
+  WEB_TOKEN_ID = signed.json.tokenId;
+  assert.equal(db.value("SELECT COUNT(*) FROM tokens"), before + 1, "a browser is a device: one more row");
+  assert.equal(db.value("SELECT device_name FROM tokens WHERE id = ?", WEB_TOKEN_ID), "Chrome on Windows");
+  assert.equal(db.value("SELECT hash FROM tokens WHERE id = ?", WEB_TOKEN_ID), sha256(WEB), "stored by its hash, prefix and all");
+  assert.equal((await browser("/api/web/session", { method: "POST", body })).status, 401, "a code is spent once");
+  const devices = await call("/api/auth/devices", { token: OWNER });
+  assert.ok(devices.json.devices.some((d) => d.id === WEB_TOKEN_ID && d.deviceName === "Chrome on Windows"), "listed with their other devices");
+
+  // The cookie is the sign-in.
+  const meta = await browser("/api/meta", { cookie: WEB });
+  assert.equal(meta.status, 200);
+  assert.equal(meta.json.you.tokenId, WEB_TOKEN_ID);
+  assert.equal(meta.json.you.role, "superadmin", "the person's own role");
+  assert.equal(cookieOf(meta), WEB, "the probe hands the cookie back, its 400 days starting over");
+  assert.equal((await browser("/api/poll", { cookie: WEB })).headers.get("set-cookie"), null, "and nothing else does");
+
+  // …but only on a request the app's own script made: an <img> on a public
+  // page, a link somebody clicked and a ping carry the cookie too.
+  for (const headers of [
+    { "sec-fetch-dest": "image", "sec-fetch-mode": "no-cors" },
+    { "sec-fetch-dest": "document", "sec-fetch-mode": "navigate" },
+    { "sec-fetch-dest": "iframe", "sec-fetch-mode": "navigate" },
+    { "sec-fetch-mode": "no-cors" },
+    { "sec-fetch-site": "same-site" },
+    { "sec-fetch-site": "cross-site" },
+    { "sec-fetch-site": "none", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+  ]) {
+    const res = await browser("/api/meta", { cookie: WEB, headers });
+    assert.equal(res.status, 401, JSON.stringify(headers));
+    assert.equal(res.headers.get("set-cookie"), null, "it is not told to drop a cookie that is good");
+  }
+
+  // The two ways in are kept apart, both ways.
+  for (const [path, method] of [["/api/meta", "GET"], ["/api/manifest", "GET"], ["/api/manifest", "PUT"], ["/api/web/doc", "PUT"], ["/api/auth/devices/code", "POST"]]) {
+    const res = await call(path, { method, token: WEB, body: method === "GET" ? undefined : {} });
+    assert.equal(res.status, 401, `a browser's token sent as a bearer: ${method} ${path}`);
+  }
+  const borrowed = await browser("/api/meta", { cookie: OWNER });
+  assert.equal(borrowed.status, 401, "a Mac's token sent as the cookie");
+  assert.equal(borrowed.headers.get("set-cookie"), COOKIE_GONE, "a cookie that is nobody's is taken back");
+  assert.equal(borrowed.headers.get("clear-site-data"), null, "…and that is all: nothing was signed out");
+  const both = await browser("/api/web/search?q=x", { cookie: WEB, token: OWNER });
+  assert.equal(both.status, 403, "with an Authorization header the cookie is not looked at: this is the Mac asking");
+  assert.ok(/browser version's/.test(both.json.error));
+});
+
+await test("web: a browser's sign-in is answered on /api/web and the reads a browser is built from, and on nothing else; nobody else's credential is answered on /api/web", async () => {
+  const m = await sharedManifest();
+  const [fid, file] = Object.entries(m.files)[0];
+  const mine = await browser("/api/spaces/private", { method: "PUT", cookie: WEB });
+  assert.equal(mine.status, 200, "its person's own Private, made on first asking");
+  const space = mine.json.space.id;
+
+  for (const [path, method, body] of [
+    ["/api/meta", "GET"],
+    ["/api/poll", "GET"],
+    ["/api/poll", "POST", { name: "Chrome on Windows", path: file.path }],
+    ["/api/manifest", "GET"],
+    [`/api/blobs/${fid}/${file.hash}`, "GET"],
+    [`/api/spaces/${space}/manifest`, "GET"],
+    ["/api/pages", "GET"],
+  ]) {
+    const res = await browser(path, { method, cookie: WEB, body });
+    assert.equal(res.status, 200, `${method} ${path}`);
+  }
+  const here = await call("/api/poll", { token: OWNER });
+  assert.equal(here.json.presence[BROWSER_DEVICE]?.name, "Chrome on Windows", "the beat says where the browser is, as a Mac's does");
+
+  const copy = await browser(`/api/blobs/${fid}/${file.hash}`, { cookie: WEB });
+  assert.equal(copy.headers.get("cache-control"), "private, max-age=31536000, immutable", "a stored copy never changes: the browser keeps it");
+  assert.equal(copy.headers.get("vary"), "Cookie, Authorization", "…for the sign-in it was read with");
+  assert.equal((await browser(`/api/blobs/${fid}/0000000000000000`, { cookie: WEB })).headers.get("cache-control"), "no-store", "a copy that is not there is not kept");
+
+  for (const [path, method, body] of [
+    ["/api/manifest", "PUT", m],
+    [`/api/blobs/${fid}/${file.hash}`, "PUT", "x"],
+    [`/api/spaces/${space}/manifest`, "PUT", m],
+    ["/api/versions/index", "GET"],
+    ["/api/versions/index", "PUT", {}],
+    [`/api/versions/blobs/${"0".repeat(64)}`, "DELETE"],
+    ["/api/workspace", "GET"],
+    ["/api/workspace", "POST", { name: "Mine now" }],
+    ["/api/settings/plan", "PUT", { plan: "paid" }],
+    ["/api/auth/members", "GET"],
+    ["/api/auth/invites", "GET"],
+    ["/api/auth/invites", "POST", { email: "mallory@example.com", codeHash: sha256("x"), expiresAt: Date.now() + DAY }],
+    ["/api/auth/devices", "GET"],
+    ["/api/auth/devices/code", "POST", { codeHash: sha256("x"), expiresAt: Date.now() + 1000 }],
+    [`/api/auth/devices/${WEB_TOKEN_ID}`, "DELETE"],
+    ["/api/auth/agents", "GET"],
+    ["/api/spaces", "GET"],
+    ["/api/spaces", "POST", { name: "Mine" }],
+    [`/api/spaces/${space}`, "DELETE"],
+    ["/api/pages/notes", "PUT", {}],
+    ["/api/admin/wipe", "POST", { confirm: "wipe" }],
+    ["/api/agent/me", "GET"],
+  ]) {
+    const res = await browser(path, { method, cookie: WEB, body });
+    assert.equal(res.status, 403, `${method} ${path}`);
+    assert.ok(/not done from a browser|for agents/.test(res.json.error), `${method} ${path} says why: ${res.json.error}`);
+  }
+  assert.equal((await sharedManifest()).seq, m.seq, "and none of them was done");
+
+  // /api/web is the browser's alone.
+  for (const [path, method] of [["/api/web/doc?path=notes.md", "PUT"], ["/api/web/search?q=x", "GET"], ["/api/web/session", "DELETE"]]) {
+    const person = await call(path, { method, token: OWNER, body: method === "GET" ? undefined : {} });
+    assert.equal(person.status, 403, `a Mac's bearer: ${method} ${path}`);
+    assert.ok(/browser version's/.test(person.json.error));
+  }
+  assert.equal((await browser("/api/web/nothing", { cookie: WEB })).status, 404);
+  assert.equal((await browser("/api/web/doc/extra", { cookie: WEB })).status, 404);
+  assert.equal((await browser("/api/web/doc?path=notes.md", { cookie: WEB })).status, 405, "a document is read from the stored copies, not from here");
+  assert.equal((await browser("/api/web/session", { cookie: WEB })).status, 405);
+  assert.equal((await browser("/api/web/search?q=x")).status, 401, "no cookie, nobody");
+});
+
+await test("web: a note and its comments are saved in one manifest write, each over the revision that was read — and when either has moved on, neither is written", async () => {
+  const start = await sharedManifest();
+  const save = (path, body, extra = "") => browser(`/api/web/doc?path=${encodeURIComponent(path)}${extra}`, { method: "PUT", cookie: WEB, body });
+  const TEXT = "# Browser\n\nThe {==opening==}{>>#m1web<<} is here.\n";
+
+  const held = await currentEtag();
+  const made = await save("browser/First.md", { md: { text: TEXT, ifRev: null }, meta: { text: SIDECAR("m1web", "stronger"), ifRev: null } });
+  assert.equal(made.status, 200);
+  let m = await sharedManifest();
+  assert.equal(m.seq, start.seq + 1, "one write for both files");
+  assert.equal(made.json.etag, await currentEtag(), "…and the answer names the manifest it left");
+  assert.equal(made.json.over, held, "…and the one it was made to: a browser that held that one need not read it again");
+  const [mdFid, md] = fileAt(m, "browser/First.md");
+  const [metaFid, meta] = fileAt(m, "browser/First.meta.jsonl");
+  assert.deepEqual([md.path, md.rev, meta.path, meta.rev], ["browser/First.md", 1, "browser/First.meta.jsonl", 1]);
+  assert.deepEqual(made.json.md, { fid: mdFid, ...md }, "each file as the manifest now has it");
+  assert.deepEqual(made.json.meta, { fid: metaFid, ...meta });
+  assert.equal(md.by, (await browser("/api/meta", { cookie: WEB })).json.you.memberId, "signed with the person, as their Mac's write would be");
+  assert.equal(await blobText(mdFid, md.hash), TEXT, "the text as the editor made it, markers and all");
+  assert.equal(await blobText(metaFid, meta.hash), SIDECAR("m1web", "stronger"));
+
+  // Each part on its own, over what was read.
+  const again = await save("browser/First.md", { md: { text: `${TEXT}\nMore.\n`, ifRev: 1 } });
+  assert.equal(again.status, 200);
+  assert.equal(again.json.md.rev, 2);
+  assert.equal(again.json.meta, undefined, "the comments were not sent, so they were not touched");
+  const reply = await save("browser/first", { meta: { text: SIDECAR("m1web", "stronger still"), ifRev: 1 } });
+  assert.equal(reply.status, 200, "named by its stem, in any case");
+  assert.equal(reply.json.meta.rev, 2);
+  assert.equal(reply.json.meta.fid, metaFid, "the same file, a revision on");
+
+  // Moved on: the text, then the comments while the text is fine.
+  const settled = await currentEtag();
+  const stale = await save("browser/First.md", { md: { text: "mine", ifRev: 1 }, meta: { text: SIDECAR("m1web", "x"), ifRev: 2 } });
+  assert.equal(stale.status, 409);
+  assert.deepEqual([stale.json.part, stale.json.rev], ["md", 2], "which part, and where it is now");
+  const half = await save("browser/First.md", { md: { text: "mine", ifRev: 2 }, meta: { text: SIDECAR("m1web", "x"), ifRev: 1 } });
+  assert.equal(half.status, 409);
+  assert.deepEqual([half.json.part, half.json.rev], ["meta", 2]);
+  const taken = await save("browser/First.md", { md: { text: "mine", ifRev: null } });
+  assert.deepEqual([taken.status, taken.json.part, taken.json.rev], [409, "md", 2], "a note that must not exist yet, and does");
+  const gone = await save("browser/Never.md", { md: { text: "mine", ifRev: 3 } });
+  assert.deepEqual([gone.status, gone.json.part, gone.json.rev], [409, "md", null], "a note that was read, and is gone");
+  assert.equal(await currentEtag(), settled, "nothing was written by any of them");
+  assert.equal((await sharedManifest()).files[mdFid].rev, 2, "…not even the half that was fine");
+
+  // The same bytes are not a revision, and wake no Mac.
+  const same = await save("browser/First.md", { md: { text: `${TEXT}\nMore.\n`, ifRev: 2 } });
+  assert.deepEqual([same.status, same.json.md.rev, same.json.etag, same.json.over], [200, 2, settled, settled]);
+
+  // A thread is a person's to remove by editing: nothing polices the markers.
+  const plain = await save("browser/First.md", { md: { text: "# Browser\n\nNo comments now.\n", ifRev: 2 }, meta: { text: '{"doklin":"meta","v":1}\n', ifRev: 2 } });
+  assert.equal(plain.status, 200);
+  assert.deepEqual([plain.json.md.rev, plain.json.meta.rev], [3, 3]);
+
+  // A new note has nothing in it yet.
+  const empty = await save("browser/Empty.md", { md: { text: "", ifRev: null } });
+  assert.deepEqual([empty.status, empty.json.md.rev, empty.json.md.size], [200, 1, 0]);
+  assert.equal(await blobText(empty.json.md.fid, empty.json.md.hash), "");
+
+  // What is asked wrongly, or of nothing.
+  assert.equal((await save("browser/First.md", {})).status, 400);
+  assert.equal((await save("browser/First.md", { md: { text: "x" } })).status, 400, "ifRev is said, null included");
+  assert.equal((await save("browser/First.md", { md: { text: 1, ifRev: 3 } })).status, 400);
+  assert.equal((await save("browser/First.md", { meta: "text" })).status, 400);
+  assert.equal((await save("browser/First.md", { md: { text: "x", ifRev: 0 } })).status, 400);
+  assert.equal((await save("browser/Never.md", { meta: { text: SIDECAR("m1", "x"), ifRev: null } })).status, 404, "comments on no document");
+  assert.equal((await save("browser/Page.html", { md: { text: "x", ifRev: null } })).status, 400, "an html page is not written here");
+  assert.equal((await save("browser/First.meta.jsonl", { md: { text: "x", ifRev: null } })).status, 400, "the sidecar is saved as the document's comments");
+  assert.equal((await save("browser/chart.png", { md: { text: "x", ifRev: null } })).status, 400, "only documents sync");
+  assert.equal((await save("Private/x.md", { md: { text: "x", ifRev: null } })).status, 409, "the shared workspace holds nothing under Private");
+  assert.equal(await currentEtag(), empty.json.etag);
+
+  // A section is named by its id, and its paths are its own.
+  const space = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  const priv = await save("Diary.md", { md: { text: "# Diary\n", ifRev: null } }, `&space=${space}`);
+  assert.equal(priv.status, 200);
+  const inSpace = (await call(`/api/spaces/${space}/manifest`, { token: OWNER })).json;
+  assert.equal(inSpace.files[priv.json.md.fid].path, "Diary.md", "as the space stores it: no Private/ in front");
+  assert.equal(fileAt(await sharedManifest(), "Diary.md")[0], null, "…and not in the shared workspace");
+  assert.equal(db.value("SELECT etag FROM spaces WHERE id = ?", space), priv.json.etag, "the poll is told where the space's manifest is");
+  assert.equal((await save("x.md", { md: { text: "x", ifRev: null } }, "&space=s-00000000")).status, 404, "a folder they are not in is no folder");
+  assert.equal((await save("x.md", { md: { text: "x", ifRev: null } }, "&space=nope")).status, 400);
+});
+
+await test("web: a document or a folder is moved to exactly where the browser said, removed whole or by one version, and a folder with everything under it", async () => {
+  const save = (path, body, extra = "") => browser(`/api/web/doc?path=${encodeURIComponent(path)}${extra}`, { method: "PUT", cookie: WEB, body });
+  const move = (body) => browser("/api/web/move", { method: "POST", cookie: WEB, body });
+  const remove = (route, path, extra = "") => browser(`/api/web/${route}?path=${encodeURIComponent(path)}${extra}`, { method: "DELETE", cookie: WEB });
+  const space = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  for (const name of ["browser/Plan.md", "browser/Other.md", "browser/Sub/Deep.md"]) {
+    assert.equal((await save(name, { md: { text: `# ${name}\n`, ifRev: null }, meta: { text: SIDECAR("m1", name), ifRev: null } })).status, 200);
+  }
+  let m = await sharedManifest();
+  const [planFid, plan] = fileAt(m, "browser/Plan.md");
+  const [planMetaFid] = fileAt(m, "browser/Plan.meta.jsonl");
+
+  // A rename: the note and its comments, in one write, the bytes as they were.
+  const renamed = await move({ from: { path: "browser/Plan.md" }, to: { path: "browser/Roadmap.md" }, kind: "document" });
+  assert.equal(renamed.status, 200);
+  assert.deepEqual([renamed.json.kind, renamed.json.from, renamed.json.to, renamed.json.files], ["document", "browser/Plan", "browser/Roadmap", 2]);
+  assert.equal((await sharedManifest()).seq, m.seq + 1, "one write");
+  m = await sharedManifest();
+  assert.deepEqual([m.files[planFid].path, m.files[planFid].rev, m.files[planFid].hash], ["browser/Roadmap.md", plan.rev + 1, plan.hash]);
+  assert.equal(m.files[planMetaFid].path, "browser/Roadmap.meta.jsonl");
+
+  // Exactly there: a destination that is a folder's name is the note's new
+  // name, beside the folder — where an agent's `mv` reads "into it".
+  const beside = await move({ from: { path: "browser/Roadmap.md" }, to: { path: "browser/Sub" }, kind: "document" });
+  assert.deepEqual([beside.status, beside.json.to], [200, "browser/Sub"]);
+  m = await sharedManifest();
+  assert.equal(m.files[planFid].path, "browser/Sub.md");
+  assert.ok(fileAt(m, "browser/Sub/Deep.md")[0], "the folder is as it was");
+  assert.equal((await move({ from: { path: "browser/Sub.md" }, to: { path: "browser/Roadmap.md" }, kind: "document" })).status, 200);
+  assert.equal((await move({ from: { path: "browser/Roadmap.md" }, to: { path: "browser/Other.md" }, kind: "document" })).status, 409, "a name that is taken");
+  assert.equal((await move({ from: { path: "browser/Nope.md" }, to: { path: "browser/X.md" }, kind: "document" })).status, 404);
+  assert.equal((await move({ from: { path: "browser/Sub" }, to: { path: "browser/Sub2" }, kind: "document" })).status, 404, "a folder is not a document");
+  assert.equal((await move({ from: { path: "browser/Roadmap" }, to: { path: "browser/R2" }, kind: "folder" })).status, 404, "nor a document a folder");
+  assert.equal((await move({ from: { path: "browser/Roadmap.md" }, to: { path: "browser/Roadmap.md" } })).status, 400, "the kind is said");
+  assert.equal((await move({ from: { path: "browser/Roadmap.md" }, kind: "document" })).status, 400);
+  assert.equal((await move({ from: { path: "browser/Roadmap.md" }, to: { path: ".hidden/x.md" }, kind: "document" })).status, 400);
+
+  // A folder, with everything under it.
+  const folder = await move({ from: { path: "browser/Sub" }, to: { path: "browser/Deeper" }, kind: "folder" });
+  assert.deepEqual([folder.status, folder.json.kind, folder.json.to, folder.json.files], [200, "folder", "browser/Deeper", 2]);
+  assert.ok(fileAt(await sharedManifest(), "browser/Deeper/Deep.md")[0]);
+
+  // To another section: written there first, then taken out of here with a
+  // tombstone that says where it went.
+  const across = await move({ from: { path: "browser/Roadmap.md" }, to: { space, path: "Roadmap.md" }, kind: "document" });
+  assert.equal(across.status, 200);
+  assert.deepEqual([across.json.files, across.json.newLinks], [2, true]);
+  m = await sharedManifest();
+  assert.equal(m.files[planFid], undefined);
+  assert.equal(m.tombstones[planFid].to, space, "a Mac in both sections moves its copy; one that is not deletes its own");
+  const there = (await call(`/api/spaces/${space}/manifest`, { token: OWNER })).json;
+  assert.ok(fileAt(there, "Roadmap.md")[0] && fileAt(there, "Roadmap.meta.jsonl")[0], "the note and its comments, under ids of their own");
+  assert.equal((await move({ from: { space: "s-00000000", path: "x.md" }, to: { path: "x.md" }, kind: "document" })).status, 404);
+
+  // Removing: one version only when it is one of two; the document whole; a folder.
+  const only = await remove("doc", "browser/Other.md", "&v=md");
+  assert.deepEqual([only.status, only.json.code], [409, "last_version"]);
+  assert.equal((await remove("doc", "browser/Other.md", "&v=pdf")).status, 400);
+  assert.equal((await remove("doc", "browser/Nope.md")).status, 404);
+  const [otherFid] = fileAt(m, "browser/Other.md");
+  const [otherMetaFid] = fileAt(m, "browser/Other.meta.jsonl");
+  const whole = await remove("doc", "browser/Other.md");
+  assert.equal(whole.status, 200);
+  m = await sharedManifest();
+  assert.ok(!m.files[otherFid] && !m.files[otherMetaFid], "the note and its comments");
+  assert.ok(m.tombstones[otherFid] && m.tombstones[otherMetaFid], "each with the tombstone a Mac honours");
+  assert.equal(m.tombstones[otherFid].to, undefined, "deleted, not moved");
+
+  assert.equal((await remove("folder", "")).status, 400, "never the section itself");
+  assert.equal((await remove("folder", "browser/Nope")).status, 404);
+  const before = Object.keys(m.files).filter((fid) => m.files[fid].path.startsWith("browser/")).length;
+  assert.ok(before >= 3, "First and its comments, and what is under Deeper");
+  const cleared = await remove("folder", "BROWSER");
+  assert.deepEqual([cleared.status, cleared.json.path, cleared.json.files], [200, "browser", before], "named in any case, answered as it is spelled");
+  m = await sharedManifest();
+  assert.equal(Object.values(m.files).filter((f) => f.path.startsWith("browser/")).length, 0);
+  assert.equal((await remove("folder", "browser")).status, 404, "a folder is its files");
+  assert.equal((await remove("doc", "Roadmap.md", `&space=${space}`)).status, 200);
+  assert.equal((await remove("doc", "Diary.md", `&space=${space}`)).status, 200);
+});
+
+await test("web: a document or a folder is copied to exactly where the browser said, every file of it a new one, in its section or in another", async () => {
+  const save = (path, body, extra = "") => browser(`/api/web/doc?path=${encodeURIComponent(path)}${extra}`, { method: "PUT", cookie: WEB, body });
+  const copy = (body) => browser("/api/web/copy", { method: "POST", cookie: WEB, body });
+  const remove = (route, path, extra = "") => browser(`/api/web/${route}?path=${encodeURIComponent(path)}${extra}`, { method: "DELETE", cookie: WEB });
+  const space = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  for (const name of ["copies/Plan.md", "copies/Sub/Deep.md"]) {
+    assert.equal((await save(name, { md: { text: `# ${name}\n`, ifRev: null }, meta: { text: SIDECAR("m1", name), ifRev: null } })).status, 200);
+  }
+  let m = await sharedManifest();
+  const [planFid, plan] = fileAt(m, "copies/Plan.md");
+  const held = await currentEtag();
+
+  // Beside what it was copied from: the note and its comments, in one write.
+  const made = await copy({ from: { path: "copies/Plan.md" }, to: { path: "copies/Plan copy.md" }, kind: "document" });
+  assert.equal(made.status, 200);
+  assert.deepEqual([made.json.kind, made.json.from, made.json.to, made.json.files], ["document", "copies/Plan", "copies/Plan copy", 2]);
+  assert.deepEqual([made.json.over, made.json.etag], [held, await currentEtag()]);
+  assert.equal((await sharedManifest()).seq, m.seq + 1, "one write");
+  m = await sharedManifest();
+  const [copyFid, copied] = fileAt(m, "copies/Plan copy.md");
+  assert.ok(copyFid && copyFid !== planFid, "a file of its own");
+  assert.deepEqual([copied.rev, copied.hash], [1, plan.hash], "…holding the same bytes, at its first revision");
+  assert.equal(await blobText(copyFid, copied.hash), "# copies/Plan.md\n");
+  assert.ok(fileAt(m, "copies/Plan copy.meta.jsonl")[0], "its comments came with it");
+  assert.deepEqual(m.files[planFid], plan, "and what it was copied from is as it was");
+  assert.equal(m.tombstones?.[planFid], undefined);
+
+  assert.equal((await copy({ from: { path: "copies/Plan.md" }, to: { path: "copies/Plan copy.md" }, kind: "document" })).status, 409, "a name that is taken");
+  assert.equal((await copy({ from: { path: "copies/Nope.md" }, to: { path: "copies/X.md" }, kind: "document" })).status, 404);
+  assert.equal((await copy({ from: { path: "copies/Sub" }, to: { path: "copies/Sub2" }, kind: "document" })).status, 404, "a folder is not a document");
+  assert.equal((await copy({ from: { path: "copies/Plan.md" }, to: { path: "copies/Y.md" } })).status, 400, "the kind is said");
+  assert.equal((await copy({ from: { path: "copies/Plan.md" }, to: { path: ".hidden/x.md" }, kind: "document" })).status, 400);
+  assert.equal((await call("/api/web/copy", { method: "POST", token: OWNER, body: {} })).status, 403, "a browser's route, like the rest");
+
+  // A folder, with everything under it.
+  const folder = await copy({ from: { path: "copies/Sub" }, to: { path: "copies/Sub copy" }, kind: "folder" });
+  assert.deepEqual([folder.status, folder.json.kind, folder.json.to, folder.json.files], [200, "folder", "copies/Sub copy", 2]);
+  m = await sharedManifest();
+  assert.ok(fileAt(m, "copies/Sub copy/Deep.md")[0] && fileAt(m, "copies/Sub/Deep.md")[0]);
+
+  // To another section: there, and still here.
+  const across = await copy({ from: { path: "copies/Plan.md" }, to: { space, path: "Plan.md" }, kind: "document" });
+  assert.deepEqual([across.status, across.json.files], [200, 2]);
+  const there = (await call(`/api/spaces/${space}/manifest`, { token: OWNER })).json;
+  assert.ok(fileAt(there, "Plan.md")[0] && fileAt(there, "Plan.meta.jsonl")[0]);
+  assert.equal(across.json.etag, db.value("SELECT etag FROM spaces WHERE id = ?", space), "the etags are the section's it went to");
+  assert.ok((await sharedManifest()).files[planFid], "nothing left where it was copied from");
+  assert.equal((await copy({ from: { space: "s-00000000", path: "x.md" }, to: { path: "x.md" }, kind: "document" })).status, 404);
+
+  // More files than one request carries.
+  for (let i = 0; i < 17; i++) assert.equal((await save(`copies/Many/n${i}.md`, { md: { text: `${i}\n`, ifRev: null } })).status, 200);
+  const many = await copy({ from: { path: "copies/Many" }, to: { path: "copies/Many copy" }, kind: "folder" });
+  assert.equal(many.status, 400);
+  assert.ok(/17 files, and 16 are copied at a time/.test(many.json.error), many.json.error);
+  assert.equal(fileAt(await sharedManifest(), "copies/Many copy/n0.md")[0], null, "and none of it was");
+
+  assert.equal((await remove("folder", "copies")).status, 200);
+  assert.equal((await remove("doc", "Plan.md", `&space=${space}`)).status, 200);
+});
+
+await test("web: search covers every section the person is in, and names what it found by section and file id; what the browser just saved is found at once", async () => {
+  const space = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  const put = (path, text, extra = "") =>
+    browser(`/api/web/doc?path=${encodeURIComponent(path)}${extra}`, { method: "PUT", cookie: WEB, body: { md: { text, ifRev: null } } });
+  const search = async (q, as = { cookie: WEB }) => {
+    for (let round = 0; round < 40; round += 1) {
+      const res = await browser(`/api/web/search?q=${encodeURIComponent(q)}`, as);
+      if (res.status !== 202) return res;
+      assert.equal(res.json.indexing, true, "the mirror is catching up: ask again");
+    }
+    throw new Error("the mirror never caught up");
+  };
+  assert.equal((await search("warm")).status, 200, "a first search of the person's own Private builds its mirror");
+  const shared = await put("browsing/Quokka.md", "# Field notes\n\nA zyzzyva sat on the fence.\n");
+  const priv = await put("Secret.md", "# Secret\n\nThe zyzzyva again, in private.\n", `&space=${space}`);
+  assert.deepEqual([shared.status, priv.status], [200, 200]);
+
+  const found = await search("ZYZZYVA");
+  assert.equal(found.status, 200);
+  assert.deepEqual(
+    found.json.results.map((r) => [r.space, r.fid, r.path, r.matches[0].line]),
+    [
+      ["", shared.json.md.fid, "browsing/Quokka.md", 3],
+      [space, priv.json.md.fid, "Secret.md", 3],
+    ],
+    "the section's id and the file's, and the path as that section stores it",
+  );
+  assert.equal(found.json.total, 2);
+  const named = await search("quokka");
+  assert.deepEqual([named.json.results[0].fid, named.json.results[0].inName], [shared.json.md.fid, true], "by its name too");
+  assert.equal((await browser("/api/web/search", { cookie: WEB })).status, 400);
+  assert.equal((await browser("/api/web/search?q=a%0Ab", { cookie: WEB })).status, 400);
+
+  // Somebody else's Private is not theirs to search.
+  const alice = await codeFor("WEB00000000000000002", MEMBER);
+  const hers = cookieOf(await browser("/api/web/session", { method: "POST", body: { code: alice, deviceId: "d-alice-web", deviceName: "Firefox" } }));
+  const asAlice = await search("zyzzyva", { cookie: hers, device: "d-alice-web" });
+  assert.deepEqual(asAlice.json.results.map((r) => [r.space, r.path]), [["", "browsing/Quokka.md"]], "the shared note, and nothing of his");
+  assert.equal((await browser(`/api/spaces/${space}/manifest`, { cookie: hers })).status, 404, "nor to read");
+  assert.equal((await browser("/api/pages", { cookie: hers })).status, 403, "and every address on the domain is an owner's to list, in a browser as on a Mac");
+  assert.equal((await browser("/api/auth/session", { method: "DELETE", cookie: hers })).status, 204);
+
+  assert.equal((await browser("/api/web/folder?path=browsing", { method: "DELETE", cookie: WEB })).status, 200);
+  assert.equal((await browser(`/api/web/doc?path=Secret.md&space=${space}`, { method: "DELETE", cookie: WEB })).status, 200);
+});
+
+await test("web: publishing from a browser is the same entry in the public map — an address answers at once, the home page is chosen from the shared workspace, and `app` is no page's address", async () => {
+  const space = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  const put = (path, text, extra = "") =>
+    browser(`/api/web/doc?path=${encodeURIComponent(path)}${extra}`, { method: "PUT", cookie: WEB, body: { md: { text, ifRev: null } } });
+  const publish = (body) => browser("/api/web/pages", { method: "PUT", cookie: WEB, body });
+  const stop = (slug) => browser(`/api/web/pages?slug=${slug}`, { method: "DELETE", cookie: WEB });
+  const home = (slug) => browser("/api/web/home", { method: "PUT", cookie: WEB, body: { slug } });
+  const visit = (path) => call(path, { device: null });
+  const wasHome = Object.entries((await sharedManifest()).public ?? {}).find(([, e]) => e.root)?.[0] ?? null;
+  assert.equal((await put("published/Handbook.md", "# Handbook\n\nFrom a browser.\n")).status, 200);
+  assert.equal((await put("published/Notes/Aside.md", "# Aside\n")).status, 200);
+  assert.equal((await put("Mine.md", "# Mine\n", `&space=${space}`)).status, 200);
+
+  const page = await publish({ path: "published/Handbook.md", kind: "document", title: "The handbook" });
+  assert.equal(page.status, 201);
+  assert.ok(/^[a-z0-9]{8}$/.test(page.json.slug), "an address nobody chose");
+  assert.equal(page.json.url, `https://notes.example.com/${page.json.slug}`);
+  const shown = await visit(`/${page.json.slug}`);
+  assert.equal(shown.status, 200, "it answers at once");
+  assert.ok(shown.text.includes("From a browser."));
+  const entry = (await sharedManifest()).public[page.json.slug];
+  assert.deepEqual([entry.kind, entry.path, entry.title], ["file", "published/Handbook.md", "The handbook"]);
+  assert.equal(entry.by, (await browser("/api/meta", { cookie: WEB })).json.you.memberId);
+
+  // The page it has, at an address of its own choosing.
+  const again = await publish({ path: "published/Handbook", kind: "document", slug: "Handbook" });
+  assert.deepEqual([again.status, again.json.slug, again.json.created], [200, "handbook", false]);
+  assert.equal((await visit(`/${page.json.slug}`)).status, 404, "the old address is given up");
+  assert.equal((await visit("/handbook")).status, 200);
+  const rekeyed = (await sharedManifest()).public.handbook;
+  assert.deepEqual([rekeyed.title, rekeyed.at, rekeyed.by], [entry.title, entry.at, entry.by], "its title, its first date and who published it stay");
+
+  const folder = await publish({ path: "published/Notes", kind: "folder", slug: "aside-notes" });
+  assert.equal(folder.status, 201);
+  assert.deepEqual(folder.json.documents, ["published/Notes/Aside"]);
+  assert.equal((await visit("/aside-notes/Aside")).status, 200);
+
+  for (const [body, status, why] of [
+    [{ path: "published/Handbook.md", kind: "document", slug: "app" }, 400, "the browser version's own address"],
+    [{ path: "published/Handbook.md", kind: "document", slug: "api" }, 400, "a word Doklin keeps"],
+    [{ path: "published/Handbook.md", kind: "document", slug: "No" }, 400, "too short"],
+    [{ path: "published/Notes/Aside.md", kind: "document", slug: "handbook" }, 409, "another page's address"],
+    [{ path: "published/Nope.md", kind: "document" }, 404, "no such document"],
+    [{ path: "published/Nope", kind: "folder" }, 404, "no such folder"],
+    [{ path: "published/Handbook.md" }, 400, "the kind is said"],
+    [{ path: "", kind: "document" }, 400, "nothing named"],
+  ]) {
+    assert.equal((await publish(body)).status, status, why);
+  }
+  const refused = await putManifest({ ...(await sharedManifest()), seq: (await sharedManifest()).seq + 1, public: { app: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1 } } });
+  assert.equal(refused.status, 400, "nor may a Mac's manifest name it");
+  // Nothing is published there, and nothing can be: beside a web directory
+  // the address is the browser version's own page, and a path under it that
+  // names none of its files is nobody's.
+  const there = await visit("/app");
+  if (webDir) assert.ok(there.status === 200 && there.text.includes('src="/app/gate.js"'), "the browser version's page, not a page of the workspace's");
+  else assert.equal(there.status, 404);
+  assert.equal((await visit("/app/handbook")).status, 404, "nor is a page under it");
+
+  // The home page: one of the shared workspace's pages, or none.
+  assert.equal((await home("handbook")).status, 200);
+  assert.ok((await visit("/")).text.includes("From a browser."));
+  assert.equal((await home("aside-notes")).status, 200);
+  const map = (await sharedManifest()).public;
+  assert.deepEqual(Object.keys(map).filter((s) => map[s].root), ["aside-notes"], "one home page: choosing another moves it");
+  assert.equal((await home("nothing-here")).status, 404);
+  assert.equal((await home("x")).status, 400);
+  assert.equal((await home(undefined)).status, 400, "null says none; nothing said is not an answer");
+  const mine = await publish({ space, path: "Mine.md", kind: "document", slug: "mine-alone" });
+  assert.equal(mine.status, 201, "a page is published in the section its document is in");
+  assert.equal((await visit("/mine-alone")).status, 200);
+  const notShared = await home("mine-alone");
+  assert.deepEqual([notShared.status, notShared.json.error], [409, "the home page is chosen from the shared workspace"]);
+  assert.equal((await home(null)).status, 200);
+  assert.equal(Object.values((await sharedManifest()).public).some((e) => e.root), false);
+
+  // An owner's browser takes a page down as their Mac does, whoever published it.
+  assert.equal((await publish({ path: "published/Handbook.md", kind: "document", slug: "handbook" })).status, 200);
+  const listed = await browser("/api/pages", { cookie: WEB });
+  assert.ok(listed.json.pages.some((p) => p.slug === "handbook" && p.shared), "every page on the domain, to an owner");
+  assert.equal((await browser("/api/pages/aside-notes", { method: "DELETE", cookie: WEB })).status, 204);
+  assert.equal((await visit("/aside-notes/Aside")).status, 404);
+  assert.equal((await browser("/api/pages/aside-notes", { method: "DELETE", cookie: WEB })).status, 404);
+
+  // Stopping: in whichever section of theirs holds the address.
+  assert.equal((await stop("mine-alone")).status, 200);
+  assert.equal((await visit("/mine-alone")).status, 404);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'mine-alone'"), 0, "the address is let go");
+  assert.equal((await stop("handbook")).status, 200);
+  assert.equal((await stop("aside-notes")).status, 404, "taken down already");
+  assert.equal((await stop("handbook")).status, 404);
+  assert.equal((await stop("x")).status, 400);
+  if (wasHome) assert.equal((await home(wasHome)).status, 200);
+  assert.equal((await browser("/api/web/folder?path=published", { method: "DELETE", cookie: WEB })).status, 200);
+  assert.equal((await browser(`/api/web/doc?path=Mine.md&space=${space}`, { method: "DELETE", cookie: WEB })).status, 200);
+});
+
+await test("web: a browser that signs out, or is signed out, is told to drop its cookie and what it kept; one whose cookie is nobody's, only the cookie", async () => {
+  const typed = await codeFor("WEB00000000000000003", OWNER);
+  const second = await browser("/api/web/session", { method: "POST", body: { code: typed, deviceId: "d-browser-2", deviceName: "Edge" } });
+  const other = cookieOf(second);
+
+  // An owner signs the first one out from a Mac, as they would any device.
+  assert.equal((await call(`/api/auth/devices/${WEB_TOKEN_ID}`, { method: "DELETE", token: OWNER })).status, 204);
+  const removed = await browser("/api/poll", { cookie: WEB });
+  assert.equal(removed.status, 401);
+  assert.equal(removed.json.removed, true, "what a Mac hears, and deletes its copy for");
+  assert.equal(removed.headers.get("set-cookie"), COOKIE_GONE);
+  assert.equal(removed.headers.get("clear-site-data"), '"cache", "storage"', "a browser's copy is what it cached and what it remembered");
+  assert.equal((await call("/api/poll", { token: WEB })).headers.get("set-cookie"), null, "said to a browser only");
+
+  // The second signs itself out.
+  const out = await browser("/api/auth/session", { method: "DELETE", cookie: other, device: "d-browser-2" });
+  assert.equal(out.status, 204);
+  assert.equal(out.headers.get("set-cookie"), COOKIE_GONE);
+  assert.equal(out.headers.get("clear-site-data"), '"cache", "storage"');
+  assert.equal(db.value("SELECT COUNT(*) FROM tokens WHERE id = ?", second.json.tokenId), 0);
+  const after = await browser("/api/poll", { cookie: other });
+  assert.deepEqual([after.status, after.json.removed], [401, undefined], "it left: nobody took its access away");
+  assert.equal(after.headers.get("set-cookie"), COOKIE_GONE);
+  assert.equal(after.headers.get("clear-site-data"), null);
+  const spare = await call("/api/auth/join", {
+    method: "POST",
+    body: { code: await codeFor("WEB00000000000000004", OWNER), deviceId: "d-spare", deviceName: "A spare Mac" },
+  });
+  assert.ok(/^[a-f0-9]{64}$/.test(spare.json.token), "the same code, joined as a Mac: a bearer, with nothing in front");
+  const mac = await call("/api/auth/session", { method: "DELETE", token: spare.json.token });
+  assert.deepEqual([mac.status, mac.headers.get("set-cookie"), mac.headers.get("clear-site-data")], [204, null, null], "a Mac ending its sign-in is told nothing of the kind");
 });
 
 await test("wipe: the superadmin's, confirmed, empties the bucket and frees the domain for a new binding", async () => {

@@ -3,17 +3,8 @@ import { useDismiss } from "./dismiss";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { Facepile } from "./Avatar";
 import { pageUrl, placeOf, publishedByPath, type CloudSpace, type CloudStatus, type PublicPage } from "./cloud";
-import { invoke } from "@tauri-apps/api/core";
-
-export type TreeNode =
-  // `paired` marks a markdown row that also has an html rendition folded into
-  // it (a same-stem .html sibling), so the tree can icon md-only, html-only,
-  // and bundled md+html rows distinctly. Absent/false for standalone html.
-  // `supported: false` marks a file the app can't open — only ever present in
-  // "show every file" mode, where those rows are listed greyed out so their
-  // existence is visible. Absent means openable (the documents-only tree).
-  | { kind: "file"; name: string; path: string; paired?: boolean; supported?: boolean }
-  | { kind: "dir"; name: string; path: string; children: TreeNode[] };
+import { backend, type FileClipboardPayload, type TreeNode } from "./backend";
+import { keys } from "./keys";
 
 // A file row the app can open (markdown, html, or a bundled pair). Folders and
 // documents-only trees are always openable; only "show every file" rows differ.
@@ -26,11 +17,6 @@ const isOpenable = (node: TreeNode) => node.kind !== "file" || node.supported !=
 // for saving an untitled note (it defaults into the selected folder / next to
 // the selected file).
 export type SidebarSelection = { path: string; kind: "file" | "dir" };
-
-// Mirror of the app-wide file clipboard (it lives in the Rust backend — see
-// FileClipboard in lib.rs — so every workspace window shares it). The sidebar
-// only reads it: to enable Paste and to dim rows a Cut is about to move.
-export type FileClipboardPayload = { items: SidebarSelection[]; cut: boolean };
 
 // Nested entries collapse into their selected ancestor: moving, pasting, or
 // trashing a folder already takes everything inside it, so acting on a
@@ -99,9 +85,11 @@ type Props = {
   refreshToken: number;
   onSelect: (sels: SidebarSelection[]) => void;
   onOpenFile: (path: string) => void;
-  onOpenFolder: () => void;
-  onOpenFilePicker: () => void;
-  onRevealInFinder: (path: string) => void;
+  // This computer's own files and folders: absent where the platform has no
+  // way to them, and then their rows are not shown.
+  onOpenFolder?: () => void;
+  onOpenFilePicker?: () => void;
+  onRevealInFinder?: (path: string) => void;
   onDelete: (entries: SidebarSelection[]) => void;
   // Park entries on the app-wide file clipboard (Cut when `cut`), and paste
   // the clipboard's contents into a destination folder.
@@ -368,7 +356,7 @@ export default function Sidebar({
     setLoading(true);
     setError(null);
     try {
-      const node = await invoke<TreeNode>("list_md_tree", { path: root, all: showAll });
+      const node = await backend.documents.tree(root, showAll);
       setTree(node);
     } catch (e) {
       setError(String(e));
@@ -603,14 +591,17 @@ export default function Sidebar({
       if (!toDir) return false;
       if (entries.every((en) => dirname(en.path) === toDir)) return false;
       // Straight under Restricted is where the restricted folders are: a
-      // folder dropped there becomes one, and a note there would be in none.
-      if (sectioned && toDir === restrictedDir && entries.some((en) => en.kind === "file")) return false;
+      // folder dropped there becomes one — where one can be made at all —
+      // and a note there would be in none.
+      if (sectioned && toDir === restrictedDir && (!onNewRestricted || entries.some((en) => en.kind === "file"))) {
+        return false;
+      }
       return !entries.some(
         (en) =>
           en.kind === "dir" && (toDir === en.path || toDir.startsWith(en.path + "/")),
       );
     },
-    [sectioned, restrictedDir],
+    [sectioned, restrictedDir, onNewRestricted],
   );
 
   const setDropState = useCallback((dir: string | null) => {
@@ -936,7 +927,7 @@ export default function Sidebar({
       const fileName = pc.kind === "file" && !DOC_EXT_RE.test(name) ? `${name}.md` : name;
       const path = `${pc.parentDir}/${fileName}`;
       try {
-        await invoke(pc.kind === "file" ? "create_file" : "create_dir", { path });
+        await backend.documents.create(path, pc.kind);
       } catch (e) {
         return String(e);
       }
@@ -1066,10 +1057,12 @@ export default function Sidebar({
         { label: "New Folder…", onClick: () => startCreate("dir", createDirFor(target)) },
       );
     }
-    items.push({
-      label: "Reveal in Finder",
-      onClick: () => onRevealInFinder(target.kind === "root" ? root : target.path),
-    });
+    if (onRevealInFinder) {
+      items.push({
+        label: "Reveal in Finder",
+        onClick: () => onRevealInFinder(target.kind === "root" ? root : target.path),
+      });
+    }
     // A file in one of the workspace's sections has a link of its own: it
     // opens in Doklin for whoever can see it, wherever it is clicked.
     if (
@@ -1295,7 +1288,7 @@ export default function Sidebar({
         setMenuOpen={setMenuOpen}
         onOpenFolder={onOpenFolder}
         onOpenFile={onOpenFilePicker}
-        onRevealInFinder={() => onRevealInFinder(root)}
+        onRevealInFinder={onRevealInFinder ? () => onRevealInFinder(root) : undefined}
         showAll={showAll}
         onToggleShowAll={toggleShowAll}
         onSwitchToSearch={onSwitchToSearch}
@@ -1532,9 +1525,9 @@ function SidebarHeader({
   onJoinWorkspace?: () => void;
   menuOpen: boolean;
   setMenuOpen: (v: boolean) => void;
-  onOpenFolder: () => void;
-  onOpenFile: () => void;
-  onRevealInFinder: () => void;
+  onOpenFolder?: () => void;
+  onOpenFile?: () => void;
+  onRevealInFinder?: () => void;
   // Whether the tree lists every file (non-documents greyed out) or documents
   // only, and the toggle for it.
   showAll: boolean;
@@ -1656,36 +1649,42 @@ function SidebarHeader({
               </button>
             )}
             {(onOpenPeople || onOpenAgents) && <div className="sidebar-menu-sep" role="separator" />}
-            <button
-              role="menuitem"
-              className="sidebar-menu-item"
-              onClick={() => {
-                setMenuOpen(false);
-                onOpenFolder();
-              }}
-            >
-              Open folder…
-            </button>
-            <button
-              role="menuitem"
-              className="sidebar-menu-item"
-              onClick={() => {
-                setMenuOpen(false);
-                onOpenFile();
-              }}
-            >
-              Open file…
-            </button>
-            <button
-              role="menuitem"
-              className="sidebar-menu-item"
-              onClick={() => {
-                setMenuOpen(false);
-                onRevealInFinder();
-              }}
-            >
-              Reveal in Finder
-            </button>
+            {onOpenFolder && (
+              <button
+                role="menuitem"
+                className="sidebar-menu-item"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onOpenFolder();
+                }}
+              >
+                Open folder…
+              </button>
+            )}
+            {onOpenFile && (
+              <button
+                role="menuitem"
+                className="sidebar-menu-item"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onOpenFile();
+                }}
+              >
+                Open file…
+              </button>
+            )}
+            {onRevealInFinder && (
+              <button
+                role="menuitem"
+                className="sidebar-menu-item"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onRevealInFinder();
+                }}
+              >
+                Reveal in Finder
+              </button>
+            )}
             <button
               role="menuitem"
               className="sidebar-menu-item"
@@ -1716,12 +1715,12 @@ function SidebarHeader({
         <button
           className="sidebar-search"
           onClick={onSwitchToSearch}
-          title="Search in folder (⌘⇧F)"
+          title={`Search in folder (${keys("⌘⇧F")})`}
           aria-label="Search in folder"
         >
           <SearchIcon />
           <span className="sidebar-search-label">Search</span>
-          <kbd>⌘⇧F</kbd>
+          <kbd>{keys("⌘⇧F")}</kbd>
         </button>
         <button
           className="sidebar-new"

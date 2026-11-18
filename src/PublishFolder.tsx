@@ -5,20 +5,16 @@
 // description, and previews the address scheme. The same dialog edits a
 // published folder and stops it.
 
-import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
 import {
-  cloudPublish,
-  cloudUnpublish,
   pageForPath,
   relPathIn,
   slugProblem,
   suggestSlug,
   type CloudStatus,
 } from "./cloud";
-
-type TreeNode = { kind: "file" | "dir"; name: string; path: string; children?: TreeNode[] };
+import { backend, type TreeNode } from "./backend";
 
 const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
 const countNotes = (node: TreeNode): number =>
@@ -26,7 +22,7 @@ const countNotes = (node: TreeNode): number =>
     ? MD_EXT_RE.test(node.name)
       ? 1
       : 0
-    : (node.children ?? []).reduce((n, c) => n + countNotes(c), 0);
+    : node.children.reduce((n, c) => n + countNotes(c), 0);
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -73,7 +69,8 @@ export default function PublishFolder({
   // How much becomes public: every note under the folder, however deep.
   useEffect(() => {
     let live = true;
-    void invoke<TreeNode>("list_md_tree", { path: dir })
+    void backend.documents
+      .tree(dir)
       .then((tree) => {
         if (live) setCount(countNotes(tree));
       })
@@ -167,7 +164,7 @@ export default function PublishFolder({
               data-testid="folder-publish"
               disabled={!canSave}
               onClick={() =>
-                void run(() => cloudPublish(dir, { slug: typed, title: title.trim(), desc: desc.trim() || undefined }))
+                void run(() => backend.cloud.publish(dir, { slug: typed, title: title.trim(), desc: desc.trim() || undefined }))
               }
             >
               {busy ? "Working…" : existing ? "Save changes" : "Publish folder"}
@@ -190,7 +187,7 @@ export default function PublishFolder({
                     className="modal-btn is-danger-solid"
                     data-testid="folder-stop-yes"
                     disabled={busy}
-                    onClick={() => void run(() => cloudUnpublish(cloud.root, existing.slug))}
+                    onClick={() => void run(() => backend.cloud.unpublish(cloud.root, existing.slug))}
                   >
                     Stop
                   </button>

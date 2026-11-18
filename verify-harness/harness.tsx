@@ -7,6 +7,11 @@ import { createRoot } from "react-dom/client";
 import HtmlView from "../src/HtmlView";
 import type { HtmlThread } from "../src/htmlComments";
 import "../src/App.css";
+import { installBackend } from "../src/backend";
+import { macBackend } from "../src/mac/backend";
+
+// The Mac's backend, answered by the page's IPC stub.
+installBackend(macBackend);
 
 const PAGE_V1 = `<!doctype html>
 <html><head><style>

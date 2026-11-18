@@ -32,6 +32,7 @@ import type { Env } from "./env";
 import { MAX_EMAIL_LEN, MAX_NAME_LEN, validName } from "./layout";
 import type { PersonRole } from "./roles";
 import { withDb } from "./schema";
+import type { DirectoryEntry } from "./wire";
 
 export type Member = {
   id: string;
@@ -112,50 +113,12 @@ export function normalizeEmail(raw: unknown): string | null {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
 }
 
-// Crockford's base32: no I, no L, no O, no U — so a code cannot spell a word
-// and cannot be mistyped into a different valid one. I and L read back as 1,
-// O as 0, which is the whole reason he dropped them.
-const CROCKFORD = /^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{20}$/;
-
-/**
- * A code as it is hashed: the twenty Crockford characters, uppercase, no
- * prefix and no dashes. `dkln-K7QM2-9XVR4-8TBHN-3WGYD` and
- * `dkln k7qm2 9xvr4 8tbhn 3wgyd` and the bare twenty all canonicalize to the
- * same string, so a code that survived an autocorrect, a line wrap or a
- * spreadsheet still redeems. Null when it is not a code.
- *
- * `prefix` is the four letters the code announces itself with, uppercase:
- * `DKLN` for an invite, `DKLA` for an agent's login code (agents.ts). A code
- * wearing the other kind's prefix is not a code here — the two are stored in
- * different tables, and saying so at the door beats a lookup that misses.
- *
- * This is a wire contract, not a convenience: the app hashes the canonical
- * form when it mints a code, and the worker hashes the canonical form when it
- * redeems one. The two have to agree character for character.
- */
-export function canonicalCode(raw: unknown, prefix: string): string | null {
-  if (typeof raw !== "string") return null;
-  const bare = raw.trim().toUpperCase().replace(/[^0-9A-Z]/g, "");
-  // The prefix only comes off a string long enough to have carried one. (A
-  // bare code can never begin with either prefix — L is not in the alphabet
-  // — but the length guard says so without depending on that.)
-  const body = bare.length === 24 && bare.startsWith(prefix) ? bare.slice(4) : bare;
-  const canonical = body.replace(/[IL]/g, "1").replace(/O/g, "0");
-  return CROCKFORD.test(canonical) ? canonical : null;
-}
-
-/** An invite code as it is hashed (see `canonicalCode`). */
-export const normalizeCode = (raw: unknown): string | null => canonicalCode(raw, "DKLN");
-
 /** A sha256 hex digest, as the two hashed columns store one. */
 export const HASH_RE = /^[a-f0-9]{64}$/;
 
-/** The ids this module mints: `m-` a member, `t-` a token, `i-` an invite.
- *  Short on purpose — a member id is what the manifest, presence and leases
- *  carry, and an email must never enter any of them. */
+/** The ids this module mints: `m-` a member (`MEMBER_ID_RE`, layout.ts),
+ *  `t-` a token, `i-` an invite. */
 export const ENTITY_ID_RE = /^[mti]-[a-f0-9]{8}$/;
-/** A member's id alone — what a space lists its people by. */
-export const MEMBER_ID_RE = /^m-[a-f0-9]{8}$/;
 
 type MemberRow = {
   id: string;
@@ -260,9 +223,6 @@ export async function listMembers(env: Env): Promise<MemberWithDevices[] | null>
     return results.map((r) => ({ ...toMember(r), devices: Number(r.devices) }));
   });
 }
-
-/** One row of the directory: a person, or an agent with whose it is. */
-export type DirectoryEntry = { id: string; name: string; person?: string };
 
 /**
  * Everyone's id and display name, and nothing else — what a `by` in the
@@ -676,6 +636,16 @@ export async function deleteInvite(env: Env, id: string): Promise<boolean | null
   });
 }
 
+/**
+ * What a browser's sign-in starts with. A browser is a device, and its token
+ * a row of `tokens` like any other's — but it is carried by a cookie no
+ * script can read and answered on fewer routes (web.ts), and that has to stay
+ * true of the token itself: one lifted out of a browser's cookie store and
+ * sent as a Mac would send it is refused, because of how it starts
+ * (auth.ts). The prefix is inside what is hashed, so it cannot be taken off.
+ */
+export const BROWSER_TOKEN_PREFIX = "dkw_";
+
 export type Redeemed = { token: string; tokenId: string; member: Member };
 
 /** What a redeem can come to: the token, or the reason there isn't one.
@@ -691,12 +661,14 @@ export type RedeemResult = Redeemed | "expired" | "unknown";
  * The token is minted here, 256 bits, and returned exactly once; the database
  * keeps only its sha256. That matters because a person's token is not a
  * limited account — and, on an owner's row, it is an owner's.
+ *
+ * A browser's is a row like any device's, and says what it is in its first
+ * characters (`BROWSER_TOKEN_PREFIX`).
  */
 export async function redeemInvite(
   env: Env,
   codeHash: string,
-  deviceId: string | null,
-  deviceName: string | null,
+  device: { id: string | null; name: string | null; browser: boolean },
   now = Date.now(),
 ): Promise<RedeemResult | null> {
   return withDb(env, async (db) => {
@@ -716,14 +688,14 @@ export async function redeemInvite(
       return "expired" as RedeemResult;
     }
 
-    const token = randomHex(32);
+    const token = `${device.browser ? BROWSER_TOKEN_PREFIX : ""}${randomHex(32)}`;
     const tokenId = `t-${randomHex(4)}`;
     await db.batch([
       db
         .prepare(
           "INSERT OR REPLACE INTO tokens (hash, id, member_id, device_id, device_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(await sha256Hex(token), tokenId, row.id, deviceId, validName(deviceName, "A device"), now),
+        .bind(await sha256Hex(token), tokenId, row.id, device.id, validName(device.name, device.browser ? "A browser" : "A device"), now),
       db.prepare("DELETE FROM invites WHERE hash = ?").bind(codeHash),
       // From here somebody has signed in as this person (`Member.lastSeenAt`).
       db.prepare("UPDATE members SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at IS NULL").bind(now, row.id),

@@ -14,7 +14,7 @@
 //! backup and the request body are all incapable of letting anyone in.
 //!
 //! [`normalize_code`] is mirrored by `normalizeCode` in
-//! cloud-worker/src/members.ts — the app hashes the canonical form when it
+//! cloud-worker/src/layout.ts — the app hashes the canonical form when it
 //! mints an invite and the worker hashes the canonical form when it redeems
 //! one, so the two must agree character for character. **Change both.**
 
@@ -195,7 +195,9 @@ pub struct Pasted {
 }
 
 /// Read an invite out of a paste: the blob itself, a whole chat message
-/// carrying it, or just one of the two halves on its own.
+/// carrying it, or just one of the two halves on its own. The browser's
+/// sign-in reads one the same way (`parsePasted`, src/web/SignIn.tsx):
+/// **change both.**
 ///
 /// Punctuation decides which half a word is, and it has to: strip the dots
 /// and slashes out of `https://notes.example.com` and what is left is twenty

@@ -27,7 +27,10 @@ pub const MAX_PATH_LEN: usize = 1024;
 /// Segments in a workspace-relative path.
 pub const MAX_PATH_DEPTH: usize = 12;
 
-/// Slugs the worker's own routes speak for — never a public page's.
+/// Slugs the worker's own routes speak for — never a public page's. `app` is
+/// the browser version's: every address under it is that app's. Mirrored by
+/// the worker (`RESERVED_SLUGS`, cloud-worker/src/layout.ts), the app
+/// (src/cloud.ts) and the iPhone (Publishing.swift): change all four.
 pub const RESERVED_SLUGS: &[&str] = &[
     "api",
     "__web",
@@ -37,6 +40,7 @@ pub const RESERVED_SLUGS: &[&str] = &[
     "favicon.ico",
     "apple-touch-icon.png",
     "join",
+    "app",
 ];
 
 /// The unambiguous alphabet a random slug is drawn from: no `0`/`o`,
@@ -149,7 +153,8 @@ impl PublicEntry {
 }
 
 /// `GET /api/poll`, or the `POST` that carries a beat: whether the manifest
-/// moved, who else is here, and which documents they hold.
+/// moved, who else is here, and which documents they hold (`PollAnswer` and
+/// what it is made of, `cloud-worker/src/wire.ts` — change both).
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PollResponse {
     #[serde(rename = "manifestEtag")]

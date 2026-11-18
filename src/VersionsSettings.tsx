@@ -9,19 +9,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
-  onVersionsProgress,
-  versionsExport,
-  versionsForget,
-  versionsSetCloudHorizon,
-  versionsSetHorizon,
-  versionsStores,
   type ExportReport,
   type StoreInfo,
   type VersionsStatus,
 } from "./versions";
 import type { CloudStatus } from "./cloud";
+import { backend, type Versions } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -64,12 +58,15 @@ export function storeLine(store: StoreInfo): string {
 }
 
 export default function VersionsSettings({
+  store,
   root,
   statuses,
   cloud,
   onClose,
   onError,
 }: {
+  /** The version store: what this reads and restores from. */
+  store: Versions;
   /** The workspace this window has open, or null for a lone document — the
    *  horizon and the export are that folder's, the store list is the Mac's. */
   root: string | null;
@@ -96,11 +93,11 @@ export default function VersionsSettings({
 
   const load = useCallback(async () => {
     try {
-      setStores(await versionsStores());
+      setStores(await store.stores());
     } catch (e) {
       setError(errText(e));
     }
-  }, []);
+  }, [store]);
 
   useEffect(() => {
     void load();
@@ -117,19 +114,10 @@ export default function VersionsSettings({
   // no reason to hold a listener open for the life of the modal.
   useEffect(() => {
     if (!busy) return;
-    let stop: (() => void) | null = null;
-    let dead = false;
-    void onVersionsProgress((e) => {
+    return store.onProgress((e) => {
       if (root && e.root === root) setProgress({ done: e.done, total: e.total });
-    }).then((un) => {
-      if (dead) un();
-      else stop = un;
     });
-    return () => {
-      dead = true;
-      stop?.();
-    };
-  }, [busy, root]);
+  }, [busy, root, store]);
 
   const act = useCallback(
     async (run: () => Promise<void>) => {
@@ -150,17 +138,17 @@ export default function VersionsSettings({
 
   const exportHere = useCallback(async () => {
     if (!root) return;
-    const dest = await openDialog({ directory: true, multiple: false });
-    if (typeof dest !== "string") return;
+    const dest = await backend.localFiles?.pickFolder();
+    if (!dest) return;
     setExported(null);
     setProgress({ done: 0, total: 0 });
     await act(async () => {
-      const report = await versionsExport(root, dest);
+      const report = await store.export(root, dest);
       setExported(report);
       await load();
     });
     setProgress(null);
-  }, [root, act, load]);
+  }, [root, act, load, store]);
 
   return (
     <div className="modal-overlay">
@@ -210,7 +198,7 @@ export default function VersionsSettings({
                     data-days={h.days ?? "forever"}
                     aria-pressed={here.horizonDays === h.days}
                     disabled={busy}
-                    onClick={() => void act(() => versionsSetHorizon(here.root, h.days))}
+                    onClick={() => void act(() => store.setHorizon(here.root, h.days))}
                   >
                     {h.label}
                   </button>
@@ -236,7 +224,7 @@ export default function VersionsSettings({
                     data-days={h.days ?? "forever"}
                     aria-pressed={cloudKnown && mirror.horizonDays === h.days}
                     disabled={busy}
-                    onClick={() => void act(() => versionsSetCloudHorizon(root, h.days))}
+                    onClick={() => void act(() => store.setCloudHorizon(root, h.days))}
                   >
                     {h.label}
                   </button>
@@ -246,7 +234,7 @@ export default function VersionsSettings({
             </>
           )}
 
-          {root != null && (
+          {root != null && backend.localFiles && (
             <>
               <div className="cloud-section-label">A copy you keep</div>
               <p className="cloud-hint">
@@ -278,21 +266,21 @@ export default function VersionsSettings({
             </p>
           ) : (
             <ul className="vs-stores" data-testid="vs-stores">
-              {stores.map((store) => (
-                <li className="vs-store" key={store.key} data-testid="vs-store" data-key={store.key}>
-                  <span className="vs-store-name" title={store.root}>
-                    {basename(store.root) || store.key}
+              {stores.map((other) => (
+                <li className="vs-store" key={other.key} data-testid="vs-store" data-key={other.key}>
+                  <span className="vs-store-name" title={other.root}>
+                    {basename(other.root) || other.key}
                   </span>
                   <span className="vs-store-sub">
-                    {storeLine(store)}
-                    {!store.exists && " · that folder is gone"}
+                    {storeLine(other)}
+                    {!other.exists && " · that folder is gone"}
                   </span>
                   <span className="vs-store-actions">
-                    {open.has(store.key) ? (
+                    {open.has(other.key) ? (
                       <span className="cloud-hint" data-testid="vs-store-open">
                         open
                       </span>
-                    ) : forgetting === store.key ? (
+                    ) : forgetting === other.key ? (
                       <>
                         <button
                           className="modal-btn is-danger-solid"
@@ -300,7 +288,7 @@ export default function VersionsSettings({
                           disabled={busy}
                           onClick={() =>
                             void act(async () => {
-                              await versionsForget(store.key);
+                              await store.forget(other.key);
                               setForgetting(null);
                               await load();
                             })
@@ -318,7 +306,7 @@ export default function VersionsSettings({
                         data-testid="vs-forget"
                         onClick={() => {
                           setError(null);
-                          setForgetting(store.key);
+                          setForgetting(other.key);
                         }}
                       >
                         Forget

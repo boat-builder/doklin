@@ -6,12 +6,13 @@
 // through here, which is why nothing public is ever stored: a page can never
 // be staler than the sync, and never fresher. Nothing here writes.
 
-import { readWorkspace, type WorkspaceRecord } from "./bucket";
+import { readWorkspace } from "./bucket";
 import type { Env } from "./env";
 import { MANIFEST_KEY, blobKey, syncs, validPath } from "./layout";
 import type { Manifest, ManifestFile, PublicEntry } from "./manifest";
 import { spaceOf } from "./spaces";
 import { MANIFEST_VERSION } from "./version";
+import type { WorkspaceRecord } from "./wire";
 import { META_SUFFIX, parseEntityMeta, type EntityMeta } from "../../src/metaFile";
 
 /** What the app opens as a note — the same rule as App.tsx's MD_EXT_RE. */

@@ -22,4 +22,33 @@ export default [
       "react-hooks/exhaustive-deps": "warn",
     },
   },
+  // The frontend never fetches. On a Mac the cloud engine in Rust is the only
+  // code that holds a token or talks to a domain; in a browser the one module
+  // that does is src/web/http.ts, which holds no token at all.
+  {
+    files: ["src/**/*.ts", "src/**/*.tsx"],
+    ignores: ["src/web/http.ts"],
+    rules: {
+      "no-restricted-globals": [
+        "error",
+        { name: "fetch", message: "The frontend never fetches: ask src/backend.ts for it." },
+      ],
+    },
+  },
+  // The UI is written against src/backend.ts; only the Mac's answer to it
+  // knows that Tauri is underneath.
+  {
+    files: ["src/**/*.ts", "src/**/*.tsx"],
+    ignores: ["src/mac/**"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            { group: ["@tauri-apps/**"], message: "Only src/mac/ imports Tauri: ask src/backend.ts for it." },
+          ],
+        },
+      ],
+    },
+  },
 ];

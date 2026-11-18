@@ -1,0 +1,46 @@
+/* The browser version's own screens, shown before the app is: the sign-in,
+   and the two that stand in for it while the workspace opens or when it
+   does not. The app's tokens and form controls (App.css) dress them. */
+
+.web-screen {
+  min-height: 100dvh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 18vh 24px 24px;
+  background: var(--canvas);
+  color: var(--text-1);
+  font-family: var(--font-ui);
+}
+
+.web-card {
+  width: 100%;
+  max-width: 440px;
+  padding: 20px;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+}
+
+.web-title {
+  margin: 0 0 8px;
+  font-family: var(--font-heading);
+  font-size: 24px;
+  font-weight: var(--doc-heading-weight);
+  line-height: 1.25;
+}
+
+.web-text {
+  margin: 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.web-invite {
+  display: block;
+  resize: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}

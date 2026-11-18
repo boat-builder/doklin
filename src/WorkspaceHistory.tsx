@@ -13,14 +13,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
 import { groupByDay, isRecent, timeLabel } from "./HistoryRail";
 import {
-  versionsRestoreSnapshot,
-  versionsSnapshotDiff,
-  versionsSnapshots,
   versionReasonWord,
   type RestoreReport,
   type SnapshotDiff,
   type SnapshotMeta,
 } from "./versions";
+import type { Versions } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -66,11 +64,14 @@ const KIND_WORD: Record<Row["kind"], string> = {
 };
 
 export default function WorkspaceHistory({
+  store,
   root,
   onClose,
   onRestored,
   onError,
 }: {
+  /** The version store: what this reads and restores from. */
+  store: Versions;
   /** The workspace whose timeline this is — the store's display root. */
   root: string;
   onClose: () => void;
@@ -92,7 +93,7 @@ export default function WorkspaceHistory({
 
   const load = useCallback(async () => {
     try {
-      setSnapshots(await versionsSnapshots(root));
+      setSnapshots(await store.snapshots(root));
       setError(null);
     } catch (e) {
       setSnapshots([]);
@@ -100,7 +101,7 @@ export default function WorkspaceHistory({
     } finally {
       setLoading(false);
     }
-  }, [root]);
+  }, [root, store]);
 
   useEffect(() => {
     setLoading(true);
@@ -120,7 +121,7 @@ export default function WorkspaceHistory({
     setDiffError(null);
     void (async () => {
       try {
-        const next = await versionsSnapshotDiff(root, selected);
+        const next = await store.snapshotDiff(root, selected);
         if (cancelled) return;
         setDiff(next);
         setTicked(new Set(rowsOf(next).map((r) => r.path)));
@@ -131,7 +132,7 @@ export default function WorkspaceHistory({
     return () => {
       cancelled = true;
     };
-  }, [root, selected]);
+  }, [root, selected, store]);
 
   // Esc takes back a pending restore first; a press outside just closes.
   const cardRef = useRef<HTMLDivElement>(null);
@@ -162,12 +163,12 @@ export default function WorkspaceHistory({
     const paths = confirming === "all" ? null : scope.map((r) => r.path);
     setBusy(true);
     try {
-      const report = await versionsRestoreSnapshot(root, selected, paths);
+      const report = await store.restoreSnapshot(root, selected, paths);
       setConfirming(null);
       onRestored?.(report, paths);
       await load();
       // The folder has changed under it; re-ask what is left to do.
-      const next = await versionsSnapshotDiff(root, selected);
+      const next = await store.snapshotDiff(root, selected);
       setDiff(next);
       setTicked(new Set(rowsOf(next).map((r) => r.path)));
     } catch (e) {
@@ -177,7 +178,7 @@ export default function WorkspaceHistory({
     } finally {
       setBusy(false);
     }
-  }, [selected, busy, confirming, scope, root, onRestored, onError, load]);
+  }, [selected, busy, confirming, scope, root, onRestored, onError, load, store]);
 
   const toggle = (path: string) =>
     setTicked((prev) => {

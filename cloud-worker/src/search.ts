@@ -2,7 +2,8 @@
 // lines — the question the app's own search asks (`search_workspace`,
 // src-tauri/src/lib.rs), answered for a caller that has no copy of the folder.
 //
-//   GET /api/agent/search?q=&dir=&limit=
+//   GET /api/agent/search?q=&dir=&limit=      an agent's (agentDocs.ts)
+//   GET /api/web/search?q=&limit=             a person's in a browser (webDocs.ts)
 //
 // A Worker cannot read every document on every search: each is a blob read,
 // and a request may make fifty. So the text is mirrored into D1, one row per
@@ -11,7 +12,7 @@
 // the matching lines.
 //
 // There is one mirror per section — the shared workspace's, and one for each
-// space — so a search scans the text of the sections its agent's person can
+// space — so a search scans the text of the sections its caller's person can
 // see and of no other. Searching the workspace itself covers every one of
 // them, up to what a request can open (`sectionsNotSearched` names the rest).
 //
@@ -23,8 +24,8 @@
 //   · A search catches the mirror up before it answers. A few stale
 //     documents are read in the same request; more than that and the answer
 //     is `202` with how many are left, and the caller asks again.
-//   · A change made through the document API catches up straight away, so an
-//     agent finds what it just wrote. A change made on a Mac is caught up by
+//   · A change the worker itself makes — an agent's, or a person's in a
+//     browser — catches up straight away, so they find what they just wrote. A change made on a Mac is caught up by
 //     the next search — deliberately not on the Mac's own manifest PUT, which
 //     would spend a database write on every save for a mirror nobody may ask.
 //   · Until somebody searches there is no mirror, and nothing here costs
@@ -37,17 +38,14 @@
 // It is the database or nothing: a database that cannot answer is a 503 to a
 // search, and costs nothing else.
 
-import { refuse, type Call } from "./agentCall";
-import { MAX_SECTIONS_READ, type Section } from "./agentPlace";
 import { Refusal, type Committed } from "./commit";
-import { Index, nameOf, pathProblem, type Entry } from "./documents";
+import { Index, nameOf, type Entry } from "./documents";
 import type { Env } from "./env";
-import { json } from "./http";
 import { textOf } from "./htmlText";
-import { blobKey } from "./layout";
+import { SEARCH_LIMIT_MAX, blobKey } from "./layout";
 import type { Manifest } from "./manifest";
 import { ensureSchema } from "./schema";
-import { spaceOf } from "./spaces";
+import { MAX_SECTIONS_READ, spaceOf, type Where } from "./spaces";
 import { basename, isHtmlPath, isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 import { stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, parseEntityMeta } from "../../src/metaFile";
@@ -61,7 +59,6 @@ const CATCH_UP_BYTES = 1024 * 1024;
 /** Stale documents a search still catches up and answers in one request. */
 const INLINE_READS = 8;
 const DEFAULT_LIMIT = 20;
-const MAX_LIMIT = 30;
 /** Matching lines shown per document. */
 const MAX_LINES = 5;
 const LINE_PREVIEW = 200;
@@ -231,7 +228,7 @@ async function catchUp(
  * there is a mirror. Runs after the response where the runtime allows it,
  * and never fails the change it follows.
  */
-export async function mirrorAfter(c: Pick<Call, "env" | "ctx">, done: Committed<unknown>): Promise<void> {
+export async function mirrorAfter(c: { env: Env; ctx: ExecutionContext | undefined }, done: Committed<unknown>): Promise<void> {
   if (!done.wrote) return;
   const work = (async (): Promise<void> => {
     const db = c.env.DB;
@@ -249,7 +246,7 @@ export async function mirrorAfter(c: Pick<Call, "env" | "ctx">, done: Committed<
   else await work;
 }
 
-type Match = { line?: number; text: string };
+export type Match = { line?: number; text: string };
 
 /** The lines of a document that contain the needle. Markdown lines are
  *  numbered as the file numbers them; an html page's are its text, unnumbered. */
@@ -267,7 +264,7 @@ function matchingLines(path: string, text: string, needle: string): { matches: M
   return { matches, total };
 }
 
-/** A path in a section, as its person names it. */
+/** A path in a section, as the caller names it. */
 const under = (mount: string, path: string): string => (mount ? `${mount}/${path}` : path);
 
 /** Whether a document is called something holding the needle: its file name
@@ -276,43 +273,70 @@ const isCalled = (path: string, needle: string): boolean => basename(nameOf(path
 
 /** A document a search found: by its name, by its mirror row — `text` when
  *  the row holds the needle, `big` when it was too large to mirror — or both. */
-type Found = { doc: Searchable; section: Section; path: string; named: boolean; row: "text" | "big" | null };
+type Found = { doc: Searchable; section: Where; path: string; named: boolean; row: "text" | "big" | null };
 
-export async function getSearch(c: Call): Promise<Response> {
-  const { env, url, places } = c;
-  const query = (url.searchParams.get("q") ?? "").trim();
-  if (query === "") return json({ error: "say what to search for" }, 400);
-  if (/[\r\n]/.test(query)) return json({ error: "search for text within one line" }, 400);
+/** What to search for: one line of text, in the documents under `dir` ("" is
+ *  everything the sections hold), at most `limit` of them. */
+export type Ask = { query: string; dir: string; limit: number };
+
+/** What a request's `q` and `limit` ask for, or why they ask for nothing. */
+export function askOf(params: URLSearchParams, dir: string): Ask | Refusal {
+  const query = (params.get("q") ?? "").trim();
+  if (query === "") return new Refusal(400, "say what to search for");
+  if (/[\r\n]/.test(query)) return new Refusal(400, "search for text within one line");
+  const asked = Number(params.get("limit") ?? DEFAULT_LIMIT);
+  const limit = Number.isInteger(asked) && asked > 0 ? Math.min(asked, SEARCH_LIMIT_MAX) : DEFAULT_LIMIT;
+  return { query, dir, limit };
+}
+
+/** One document a search found. */
+export type Hit = {
+  /** The section it is in, and its file there: the markdown, or the html of
+   *  a document that has no markdown. */
+  space: string;
+  fid: string;
+  /** That file's path, as the caller names paths. */
+  path: string;
+  matches: Match[];
+  /** Matching lines beyond the ones in `matches`. */
+  moreLines: number;
+  /** Its name holds the text. */
+  inName: boolean;
+  /** Its text does not, on any line: the text was said in a comment. */
+  inComments: boolean;
+};
+
+export type Searched = {
+  hits: Hit[];
+  /** Every document that matched, shown or not. */
+  total: number;
+  /** Documents too large to mirror, and not found by name either: never
+   *  searched, and said so. */
+  notSearched: { space: string; path: string }[];
+  /** Sections beyond what one request opens. */
+  left: Where[];
+};
+
+/**
+ * Search `sections`. `{ indexing }` when the mirror had more to catch up on
+ * than one request reads — that many documents are left, and the caller asks
+ * again.
+ */
+export async function searchIn(
+  env: Env,
+  sections: readonly Where[],
+  { query, dir, limit }: Ask,
+): Promise<Searched | { indexing: number } | Refusal> {
   const needle = query.toLowerCase();
-  const dir = (url.searchParams.get("dir") ?? "").replace(/^\/+|\/+$/g, "");
-  if (dir) {
-    const problem = pathProblem(dir);
-    if (problem) return json({ error: problem }, 400);
-  }
-  const asked = Number(url.searchParams.get("limit") ?? DEFAULT_LIMIT);
-  const limit = Number.isInteger(asked) && asked > 0 ? Math.min(asked, MAX_LIMIT) : DEFAULT_LIMIT;
-  const unavailable = (): Response => json({ error: "search needs this domain's database, which isn't answering — try again in a moment" }, 503);
-
-  // A folder is in one section. The workspace itself is all of them, and
-  // `Restricted` every restricted folder.
-  const at = dir === "" ? null : await places.at(dir);
-  if (at instanceof Refusal) return refuse(at);
-  let sections: Section[];
-  if (at && at !== "restricted") {
-    sections = [at];
-  } else {
-    const all = await places.all();
-    if (all === null) return unavailable();
-    sections = at === "restricted" ? all.filter((s) => s.kind === "restricted") : all;
-  }
+  const unavailable = (): Refusal => new Refusal(503, "search needs this domain's database, which isn't answering — try again in a moment");
   const covered = sections.slice(0, 1 + MAX_SECTIONS_READ);
-  const left = sections.slice(covered.length).map((s) => s.mount);
+  const left = sections.slice(covered.length);
 
-  const open: { section: Section; ws: Workspace; want: Map<string, Searchable> }[] = [];
+  const open: { section: Where; ws: Workspace; want: Map<string, Searchable> }[] = [];
   for (const section of covered) {
     const ws = await openWorkspace(section.env);
     if (ws) open.push({ section, ws, want: searchable(ws.manifest) });
-    else if (section.space === "") return json({ error: "this domain holds no workspace yet" }, 404);
+    else if (section.space === "") return new Refusal(404, "this domain holds no workspace yet");
   }
   const db = env.DB;
   if (!db) return unavailable();
@@ -334,7 +358,7 @@ export async function getSearch(c: Call): Promise<Response> {
       }
       // A round that read more than a handful has used this request's
       // budget; the lines are cut on the next one.
-      if (pending > 0 || reads > INLINE_READS) return json({ indexing: true, pending }, 202);
+      if (pending > 0 || reads > INLINE_READS) return { indexing: pending };
       spent += reads;
       const found = await db
         .prepare(
@@ -351,7 +375,7 @@ export async function getSearch(c: Call): Promise<Response> {
 
   const prefix = dir ? `${dir.toLowerCase()}/` : "";
   const docs = new Map<string, Found>();
-  const found = (section: Section, fid: string, doc: Searchable): Found => {
+  const found = (section: Where, fid: string, doc: Searchable): Found => {
     const k = `${section.space}/${fid}`;
     let f = docs.get(k);
     if (!f) docs.set(k, (f = { doc, section, path: under(section.mount, doc.text.file.path), named: false, row: null }));
@@ -368,13 +392,13 @@ export async function getSearch(c: Call): Promise<Response> {
   }
   const inDir = [...docs.values()].filter((r) => r.path.toLowerCase().startsWith(prefix));
   // What a document is called first: whoever typed a name is after that one.
-  const hits = inDir
+  const matched = inDir
     .filter((r) => r.named || r.row === "text")
     .sort((a, b) => Number(b.named) - Number(a.named) || a.path.localeCompare(b.path, undefined, { sensitivity: "base" }));
   // Only a row's lines cost a read; a name alone is already in the manifest.
   const shown: Found[] = [];
   let reads = Math.max(1, SEARCH_READS - spent);
-  for (const hit of hits) {
+  for (const hit of matched) {
     if (shown.length === limit) break;
     if (hit.row === "text") {
       if (reads === 0) break;
@@ -383,31 +407,23 @@ export async function getSearch(c: Call): Promise<Response> {
     shown.push(hit);
   }
 
-  const results = await mapLimited(shown, READ_CONCURRENCY, async ({ doc, section, path, named, row }) => {
+  const hits = await mapLimited(shown, READ_CONCURRENCY, async ({ doc, section, path, named, row }): Promise<Hit> => {
     const text = row === "text" ? await blobText(section.env, doc.text) : null;
     const { matches, total } = text === null ? { matches: [], total: 0 } : matchingLines(path, text, needle);
     return {
-      path: nameOf(path).stem,
-      version: isMarkdownPath(path) ? "md" : "html",
+      space: section.space,
+      fid: doc.text.fid,
+      path,
       matches,
-      ...(total > matches.length ? { moreLines: total - matches.length } : {}),
-      ...(named ? { inName: true } : {}),
-      // In the mirror but on no line: the text was said in a comment.
-      ...(row === "text" && total === 0 ? { inComments: true } : {}),
+      moreLines: total - matches.length,
+      inName: named,
+      inComments: row === "text" && total === 0,
     };
   });
-  // Too large to mirror, and not found by its name either.
-  const notSearched = inDir.filter((r) => r.row === "big" && !r.named).map((r) => nameOf(r.path).stem);
-
-  return json({
-    query,
-    dir,
-    results,
-    total: hits.length,
-    ...(hits.length > shown.length ? { truncated: true } : {}),
-    // Too large to mirror — said, rather than silently never found.
-    ...(notSearched.length > 0 ? { notSearched } : {}),
-    // More sections than one request opens: search inside one of these.
-    ...(left.length > 0 ? { sectionsNotSearched: left } : {}),
-  });
+  return {
+    hits,
+    total: matched.length,
+    notSearched: inDir.filter((r) => r.row === "big" && !r.named).map((r) => ({ space: r.section.space, path: r.path })),
+    left,
+  };
 }

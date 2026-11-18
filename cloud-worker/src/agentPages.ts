@@ -4,16 +4,8 @@
 //   PUT    /api/agent/pages           {path, slug?, title?, desc?, dryRun?}
 //   DELETE /api/agent/pages?path= | ?slug=  [&dry=1]
 //
-// Publishing is what it is on a Mac: an entry in the manifest's public map,
-// keyed by its slug (manifest.ts). Nothing is uploaded and nothing is
-// rendered ahead of time — the page is drawn from the synced files when
-// somebody asks for it — so an address answers the moment the entry lands.
-//
-// The rules an entry keeps are the engine's (`queue_publish` and
-// `fold_public`, engine/src/cloud/engine.rs): one page per thing, a slug
-// that is free or already its own, the first publisher's name and date kept
-// when a page is republished. A document's page belongs to its markdown file
-// when it has one and to its html when it has not.
+// What publishing is, and the rules an entry keeps, are publishing.ts's:
+// a person in a browser publishes through the same ones.
 //
 // Each section keeps its own map, and an address is one section's for the
 // whole domain (addresses.ts). So a page is published in the section its
@@ -22,48 +14,16 @@
 
 import { spaceAt, spacesWithPages } from "./addresses";
 import { change, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
-import { MAX_SECTIONS_READ, type Section } from "./agentPlace";
+import type { Section } from "./agentPlace";
 import { Refusal, type Committed, type Tx } from "./commit";
-import {
-  Index,
-  docExists,
-  documentsUnder,
-  locate,
-  nameOf,
-  pathProblem,
-  primaryOf,
-  type Entry,
-} from "./documents";
+import { Index, nameOf, pathProblem } from "./documents";
 import { json, readJsonObject } from "./http";
-import { MAX_DESC_LEN, MAX_TITLE_LEN, RESERVED_SLUGS, SLUG_RE } from "./layout";
-import type { Manifest, PublicEntry } from "./manifest";
+import { MAX_DESC_LEN, MAX_TITLE_LEN, SLUG_RE } from "./layout";
+import type { Manifest } from "./manifest";
 import { listDirectory } from "./members";
+import { cleanText, documentTarget, folderTarget, publish, sameTarget, slugProblem, type Found } from "./publishing";
 import { mirrorAfter } from "./search";
-
-/** The alphabet a random slug is drawn from — no look-alikes, as the engine's
- *  is (`SLUG_ALPHABET`, engine/src/cloud/manifest.rs). */
-const SLUG_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
-const RANDOM_SLUG_LEN = 8;
-
-function randomSlug(): string {
-  const buf = new Uint8Array(RANDOM_SLUG_LEN);
-  crypto.getRandomValues(buf);
-  return [...buf].map((b) => SLUG_ALPHABET[b % SLUG_ALPHABET.length]).join("");
-}
-
-/** What a page shows: a document (by its markdown, else its html) or a folder. */
-type Target = { kind: "file"; entry: Entry; name: string } | { kind: "dir"; path: string };
-
-const sameTarget = (e: PublicEntry, t: Target, fids: readonly string[]): boolean =>
-  t.kind === "dir" ? e.kind === "dir" && e.path.toLowerCase() === t.path.toLowerCase() : e.kind === "file" && fids.includes(e.file);
-
-const describe = (e: PublicEntry): string =>
-  e.kind === "file" ? e.path : e.path === "" ? "the whole workspace" : `the folder ${e.path}`;
-
-const cleanText = (raw: unknown, max: number): string | undefined => {
-  const text = typeof raw === "string" ? raw.trim().slice(0, max) : "";
-  return text === "" ? undefined : text;
-};
+import { MAX_SECTIONS_READ } from "./spaces";
 
 /**
  * What a path means to publishing. `/` is the whole workspace; a trailing
@@ -71,29 +31,14 @@ const cleanText = (raw: unknown, max: number): string | undefined => {
  * path is read in everywhere else. A picture or a PDF is refused by `locate`:
  * nothing but documents syncs, so there is nothing else to show.
  */
-function targetAt(index: Index, raw: string): { target: Target; fids: string[] } | Refusal {
+function targetAt(index: Index, raw: string): Found | Refusal {
   const asFolder = raw.endsWith("/");
   const path = raw.replace(/^\/+|\/+$/g, "");
-  if (path === "") {
-    return asFolder ? { target: { kind: "dir", path: "" }, fids: [] } : new Refusal(400, "say what to publish");
-  }
+  if (path === "") return asFolder ? folderTarget(index, "")! : new Refusal(400, "say what to publish");
   const problem = pathProblem(path);
   if (problem) return new Refusal(400, problem);
-  if (!asFolder) {
-    const at = locate(index, path, null);
-    if (at instanceof Refusal) return at;
-    if (docExists(at.doc)) {
-      const entry = primaryOf(at.doc)!;
-      const fids = [at.doc.md?.fid, at.doc.html?.fid].filter((f): f is string => f !== undefined);
-      return { target: { kind: "file", entry, name: at.doc.stem }, fids };
-    }
-  }
-  if (index.isFolder(path)) {
-    // The folder's own spelling, from a file inside it.
-    const inside = index.under(path)[0].file.path;
-    return { target: { kind: "dir", path: inside.slice(0, path.length) }, fids: [] };
-  }
-  return new Refusal(404, `there is nothing at "${path}" to publish`);
+  const found = (asFolder ? null : documentTarget(index, path)) ?? folderTarget(index, path);
+  return found ?? new Refusal(404, `there is nothing at "${path}" to publish`);
 }
 
 /* ---------- What is public ---------- */
@@ -155,12 +100,8 @@ export async function putPage(c: Call): Promise<Response> {
   if (!body) return json({ error: "invalid json body" }, 400);
   const path = typeof body.path === "string" ? body.path : "";
   const wanted = typeof body.slug === "string" ? body.slug.trim().toLowerCase() : "";
-  if (wanted && (!SLUG_RE.test(wanted) || RESERVED_SLUGS.has(wanted))) {
-    return json(
-      { error: "an address is 3 to 64 characters — lowercase letters, digits and dashes, starting with a letter or a digit — and not a word Doklin keeps" },
-      400,
-    );
-  }
+  const unusable = wanted ? slugProblem(wanted) : null;
+  if (unusable) return json({ error: unusable }, 400);
   const title = cleanText(body.title, MAX_TITLE_LEN);
   const desc = cleanText(body.desc, MAX_DESC_LEN);
 
@@ -170,7 +111,7 @@ export async function putPage(c: Call): Promise<Response> {
       const index = new Index(tx.files);
       const found = targetAt(index, path);
       if (found instanceof Refusal) return found;
-      return publish(tx, index, found.target, found.fids, { wanted, title, desc }, url.origin);
+      return publish(tx, index, found, { wanted, title, desc }, url.origin);
     },
     body.dryRun === true,
   );
@@ -179,59 +120,6 @@ export async function putPage(c: Call): Promise<Response> {
   const { created, ...answer } = done.value;
   // Not written: a dry run, or a page that already was exactly this.
   return json({ ...answer, created, ...(done.wrote ? {} : { written: false }) }, created && done.wrote ? 201 : 200);
-}
-
-function publish(
-  tx: Tx,
-  index: Index,
-  target: Target,
-  fids: readonly string[],
-  ask: { wanted: string; title?: string; desc?: string },
-  origin: string,
-): (Record<string, unknown> & { created: boolean }) | Refusal {
-  const map = (tx.m.public ??= {});
-  const existing = Object.keys(map).find((slug) => sameTarget(map[slug], target, fids));
-  if (ask.wanted && map[ask.wanted] && ask.wanted !== existing) {
-    return new Refusal(409, `"${ask.wanted}" is already the address of ${describe(map[ask.wanted])}`, { code: "slug_taken" });
-  }
-  let slug = ask.wanted || existing;
-  while (!slug) {
-    const candidate = randomSlug();
-    if (!map[candidate] && !RESERVED_SLUGS.has(candidate)) slug = candidate;
-  }
-
-  const prev = existing ? map[existing] : undefined;
-  const common = {
-    ...((ask.title ?? prev?.title) ? { title: ask.title ?? prev?.title } : {}),
-    ...((ask.desc ?? prev?.desc) ? { desc: ask.desc ?? prev?.desc } : {}),
-    ...(prev?.root ? { root: true } : {}),
-    // Who published it first, and when, stay: republishing renames or
-    // retitles a page, it does not take it over.
-    by: prev?.by ?? tx.by,
-    at: prev?.at ?? tx.now,
-  };
-  const next: PublicEntry =
-    target.kind === "dir"
-      ? { kind: "dir", path: target.path, ...common }
-      : { kind: "file", file: target.entry.fid, path: target.entry.file.path, ...common };
-  if (!prev || existing !== slug || JSON.stringify(prev) !== JSON.stringify(next)) {
-    if (existing && existing !== slug) delete map[existing];
-    map[slug] = next;
-    tx.touch();
-  }
-
-  const documents = target.kind === "dir" ? documentsUnder(index, target.path).map((d) => d.stem) : [target.name];
-  return {
-    slug,
-    url: `${origin}/${slug}`,
-    kind: target.kind === "dir" ? "folder" : "document",
-    path: target.kind === "dir" ? target.path : target.name,
-    // Everything this makes readable: one document, or every document in the
-    // folder — an html-only one included, which a published folder serves at
-    // its own name (pages.ts).
-    documents,
-    created: !prev,
-  };
 }
 
 /* ---------- Stopping ---------- */

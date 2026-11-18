@@ -1,7 +1,8 @@
 # Doklin
 
 macOS-only (Apple Silicon) Tauri 2 markdown editor. `src/` React + Milkdown
-Crepe frontend, `src-tauri/` Rust backend, `engine/` the sync engine and
+Crepe frontend (`src/web/`: the same frontend in a browser, served by the
+worker at `/app`), `src-tauri/` Rust backend, `engine/` the sync engine and
 version store (Rust, no Tauri: the Mac and iPhone apps both build it in),
 `cloud-worker/` Cloudflare Worker, `cli/` the `doklin` command, `ios/` the
 iPhone and iPad app (Swift, built from Xcode by hand), `site/` the doklin.cc
@@ -18,6 +19,7 @@ pnpm typecheck:worker && pnpm test:worker      # the cloud worker
 (cd cli && cargo build --release && cargo test) # the CLI
 node verify-harness/drive-ios.mjs             # the iOS app's core against a harness worker
 node verify-harness/drive-ios.mjs --app       # the iOS app in a simulator (a Mac with Xcode)
+node verify-harness/drive-web.mjs             # the browser version, built, against a harness worker
 ```
 
 `swift test --package-path ios/DoklinKit` links the engine: `scripts/ios-engine.sh
@@ -31,7 +33,10 @@ Tauri IPC stubbed: `(cd verify-harness && npm install)` once, a vite server on
 
 - Every push to `main` cuts a release, unless it only touches `site/` or `ios/`.
 - The frontend never `fetch`es. The cloud engine in Rust is the only code that
-  holds a token or talks to a domain.
+  holds a token or talks to a domain. In a browser the one module that
+  fetches is `src/web/http.ts`, and it holds no token.
+- The UI asks `src/backend.ts`. Only `src/mac/` imports Tauri; `src/web/`
+  answers it in a browser.
 - Contracts mirrored in two places say "change both" on both sides — change both.
 - A number with one source is parsed from it, never retyped.
 - macOS-specific Rust is tagged `macOS-only`.
@@ -43,10 +48,10 @@ Read a doc only when the change is in its area.
 
 | Area | Doc |
 |---|---|
-| App shell, saving, tabs, windows, editor, frontmatter | `docs/architecture.md` |
+| App shell, `src/backend.ts`, `src/web/`, saving, tabs, windows, editor, frontmatter | `docs/architecture.md` |
 | `engine/` (not `versions/`), `src-tauri/src/engine.rs`, `src/cloud.ts`, sync | `docs/cloud.md` |
 | Publishing, public pages | `docs/cloud-publishing.md` |
-| People, spaces, leases, agents, document API, `cli/` | `docs/cloud-people-agents.md` |
+| People, spaces, leases, agents, document API, a browser's sign-in and routes, `cli/` | `docs/cloud-people-agents.md` |
 | Worker routes, bucket, D1, manifest format | `cloud-worker/README.md` |
 | `engine/src/versions/`, history | `docs/versioning.md` |
 | `pdf_export.rs` | `docs/pdf-export.md` |

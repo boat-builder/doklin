@@ -4,7 +4,8 @@
 // CloudPeople, one tab each.
 
 import { useCallback, useRef, useState } from "react";
-import { mayOn, type CloudStatus } from "./cloud";
+import type { CloudAccess } from "./backend";
+import { inviteToSend, mayOn, type CloudStatus } from "./cloud";
 import CloudPeople, { type AccessTab } from "./CloudPeople";
 import { useDismiss } from "./dismiss";
 
@@ -18,11 +19,13 @@ function CloseIcon() {
 }
 
 export default function PeopleDialog({
+  access,
   cloud,
   tab,
   onTab,
   onClose,
 }: {
+  access: CloudAccess;
   cloud: CloudStatus;
   tab: AccessTab;
   onTab: (tab: AccessTab) => void;
@@ -55,9 +58,11 @@ export default function PeopleDialog({
         </div>
         <div className="cloud-body">
           <CloudPeople
+            access={access}
             root={cloud.root}
             name={cloud.name}
             domain={cloud.domain}
+            toSend={(line) => inviteToSend(line, cloud)}
             tab={tab}
             onTab={onTab}
             copy={(k, t) => void copy(k, t)}

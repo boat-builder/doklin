@@ -9,8 +9,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { pressedOutside } from "./dismiss";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { backend } from "./backend";
 import Avatar from "./Avatar";
 import { ThreadCard, type EditTarget, type RailThread } from "./CommentsRail";
 import {
@@ -178,6 +177,15 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   pdfPathRef.current = pdfExportPath;
 
   const srcDoc = useMemo(() => instrumentHtml(htmlContent), [htmlContent]);
+  // Where the app's own page may not be handed markup that runs script, the
+  // frame is a page of the platform's that asks for the markup instead
+  // (`Backend.htmlFrame`), loaded afresh for each markup it is to show.
+  const frameHost = backend.htmlFrame;
+  const srcDocRef = useRef(srcDoc);
+  srcDocRef.current = srcDoc;
+  const frameLoads = useRef(0);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- the count moves when the markup does
+  const frameLoad = useMemo(() => (frameLoads.current += 1), [srcDoc]);
 
   useImperativeHandle(
     ref,
@@ -227,7 +235,14 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
 
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
-      if (e.source !== iframeRef.current?.contentWindow) return;
+      const frame = iframeRef.current?.contentWindow;
+      if (!frame || e.source !== frame) return;
+      if ((e.data as { doklin?: unknown } | null)?.doklin === "frame-ready") {
+        // The frame's origin is opaque, so there is none to address it by:
+        // it is this view's own frame, and nothing else is posted to.
+        frame.postMessage({ doklin: "frame-html", html: srcDocRef.current }, "*");
+        return;
+      }
       if (!isBridgeMsg(e.data)) return;
       const msg = e.data;
       if (msg.type === "ready") {
@@ -256,9 +271,7 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
         if (onOpenExternalRef.current) {
           onOpenExternalRef.current(msg.url);
         } else {
-          void invoke("open_external", { url: msg.url }).catch((err) =>
-            console.error("open_external failed", err),
-          );
+          void backend.openExternal(msg.url).catch((err) => console.error("open external failed", err));
         }
       } else if (msg.type === "scroll") {
         onScrollRatioRef.current?.(msg.ratio);
@@ -319,17 +332,14 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
     setMode(next);
   }, []);
 
-  // One-click export (no options, by design). Subscribe to progress BEFORE
-  // invoking so the first stage event can't slip past; the backend serializes
-  // concurrent exports itself, so a second click elsewhere just errors.
+  // One-click export (no options, by design). One export runs at a time: a
+  // second click elsewhere just errors.
   const exportPdf = useCallback(async () => {
     const path = pdfPathRef.current;
-    if (!path) return;
+    if (!path || !backend.pdf) return;
     setPdf({ kind: "running", label: "Exporting…" });
-    const unlisten = await listen<{ stage: string; pct: number | null }>(
-      "pdf-export-progress",
-      (e) => {
-        const { stage, pct } = e.payload;
+    try {
+      const saved = await backend.pdf.export(path, ({ stage, pct }) => {
         const label =
           stage === "engine-download"
             ? `Fetching engine ${pct ?? 0}%`
@@ -341,15 +351,10 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
                   ? "Checking…"
                   : "Rendering…";
         setPdf((p) => (p.kind === "running" ? { kind: "running", label } : p));
-      },
-    );
-    try {
-      const saved = await invoke<string>("export_pdf", { path });
+      });
       setPdf({ kind: "saved", name: saved.split("/").pop() ?? "PDF" });
     } catch (err) {
       setPdf({ kind: "error", msg: String(err) });
-    } finally {
-      unlisten();
     }
   }, []);
 
@@ -487,7 +492,7 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   const docked = controlsSlot !== undefined;
   const controls = (
     <div className={`html-view-btns ${docked ? "is-docked" : ""}`}>
-      {pdfExportPath != null && (
+      {pdfExportPath != null && backend.pdf && (
         <button
           type="button"
           className={`html-comment-btn html-pdf-btn ${pdf.kind === "running" ? "is-busy" : ""}`}
@@ -526,11 +531,12 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
           the app, its storage, or Tauri IPC). The bridge script injected by
           instrumentHtml runs inside that same sandbox. */}
       <iframe
+        key={frameHost ? frameLoad : undefined}
         ref={iframeRef}
         className="html-preview"
         title="HTML version"
         sandbox="allow-scripts allow-popups"
-        srcDoc={srcDoc}
+        {...(frameHost ? { src: frameHost } : { srcDoc })}
         // A one-colour gradient layers the page's colour over the white
         // backdrop, compositing a translucent canvas exactly as the page does.
         style={canvas ? { backgroundImage: `linear-gradient(${canvas}, ${canvas})` } : undefined}

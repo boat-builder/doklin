@@ -135,11 +135,15 @@ body,
   align-items: center;
   gap: 2px;
   min-width: 0;
-  /* The traffic lights sit at x 16–70 (tauri.conf.json); the toggles start
-     after them, at the same x whether the lead is over the sidebar or at
-     the start of the tab bar. */
-  padding-left: 84px;
+  padding-left: var(--inset);
   user-select: none;
+}
+
+/* In a window of the app's own the traffic lights sit at x 16–70
+   (tauri.conf.json); the toggles start after them, at the same x whether the
+   lead is over the sidebar or at the start of the tab bar. */
+.title-lead.clears-window-buttons {
+  padding-left: 84px;
 }
 
 .app > .title-lead {

@@ -23,7 +23,8 @@
 // — so one of those paths that does reach it names nothing, and is a 404
 // without a look at the workspace.
 //
-// Every page carries <meta name="robots" content="noindex">.
+// Every page carries <meta name="robots" content="noindex">, and goes out
+// under the page policy below.
 
 import { spaceAt } from "./addresses";
 import { WEB_TAG } from "./assets";
@@ -31,6 +32,7 @@ import type { Env } from "./env";
 import { RESERVED_SLUGS, SLUG_RE, validPath } from "./layout";
 import { dirTitle, htmlFile, notePage, rawRendition, tocPage } from "./pages";
 import { PublicMap, nestedUrl, type DirPage, type Page } from "./publicMap";
+import { mermaidModulePath } from "./render";
 import { landingPage, notFoundPage } from "./static";
 import { spaceEnv } from "./spaces";
 import { isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
@@ -73,9 +75,45 @@ function withCacheControl(res: Response, value: string): Response {
   return new Response(res.body, { status: res.status, headers });
 }
 
-/** A GET response, or its headers alone for HEAD. */
-const deliver = (res: Response, method: string): Response =>
-  method === "HEAD" ? new Response(null, { status: res.status, headers: res.headers }) : res;
+/* ---------- What a page may do ----------
+
+   A note's markdown may carry HTML of its own, and its page draws that as
+   written — on the address the workspace's API answers on. So every page the
+   worker draws goes out under a policy that lets it show and never act. The
+   one script it runs is the mermaid module, named by its whole address (a
+   policy has no other way to say "this path, on this domain"): a script, a
+   handler or a `javascript:` link written into a note does nothing. A form
+   posts nowhere, a <base> re-points nothing, nothing is fetched or embedded
+   as a plugin. Styles stay open — the page's sheet is inline, and stored
+   column widths and drawn diagrams are style attributes — and so do the
+   pictures, media and frames a note shows from the web.
+
+   The policy is set here, on the way out, and not where a page is drawn: it
+   names the domain the request came to, and the cache keeps a page under a
+   key that names none. An html document is not the worker's drawing: it
+   brings its sandbox (pages.ts) and keeps it. */
+
+const POLICY = "content-security-policy";
+
+const pagePolicy = (origin: string): string =>
+  [
+    "default-src 'none'",
+    `script-src ${origin}${mermaidModulePath(WEB_TAG)}`,
+    "style-src 'unsafe-inline'",
+    "img-src * data:",
+    "media-src *",
+    "font-src 'self'",
+    "frame-src *",
+    "form-action 'none'",
+    "base-uri 'none'",
+  ].join("; ");
+
+/** A response on its way out: under the page policy unless it brought its own, and its headers alone for HEAD. */
+function deliver(res: Response, request: Request, url: URL): Response {
+  const headers = new Headers(res.headers);
+  if (!headers.has(POLICY)) headers.set(POLICY, pagePolicy(url.origin));
+  return new Response(request.method === "HEAD" ? null : res.body, { status: res.status, headers });
+}
 
 /* ---------- Routing ---------- */
 
@@ -89,18 +127,18 @@ export async function handlePublic(
   url: URL,
 ): Promise<Response> {
   const path = url.pathname;
-  if (path.startsWith("/__web/") || WEB_FILES.has(path)) return deliver(notFoundPage(), request.method);
+  if (path.startsWith("/__web/") || WEB_FILES.has(path)) return deliver(notFoundPage(), request, url);
 
   const shared = await openWorkspace(env);
-  if (!shared) return deliver(path === "/" ? landingPage(null) : notFoundPage(), request.method);
+  if (!shared) return deliver(path === "/" ? landingPage(null) : notFoundPage(), request, url);
   const ws = await serving(env, shared, url);
-  if (!ws) return deliver(notFoundPage(), request.method);
+  if (!ws) return deliver(notFoundPage(), request, url);
 
   const cache = cacheStore();
   const key = cacheKey(ws, url);
   if (cache) {
     const hit = await cache.match(key);
-    if (hit) return deliver(withCacheControl(hit, "no-cache"), request.method);
+    if (hit) return deliver(withCacheControl(hit, "no-cache"), request, url);
   }
   const res = await route(ws, url);
   if (cache && cacheable(res)) {
@@ -108,7 +146,7 @@ export async function handlePublic(
     if (ctx) ctx.waitUntil(put);
     else await put;
   }
-  return deliver(res, request.method);
+  return deliver(res, request, url);
 }
 
 /**

@@ -67,8 +67,8 @@ pub enum Plan {
 }
 
 /// The limits of the domain's plan, as `/api/meta` and every poll answer
-/// carry them (`cloud-worker/src/limits.ts` — change both). `None` is "no
-/// such limit" (Workers Paid).
+/// carry them (`Limits`, `cloud-worker/src/wire.ts` — change both; the
+/// numbers are `limits.ts`'s). `None` is "no such limit" (Workers Paid).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Limits {

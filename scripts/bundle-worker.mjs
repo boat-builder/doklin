@@ -2,13 +2,18 @@
 // Bundle the cloud worker (cloud-worker/src, TypeScript) into ONE deployable
 // JavaScript file, readable — people are asked to trust-deploy it — and build
 // the web directory Cloudflare serves beside it as static assets: the files
-// public pages ask for, answered without running the worker, so they cost
-// none of the day's requests. It is doklin-cloud-web/, beside the worker file:
+// public pages ask for and the browser version of the app, answered without
+// running the worker, so they cost none of the day's requests. It is
+// doklin-cloud-web/, beside the worker file:
 //
 //   __web/<tag>/mermaid.js   the standalone mermaid module (cloud-worker/web/mermaid-entry.ts)
 //   __web/fonts/<file>       the fonts src/styles/fonts.css names, from src/assets/fonts/
 //   favicon.ico, apple-touch-icon.png   the app's own, from public/
 //   og.png, robots.txt, _headers        from cloud-worker/web/
+//   app.html                 the browser version's page, served at /app (app.html, src/web/)
+//   app/assets/<name>-<hash> its scripts, styles and fonts: a new build is a new name
+//   app/gate.js              what the page runs first (src/web/gate.js), as written
+//   app/frame.html           the page an html document is shown in, served at /app/frame
 //
 // The tag is a short content hash of the mermaid module, spliced into the
 // worker (cloud-worker/src/assets.ts) so its pages ask for the module at the
@@ -29,6 +34,7 @@
 //                                               doklin-cloud-web/ goes beside it)
 //   node scripts/bundle-worker.mjs --no-mermaid   a quick local build without the mermaid
 //                                                 module (pages ask for /__web/dev/mermaid.js)
+//   node scripts/bundle-worker.mjs --no-app       … without the browser version (/app answers 404)
 //
 // Prints the sizes, and fails the build past Cloudflare's free-plan cap of
 // 3 MB compressed for the worker rather than letting the deploy be the first
@@ -88,6 +94,35 @@ async function buildMermaidModule() {
 }
 
 /**
+ * The browser version of the app: the page at the repository's top
+ * (app.html) and everything its script imports, built the way the Mac app's
+ * frontend is — the same vite.config.ts, so the same plugins — and returned
+ * instead of written. Every address in it starts with /app/, the one part of
+ * a domain no public page can be under (`RESERVED_SLUGS`,
+ * cloud-worker/src/layout.ts).
+ */
+async function buildApp() {
+  const out = await build({
+    configFile: path.join(repoRoot, "vite.config.ts"),
+    root: repoRoot,
+    base: "/app/",
+    logLevel: "warn",
+    // The Mac app's public files are its window's; the page names the two
+    // icons it shows by the addresses the web directory already has.
+    publicDir: false,
+    build: { write: false, rollupOptions: { input: path.join(repoRoot, "app.html") } },
+  });
+  const result = Array.isArray(out) ? out[0] : out;
+  if (!("output" in result)) throw new Error("unexpected watcher from the app build");
+  const page = result.output.find((o) => o.fileName === "app.html");
+  if (!page || page.type !== "asset") throw new Error("the app build produced no app.html");
+  return {
+    page: page.source,
+    files: result.output.filter((o) => o !== page).map((o) => [o.fileName, o.type === "chunk" ? o.code : o.source]),
+  };
+}
+
+/**
  * The font files src/styles/fonts.css names, as [family, file] — read with
  * the pattern cloud-worker/src/theme.ts rewrites, so every face a page
  * declares is a file this build copies. Two files of one name would land on
@@ -107,9 +142,10 @@ function fontFiles() {
 
 /**
  * Write the web directory to `dir` (emptied first) and return its tag: the
- * mermaid module's content hash, or DEV_TAG without one.
+ * mermaid module's content hash, or DEV_TAG without one. `app: false` leaves
+ * the browser version out.
  */
-export async function buildWeb(dir, { mermaid = true } = {}) {
+export async function buildWeb(dir, { mermaid = true, app = true } = {}) {
   fs.rmSync(dir, { recursive: true, force: true });
   const put = (rel, bytes) => {
     const dest = path.join(dir, rel);
@@ -130,6 +166,14 @@ export async function buildWeb(dir, { mermaid = true } = {}) {
   copy("favicon.ico", path.join(repoRoot, "public", "favicon.ico"));
   copy("apple-touch-icon.png", path.join(repoRoot, "public", "apple-touch-icon.png"));
   for (const file of ["og.png", "robots.txt", "_headers"]) copy(file, path.join(workerDir, "web", file));
+  if (app) {
+    const built = await buildApp();
+    // Cloudflare serves `app.html` at /app and `app/frame.html` at /app/frame.
+    put("app.html", built.page);
+    for (const [name, bytes] of built.files) put(`app/${name}`, bytes);
+    copy("app/gate.js", path.join(repoRoot, "src", "web", "gate.js"));
+    copy("app/frame.html", path.join(repoRoot, "src", "web", "frame.html"));
+  }
   return tag;
 }
 
@@ -163,11 +207,12 @@ function listFiles(dir, prefix = "") {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const args = process.argv.slice(2);
   const withMermaid = !args.includes("--no-mermaid");
+  const withApp = !args.includes("--no-app");
   const outArg = args.find((a) => !a.startsWith("--"));
   const dest = path.resolve(outArg ?? path.join(workerDir, "dist", "doklin-cloud-worker.js"));
   const webDir = path.join(path.dirname(dest), WEB_DIR);
 
-  const tag = await buildWeb(webDir, { mermaid: withMermaid });
+  const tag = await buildWeb(webDir, { mermaid: withMermaid, app: withApp });
   const code = await bundleWorker(tag);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, code);

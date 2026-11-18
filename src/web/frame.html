@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Document</title>
+  </head>
+  <body>
+    <!--
+      The page an html document is shown in (`Backend.htmlFrame`,
+      src/backend.ts). The app's page lets no markup of a document's run
+      script, and a frame given markup directly would be held to the same
+      rule; this page comes with a policy of its own (cloud-worker/web/_headers):
+      sandboxed, so what is written into it runs under an origin that is
+      nobody's and is sent no sign-in.
+
+      It asks the page that framed it for the markup and becomes that
+      document. Only the app's own origin is asked and heard.
+    -->
+    <script>
+      (function () {
+        function become(e) {
+          if (e.source !== parent || e.origin !== location.origin) return;
+          var said = e.data;
+          if (!said || said.doklin !== "frame-html" || typeof said.html !== "string") return;
+          removeEventListener("message", become);
+          document.open();
+          document.write(said.html);
+          document.close();
+        }
+        addEventListener("message", become);
+        parent.postMessage({ doklin: "frame-ready" }, location.origin);
+      })();
+    </script>
+  </body>
+</html>

@@ -24,7 +24,9 @@
 //! for an older app to refuse a link.
 //!
 //! The page's address, the scheme and the key names are also in
-//! site/public/open.html, the scheme in src-tauri/Info.plist and
+//! site/public/open.html, the address and the key names in
+//! src/web/address.ts (the browser version makes a link, follows one, and
+//! reads one in its own address), the scheme in src-tauri/Info.plist and
 //! ios/Info.plist, and the address in ios/Doklin.entitlements: **change
 //! all of them together.**
 
@@ -201,8 +203,11 @@ mod tests {
     fn everything_that_says_where_a_link_goes_says_it_as_this_does() {
         let page = include_str!("../../../site/public/open.html");
         assert!(page.contains(&format!("\"{}://open\"", SCHEME)), "open.html hands a link on as {}://open", SCHEME);
+        let browser = include_str!("../../../src/web/address.ts");
+        assert!(browser.contains(&format!("const PAGE = \"{}\";", PAGE)), "the browser version makes a link at {}", PAGE);
         for key in ["\"d\"", "\"w\"", "\"f\""] {
             assert!(page.contains(&format!("link.get({})", key)), "open.html reads {}", key);
+            assert!(browser.contains(&format!("link.get({})", key)), "the browser version reads {}", key);
         }
         let scheme = format!("<string>{}</string>", SCHEME);
         assert!(include_str!("../../../src-tauri/Info.plist").contains(&scheme), "the Mac app is registered for it");

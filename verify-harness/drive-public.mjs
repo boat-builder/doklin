@@ -4,9 +4,9 @@
 // a note's page, the MD/HTML pill and the sandboxed rendition, a folder's
 // table of contents, a nested note with its crumb, a note whose frontmatter
 // is left off its page, a diagram hydrating in light and in dark, the app's
-// own type and palettes, links between notes, the root page, a picture in the
-// workspace shown as its alt text, an html document by its exact path, and a
-// 404. Run:
+// own type and palettes, HTML written into a note refused by the page's
+// policy, links between notes, the root page, a picture in the workspace
+// shown as its alt text, an html document by its exact path, and a 404. Run:
 //
 //   node verify-harness/serve-worker.mjs &     # bundles the worker (mermaid included), seeds, serves :8787
 //   node verify-harness/drive-public.mjs
@@ -46,10 +46,17 @@ const browser = await chromium.launch(
 
 async function pageIn(options = {}) {
   const context = await browser.newContext({ viewport: { width: 1200, height: 860 }, ...options });
+  // What a page's policy refused, where a step can read it. The driver's own
+  // script, so no policy applies to it.
+  await context.addInitScript(() => {
+    window.__refused = [];
+    document.addEventListener("securitypolicyviolation", (e) => window.__refused.push(`${e.effectiveDirective} ${e.blockedURI}`));
+  });
   const page = await context.newPage();
   page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
   return page;
 }
+const refusedOn = (p) => p.evaluate(() => window.__refused);
 
 /* 1 — a note: the title, the document, the stored column widths, noindex */
 const page = await pageIn();
@@ -138,6 +145,37 @@ step(
     darkBg === "rgb(11, 11, 11)" &&
     (await page.locator("code.language-mermaid").count()) === 0,
   `${lightBg} / ${darkBg}`,
+);
+
+/* 6c — the same page carries HTML written into its markdown. It is drawn as
+   written and does nothing: the page's policy runs the one script that drew
+   the diagram above and refuses the rest */
+const written = async () => ({
+  ran: await page.evaluate(() => document.documentElement.dataset.ran ?? null),
+  base: await page.evaluate(() => document.baseURI),
+  url: page.url(),
+  refused: await refusedOn(page),
+});
+const loaded = await written();
+// A refused navigation never finishes, so the clicks don't wait for one.
+await page.locator("#written-link").click({ noWaitAfter: true });
+await page.locator("#written-form button").click({ noWaitAfter: true });
+await page.waitForTimeout(400);
+const pressed = await written();
+const kinds = [...new Set(pressed.refused.map((r) => r.split(" ")[0]))].sort();
+step(
+  "HTML written into a note is drawn and does nothing: its script, its handler, its javascript: link, its form and its <base> are each refused, and nothing the page itself asked for is",
+  (await page.locator("#written-in img").count()) === 1 &&
+    loaded.ran === null &&
+    pressed.ran === null &&
+    loaded.base === `${BASE}/diagram` &&
+    pressed.url === `${BASE}/diagram` &&
+    kinds.join() === "base-uri,form-action,script-src-attr,script-src-elem" &&
+    // the script tag when the page loaded, the link when it was pressed
+    loaded.refused.filter((r) => r.startsWith("script-src-elem")).length === 1 &&
+    pressed.refused.filter((r) => r.startsWith("script-src-elem")).length === 2 &&
+    !pressed.refused.some((r) => r.includes("/__web/")),
+  JSON.stringify(pressed.refused),
 );
 
 /* 6a — drawings are drawn by the worker: there with scripts off, each with
@@ -272,6 +310,20 @@ const sub = await page.goto(`${BASE}/projects/Roadmap`);
 step(
   "404: an unknown slug and a subfolder inside a published folder both get the 404 page",
   missing.status() === 404 && sub.status() === 404 && (await page.locator("h1").textContent()) === "Nothing here",
+);
+
+/* 9 — the policy refuses nothing a page of the worker's own asks for */
+const asked = {};
+for (const path of ["/sizes", "/plan", "/plan?v=md", "/projects", "/projects/status", "/home", "/", "/nope"]) {
+  await page.goto(`${BASE}${path}`);
+  await page.evaluate(() => document.fonts.ready);
+  const refused = await refusedOn(page);
+  if (refused.length > 0) asked[path] = refused;
+}
+step(
+  "the policy refuses nothing of the worker's own: a note, a framed rendition, a folder, the root and the 404 load their styles, fonts, pictures and frame",
+  Object.keys(asked).length === 0,
+  JSON.stringify(asked),
 );
 
 await browser.close();
