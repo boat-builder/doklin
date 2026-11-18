@@ -2,7 +2,8 @@
 // No script, no bindings. The cloud worker's own landing page (the fallback
 // every user's domain shows) is a different thing and lives in cloud-worker/.
 //
-//   cd site && CLOUDFLARE_ACCOUNT_ID=<account id> wrangler deploy
+// Deployed by .github/workflows/site.yml on a push to main that touches
+// site/: the live site is what main has.
 {
   "name": "doklin-site",
   "compatibility_date": "2026-09-17",
