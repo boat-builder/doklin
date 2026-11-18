@@ -268,11 +268,14 @@ authenticates (400 days from the app's last start).
 - Answered on `/api/web/*` and on `ALSO` (`web.ts`): `GET meta`, `GET|POST
   poll`, `GET manifest`, `GET blobs/…`, the last two under `spaces/<id>/`,
   `PUT spaces/private`, `GET pages`, `DELETE pages/<slug>`, `DELETE
-  auth/session`, and every route under `auth/members`, `auth/invites`,
+  auth/session`, every route under `auth/members`, `auth/invites`,
   `auth/devices` and `auth/agents` (*People*, *Agents*), each by role as for
-  a Mac. Everything else → `403`: a manifest or blob `PUT`, `versions/…`,
-  `workspace`, `settings/plan`, `admin/wipe`, and `spaces` but for the reads
-  and the Private above. **A route added to `ALSO` must change nothing on `GET`.**
+  a Mac, and a restricted folder's making, people and deleting (`POST
+  spaces`, `DELETE spaces/<id>`, `PUT|DELETE spaces/<id>/members/<id>`), each
+  for the people in it as for a Mac. Everything else → `403`: a manifest or
+  blob `PUT`, `versions/…`, `workspace`, `settings/plan`, `admin/wipe`, `GET
+  spaces`, `PATCH spaces/<id>`. **A route added to `ALSO` must change nothing
+  on `GET`.**
 - Ended: `DELETE /api/auth/session` and `401 {removed: true}` answer a browser
   with `Set-Cookie` (`Max-Age=0`) and `Clear-Site-Data: "cache", "storage"`. A
   cookie that is nobody's → `401` + the `Set-Cookie` alone.
@@ -298,7 +301,11 @@ PUT    doc?space=&path=  {md?: {text, ifRev}, meta?: {text, ifRev}} → {md?, me
 DELETE doc?space=&path=[&v=md|html]  the document, or one version of two (last_version → 409)
 DELETE folder?space=&path=  every file under it → {kind: "folder", path, files}; 404 none
 POST   move  {from: {space?, path}, to: {space?, path}, kind: "document"|"folder"} → {kind, from, to,
-       files}; to exactly `to`, never "into it". Across sections: newLinks, unpublished?, 16 files
+       files}; to exactly `to`, never "into it". Across sections: newLinks, unpublished?; a document
+       is ≤ 16 files; a folder goes 16 files a request, whole documents at a time, by path:
+       `remaining` (files still where they were) until the same request, made again, answers
+       without it. `to.path` "" = the top of another section, a folder only: what was in the
+       folder is what is in the section (a folder made into a restricted one)
 POST   copy  the same body → {kind, from, to, files}: every file written again at `to` as a new
        file (new id, rev 1), in the same section or another; 16 files; 409 a name that is taken.
        A copy takes no page and no link with it

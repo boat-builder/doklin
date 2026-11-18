@@ -3669,7 +3669,7 @@ export default function App() {
   // Asked once before anything moves between folders. Two moves change who
   // can open a thing, and say so first: one that lets more people see it,
   // and a folder put straight under Restricted, which becomes a restricted
-  // folder and leaves everyone else's Mac. Every other move just happens.
+  // folder and leaves everyone else's devices. Every other move just happens.
   const confirmMove = useCallback(
     async (entries: SidebarSelection[], toDir: string): Promise<boolean> => {
       const cloud = cloudForRootRef.current;
@@ -3686,7 +3686,7 @@ export default function App() {
         if (toRel.toLowerCase() !== "restricted" || !backend.spaces) return true;
         return askUser({
           title: `Restrict ${what}?`,
-          body: `${one ? "It becomes a restricted folder" : "Each becomes a restricted folder"} only you can open until you add people, and is removed from everyone else’s Mac.`,
+          body: `${one ? "It becomes a restricted folder" : "Each becomes a restricted folder"} only you can open until you add people, and is removed from everyone else’s devices.`,
           confirm: "Restrict",
         });
       }
@@ -3707,8 +3707,9 @@ export default function App() {
   );
 
   // Make the restricted folder its dialog asked for, and put in it what the
-  // dialog was opened on: a folder becomes it (the engine moves it, so the
-  // people in it keep their copies in place); a note is moved into it.
+  // dialog was opened on: a folder becomes it (the backend moves it: on a
+  // Mac the engine, so the people in it keep their copies in place); a note
+  // is moved into it.
   // Resolves to a sentence when it could not be done.
   const makeRestricted = useCallback(
     async (source: RestrictedSource, name: string, members: string[]): Promise<string | null> => {

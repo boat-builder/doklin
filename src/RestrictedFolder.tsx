@@ -3,7 +3,7 @@
 //
 //   new      an empty folder (the Restricted heading's +)
 //   folder   a folder that is there becomes it (*Restrict access…*) — and
-//            leaves the Mac of everyone not picked
+//            leaves the devices of everyone not picked
 //   note     a private note goes into a new folder with somebody
 //            (*Share with…*) — which is how a single note is shared, there
 //            being no per-note permissions
@@ -127,9 +127,9 @@ export default function RestrictedFolder({
         <div className="cloud-body">
           <p className="cloud-hint">
             {source.kind === "new" &&
-              "A restricted folder is only on the Macs of the people in it. Nobody else in the workspace sees it, or that it exists."}
+              "A restricted folder is only on the devices of the people in it. Nobody else in the workspace sees it, or that it exists."}
             {source.kind === "folder" &&
-              "It becomes a restricted folder: only the people you pick keep it, and it is removed from everyone else’s Mac. Versions from before stay in the workspace’s history until they age out."}
+              "It becomes a restricted folder: only the people you pick keep it, and it is removed from everyone else’s devices. Versions from before stay in the workspace’s history until they age out."}
             {source.kind === "note" &&
               "The note moves into a new restricted folder that holds you and the people you pick. Nobody else sees it."}
           </p>

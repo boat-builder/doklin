@@ -137,9 +137,9 @@
 //                                    may remove any
 //
 //   The browser version. A browser's sign-in is answered under /api/web and on the
-//   routes above that web.ts lists — the reads it is built from, and people, devices and
-//   agents — and on nothing else (403); nobody else's credential is answered under
-//   /api/web.
+//   routes above that web.ts lists — the reads it is built from, people, devices and
+//   agents, and restricted folders — and on nothing else (403); nobody else's credential
+//   is answered under /api/web.
 //
 //   POST   /api/web/session          NO CREDENTIAL — the third route above the gate
 //   *      /api/web/…                a browser's sign-in only: listed in web.ts

@@ -61,6 +61,20 @@
 //   - a member is offered nothing that is an owner's, and an owner changes
 //     a role and removes a person from a browser.
 //
+// And restricted folders (the `spaces` group), with a second person's
+// browser beside the owner's:
+//
+//   - one is made with a person in it, who sees it; people are taken out and
+//     put in from Manage access…;
+//   - a folder of more files than the worker moves at once becomes one
+//     (Restrict access…) in as many requests as it takes, and the note open
+//     in it follows;
+//   - a private note is shared into a new folder, and a folder dropped on
+//     Restricted becomes one;
+//   - a restricting that stops part of the way says how much went and where
+//     the rest is, and one that moves nothing leaves no folder behind;
+//   - a folder is left, and deleted for everyone.
+//
 // A real domain is https, and a Secure cookie needs it (WebKit keeps none
 // over http, localhost included), so the worker is driven through a TLS
 // front this file runs, with a certificate it makes for the run (`openssl`).
@@ -71,7 +85,7 @@
 //   (cd verify-harness && npm install && npx playwright install)   # once
 //   node verify-harness/drive-web.mjs                 # every engine installed
 //   ENGINES=chromium node verify-harness/drive-web.mjs
-//   PARTS=writing node verify-harness/drive-web.mjs   # files, cookie, app, writing, rest, access, cache
+//   PARTS=writing node verify-harness/drive-web.mjs   # files, cookie, app, writing, rest, access, folders, cache
 import { chromium, firefox, webkit } from "playwright";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -86,7 +100,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ENGINES = { chromium, firefox, webkit };
 const wanted = (process.env.ENGINES ?? "chromium,firefox,webkit").split(",").map((s) => s.trim()).filter(Boolean);
-const parts = new Set((process.env.PARTS ?? "files,cookie,app,writing,rest,access,cache").split(",").map((s) => s.trim()));
+const parts = new Set((process.env.PARTS ?? "files,cookie,app,writing,rest,access,folders,cache").split(",").map((s) => s.trim()));
 
 const results = [];
 const step = (name, ok, detail = "") => {
@@ -152,15 +166,27 @@ const tls = { key: readFileSync(join(scratch, "key.pem")), cert: readFileSync(jo
 
 /** What reached the worker: each request, and the status it was answered with. */
 const answered = [];
+/** A request the front answers in the worker's place, when a part of the
+ *  drive wants one refused: `(req) => {status, error} | null`. */
+let refusing = null;
 /** The worker behind a front of this file's own, which writes down what passes. */
 function front(listen) {
   return listen((req, res) => {
+    const refusal = refusing?.(req) ?? null;
+    if (refusal) {
+      req.resume();
+      answered.push({ method: req.method, path: req.url, status: refusal.status, at: Date.now(), refused: true });
+      res.writeHead(refusal.status, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: refusal.error }));
+      return;
+    }
     // What a save carried: which of a document's parts. And what was asked
     // of a page: its address.
     const save = req.method === "PUT" && req.url.startsWith("/api/web/doc");
     const publish = req.method === "PUT" && req.url.startsWith("/api/web/pages");
-    // And what a call that makes a code carried, whole.
-    const coded = req.method === "POST" && req.url.startsWith("/api/auth/");
+    // And what a call that makes a code carried, whole; so with one that
+    // makes a restricted folder.
+    const coded = req.method === "POST" && (req.url.startsWith("/api/auth/") || req.url === "/api/spaces");
     const sent = [];
     if (save || publish || coded) req.on("data", (chunk) => sent.push(chunk));
     const upstream = httpRequest(
@@ -1231,13 +1257,11 @@ async function driveRest(name) {
 
 /* ---------- People, devices and agents ---------- */
 
-async function driveAccess(name) {
-  const say = (what, ok, detail) => step(`${name}, access: ${what}`, Boolean(ok), detail);
-  const browser = await ENGINES[name].launch();
-  const trouble = [];
-  /** One browser of somebody's: its own cookies, and what its page copies
-   *  kept where the drive can read it. */
-  const open = async (who) => {
+/** Browsers of people's, for a part of the drive: each `open(who)` is one
+ *  with its own cookies, whose page copies are kept where the drive can read
+ *  them. What a page's policy refused, and what a page threw, go to `trouble`. */
+function signedIn(browser, trouble) {
+  return async (who) => {
     const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 900 } });
     await context.addInitScript(() => {
       if (!navigator.clipboard) Object.defineProperty(navigator, "clipboard", { value: {}, configurable: true });
@@ -1285,6 +1309,13 @@ async function driveAccess(name) {
       },
     };
   };
+}
+
+async function driveAccess(name) {
+  const say = (what, ok, detail) => step(`${name}, access: ${what}`, Boolean(ok), detail);
+  const browser = await ENGINES[name].launch();
+  const trouble = [];
+  const open = signedIn(browser, trouble);
   const sha = (text) => createHash("sha256").update(text).digest("hex");
   /** A code as it is hashed: the twenty characters. */
   const canonical = (code) => code.replace(/^dkl[na]-/, "").replaceAll("-", "");
@@ -1468,6 +1499,299 @@ async function driveAccess(name) {
   await browser.close();
 }
 
+/* ---------- Restricted folders ---------- */
+
+async function driveFolders(name) {
+  const say = (what, ok, detail) => step(`${name}, folders: ${what}`, Boolean(ok), detail);
+  const browser = await ENGINES[name].launch();
+  const trouble = [];
+  const open = signedIn(browser, trouble);
+  const sha = (text) => createHash("sha256").update(text).digest("hex");
+  const row = (who, path) => who.page.locator(`[data-tree-path="${ROOT_NAME}/${path}"]`);
+  const there = (who, path, ms = 30_000) => row(who, path).first().waitFor({ timeout: ms }).then(() => true, () => false);
+  const gone = (who, path, ms = 30_000) => until(async () => (await row(who, path).count()) === 0, ms);
+  const pick = async (who, path, label) => {
+    await row(who, path).click({ button: "right" });
+    await who.page.locator(".sidebar-menu-item").filter({ hasText: new RegExp(`^${label}$`) }).click();
+  };
+  const labels = async (who, path) => {
+    await row(who, path).click({ button: "right" });
+    const all = await who.page.locator(".sidebar-menu-item").allInnerTexts();
+    await who.page.keyboard.press("Escape");
+    return all.map((l) => l.trim());
+  };
+  /** The page loaded again: what a poll would bring, without waiting for one. */
+  const again = async (who) => {
+    await who.page.reload();
+    await row(who, "Home.md").waitFor({ timeout: 60_000 });
+  };
+  const dialogText = async (who, id) => (await who.at(id).innerText({ timeout: 15_000 })).replace(/\s+/g, " ").trim();
+  const moves = (from) => answered.slice(from).filter((a) => a.method === "POST" && a.path === "/api/web/move");
+  const spacesNow = async () => (await (await owner("/api/spaces")).json()).spaces;
+  const filesOf = async (space) => Object.values((await (await owner(space ? `/api/spaces/${space}/manifest` : "/api/manifest")).json()).files).map((f) => f.path);
+
+  // Folders of this engine's own: the engines share one worker.
+  const PLANS = `Plans ${name}`;
+  const BOARD = `Board in ${name}`;
+  const HALF = `Half in ${name}`;
+  const NONE = `None in ${name}`;
+  const DROP = `Drop in ${name}`;
+  const SECRET = `Secret ${name}`;
+  const other = await elsewhere(browser);
+  const mine = (await (await owner("/api/spaces/private", { method: "PUT" })).json()).space.id;
+  const put = (path, text, space = "") =>
+    other.ask(`/api/web/doc?space=${space}&path=${encodeURIComponent(path)}`, { method: "PUT", body: JSON.stringify({ md: { text, ifRev: null } }) });
+  // Twenty-one files where the worker moves sixteen a request.
+  for (const dir of [BOARD, HALF]) {
+    for (let i = 0; i < 20; i += 1) await put(`${dir}/n${String(i).padStart(2, "0")}.md`, `# Note ${String(i).padStart(2, "0")}\n\nIn ${dir}.\n`);
+    await put(`${dir}/Sub/Deep.md`, "# Deep\n");
+  }
+  for (const dir of [NONE, DROP]) for (const n of ["one", "two"]) await put(`${dir}/${n}.md`, `# ${n}\n`);
+  await put(`${SECRET}.md`, "# Secret\n\nFor two people.\n", mine);
+
+  // A second person, with a browser of their own.
+  const EMAIL = `fo-${name}@example.com`;
+  const code = Array.from({ length: 20 }, () => CROCKFORD[Math.floor(Math.random() * 32)]).join("");
+  const invited = await owner("/api/auth/invites", { method: "POST", json: { email: EMAIL, name: `Fo ${name}`, codeHash: sha(code), expiresAt: Date.now() + 86_400_000 } });
+  if (invited.status !== 201) throw new Error(`could not invite a second person: ${invited.status}`);
+  const boss = await open("the owner");
+  const fo = await open("a second person");
+  await boss.signIn(`doklin-invite ${ORIGIN} ${await deviceCode()}`);
+  await fo.signIn(`doklin-invite ${ORIGIN} dkln-${code.slice(0, 5)}-${code.slice(5, 10)}-${code.slice(10, 15)}-${code.slice(15)}`);
+  const them = (await (await owner("/api/auth/members")).json()).members.find((m) => m.email === EMAIL);
+
+  /* 1 — a new restricted folder, with somebody in it */
+  let from = answered.length;
+  await boss.at("section-restricted").hover();
+  await boss.at("new-restricted").click();
+  await boss.at("restricted-people").waitFor({ timeout: 15_000 });
+  const newHint = await dialogText(boss, "restricted-folder");
+  await boss.at("restricted-name").fill(PLANS);
+  await boss.at(`restricted-pick-${them.id}`).check();
+  await boss.at("restricted-create").click();
+  const madeRow = await there(boss, `Restricted/${PLANS}`);
+  const makeCall = answered.slice(from).find((a) => a.method === "POST" && a.path === "/api/spaces");
+  const plans = (await spacesNow()).find((s) => s.name === PLANS);
+  say(
+    "a browser offers a new restricted folder, and makes it with the people picked: it is in the tree at once",
+    newHint.includes("only on the devices of the people in it") &&
+      madeRow &&
+      makeCall?.status === 201 &&
+      JSON.stringify(JSON.parse(makeCall.body).members) === JSON.stringify([them.id]) &&
+      plans?.members.length === 2 &&
+      (await boss.at("restricted-folder").count()) === 0,
+    makeCall?.body,
+  );
+  await again(fo);
+  say("the person put in it sees it, in their own browser", await there(fo, `Restricted/${PLANS}`));
+
+  /* 2 — Manage access…: somebody taken out, and put back */
+  await pick(boss, `Restricted/${PLANS}`, "Manage access…");
+  await boss.at("space-members").waitFor({ timeout: 15_000 });
+  const accessHint = await dialogText(boss, "space-access");
+  await boss.at(`space-out-${them.id}`).click();
+  await boss.at(`space-out-yes-${them.id}`).click();
+  const takenOut = await until(async () => (await boss.at("space-members").locator("li").count()) === 1, 15_000);
+  await again(fo);
+  const hidden = (await row(fo, `Restricted/${PLANS}`).count()) === 0;
+  await boss.at(`space-add-${them.id}`).click();
+  const putBack = await until(async () => (await boss.at("space-members").locator("li").count()) === 2, 15_000);
+  await boss.page.locator('[data-testid="space-access"] .modal-close').click();
+  await again(fo);
+  say(
+    "Manage access… takes a person out, who stops seeing the folder, and puts them back",
+    accessHint.includes("on their own devices") && takenOut && hidden && putBack && (await there(fo, `Restricted/${PLANS}`)),
+    accessHint,
+  );
+
+  /* 3 — Restrict access… on a folder larger than one request moves */
+  await row(boss, BOARD).click();
+  await row(boss, `${BOARD}/n00.md`).click();
+  const editorHas = (who, text, ms = 30_000) =>
+    who.page.waitForFunction((t) => (document.querySelector(".ProseMirror")?.innerText ?? "").includes(t), text, { timeout: ms }).then(() => true, () => false);
+  await editorHas(boss, "Note 00");
+  const offered = await labels(boss, BOARD);
+  from = answered.length;
+  await pick(boss, BOARD, "Restrict access…");
+  await boss.at("restricted-people").waitFor({ timeout: 15_000 });
+  const restrictHint = await dialogText(boss, "restricted-folder");
+  const prefilled = await boss.at("restricted-name").inputValue();
+  await boss.at(`restricted-pick-${them.id}`).check();
+  await boss.at("restricted-create").click();
+  const restricted = await there(boss, `Restricted/${BOARD}`, 60_000);
+  await until(async () => (await boss.at("restricted-folder").count()) === 0, 30_000);
+  const board = (await spacesNow()).find((s) => s.name === BOARD);
+  const boardMoves = moves(from);
+  const inBoard = board ? await filesOf(board.id) : [];
+  const leftBehind = (await filesOf("")).filter((x) => x.startsWith(`${BOARD}/`));
+  say(
+    "a folder of 21 files becomes a restricted folder in two requests, and nothing of it is left where everyone could open it",
+    offered.includes("Restrict access…") &&
+      prefilled === BOARD &&
+      restrictHint.includes("removed from everyone else’s devices") &&
+      restricted &&
+      boardMoves.length === 2 &&
+      boardMoves.every((m) => m.status === 200) &&
+      inBoard.length === 21 &&
+      inBoard.includes("n00.md") &&
+      inBoard.includes("Sub/Deep.md") &&
+      leftBehind.length === 0 &&
+      (await row(boss, BOARD).count()) === 0,
+    `${boardMoves.length} move(s): ${boardMoves.map((m) => m.status).join(", ")}; ${inBoard.length} file(s) in it, ${leftBehind.length} left behind`,
+  );
+  if ((await row(boss, `Restricted/${BOARD}/n00.md`).count()) === 0) await row(boss, `Restricted/${BOARD}`).click();
+  await there(boss, `Restricted/${BOARD}/n00.md`);
+  const followed = await until(async () => /\bis-active\b/.test((await row(boss, `Restricted/${BOARD}/n00.md`).getAttribute("class")) ?? ""), 15_000);
+  say("the note open in it follows it there, still open", followed && (await editorHas(boss, "Note 00", 5_000)));
+  await again(fo);
+  await row(fo, `Restricted/${BOARD}`).click();
+  await row(fo, `Restricted/${BOARD}/n07.md`).click();
+  say("the person picked opens a note of it in their own browser", await editorHas(fo, "Note 07"));
+  // Closed again: the rest of this is done in a tree short enough to see whole.
+  await row(boss, `Restricted/${BOARD}`).click();
+  await gone(boss, `Restricted/${BOARD}/n00.md`, 5_000);
+
+  /* 4 — Share with…: a private note goes into a new folder with somebody */
+  const privateMenu = await labels(boss, `Private/${SECRET}.md`);
+  await pick(boss, `Private/${SECRET}.md`, "Share with…");
+  await boss.at("restricted-people").waitFor({ timeout: 15_000 });
+  const aloneDisabled = await boss.at("restricted-create").isDisabled();
+  await boss.at(`restricted-pick-${them.id}`).check();
+  await boss.at("restricted-create").click();
+  await there(boss, `Restricted/${SECRET}`, 60_000);
+  await until(async () => (await boss.at("restricted-folder").count()) === 0, 30_000);
+  if ((await row(boss, `Restricted/${SECRET}/${SECRET}.md`).count()) === 0) await row(boss, `Restricted/${SECRET}`).click();
+  const shared = await there(boss, `Restricted/${SECRET}/${SECRET}.md`, 15_000);
+  const secret = (await spacesNow()).find((s) => s.name === SECRET);
+  say(
+    "Share with… moves a private note into a new folder with the person picked",
+    privateMenu.includes("Share with…") &&
+      aloneDisabled &&
+      shared &&
+      (await gone(boss, `Private/${SECRET}.md`)) &&
+      secret?.members.includes(them.id) &&
+      (await filesOf(secret.id)).includes(`${SECRET}.md`) &&
+      !(await filesOf(mine)).includes(`${SECRET}.md`),
+  );
+
+  /* 5 — a folder dropped on Restricted becomes one, after a question */
+  await row(boss, DROP).scrollIntoViewIfNeeded();
+  const a = await row(boss, DROP).boundingBox();
+  const b = await boss.at("section-restricted").locator(".sidebar-section-label").boundingBox();
+  await boss.page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+  await boss.page.mouse.down();
+  await boss.page.mouse.move(a.x + a.width / 2 + 9, a.y + a.height / 2 + 9, { steps: 3 });
+  await boss.page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 8 });
+  await sleep(150);
+  await boss.page.mouse.up();
+  const asked = await boss.at("question-prompt").waitFor({ timeout: 15_000 }).then(() => true, () => false);
+  const question = asked ? await dialogText(boss, "question-prompt") : "";
+  if (asked) await boss.at("question-yes").click();
+  const dropped = await there(boss, `Restricted/${DROP}`, 60_000);
+  const drop = (await spacesNow()).find((s) => s.name === DROP);
+  say(
+    "a folder dropped on Restricted is asked about, then becomes a restricted folder of its name with only its maker in it",
+    question.includes(`Restrict “${DROP}”?`) &&
+      dropped &&
+      drop?.members.length === 1 &&
+      (await filesOf(drop.id)).sort().join() === "one.md,two.md" &&
+      (await gone(boss, DROP)),
+    question || `no question: dragged from ${JSON.stringify(a)} to ${JSON.stringify(b)}`,
+  );
+
+  /* 6 — a restricting that stops part of the way says so, in numbers */
+  const REASON = "the bucket is not answering — try again in a moment";
+  let asks = 0;
+  refusing = (req) => (req.method === "POST" && req.url === "/api/web/move" && (asks += 1) === 2 ? { status: 503, error: REASON } : null);
+  await pick(boss, HALF, "Restrict access…");
+  await boss.at("restricted-people").waitFor({ timeout: 15_000 });
+  await boss.at("restricted-create").click();
+  const partway = await boss.page.locator('[data-testid="restricted-folder"] .modal-error').innerText({ timeout: 60_000 }).catch(() => "");
+  refusing = null;
+  const half = (await spacesNow()).find((s) => s.name === HALF);
+  const stillShared = (await filesOf("")).filter((x) => x.startsWith(`${HALF}/`));
+  say(
+    "stopped after the first sixteen files: the sentence says how many reached the folder and where the rest still are",
+    partway.includes(`“${HALF}” was made, but only 16 of 21 files reached it`) &&
+      partway.includes("The bucket is not answering") &&
+      partway.includes(`The rest are still in “${HALF}”, open to whoever could open them before`) &&
+      half !== undefined &&
+      (await filesOf(half.id)).length === 16 &&
+      stillShared.length === 5 &&
+      (await there(boss, `Restricted/${HALF}`)) &&
+      (await row(boss, HALF).count()) === 1,
+    partway,
+  );
+  await boss.page.locator('[data-testid="restricted-folder"] .modal-close').click();
+
+  /* 7 — and one that moves nothing leaves no folder behind */
+  from = answered.length;
+  refusing = (req) => (req.method === "POST" && req.url === "/api/web/move" ? { status: 503, error: REASON } : null);
+  await pick(boss, NONE, "Restrict access…");
+  await boss.at("restricted-people").waitFor({ timeout: 15_000 });
+  await boss.at("restricted-create").click();
+  const nothing = await boss.page.locator('[data-testid="restricted-folder"] .modal-error').innerText({ timeout: 60_000 }).catch(() => "");
+  refusing = null;
+  const takenBack = answered.slice(from).some((x) => x.method === "DELETE" && /^\/api\/spaces\/s-/.test(x.path) && x.status === 200);
+  say(
+    "stopped before anything moved: the folder made for it is taken back, and the sentence is the reason alone",
+    nothing.trim() === "The bucket is not answering — try again in a moment" &&
+      takenBack &&
+      !(await spacesNow()).some((s) => s.name === NONE) &&
+      (await row(boss, `Restricted/${NONE}`).count()) === 0 &&
+      (await filesOf("")).filter((x) => x.startsWith(`${NONE}/`)).length === 2 &&
+      (await boss.page.locator(".toast-text", { hasText: "no longer on this" }).count()) === 0,
+    nothing,
+  );
+  await boss.page.locator('[data-testid="restricted-folder"] .modal-close').click();
+
+  /* 8 — leaving a folder */
+  await pick(fo, `Restricted/${BOARD}`, "Manage access…");
+  await fo.at("space-leave").click();
+  const leaveAsk = await dialogText(fo, "space-leave-confirm");
+  await fo.at("space-leave-yes").click();
+  const left = await gone(fo, `Restricted/${BOARD}`);
+  say(
+    "somebody leaves a folder from their browser: it goes from their tree, the note of it they had open closes, and nothing says they were taken out",
+    leaveAsk.includes("It is removed from this browser. The others keep theirs.") &&
+      left &&
+      (await fo.at("space-access").count()) === 0 &&
+      !(await editorHas(fo, "Note 07", 1_000)) &&
+      (await fo.page.locator(".toast-text", { hasText: "no longer on this" }).count()) === 0 &&
+      !(await spacesNow()).find((s) => s.name === BOARD)?.members.includes(them.id),
+    leaveAsk,
+  );
+
+  /* 9 — and deleting one, for everyone in it */
+  from = answered.length;
+  await pick(boss, `Restricted/${PLANS}`, "Manage access…");
+  await boss.at("space-delete").click();
+  const deleteAsk = await dialogText(boss, "space-delete-confirm");
+  await boss.at("space-delete-yes").click();
+  const deleted = await gone(boss, `Restricted/${PLANS}`);
+  await again(fo);
+  say(
+    "a folder deleted from a browser is gone for everyone in it",
+    deleteAsk.includes("from the devices of each person in it") &&
+      deleted &&
+      answered.slice(from).some((x) => x.method === "DELETE" && x.path === `/api/spaces/${plans.id}` && x.status === 200) &&
+      !(await spacesNow()).some((s) => s.id === plans.id) &&
+      (await row(fo, `Restricted/${PLANS}`).count()) === 0,
+    deleteAsk,
+  );
+  say("nothing was refused by the page's policy, and nothing threw", trouble.length === 0, trouble.join(" | "));
+
+  // The folders this made go with it: the next engine's owner is in none of them.
+  for (const s of await spacesNow()) {
+    if (s.kind !== "restricted" || !s.name.endsWith(name)) continue;
+    while ((await (await owner(`/api/spaces/${s.id}`, { method: "DELETE" })).json()).remaining) {
+      // a request's worth at a time
+    }
+  }
+  await other.close();
+  await browser.close();
+}
+
 /* ---------- What a browser keeps, and stops keeping ---------- */
 
 /** Over plain http, where Chromium caches as it does on a real domain (and
@@ -1526,6 +1850,7 @@ for (const name of wanted) {
   if (parts.has("writing")) await driveWriting(name);
   if (parts.has("rest")) await driveRest(name);
   if (parts.has("access")) await driveAccess(name);
+  if (parts.has("folders")) await driveFolders(name);
 }
 if (wanted.includes("chromium") && parts.has("cache")) await driveCache();
 

@@ -1,10 +1,9 @@
 // The browser's answer to src/backend.ts: the worker, through the picture of
 // the workspace this page holds (workspace.ts). No Tauri, and no group for
 // what a browser has none of: a copy of the workspace to sync, set up or
-// disconnect, the domain's upkeep, restricted folders to make, windows of
-// its own, files on this computer, untitled notes, version history, PDF
-// export, an updater. What it has that a Mac has not is a sign-in to end
-// (`session`).
+// disconnect, the domain's upkeep, windows of its own, files on this
+// computer, untitled notes, version history, PDF export, an updater. What
+// it has that a Mac has not is a sign-in to end (`session`).
 //
 // Here a document is stored copies named by a manifest: the note, the html
 // rendition beside it and its sidecar are three files of one section. What
@@ -17,6 +16,7 @@ import type {
   Backend,
   Cloud,
   CloudAccess,
+  CloudSpaces,
   Documents,
   FileClipboard,
   FileClipboardPayload,
@@ -311,6 +311,26 @@ function accessOf(ws: Workspace): CloudAccess {
   };
 }
 
+/** Restricted folders: each is the route a Mac's engine calls
+ *  (`create_space` and the rest, engine/src/cloud/remote.rs), and the worker
+ *  answers the people in the folder and nobody else. What a Mac does on its
+ *  own disk, this page asks for: a folder that becomes a restricted one is
+ *  moved into it (saving.ts), and a folder left or deleted goes from the
+ *  picture held here at once (workspace.ts). */
+function spacesOf(ws: Workspace, saving: Saving): CloudSpaces {
+  return {
+    spaceCreate: (_root, name, members, from = null) => saving.restrict(name, members, from),
+    async spaceMember(_root, id, memberId, add) {
+      // Leaving: what was typed in it goes first, while there is still
+      // somewhere to send it.
+      const folder = !add && memberId === ws.me ? ws.folderOf(id) : null;
+      if (folder !== null) await saving.flush(folder);
+      await ws.spaceMember(id, memberId, add);
+    },
+    spaceDelete: (_root, id) => ws.deleteSpace(id),
+  };
+}
+
 export function webBackend(ws: Workspace, saving: Saving): Backend {
   const leaving: Leaving = { onLeave: (flush) => saving.onLeave(flush) };
   const session: Session = {
@@ -354,6 +374,7 @@ export function webBackend(ws: Workspace, saving: Saving): Backend {
     home: ws.root,
     htmlFrame: "/app/frame",
     access: accessOf(ws),
+    spaces: spacesOf(ws, saving),
     session,
     shows,
     leaving,

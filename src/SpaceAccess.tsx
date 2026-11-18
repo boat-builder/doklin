@@ -5,8 +5,8 @@
 // The folder itself comes from the workspace's status, so the list is what
 // the engine believes: a person added or taken out shows the moment the
 // command answers. Names come from the People list, which everybody here may
-// read. When the folder leaves this Mac — left, deleted, or taken away — the
-// status stops listing it and the dialog closes.
+// read. When the folder leaves this device — left, deleted, or taken away —
+// the status stops listing it and the dialog closes.
 //
 // The last person cannot leave: a folder is deleted, or handed to somebody
 // first, never abandoned by its own people.
@@ -19,7 +19,7 @@ import {
 } from "./cloud";
 import Avatar from "./Avatar";
 import { useDismiss } from "./dismiss";
-import type { CloudAccess, CloudSpaces } from "./backend";
+import { backend, type CloudAccess, type CloudSpaces } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -46,8 +46,8 @@ export default function SpaceAccess({
   cloud: CloudStatus;
   /** The folder, as the status lists it now. */
   space: CloudSpace;
-  /** Called just before this Mac gives the folder up — leaving it or deleting
-   *  it — so the app knows the folder's going is the user's own doing. */
+  /** Called just before this device gives the folder up — leaving it or
+   *  deleting it — so the app knows the folder's going is the user's own doing. */
   onLeaving: (space: CloudSpace) => void;
   onClose: () => void;
 }) {
@@ -104,7 +104,7 @@ export default function SpaceAccess({
   /** Leave: take yourself out — after handing the folder to `to`, when alone. */
   const leave = (to: string | null) =>
     act(async () => {
-      if (!me) throw new Error("This Mac does not know who you are here yet — try again in a moment.");
+      if (!me) throw new Error(`This ${backend.device} does not know who you are here yet — try again in a moment.`);
       if (to) await spaces.spaceMember(cloud.root, space.id, to, true);
       onLeaving(space);
       await spaces.spaceMember(cloud.root, space.id, me, false);
@@ -129,7 +129,7 @@ export default function SpaceAccess({
         </div>
         <div className="cloud-body">
           <p className="cloud-hint">
-            Only the people here have this folder, on their own Macs. Nobody else in {cloud.name} sees it, or that
+            Only the people here have this folder, on their own devices. Nobody else in {cloud.name} sees it, or that
             it exists. Anyone in it can add people, take them out, rename it and delete it.
           </p>
 
@@ -148,7 +148,7 @@ export default function SpaceAccess({
                   {!you &&
                     (confirm === `out:${id}` ? (
                       <span className="cloud-inline-confirm">
-                        <span className="cloud-hint">Their Macs delete their copy of this folder.</span>
+                        <span className="cloud-hint">Their devices delete their copy of this folder.</span>
                         <button
                           className="modal-btn is-danger-solid"
                           data-testid={`space-out-yes-${id}`}
@@ -249,7 +249,9 @@ export default function SpaceAccess({
               </div>
             ) : (
               <div className="cloud-inline-confirm" data-testid="space-leave-confirm">
-                <span className="cloud-hint">This Mac deletes its copy of the folder. The others keep theirs.</span>
+                <span className="cloud-hint">
+                  It is removed from this {backend.device}. The others keep theirs.
+                </span>
                 <button
                   className="modal-btn is-danger-solid"
                   data-testid="space-leave-yes"
@@ -267,8 +269,8 @@ export default function SpaceAccess({
             <div className="cloud-card cloud-card--attention" data-testid="space-delete-confirm">
               <div className="cloud-card-title">Delete “{space.name}” for everyone in it?</div>
               <p className="cloud-hint">
-                Everything in it is erased from the cloud, and from the Mac of each person in it. This cannot be
-                undone.
+                Everything in it is erased from the cloud, and from the devices of each person in it. This cannot
+                be undone.
               </p>
               <div className="modal-buttons">
                 <button

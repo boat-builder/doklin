@@ -6079,10 +6079,8 @@ await test("web: a browser's sign-in is answered on /api/web and the reads a bro
     ["/api/auth/recover", "POST", { email: "mallory@example.com" }],
     ["/api/auth/join", "GET"],
     ["/api/spaces", "GET"],
-    ["/api/spaces", "POST", { name: "Mine" }],
     [`/api/spaces/${space}`, "PATCH", { name: "Mine" }],
-    [`/api/spaces/${space}`, "DELETE"],
-    [`/api/spaces/${space}/members/m-00000000`, "PUT"],
+    [`/api/spaces/${space}/versions/index`, "GET"],
     ["/api/pages/notes", "PUT", {}],
     ["/api/admin/wipe", "POST", { confirm: "wipe" }],
     ["/api/agent/me", "GET"],
@@ -6235,6 +6233,111 @@ await test("web: people, devices and agents are a browser's too, by its person's
   assert.equal(out.headers.get("clear-site-data"), '"cache", "storage"');
   assert.equal((await call("/api/poll", { token: phone.json.token })).json.removed, true, "every device they had, the one a browser's code let in among them");
   assert.equal(db.value("SELECT COUNT(*) FROM agents WHERE member_id = ?", them), 0, "and their agents");
+});
+
+await test("web: restricted folders are a browser's too — one is made, people are put in and taken out, a folder of the workspace becomes one in parts, and it is deleted", async () => {
+  const save = (path, body) => browser(`/api/web/doc?path=${encodeURIComponent(path)}`, { method: "PUT", cookie: WEB, body });
+  const move = (body) => browser("/api/web/move", { method: "POST", cookie: WEB, body });
+  const me = (await browser("/api/meta", { cookie: WEB })).json.you.memberId;
+  const other = (await call("/api/meta", { token: MEMBER })).json.you.memberId;
+
+  // Made from a browser, by the route a Mac calls: its maker is in it.
+  const made = await browser("/api/spaces", { method: "POST", cookie: WEB, body: { name: "Board" } });
+  assert.equal(made.status, 201, made.text);
+  const board = made.json.space;
+  assert.deepEqual([board.kind, board.name, board.members], ["restricted", "Board", [me]]);
+  const at = `/api/spaces/${board.id}`;
+  assert.ok((await browser("/api/poll", { cookie: WEB })).json.spaces.some((s) => s.id === board.id), "the poll lists it from then on");
+  assert.equal((await call(`${at}/manifest`, { token: MEMBER })).status, 404, "and to everybody else it does not exist");
+
+  // Who is in it: anyone in a folder adds and takes out, from a browser as from a Mac.
+  const added = await browser(`${at}/members/${other}`, { method: "PUT", cookie: WEB });
+  assert.deepEqual([added.status, added.json.space.members], [200, [me, other].sort()]);
+  assert.equal((await call(`${at}/manifest`, { token: MEMBER })).status, 200);
+  assert.equal((await browser(`${at}/members/m-00000000`, { method: "PUT", cookie: WEB })).status, 404, "only people here");
+  assert.equal((await browser(`${at}/members/${other}`, { method: "DELETE", cookie: WEB })).status, 204);
+  assert.equal((await call(`${at}/manifest`, { token: MEMBER })).status, 404);
+  const last = await browser(`${at}/members/${me}`, { method: "DELETE", cookie: WEB });
+  assert.equal(last.status, 409, "never left with nobody in it");
+  assert.ok(/delete it, or add somebody first/.test(last.json.error), last.json.error);
+  const mine = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  assert.equal((await browser(`/api/spaces/${mine}`, { method: "DELETE", cookie: WEB })).status, 409, "a Private is not deleted, from a browser either");
+
+  // A folder of the workspace becomes it. Twenty notes with their comments
+  // and two more beneath: 42 files, where one request carries 16.
+  for (let i = 0; i < 20; i += 1) {
+    const name = `board/n${String(i).padStart(2, "0")}.md`;
+    assert.equal((await save(name, { md: { text: `# ${i}\n`, ifRev: null }, meta: { text: SIDECAR("m1", name), ifRev: null } })).status, 200);
+  }
+  for (const name of ["board/Sub/Deep.md", "board/Sub/Deeper/Last.md"]) {
+    assert.equal((await save(name, { md: { text: `# ${name}\n`, ifRev: null } })).status, 200);
+  }
+  const page = await browser("/api/web/pages", { method: "PUT", cookie: WEB, body: { path: "board/n19.md", kind: "document", slug: "board-minutes" } });
+  assert.equal(page.status, 201, page.text);
+  const site = await browser("/api/web/pages", { method: "PUT", cookie: WEB, body: { path: "board/Sub", kind: "folder", slug: "board-papers" } });
+  assert.equal(site.status, 201, site.text);
+  const before = await sharedManifest();
+  const fids = Object.keys(before.files).filter((fid) => before.files[fid].path.startsWith("board/"));
+  assert.equal(fids.length, 42);
+
+  const ask = { from: { path: "board" }, to: { space: board.id, path: "" }, kind: "folder" };
+  const parts = [];
+  for (let left = 42; left > 0; ) {
+    const part = await move(ask);
+    assert.equal(part.status, 200, part.text);
+    assert.deepEqual([part.json.kind, part.json.from, part.json.to], ["folder", "board", ""]);
+    parts.push(part.json.files);
+    left -= part.json.files;
+    assert.equal(part.json.remaining ?? 0, left, "each answer says how many files are still where they were");
+    // Whole documents: no note is ever in one section and its comments in the other.
+    const here = Object.values((await sharedManifest()).files).map((f) => f.path).filter((x) => x.startsWith("board/"));
+    for (const x of here.filter((x) => x.endsWith(".meta.jsonl"))) assert.ok(here.includes(x.replace(/\.meta\.jsonl$/, ".md")), x);
+    assert.equal(here.length, left);
+  }
+  assert.deepEqual(parts, [16, 16, 10], "sixteen files a request, by path");
+  let shared = await sharedManifest();
+  assert.equal(Object.values(shared.files).filter((f) => f.path.startsWith("board/")).length, 0);
+  for (const fid of fids) assert.equal(shared.tombstones[fid].to, board.id, "each with the tombstone that says where it went");
+  let there = (await browser(`${at}/manifest`, { cookie: WEB })).json;
+  assert.deepEqual(
+    Object.values(there.files).map((f) => f.path).filter((x) => !x.endsWith(".meta.jsonl")).sort(),
+    [...Array.from({ length: 20 }, (_, i) => `n${String(i).padStart(2, "0")}.md`), "Sub/Deep.md", "Sub/Deeper/Last.md"].sort(),
+    "what was in the folder is what is in the section, at its top",
+  );
+  assert.equal(Object.values(there.files).filter((f) => f.path.endsWith(".meta.jsonl")).length, 20);
+  // Its pages keep their addresses, in the section they now belong to.
+  assert.ok(!shared.public?.["board-minutes"] && !shared.public?.["board-papers"]);
+  assert.equal(there.public["board-minutes"].path, "n19.md");
+  assert.equal(there.files[there.public["board-minutes"].file].path, "n19.md");
+  assert.deepEqual([there.public["board-papers"].kind, there.public["board-papers"].path], ["dir", "Sub"]);
+  assert.equal((await move(ask)).status, 404, "and nothing is left to ask for");
+
+  // The top of a section is for a folder that comes from another one.
+  for (const [body, route] of [
+    [{ from: { space: board.id, path: "Sub" }, to: { space: board.id, path: "" }, kind: "folder" }, "move"],
+    [{ from: { path: "notes.md" }, to: { space: board.id, path: "" }, kind: "document" }, "move"],
+    [{ from: { space: board.id, path: "Sub" }, to: { path: "" }, kind: "folder" }, "copy"],
+    [{ from: { path: "" }, to: { space: board.id, path: "x" }, kind: "folder" }, "move"],
+  ]) {
+    const res = await browser(`/api/web/${route}`, { method: "POST", cookie: WEB, body });
+    assert.equal(res.status, 400, `${route} ${JSON.stringify(body)}: ${res.text}`);
+  }
+  // A folder moved back out, to a name: in parts as well, and nothing is lost.
+  const back = { from: { space: board.id, path: "Sub" }, to: { path: "papers" }, kind: "folder" };
+  const out = await move(back);
+  assert.deepEqual([out.status, out.json.files, out.json.remaining], [200, 2, undefined], "a folder one request carries says nothing of parts");
+  shared = await sharedManifest();
+  assert.ok(fileAt(shared, "papers/Deep.md")[0] && fileAt(shared, "papers/Deeper/Last.md")[0]);
+  assert.deepEqual([shared.public["board-papers"].kind, shared.public["board-papers"].path], ["dir", "papers"], "its page with it");
+
+  // Deleted for everyone in it, from a browser.
+  const gone = await browser(at, { method: "DELETE", cookie: WEB });
+  assert.deepEqual([gone.status, gone.json.deleted, gone.json.remaining], [200, true, false]);
+  assert.deepEqual([...fake.store.keys()].filter((k) => k.startsWith(`spaces/${board.id}/`)), []);
+  assert.equal((await browser(`${at}/manifest`, { cookie: WEB })).status, 404);
+  assert.ok(!(await browser("/api/poll", { cookie: WEB })).json.spaces.some((s) => s.id === board.id));
+  assert.equal((await browser("/api/web/folder?path=papers", { method: "DELETE", cookie: WEB })).status, 200);
+  assert.equal((await browser("/api/web/pages?slug=board-papers", { method: "DELETE", cookie: WEB })).status, 200);
 });
 
 await test("web: a note and its comments are saved in one manifest write, each over the revision that was read — and when either has moved on, neither is written", async () => {

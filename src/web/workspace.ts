@@ -133,6 +133,10 @@ export class Workspace {
   /** Each space's folder, kept for as long as the page is: a folder never
    *  changes its name under an open document. */
   private readonly mounts = new Map<string, string>();
+  /** Restricted folders made on this page that no poll has listed yet: an
+   *  answer asked for before one was made says nothing of it, which would
+   *  otherwise read as this person having been taken out of it. */
+  private readonly entering = new Map<string, Space>();
   private poll: PollAnswer | null = null;
   private limits: Limits;
   private phase: CloudStatus["phase"] = "idle";
@@ -282,6 +286,21 @@ export class Workspace {
   /** A path under the root, as sentences and events name it; null outside it. */
   rel(abs: string): string | null {
     return this.relOf(abs);
+  }
+
+  /** What a folder put at an absolute path would be as a restricted folder:
+   *  its name, and whether one is there already. Null for a path that is
+   *  not straight under `Restricted`, where the restricted folders are. */
+  restrictedSlot(abs: string): { name: string; taken: boolean } | null {
+    const rel = this.relOf(abs);
+    if (rel === null || dirIn(rel) !== RESTRICTED_DIR) return null;
+    return { name: nameIn(rel), taken: [...this.mounts.values()].some((mount) => mount.toLowerCase() === rel.toLowerCase()) };
+  }
+
+  /** A section's own folder, by the section's id; null for one not held. */
+  folderOf(space: string): string | null {
+    const section = this.sections.get(space);
+    return section ? join(this.root, section.mount) : null;
   }
 
   /** The file stored at an absolute path, or null. */
@@ -683,12 +702,7 @@ export class Workspace {
     }
     for (const [id, section] of before) {
       if (kept.has(id) || (only && !read.some((r) => r.id === id))) continue;
-      this.sections.delete(id);
-      this.mounts.delete(id);
-      for (const path of section.files.keys()) changed.push(join(section.mount, path));
-      if (section.space?.kind === "restricted") {
-        tell(this.spaceLeftHeard, { root: this.root, name: section.space.name, path: section.mount });
-      }
+      changed.push(...this.drop(section, true));
     }
     // A folder made here that a document now sits in is a folder like any other.
     for (const dir of [...this.made]) if (this.holdsFiles(join(this.root, dir))) this.made.delete(dir);
@@ -696,12 +710,27 @@ export class Workspace {
     if (before.size > 0 && changed.length > 0) this.changed(changed.map((rel) => `${this.root}/${rel}`));
   }
 
+  /** Let go of a section this person is no longer in, and answer what was
+   *  in it, as the tree placed it. `said`: the app is told the folder left
+   *  (it is not, of one made a moment ago and taken back). */
+  private drop(section: Section, said: boolean): string[] {
+    this.sections.delete(section.id);
+    this.mounts.delete(section.id);
+    this.entering.delete(section.id);
+    if (said && section.space?.kind === "restricted") {
+      tell(this.spaceLeftHeard, { root: this.root, name: section.space.name, path: section.mount });
+    }
+    return [...section.files.keys()].map((path) => join(section.mount, path));
+  }
+
   /** Take in what a poll says: read every manifest that moved, drop the
    *  sections this person is no longer in, and say what changed. */
   private async take(poll: PollAnswer): Promise<void> {
     this.limits = poll.limits;
+    for (const space of poll.spaces ?? []) this.entering.delete(space.id);
     // Null: the database could not say. What is held stays as it is.
-    const spaces = poll.spaces ?? [...this.sections.values()].flatMap((s) => (s.space ? [s.space] : []));
+    const listed = poll.spaces ?? [...this.sections.values()].flatMap((s) => (s.space ? [s.space] : []));
+    const spaces = [...listed, ...[...this.entering.values()].filter((made) => !listed.some((s) => s.id === made.id))];
     const read = await Promise.all([
       this.readSection("", null, poll.manifestEtag),
       ...spaces.map((space) => this.readSection(space.id, space, space.etag)),
@@ -725,6 +754,76 @@ export class Workspace {
     );
     this.adopt(read, true);
     this.restate();
+  }
+
+  /* ---------- Restricted folders ---------- */
+
+  /** A call about a restricted folder; `gone` is what is said when the
+   *  domain knows nothing of what it named. */
+  private async aboutSpace<T>(asked: Promise<T>, gone: string): Promise<T> {
+    try {
+      return await asked;
+    } catch (e) {
+      if (e instanceof Refused && e.status === 404) throw new Error(gone);
+      throw e;
+    }
+  }
+
+  /** Make a restricted folder holding this person and `members`, and hold
+   *  it from now on rather than from the next poll. `at`: where it is shown
+   *  on this page, for one made by putting a folder there. */
+  async makeSpace(name: string, members: string[], at?: string): Promise<CloudSpace> {
+    const { space } = await askJson<{ space: Space }>("POST", "/api/spaces", { body: { name, members } });
+    const mount = at === undefined ? null : this.relOf(at);
+    if (mount) this.mounts.set(space.id, mount);
+    this.entering.set(space.id, space);
+    this.adopt([await this.readSection(space.id, space, null)], true);
+    this.restate();
+    const made = this.spaces().find((s) => s.id === space.id);
+    if (!made) throw new Error("The folder was made, and will be here in a moment.");
+    return made;
+  }
+
+  /** Add a person to a restricted folder, or take one out. Taking this
+   *  person out is leaving it: it goes from this page with them. */
+  async spaceMember(id: string, member: string, add: boolean): Promise<void> {
+    const at = `/api/spaces/${encodeURIComponent(id)}/members/${encodeURIComponent(member)}`;
+    const section = this.sections.get(id);
+    if (add) {
+      const { space } = await this.aboutSpace(
+        askJson<{ space: Space }>("PUT", at),
+        "That person is not in this workspace any more, or the folder is gone.",
+      );
+      if (section) section.space = space;
+    } else {
+      await this.aboutSpace(ask("DELETE", at), "That folder is not there any more, or you are no longer in it.");
+      if (member === this.me) this.leave(id, true);
+      else if (section?.space) section.space = { ...section.space, members: section.space.members.filter((m) => m !== member) };
+    }
+    this.restate();
+  }
+
+  /** Delete a restricted folder for everyone in it: the domain erases what
+   *  it stored a request's worth at a time. `quiet`: nothing is said of its
+   *  going, for one made a moment ago that is being taken back. */
+  async deleteSpace(id: string, quiet = false): Promise<void> {
+    for (let remaining = true; remaining; ) {
+      ({ remaining } = await this.aboutSpace(
+        askJson<{ remaining: boolean }>("DELETE", `/api/spaces/${encodeURIComponent(id)}`),
+        "That folder is not there any more, or you are no longer in it.",
+      ));
+    }
+    this.leave(id, !quiet);
+    this.restate();
+  }
+
+  /** This person is out of a restricted folder by something done on this
+   *  page: it goes now rather than at the next poll. */
+  private leave(id: string, said: boolean): void {
+    const section = this.sections.get(id);
+    if (!section) return;
+    const gone = this.drop(section, said);
+    if (gone.length > 0) this.changed(gone.map((rel) => `${this.root}/${rel}`));
   }
 
   /**
