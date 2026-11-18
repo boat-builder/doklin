@@ -59,7 +59,7 @@
 - WebKit puts its own bar over the keyboard (previous, next, done); the editor's content view is made a subclass of itself without one (`dropInputAccessory`).
 - A note's top-level blocks are counted by two parsers, the reader's and Milkdown's: Edit names the block by index and its first words, and the editor finds it by the words when the counts differ.
 - `Info.plist` and `Doklin.entitlements` stay outside `ios/Doklin/`: inside the synchronized folder a file is copied as a resource too, and the build fails on two commands producing one file.
-- Apple reads the association file from its own cache, refreshed when the app is installed: a change to it reaches phones only once doklin.cc is deployed (`cd site && wrangler deploy`), and then only on the next install. The archive that first carries the entitlement makes Xcode add *Associated Domains* to the App ID.
+- Apple reads the association file from its own cache, refreshed when the app is installed: a change to it reaches phones only once doklin.cc is deployed (`site.yml`, on the push to `main`), and then only on the next install. The archive that first carries the entitlement makes Xcode add *Associated Domains* to the App ID.
 - `"\r\n"` is one `Character` in Swift. Lines are split by `MarkdownLines.split`, and a ticked box changes one character in place, so a note's line endings survive.
 - A block's `line` is a line of the file, frontmatter included: `togglingTask` takes that number as it is.
 - `x-doklin-client` is `ios/<MARKETING_VERSION>`. The version is the project's, not the Mac app's: `bump` does not stamp it, and a push touching only `ios/` cuts no release.

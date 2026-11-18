@@ -42,9 +42,9 @@ name: release
 on:
   push:
     branches: [main]
-    # The doklin.cc page ships with `wrangler deploy`, not with the app, and
-    # the iOS app is built from Xcode: a push that touches nothing but site/
-    # and ios/ cuts no release.
+    # The doklin.cc page ships by site.yml, not with the app, and the iOS app
+    # is built from Xcode: a push that touches nothing but site/ and ios/
+    # cuts no release.
     paths-ignore:
       - "site/**"
       - "ios/**"

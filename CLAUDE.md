@@ -6,7 +6,7 @@ worker at `/app`), `src-tauri/` Rust backend, `engine/` the sync engine and
 version store (Rust, no Tauri: the Mac and iPhone apps both build it in),
 `cloud-worker/` Cloudflare Worker, `cli/` the `doklin` command, `ios/` the
 iPhone and iPad app (Swift, built from Xcode by hand), `site/` the doklin.cc
-product page (static, deployed by hand: `cd site && wrangler deploy`).
+product page (static, deployed by `.github/workflows/site.yml`).
 
 ## Commands
 
@@ -33,6 +33,7 @@ Tauri IPC stubbed: `(cd verify-harness && npm install)` once, a vite server on
 ## Rules
 
 - Every push to `main` cuts a release, unless it only touches `site/` or `ios/`.
+  One that touches `site/` puts it on doklin.cc.
 - The frontend never `fetch`es. The cloud engine in Rust is the only code that
   holds a token or talks to a domain. In a browser the one module that
   fetches is `src/web/http.ts`, and it holds no token.

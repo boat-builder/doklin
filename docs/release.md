@@ -7,10 +7,12 @@ macOS, Apple Silicon only. Producer: `.github/workflows/release.yml`. Consumer: 
 - `ci.yml` (PRs): `checks` (eslint, tsc, cloud worker tests + bundle, max 3 MB gzipped), `cli` (`--locked` build, `cargo test`, `verify-harness/drive-cli.mjs`), `engine` (`cargo test --workspace --locked` in `engine/`), `ios` (colour sets + `verify-harness/drive-ios.mjs`).
 - `ios.yml` (push touching `ios/`): on macos-15, the iOS core's tests, a simulator build, and the app driven in a simulator (`verify-harness/drive-ios.mjs --app`). Nothing ships the iOS app: [ios.md](ios.md).
 - `release.yml` (push to `main`): `bump` → `build-cli` (Linux x64/arm64 musl) → `build-release` (macos-15, publishes).
+- `site.yml` (push to `main` touching `site/`): `wrangler deploy` of `site/`, the assets-only Worker `doklin-site` behind doklin.cc.
 
 ## Rules
 
 - Every push to `main` cuts a release, except one touching only `site/` and `ios/` (`paths-ignore`); runs are serialized (`concurrency: release-main`).
+- doklin.cc is what `main`'s `site/` has. A deploy by hand from a branch lasts until the next push that touches `site/`. `site.yml` needs the secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` and fails without them. Nothing orders it with a release or with a domain's worker: a page that leans on a newer worker is live once merged, and that is accepted.
 - Never version by hand. `bump` patch-bumps the latest `v*` tag; for minor/major, raise `version` in `src-tauri/tauri.conf.json`. It stamps `package.json`, `tauri.conf.json`, and `Cargo.toml` + `Cargo.lock` of `src-tauri/` (crate `doklin`) and `cli/` (crate `doklin-cli`, names hard-coded). A new file carrying the version must join the stamp, or app and manifest drift and the updater misfires.
 - Keep the build in `bump`'s run: its tag is pushed with `GITHUB_TOKEN`, which triggers no workflow, so an `on: push: tags` workflow never runs.
 - `ci.yml` does not compile the Mac app's Rust; a `src-tauri/` break first fails the release on `main`. That includes its wrappers over the engine's commands (`src-tauri/src/cloud.rs`, `versions.rs`): after changing a command's signature in `engine/`, run `cd src-tauri && cargo check`.
