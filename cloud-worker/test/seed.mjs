@@ -13,7 +13,10 @@
 //   Sizes.md + Sizes.meta.jsonl      a table with stored column widths
 //   Comments.md + Comments.meta.jsonl  comment markers in the text, bodies in the sidecar
 //   Diagram.md                       a ```mermaid block and ```svg drawings (two
-//                                    sharing a marker id, one that doesn't parse)
+//                                    sharing a marker id, one that doesn't parse),
+//                                    then HTML written into the markdown that would
+//                                    act if its page let it: a script, a handler, a
+//                                    javascript: link, a form and a <base>
 //   Scratch.md                       synced, never published
 import { createHash } from "node:crypto";
 
@@ -110,6 +113,14 @@ Words after the diagram.
 \`\`\`svg
 <svg viewBox="0 0 760 80"><g></svg>
 \`\`\`
+
+<div id="written-in">
+<script>document.documentElement.dataset.ran = "a script";</script>
+<img src="/written-in.png" alt="" onerror="document.documentElement.dataset.ran = 'a handler'">
+<a id="written-link" href="javascript:void(document.documentElement.dataset.ran = 'a link')">a link</a>
+<form id="written-form" action="/written-in" method="post"><button>Send</button></form>
+<base href="https://example.com/">
+</div>
 `,
   "Scratch.md": `# Scratch
 

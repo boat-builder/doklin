@@ -3,6 +3,11 @@
 # that match one path add up and a repeated header is joined with a comma, so
 # no path may match two Cache-Control rules.
 
+# A file is what its Content-Type says: the worker says the same of its own
+# answers (src/index.ts).
+/*
+  X-Content-Type-Options: nosniff
+
 /__web/*
   X-Robots-Tag: noindex
 

@@ -29,10 +29,19 @@ The files pages ask for — fonts, icons, `og.png`, `robots.txt`, the mermaid mo
 
 - Comment markers stripped; thread bodies never leave the sidecar. From `<stem>.meta.jsonl` only table widths are used, under the app's table identity (`tableSignature` in `render.ts` ⇄ `src/tableWidths.ts`, byte-compatible).
 - The frontmatter block is left off the page (`splitFrontmatter`, `src/frontmatter.ts`): only the body is rendered.
-- ```` ```svg ```` drawings are drawn by the worker through the app's `sanitizeDrawing` (ids namespaced `dg<n>-` per page), so they show with scripts off; one that doesn't parse stays a code block. ```` ```mermaid ```` stays a code block until the hydrator draws it with the app's `mermaidConfig` + `finishMermaidSvg` (re-exported by `cloud-worker/web/mermaid-entry.ts`).
+- ```` ```svg ```` drawings are drawn by the worker through the app's `sanitizeDrawing` (ids namespaced `dg<n>-` per page), so they show with scripts off; one that doesn't parse stays a code block. ```` ```mermaid ```` stays a code block until the mermaid module (`cloud-worker/web/mermaid-entry.ts`) draws it with the app's `mermaidConfig` + `finishMermaidSvg`; a page with a diagram names the module in a script tag.
 - Links: relative targets resolve against the note's folder (`..` can't escape the workspace). Public target → its URL (`urlFor` order); unpublished → plain text; a relative image → its alt text (pictures stay on their device); other schemes, anchors, absolute paths — images on the web included — untouched.
 - A note over 4 MB is refused. The manifest is read tolerantly: unknown fields never break a page, and a file outside `syncs`, or a page of one, reads as absent.
 - Every page: `<meta name="robots" content="noindex">` + `x-robots-tag`. No access codes, web editor or web comments. OG image is one static PNG.
+
+## What a page may do
+
+HTML written into a note's markdown is drawn as written, on the origin the workspace's API answers on. What keeps it from acting is the page policy (`pagePolicy`, `public.ts`), not the renderer.
+
+- Every page the worker draws — note, framed rendition, folder, landing, 404 — is served under one `Content-Security-Policy`: `default-src 'none'`; `script-src` the mermaid module's full address and nothing else; `style-src 'unsafe-inline'` (the inline sheet, `<col style>`, mermaid's SVG); pictures, media and frames from anywhere; `form-action 'none'`; `base-uri 'none'`. An html document keeps its `sandbox` instead, never both.
+- No page carries an inline script, and none may: `script-src` has no hash, nonce or `'self'`. Browser code a page needs goes in the mermaid module. `'self'` would let a note run any script the domain serves.
+- The policy is set on the way out (`deliver`), never where a page is drawn: it names the request's origin, and the cache key names no host.
+- Every answer of the worker's (`index.ts`) and every static file (`_headers`) is `X-Content-Type-Options: nosniff`, so a stored file is never loaded as a script or a stylesheet.
 
 ## Cache
 

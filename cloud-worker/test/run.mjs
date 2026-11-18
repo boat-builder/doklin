@@ -2282,6 +2282,9 @@ async function webDirectory(fonts) {
   assert.equal(mermaid.headers.get("cache-control"), "public, max-age=31536000, immutable", "one Cache-Control rule matches");
   assert.equal(mermaid.headers.get("x-robots-tag"), "noindex");
   assert.ok(mermaid.text.includes("mermaidConfig") && mermaid.text.includes("finishMermaidSvg"), "with the app's diagram grammar");
+  assert.ok(mermaid.text.includes("pre > code.language-mermaid"), "and it draws a page's diagrams itself: no page carries a script for it");
+  assert.equal(mermaid.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(robots.headers.get("x-content-type-options"), "nosniff", "every file the web directory serves");
   assert.equal(createHash("sha256").update(mermaid.bytes).digest("hex").slice(0, 12), tag, "the tag is the module's hash");
   assert.equal((await pub("/__web/abc123/mermaid.js")).status, 404, "another tag names nothing");
 
@@ -2292,6 +2295,7 @@ async function webDirectory(fonts) {
     assert.equal(font.status, 200, file);
     assert.equal(font.headers.get("content-type"), "font/woff2");
     assert.equal(font.headers.get("cache-control"), "public, max-age=604800, immutable");
+    assert.equal(font.headers.get("x-content-type-options"), "nosniff");
     assert.ok(font.bytes.equals(vendored), `${file}: the app's own file`);
   }
   assert.equal((await rawGet("/__web/fonts/inter-latin-opsz-normal.woff2", { method: "HEAD" })).bytes.length, 0);
@@ -2506,7 +2510,7 @@ await test("public: every page wears the app's own theme — its tokens light an
   assert.ok(!(await pub("/plan")).text.includes('rel="preload"'), "a framed rendition sets no type of its own, so fetches none");
 });
 
-await test("public: column widths come from the meta sidecar under the app's own table identity; comment markers are stripped; the hydrator rides only pages with a diagram", async () => {
+await test("public: column widths come from the meta sidecar under the app's own table identity; comment markers are stripped; the mermaid module is named only on pages with a diagram", async () => {
   const sizes = await pub("/sizes");
   assert.ok(
     sizes.text.includes('<table class="dk-cols"><colgroup><col style="width:260px"><col><col style="width:140px"></colgroup>'),
@@ -2522,12 +2526,10 @@ await test("public: column widths come from the meta sidecar under the app's own
 
   const diagram = await pub("/diagram");
   assert.ok(diagram.text.includes('<code class="language-mermaid">flowchart LR'), "the source stays a code block for readers without scripts");
-  const asked = diagram.text.match(/import\("(\/__web\/[a-z0-9]+\/mermaid\.js)"\)/)?.[1];
-  assert.ok(asked, "the hydrator imports the tagged module");
+  const asked = diagram.text.match(/<script type="module" src="(\/__web\/[a-z0-9]+\/mermaid\.js)"><\/script>\n<\/body>/)?.[1];
+  assert.ok(asked, "the page names the tagged module, which draws its diagrams");
   if (bundlePath) assert.equal((await rawGet(asked)).status, 200, "at the path the web directory serves it");
   else assert.equal(asked, "/__web/dev/mermaid.js", "a source compile tags its module dev");
-  assert.ok(diagram.text.includes("mermaid.initialize(mod.mermaidConfig())"), "the app's diagram grammar, from the page's own palette");
-  assert.ok(diagram.text.includes("mod.finishMermaidSvg(svg)"), "finished as the app finishes it");
 
   // Drawings are drawn by the worker itself, through the app's sanitizer:
   // no script needed, each with its own ids, nothing executable kept, and
@@ -2539,6 +2541,92 @@ await test("public: column widths come from the meta sidecar under the app's own
   const drawn = diagram.text.slice(diagram.text.indexOf('<figure class="dk-drawing">'), diagram.text.lastIndexOf("</figure>"));
   assert.ok(!drawn.includes("<script") && !drawn.includes("onclick") && !drawn.includes("alert("), "nothing executable survives");
   assert.ok(diagram.text.includes('<code class="language-svg">&lt;svg viewBox=&quot;0 0 760 80&quot;&gt;&lt;g&gt;&lt;/svg&gt;'), "a drawing that doesn't parse stays its source");
+});
+
+await test("public: every page the worker draws goes out under the page policy, which runs the mermaid module and nothing written into a note; an html document keeps its sandbox; every answer is nosniff", async () => {
+  const policy = (origin) =>
+    [
+      "default-src 'none'",
+      `script-src ${origin}/__web/${webTag}/mermaid.js`,
+      "style-src 'unsafe-inline'",
+      "img-src * data:",
+      "media-src *",
+      "font-src 'self'",
+      "frame-src *",
+      "form-action 'none'",
+      "base-uri 'none'",
+    ].join("; ");
+  const HERE = "https://notes.example.com";
+
+  // A note, a framed rendition, a folder, a nested note, the root, a 404,
+  // and an asset path that reached the worker: one policy.
+  for (const p of ["/", "/home", "/sizes", "/plan", "/plan?v=md", "/projects", "/projects/status", "/diagram", "/nope", "/projects/nope", "/__web/x/app.js"]) {
+    const res = await pub(p);
+    assert.equal(res.headers.get("content-security-policy"), policy(HERE), p);
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff", p);
+  }
+  const head = await rawGet("/home", { method: "HEAD" });
+  assert.equal(head.headers.get("content-security-policy"), policy(HERE), "HEAD says what GET says");
+
+  // No page carries a script of its own: the only one a page ever names is
+  // the module, and only where there is a diagram to draw.
+  for (const p of ["/", "/home", "/sizes", "/plan", "/plan?v=md", "/projects", "/nope"]) {
+    assert.ok(!(await pub(p)).text.includes("<script"), `${p}: no script`);
+  }
+
+  // HTML written into a note is drawn as written — the policy, not the
+  // renderer, is what keeps it from acting (drive-public.mjs watches a
+  // browser refuse each of these).
+  const diagram = await pub("/diagram");
+  assert.deepEqual(
+    diagram.text.match(/<script\b[^>]*>/g),
+    ["<script>", `<script type="module" src="/__web/${webTag}/mermaid.js">`],
+    "the note's own script tag, then the module's — and the policy names the second alone",
+  );
+  for (const written of ['onerror="document.documentElement.dataset.ran', 'href="javascript:void(', '<form id="written-form"', '<base href="https://example.com/">']) {
+    assert.ok(diagram.text.includes(written), written);
+  }
+
+  // An html document is the author's page, not the worker's: its sandbox,
+  // and never the page policy on top of it.
+  for (const p of ["/plan/raw", "/projects/plan/raw", "/projects/plan.html"]) {
+    const res = await pub(p);
+    assert.equal(res.headers.get("content-security-policy"), "sandbox allow-scripts allow-popups", p);
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff", p);
+  }
+
+  // The policy names the domain a request came to, so it is set on the way
+  // out: a page kept by the cache is kept without one, and answers on
+  // another domain under that domain's name.
+  const cache = new FakeCache();
+  globalThis.caches = { default: cache };
+  try {
+    const ask = (origin, p) => worker.fetch(new Request(`${origin}${p}`), env);
+    const first = await ask(HERE, "/diagram");
+    assert.equal(first.headers.get("content-security-policy"), policy(HERE));
+    assert.equal(cache.store.get(cache.puts[0]).headers.get("content-security-policy"), null, "kept without a policy");
+    const elsewhere = await ask("https://docs.example.net", "/diagram");
+    assert.equal(cache.hits, 1, "the same kept page");
+    assert.equal(elsewhere.headers.get("content-security-policy"), policy("https://docs.example.net"));
+    assert.equal((await ask(HERE, "/diagram")).headers.get("content-security-policy"), policy(HERE));
+    await ask(HERE, "/plan/raw");
+    const keptRaw = await ask(HERE, "/plan/raw");
+    assert.equal(cache.hits, 3);
+    assert.equal(keptRaw.headers.get("content-security-policy"), "sandbox allow-scripts allow-popups", "a kept document keeps its sandbox");
+  } finally {
+    delete globalThis.caches;
+  }
+
+  // The API's answers too: JSON, a stored file's bytes, a refusal.
+  const manifest = await call("/api/manifest", { token: OWNER });
+  assert.equal(manifest.headers.get("x-content-type-options"), "nosniff");
+  const [fid, entry] = Object.entries(manifest.json.files)[0];
+  const blob = await call(`/api/blobs/${fid}/${entry.hash}`, { token: OWNER });
+  assert.equal(blob.status, 200);
+  assert.equal(blob.headers.get("x-content-type-options"), "nosniff", "a stored file is never sniffed into a script");
+  assert.equal(blob.headers.get("content-security-policy"), null, "the page policy is a page's");
+  assert.equal((await call("/api/manifest")).headers.get("x-content-type-options"), "nosniff", "a 401");
+  assert.equal((await pub("/home", { method: "POST", body: "x" })).headers.get("x-content-type-options"), "nosniff", "a 405");
 });
 
 await test("public: links between notes rewrite to public URLs — inside the folder they were reached through first — or fall back to text; a picture in the workspace is its alt text; other links and pictures stay", async () => {

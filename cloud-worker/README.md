@@ -259,11 +259,18 @@ case-insensitive collision.
 anything else            404 page
 ```
 
+Every page above goes out under the page policy — `default-src 'none'`, scripts only
+from `<origin>/__web/<tag>/mermaid.js`, no forms, no `<base>`
+([docs/cloud-publishing.md](../docs/cloud-publishing.md)) — except an html document,
+which keeps `sandbox allow-scripts allow-popups`. Every response of the worker's, the
+API's included, carries `X-Content-Type-Options: nosniff`.
+
 Static assets, served by Cloudflare from `doklin-cloud-web/` without running
 the worker (free, uncounted; headers from its `_headers`, `cloud-worker/web/_headers`):
 
 ```
-/__web/<tag>/mermaid.js  immutable, content-tagged (the tag is spliced into the worker)
+/__web/<tag>/mermaid.js  immutable, content-tagged (the tag is spliced into the worker);
+                         the one script a public page runs
 /__web/fonts/<file>      the app's bundled fonts, a week
 /og.png · /favicon.ico · /apple-touch-icon.png   a week
 /robots.txt
