@@ -2,13 +2,13 @@
 // its frame). Three kinds of access, a tab each, because they are let in
 // differently and nobody should have to scroll past one to find another:
 //
-//   People   work in the Doklin app, on devices that hold a copy of the
-//            workspace. Everybody here sees who is in it; an owner also lets
-//            people in, takes access away, and makes other owners. The one
-//            superadmin nobody changes, removes or signs out but themselves.
-//   Devices  a person's own Macs and iPhones (CloudDevices.tsx). Everybody
-//            adds and signs out their own; an owner signs out anybody's, from
-//            the People tab.
+//   People   work in the Doklin app or in a browser, on devices of their own.
+//            Everybody here sees who is in it; an owner also lets people in,
+//            takes access away, and makes other owners. The one superadmin
+//            nobody changes, removes or signs out but themselves.
+//   Devices  a person's own Macs, iPhones and browsers (CloudDevices.tsx).
+//            Everybody adds and signs out their own; an owner signs out
+//            anybody's, from the People tab.
 //   Agents   bots that work through the `doklin` command line with no copy of
 //            the folder (CloudAgents.tsx). Everybody has their own; an owner
 //            also sees everyone else's.
@@ -18,12 +18,12 @@
 // do is at the top: the door ("Invite someone", "Add a device", "Add an
 // agent"), its form, and the one-time code it ends in; the lists follow.
 //
-// Everything comes from `cloud_people` in one answer — including who this Mac
-// is here and what it may do, which the domain is asked every time the view
-// opens: a role is the person's, and an owner can change it. Every button
-// below is offered by `may(people, …)`, the same table the domain decides by
-// (cloud-worker/src/roles.ts), so nothing is drawn that would be refused. No
-// `fetch` here either; the engine makes every call.
+// Everything comes from the backend's `people` in one answer — including who
+// this device is here and what it may do, which the domain is asked every
+// time the view opens: a role is the person's, and an owner can change it.
+// Every button below is offered by `may(people, …)`, the same table the
+// domain decides by (cloud-worker/src/roles.ts), so nothing is drawn that
+// would be refused. No `fetch` here either; the backend makes every call.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -37,8 +37,8 @@ import {
   type CloudPeople as People,
 } from "./cloud";
 import CloudAgents from "./CloudAgents";
-import CloudDevices from "./CloudDevices";
-import type { CloudAccess } from "./backend";
+import CloudDevices, { signedOutSentence } from "./CloudDevices";
+import { backend, type CloudAccess } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -69,6 +69,7 @@ export default function CloudPeople({
   name,
   domain,
   toSend,
+  browserAt,
   tab,
   onTab,
   copy,
@@ -82,6 +83,8 @@ export default function CloudPeople({
   domain: string;
   /** An invite's line as it is sent (`inviteToSend`, cloud.ts). */
   toSend: (line: string) => string;
+  /** Where the workspace opens in a browser (`browserAddress`, cloud.ts). */
+  browserAt: string | null;
   tab: AccessTab;
   onTab: (tab: AccessTab) => void;
   /** The dialog's clipboard helper, so "Copied ✓" reads the same everywhere. */
@@ -206,8 +209,8 @@ export default function CloudPeople({
       >
         <p className="cloud-hint" data-testid="people-intro">
           {canInvite
-            ? `Everyone in ${name}. Each has a copy of it on a device of their own, kept in step with yours. You let someone in with an invite code, and they stay until an owner removes them.`
-            : `Everyone in ${name}. Each has a copy of it on a device of their own, kept in step with yours. An owner invites people and removes them.`}
+            ? `Everyone in ${name}. Each works in it from devices of their own. You let someone in with an invite code, and they stay until an owner removes them.`
+            : `Everyone in ${name}. Each works in it from devices of their own. An owner invites people and removes them.`}
         </p>
 
         {canInvite && (
@@ -358,22 +361,19 @@ export default function CloudPeople({
                   {macs.length > 0 && (
                     <ul className="cloud-macs">
                       {macs.map((d) => {
-                        // This Mac's own sign-in: the row it redeemed.
+                        // This device's own sign-in: the row it redeemed.
                         const thisMac = d.id === people.tokenId;
                         return (
                           <li className="cloud-mac-row" key={d.id} data-testid={`mac-${d.id}`}>
                             <span className="cloud-mac-name">{d.deviceName || "A device"}</span>
-                            {thisMac && <span className="cloud-person-tag">this Mac</span>}
+                            {thisMac && <span className="cloud-person-tag">this {backend.device}</span>}
                             <span className="cloud-presence-what">joined {timeAgo(d.createdAt, now)}</span>
-                            {/* Never this Mac: signing it out would delete the
-                                copy being looked at. Disconnect is the way to
-                                stop syncing here. */}
+                            {/* Never this one: signing it out would delete the
+                                copy being looked at. Disconnect, or a browser's
+                                own Sign out, is the way to leave from here. */}
                             {thisMac || !signsOut ? null : confirm === `mac:${d.id}` ? (
                               <span className="cloud-inline-confirm">
-                                <span className="cloud-hint">
-                                  It stops syncing, and deletes its copy of {name} the next time Doklin
-                                  runs there.
-                                </span>
+                                <span className="cloud-hint">{signedOutSentence(name)}</span>
                                 <button
                                   className="modal-btn is-danger-solid"
                                   data-testid={`revoke-mac-yes-${d.id}`}
@@ -437,8 +437,8 @@ export default function CloudPeople({
                         (confirm === `person:${m.id}` ? (
                           <span className="cloud-inline-confirm">
                             <span className="cloud-hint">
-                              Their code stops working, and every device they signed in on stops syncing and
-                              deletes its copy of {name} the next time Doklin runs there. Nothing in the
+                              Their code stops working, and every device they signed in on is signed out, and
+                              deletes what it keeps of {name}, the next time it is used. Nothing in the
                               cloud is deleted, and their name stays on what they wrote.
                               {m.role === "owner" && " Codes nobody has used yet are withdrawn with them."}
                             </span>
@@ -536,6 +536,7 @@ export default function CloudPeople({
             root={root}
             name={name}
             domain={domain}
+            browserAt={browserAt}
             people={people}
             reload={load}
             now={now}

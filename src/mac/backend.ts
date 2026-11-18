@@ -19,6 +19,7 @@ import {
   type Backend,
   type Cloud,
   type CloudAccess,
+  type CloudSpaces,
   type CloudDomain,
   type CloudSetup,
   type CloudSync,
@@ -362,7 +363,9 @@ const access: CloudAccess = {
   agentRemove: (root, agentId) => invoke("cloud_agent_remove", { root, agentId }),
   agentRevokeMachine: (root, agentId, tokenId) =>
     invoke("cloud_agent_revoke_machine", { root, agentId, tokenId }),
+};
 
+const spaces: CloudSpaces = {
   spaceCreate: (root, name, members, from = null) => invoke("cloud_space_create", { root, name, members, from }),
   spaceMember: (root, id, memberId, add) => invoke("cloud_space_member", { root, id, memberId, add }),
   spaceDelete: (root, id) => invoke("cloud_space_delete", { root, id }),
@@ -538,6 +541,7 @@ export const macBackend: Backend = {
   sync,
   domain,
   access,
+  spaces,
   versions,
   shows,
   windows,

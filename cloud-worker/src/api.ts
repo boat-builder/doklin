@@ -136,9 +136,10 @@
 //   *      /api/auth/agents…         anyone; their own agents — an owner sees everyone's and
 //                                    may remove any
 //
-//   The browser version. A browser's sign-in is answered under /api/web and on the few
-//   routes above that web.ts lists, and on nothing else (403); nobody else's credential
-//   is answered under /api/web.
+//   The browser version. A browser's sign-in is answered under /api/web and on the
+//   routes above that web.ts lists — the reads it is built from, and people, devices and
+//   agents — and on nothing else (403); nobody else's credential is answered under
+//   /api/web.
 //
 //   POST   /api/web/session          NO CREDENTIAL — the third route above the gate
 //   *      /api/web/…                a browser's sign-in only: listed in web.ts
@@ -595,7 +596,14 @@ async function handleAuth(request: Request, env: Env, parts: string[], auth: Aut
     // copy of the workspace, and that is not something to do to the device in
     // hand. Ending its own sign-in is how a device leaves (`session`, below).
     if (auth.tokenId === id) {
-      return json({ error: "that is the device you are on — disconnect it instead of signing it out" }, 409);
+      return json(
+        {
+          error: auth.browser
+            ? "that is the browser you are in — sign out of it instead"
+            : "that is the device you are on — disconnect it instead of signing it out",
+        },
+        409,
+      );
     }
     const gone = await signOutDevice(env, id, auth.memberId, everyone);
     if (gone === null) return noDatabase();

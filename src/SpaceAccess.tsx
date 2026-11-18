@@ -19,7 +19,7 @@ import {
 } from "./cloud";
 import Avatar from "./Avatar";
 import { useDismiss } from "./dismiss";
-import type { CloudAccess } from "./backend";
+import type { CloudAccess, CloudSpaces } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -34,12 +34,15 @@ function CloseIcon() {
 
 export default function SpaceAccess({
   access,
+  spaces,
   cloud,
   space,
   onLeaving,
   onClose,
 }: {
+  /** Who there is to add. */
   access: CloudAccess;
+  spaces: CloudSpaces;
   cloud: CloudStatus;
   /** The folder, as the status lists it now. */
   space: CloudSpace;
@@ -102,9 +105,9 @@ export default function SpaceAccess({
   const leave = (to: string | null) =>
     act(async () => {
       if (!me) throw new Error("This Mac does not know who you are here yet — try again in a moment.");
-      if (to) await access.spaceMember(cloud.root, space.id, to, true);
+      if (to) await spaces.spaceMember(cloud.root, space.id, to, true);
       onLeaving(space);
-      await access.spaceMember(cloud.root, space.id, me, false);
+      await spaces.spaceMember(cloud.root, space.id, me, false);
     });
 
   const title = `Who can open “${space.name}”`;
@@ -150,7 +153,7 @@ export default function SpaceAccess({
                           className="modal-btn is-danger-solid"
                           data-testid={`space-out-yes-${id}`}
                           disabled={busy}
-                          onClick={() => void act(() => access.spaceMember(cloud.root, space.id, id, false))}
+                          onClick={() => void act(() => spaces.spaceMember(cloud.root, space.id, id, false))}
                         >
                           Remove
                         </button>
@@ -192,7 +195,7 @@ export default function SpaceAccess({
                     className="modal-btn"
                     data-testid={`space-add-${m.id}`}
                     disabled={busy}
-                    onClick={() => void act(() => access.spaceMember(cloud.root, space.id, m.id, true))}
+                    onClick={() => void act(() => spaces.spaceMember(cloud.root, space.id, m.id, true))}
                   >
                     Add
                   </button>
@@ -275,7 +278,7 @@ export default function SpaceAccess({
                   onClick={() =>
                     void act(async () => {
                       onLeaving(space);
-                      await access.spaceDelete(cloud.root, space.id);
+                      await spaces.spaceDelete(cloud.root, space.id);
                     })
                   }
                 >

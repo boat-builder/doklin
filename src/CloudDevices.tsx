@@ -1,14 +1,14 @@
 // The Devices tab of the workspace's "People, devices and agents" view.
-// A device is a Mac or an iPhone signed in as its person: it holds a copy of
-// the workspace and keeps it in step. Everybody adds their own, as many as
-// they have, with a code that works once — pasted on the other device, it
-// joins as them on a sign-in of its own, so any one device can be signed out
-// without touching the rest. No token is ever shown or carried between two,
-// and no device is special: the superadmin's are rows like anybody's.
+// A device is a Mac, an iPhone or a browser signed in as its person. Everybody
+// adds their own, as many as they have, with a code that works once — pasted
+// on the other device, it joins as them on a sign-in of its own, so any one
+// device can be signed out without touching the rest. No token is ever shown
+// or carried between two, and no device is special: the superadmin's are rows
+// like anybody's.
 //
 // The order is the other tabs': the door and the code it ends in at the top,
 // the list under them. As everywhere in the view, no `fetch` here — the
-// engine makes every call, and the list comes from `cloud_people`.
+// backend makes every call, and the list is its `people` answer.
 
 import { useCallback, useRef, useState } from "react";
 import {
@@ -18,15 +18,22 @@ import {
   type CloudDeviceCode,
   type CloudPeople,
 } from "./cloud";
-import type { CloudAccess } from "./backend";
+import { backend, type CloudAccess } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/** What signing a device out does, said before it is done. A list of devices
+ *  does not say which are browsers, so this is true of each kind: a Mac or
+ *  an iPhone deletes its copy, a browser what it stored. */
+export const signedOutSentence = (name: string): string =>
+  `It is signed out, and deletes what it keeps of ${name}, the next time it is used.`;
 
 export default function CloudDevices({
   access,
   root,
   name,
   domain,
+  browserAt,
   people,
   reload,
   now,
@@ -38,7 +45,9 @@ export default function CloudDevices({
   root: string;
   name: string;
   domain: string;
-  /** The People answer: who this Mac is, and the devices it may be told of. */
+  /** Where the workspace opens in a browser, when the domain serves that. */
+  browserAt: string | null;
+  /** The People answer: who this device is, and the devices it may be told of. */
   people: CloudPeople;
   /** Read that answer again — a change is done when the list says so. */
   reload: () => Promise<void>;
@@ -92,9 +101,8 @@ export default function CloudDevices({
   return (
     <>
       <p className="cloud-hint" data-testid="devices-intro">
-        Your devices in {name}: the Macs and iPhones signed in as you. Each holds a copy of the
-        workspace and keeps it in step, on a sign-in of its own — so any one of them can be signed
-        out without touching the others.
+        Your devices in {name}: the Macs, iPhones and browsers signed in as you. Each has a sign-in
+        of its own, so any one of them can be signed out without touching the others.
       </p>
 
       <div className="cloud-stack" ref={top}>
@@ -105,7 +113,9 @@ export default function CloudDevices({
               {minted.blob}
             </pre>
             <p className="cloud-hint" data-testid="device-terms">
-              On the other Mac or iPhone, open Doklin, choose Join a workspace and paste this line.
+              {browserAt
+                ? `Paste this line on the other device. On a Mac or an iPhone, open Doklin and choose Join a workspace. In a browser, open ${browserAt}.`
+                : "On the other Mac or iPhone, open Doklin, choose Join a workspace and paste this line."}{" "}
               It works once, for {timeUntil(minted.expiresAt, now)}. That device is then signed in as
               you: it sees what you see, and you can sign it out here.
             </p>
@@ -129,7 +139,11 @@ export default function CloudDevices({
             <button className="modal-btn is-primary" data-testid="device-add" disabled={busy} onClick={() => void add()}>
               {busy ? "Making a code…" : "Add a device"}
             </button>
-            <span className="cloud-hint">Another Mac, or an iPhone. It joins with one line you paste there.</span>
+            <span className="cloud-hint">
+              {browserAt
+                ? "Another Mac, an iPhone, or a browser on any computer. It joins with one line you paste there."
+                : "Another Mac, or an iPhone. It joins with one line you paste there."}
+            </span>
           </div>
         )}
       </div>
@@ -144,18 +158,17 @@ export default function CloudDevices({
             <li className="cloud-person" key={d.id} data-testid={`device-${d.id}`}>
               <div className="cloud-person-head">
                 <span className="cloud-person-name">{d.deviceName || "A device"}</span>
-                {thisMac && <span className="cloud-person-tag">this Mac</span>}
+                {thisMac && <span className="cloud-person-tag">this {backend.device}</span>}
               </div>
               <div className="cloud-hint">Joined {timeAgo(d.createdAt, now)}</div>
-              {/* Never this Mac: signing it out would delete the copy being
-                  looked at. Disconnect is the way to stop syncing here. */}
+              {/* Never this one: signing it out would delete the copy being
+                  looked at. Disconnect, or a browser's own Sign out, is the
+                  way to leave from here. */}
               {!thisMac && (
                 <div className="cloud-actions">
                   {confirm === d.id ? (
                     <span className="cloud-inline-confirm">
-                      <span className="cloud-hint">
-                        It stops syncing, and deletes its copy of {name} the next time Doklin runs there.
-                      </span>
+                      <span className="cloud-hint">{signedOutSentence(name)}</span>
                       <button
                         className="modal-btn is-danger-solid"
                         data-testid={`device-sign-out-yes-${d.id}`}

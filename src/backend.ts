@@ -314,7 +314,7 @@ export interface CloudDomain {
 }
 
 /** Who may open a workspace and what each may do in it: its people and
- *  their devices, its agents, its restricted folders. */
+ *  their devices, and its agents. */
 export interface CloudAccess {
   /** Who is on this workspace and what each of them holds: the People
    *  view's whole answer, this device's own role included. */
@@ -352,7 +352,12 @@ export interface CloudAccess {
   agentRemove(root: string, agentId: string): Promise<void>;
   /** Log one machine out, leaving the agent and its other machines alone. */
   agentRevokeMachine(root: string, agentId: string, tokenId: string): Promise<void>;
+}
 
+/** Restricted folders: making one, who is in it, deleting it. Who there is
+ *  to put in one is `CloudAccess.people`, so what offers these asks for both
+ *  groups. */
+export interface CloudSpaces {
   /** Make a restricted folder holding you and `members` (member ids). With
    *  `from` (a folder in the workspace) that folder becomes it and leaves
    *  the device of everyone not chosen. Resolves to the folder as the
@@ -581,6 +586,7 @@ export interface Backend {
   readonly sync?: CloudSync;
   readonly domain?: CloudDomain;
   readonly access?: CloudAccess;
+  readonly spaces?: CloudSpaces;
   readonly session?: Session;
   readonly versions?: Versions;
   readonly shows?: Shows;

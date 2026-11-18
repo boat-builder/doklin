@@ -267,8 +267,12 @@ authenticates (400 days from the app's last start).
 - `dkw_…` as a bearer → `401`. Any other token as the cookie → `401`.
 - Answered on `/api/web/*` and on `ALSO` (`web.ts`): `GET meta`, `GET|POST
   poll`, `GET manifest`, `GET blobs/…`, the last two under `spaces/<id>/`,
-  `PUT spaces/private`, `GET pages`, `DELETE pages/<slug>` (both an owner's,
-  by role as for a Mac), `DELETE auth/session`. Everything else → `403`. **A route added to `ALSO` must change nothing on `GET`.**
+  `PUT spaces/private`, `GET pages`, `DELETE pages/<slug>`, `DELETE
+  auth/session`, and every route under `auth/members`, `auth/invites`,
+  `auth/devices` and `auth/agents` (*People*, *Agents*), each by role as for
+  a Mac. Everything else → `403`: a manifest or blob `PUT`, `versions/…`,
+  `workspace`, `settings/plan`, `admin/wipe`, and `spaces` but for the reads
+  and the Private above. **A route added to `ALSO` must change nothing on `GET`.**
 - Ended: `DELETE /api/auth/session` and `401 {removed: true}` answer a browser
   with `Set-Cookie` (`Max-Age=0`) and `Clear-Site-Data: "cache", "storage"`. A
   cookie that is nobody's → `401` + the `Set-Cookie` alone.

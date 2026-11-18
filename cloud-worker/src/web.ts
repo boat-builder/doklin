@@ -59,8 +59,15 @@
 // browser's token is refused as a bearer (auth.ts). What is left out is what
 // a browser has no use for, so a page that somehow ran script on this domain
 // could not reach it either: putting a manifest or a stored copy, the version
-// store, people and their invites, devices and their codes, agents, binding
-// and erasing the domain.
+// store, restricted folders, binding and erasing the domain, its plan.
+//
+// People, devices and agents are NOT left out: somebody with no Mac has only
+// a browser to add a device or an agent from, and an owner among them only a
+// browser to invite from. So a browser makes codes, and a code is a way in
+// that outlasts the browser that made it — a device code is a Mac's sign-in
+// to whoever redeems it. Signing a browser out therefore ends that browser
+// and nothing it started: what it started is a row under Devices or Agents,
+// to be signed out there, exactly as with a code a Mac made.
 
 import { ownScript, sessionCookie, type Auth } from "./auth";
 import { sha256Hex } from "./crypto";
@@ -103,8 +110,9 @@ export async function signIn(request: Request, env: Env): Promise<Response> {
 
 /** Outside /api/web: the reads a client with no copy of the workspace is
  *  built from, the beat that says where it is, its person's own Private, an
- *  owner's view of every public page, and its own sign-out. By method and by
- *  the path after `/api/`. */
+ *  owner's view of every public page, its own sign-out — and people, devices
+ *  and agents, which each route gates by role as it does for a Mac
+ *  (roles.ts). By method and by the path after `/api/`. */
 const ALSO: readonly (readonly [method: string, path: RegExp])[] = [
   ["GET", /^meta$/],
   ["GET", /^poll$/],
@@ -117,6 +125,24 @@ const ALSO: readonly (readonly [method: string, path: RegExp])[] = [
   ["GET", /^pages$/],
   ["DELETE", /^pages\/[^/]+$/],
   ["DELETE", /^auth\/session$/],
+
+  ["GET", /^auth\/members$/],
+  ["PATCH", /^auth\/members\/[^/]+$/],
+  ["DELETE", /^auth\/members\/[^/]+$/],
+  ["GET", /^auth\/invites$/],
+  ["POST", /^auth\/invites$/],
+  ["DELETE", /^auth\/invites\/[^/]+$/],
+
+  ["GET", /^auth\/devices$/],
+  ["POST", /^auth\/devices\/code$/],
+  ["DELETE", /^auth\/devices\/[^/]+$/],
+
+  ["GET", /^auth\/agents$/],
+  ["POST", /^auth\/agents$/],
+  ["POST", /^auth\/agents\/[^/]+$/],
+  ["DELETE", /^auth\/agents\/[^/]+$/],
+  ["POST", /^auth\/agents\/[^/]+\/code$/],
+  ["DELETE", /^auth\/agents\/[^/]+\/tokens\/[^/]+$/],
 ];
 
 /** Whether a browser's sign-in is answered on a route outside /api/web. */

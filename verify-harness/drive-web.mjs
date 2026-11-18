@@ -49,6 +49,18 @@
 //     workspace is opened in that browser;
 //   - two tabs ask the worker as one.
 //
+// And people, devices and agents (the `access` group, src/web/backend.ts),
+// where a code is made on the page (src/web/codes.ts):
+//
+//   - an owner invites somebody from a browser, and only the code's sha256
+//     reaches the worker;
+//   - somebody with no Mac signs in with that invite, adds a second browser
+//     and a Mac with lines their browser made, and signs one of them out;
+//   - they add an agent, which logs in with the code on the page, and log
+//     its machine out;
+//   - a member is offered nothing that is an owner's, and an owner changes
+//     a role and removes a person from a browser.
+//
 // A real domain is https, and a Secure cookie needs it (WebKit keeps none
 // over http, localhost included), so the worker is driven through a TLS
 // front this file runs, with a certificate it makes for the run (`openssl`).
@@ -59,7 +71,7 @@
 //   (cd verify-harness && npm install && npx playwright install)   # once
 //   node verify-harness/drive-web.mjs                 # every engine installed
 //   ENGINES=chromium node verify-harness/drive-web.mjs
-//   PARTS=writing node verify-harness/drive-web.mjs   # files, cookie, app, writing, rest, cache
+//   PARTS=writing node verify-harness/drive-web.mjs   # files, cookie, app, writing, rest, access, cache
 import { chromium, firefox, webkit } from "playwright";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -74,7 +86,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ENGINES = { chromium, firefox, webkit };
 const wanted = (process.env.ENGINES ?? "chromium,firefox,webkit").split(",").map((s) => s.trim()).filter(Boolean);
-const parts = new Set((process.env.PARTS ?? "files,cookie,app,writing,rest,cache").split(",").map((s) => s.trim()));
+const parts = new Set((process.env.PARTS ?? "files,cookie,app,writing,rest,access,cache").split(",").map((s) => s.trim()));
 
 const results = [];
 const step = (name, ok, detail = "") => {
@@ -147,8 +159,10 @@ function front(listen) {
     // of a page: its address.
     const save = req.method === "PUT" && req.url.startsWith("/api/web/doc");
     const publish = req.method === "PUT" && req.url.startsWith("/api/web/pages");
+    // And what a call that makes a code carried, whole.
+    const coded = req.method === "POST" && req.url.startsWith("/api/auth/");
     const sent = [];
-    if (save || publish) req.on("data", (chunk) => sent.push(chunk));
+    if (save || publish || coded) req.on("data", (chunk) => sent.push(chunk));
     const upstream = httpRequest(
       { host: "localhost", port: WORKER_PORT, method: req.method, path: req.url, headers: req.headers },
       (answer) => {
@@ -160,7 +174,8 @@ function front(listen) {
         } catch {
           // not a body of the app's
         }
-        answered.push({ method: req.method, path: req.url, status: answer.statusCode, at: Date.now(), parts, slug, cookie: Boolean(req.headers.cookie), dest: req.headers["sec-fetch-dest"], site: req.headers["sec-fetch-site"] });
+        const body = coded ? Buffer.concat(sent).toString() : undefined;
+        answered.push({ method: req.method, path: req.url, status: answer.statusCode, at: Date.now(), parts, slug, body, cookie: Boolean(req.headers.cookie), dest: req.headers["sec-fetch-dest"], site: req.headers["sec-fetch-site"] });
         res.writeHead(answer.statusCode, answer.headers);
         answer.pipe(res);
       },
@@ -301,8 +316,8 @@ async function drive(name) {
   say("a note is saved", saved.status === 200 && saved.json?.md?.rev === 1, JSON.stringify(saved.json));
   const put = await ask("/api/manifest", { method: "PUT", headers: { "x-base-etag": "x" }, body: JSON.stringify(manifest.json) });
   say("putting a manifest is not a browser's to do", put.status === 403, String(put.status));
-  const codes = await ask("/api/auth/devices/code", { method: "POST", body: JSON.stringify({ codeHash: "0".repeat(64), expiresAt: Date.now() + 1000 }) });
-  say("nor is minting a code for another device", codes.status === 403, String(codes.status));
+  const history = await ask("/api/versions/index");
+  say("nor is the version store", history.status === 403, String(history.status));
 
   /* 3 — a stored copy comes with leave to keep it */
   const blob = `/api/blobs/${fid}/${file.hash}`;
@@ -1033,7 +1048,11 @@ async function driveRest(name) {
   await page.locator(".sidebar-header-button").first().click();
   const workspaceMenu = (await page.locator('[data-testid^="sidebar-menu-"]').evaluateAll((els) => els.map((el) => el.dataset.testid))).join(" ");
   await page.keyboard.press("Escape");
-  say("the workspace's menu has no people, devices, agents or joining in it", workspaceMenu.includes("sidebar-menu-cloud") && !/join|people|devices|agents/.test(workspaceMenu), workspaceMenu);
+  say(
+    "the workspace's menu has people, devices and agents in it, and no joining",
+    ["cloud", "people", "devices", "agents"].every((item) => workspaceMenu.includes(`sidebar-menu-${item}`)) && !/join/.test(workspaceMenu),
+    workspaceMenu,
+  );
 
   /* 2 — search */
   stage = "search";
@@ -1170,13 +1189,17 @@ async function driveRest(name) {
   const panel = page.locator(".cloud-modal");
   await panel.locator('[data-testid="usage-line"]').waitFor({ timeout: 10_000 });
   const panelText = (await panel.innerText()).replace(/\s+/g, " ");
-  const absent = ["sync-now", "pause-toggle", "disconnect", "add-device", "wipe-open", "versions-line", "update-worker-quiet", "plan-free"];
+  const absent = ["sync-now", "pause-toggle", "disconnect", "wipe-open", "versions-line", "update-worker-quiet", "plan-free"];
   const drawn = [];
   for (const id of absent) if ((await panel.locator(`[data-testid="${id}"]`).count()) > 0) drawn.push(id);
   say(
     "the Cloud panel speaks of this browser, and offers nothing a browser has not got",
     // Whoever else is here is named as their device names itself, a Mac among them.
-    drawn.length === 0 && /This browser today: /.test(panelText) && !/this Mac|other Macs/i.test(panelText) && (await panel.locator('[data-testid="sign-out"]').count()) === 1,
+    drawn.length === 0 &&
+      /This browser today: /.test(panelText) &&
+      !/this Mac|other Macs/i.test(panelText) &&
+      (await panel.locator('[data-testid="sign-out"]').count()) === 1 &&
+      (await panel.locator('[data-testid="add-device"]').count()) === 1,
     drawn.length > 0 ? `drawn: ${drawn.join(", ")}` : panelText.slice(0, 300),
   );
   await page.keyboard.press("Escape");
@@ -1203,6 +1226,245 @@ async function driveRest(name) {
   say("nothing was refused by the page's policy, and nothing threw", trouble.length === 0, trouble.join(" | "));
 
   await other.close();
+  await browser.close();
+}
+
+/* ---------- People, devices and agents ---------- */
+
+async function driveAccess(name) {
+  const say = (what, ok, detail) => step(`${name}, access: ${what}`, Boolean(ok), detail);
+  const browser = await ENGINES[name].launch();
+  const trouble = [];
+  /** One browser of somebody's: its own cookies, and what its page copies
+   *  kept where the drive can read it. */
+  const open = async (who) => {
+    const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 900 } });
+    await context.addInitScript(() => {
+      if (!navigator.clipboard) Object.defineProperty(navigator, "clipboard", { value: {}, configurable: true });
+      navigator.clipboard.writeText = async (text) => {
+        window.__copied = text;
+      };
+    });
+    const page = await context.newPage();
+    page.on("console", (m) => {
+      if (process.env.DEBUG_DRIVE) console.log(`  [${who}] console.${m.type()}: ${m.text().slice(0, 200)}`);
+      if (/Content Security Policy|Content-Security-Policy|Refused to/i.test(m.text())) trouble.push(`${who}: ${m.text().slice(0, 200)}`);
+    });
+    page.on("pageerror", (e) => trouble.push(`${who}: ${String(e).slice(0, 200)}`));
+    if (process.env.DEBUG_DRIVE) {
+      page.on("response", (r) => r.status() >= 400 && console.log(`  [${who}] ${r.status()} ${r.request().method()} ${r.url()}`));
+    }
+    const at = (id) => page.locator(`[data-testid="${id}"]`);
+    const text = async (id) => (await at(id).innerText({ timeout: 15_000 })).replace(/\s+/g, " ").trim();
+    return {
+      context,
+      page,
+      at,
+      text,
+      copied: () => page.evaluate(() => window.__copied ?? null),
+      device: () => page.evaluate(() => localStorage.getItem("doklin:web:device")),
+      /** Paste a line at the sign-in screen; true once the workspace is up. */
+      async signIn(line) {
+        await page.goto(`${ORIGIN}/app`);
+        await at("web-invite").fill(line);
+        await at("web-sign-in").click();
+        return page.locator(`[data-tree-path="${ROOT_NAME}/Home.md"]`).waitFor({ timeout: 60_000 }).then(() => true, () => false);
+      },
+      /** The workspace menu's People…, Devices… or Agents…, opened afresh:
+       *  the view reads its lists when it opens. */
+      async show(tab) {
+        if ((await page.locator(".cloud-modal").count()) > 0) await page.locator(".cloud-modal .modal-close").click();
+        await page.locator(".sidebar-header-button").first().click();
+        await at(`sidebar-menu-${tab}`).click();
+        await at(`pane-${tab}`).waitFor({ timeout: 15_000 });
+      },
+      /** Back at the sign-in screen once the page is loaded again. */
+      async signedOut() {
+        await page.reload();
+        return at("web-invite").waitFor({ timeout: 30_000 }).then(() => true, () => false);
+      },
+    };
+  };
+  const sha = (text) => createHash("sha256").update(text).digest("hex");
+  /** A code as it is hashed: the twenty characters. */
+  const canonical = (code) => code.replace(/^dkl[na]-/, "").replaceAll("-", "");
+  const lastTo = (path) => answered.findLast((a) => a.method === "POST" && a.path === path);
+  const worker = (path, { token, json, method = json === undefined ? "GET" : "POST" } = {}) =>
+    fetch(`http://localhost:${WORKER_PORT}${path}`, {
+      method,
+      ...(json === undefined ? {} : { body: JSON.stringify(json) }),
+      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(json === undefined ? {} : { "content-type": "application/json" }) },
+    });
+  const devicesOf = async (member) => (await (await owner("/api/auth/devices")).json()).devices.filter((d) => d.memberId === member);
+
+  /* 1 — an owner invites somebody, from a browser */
+  const boss = await open("the owner");
+  await boss.signIn(`doklin-invite ${ORIGIN} ${await deviceCode()}`);
+  const EMAIL = `bo-${name}@example.com`;
+  await boss.show("people");
+  await boss.at("invite-open").click();
+  await boss.at("invite-email").fill(EMAIL);
+  await boss.at("invite-name").fill(`Bo ${name}`);
+  await boss.at("invite-send").click();
+  await boss.at("minted-invite").waitFor({ timeout: 15_000 });
+  const inviteCode = await boss.text("invite-code");
+  await boss.at("copy-invite-line").click();
+  const toSend = await boss.copied();
+  const inviteCall = lastTo("/api/auth/invites");
+  const sentInvite = JSON.parse(inviteCall?.body ?? "{}");
+  say(
+    "an owner's browser makes an invite: a code of the Mac's shape, and the line to send with where the workspace opens in a browser",
+    /^dkln(-[0-9A-HJKMNP-TV-Z]{5}){4}$/.test(inviteCode) &&
+      toSend === `doklin-invite ${ORIGIN} ${inviteCode}\nNo Doklin app? Open ${ORIGIN}/app and paste the line above.`,
+    toSend,
+  );
+  say(
+    "only the code's sha256 went to the worker, never the code",
+    inviteCall?.status === 201 &&
+      sentInvite.codeHash === sha(canonical(inviteCode)) &&
+      sentInvite.email === EMAIL &&
+      !inviteCall.body.includes(canonical(inviteCode)) &&
+      !inviteCall.body.includes(inviteCode) &&
+      Math.abs(sentInvite.expiresAt - (inviteCall.at + 7 * 86_400_000)) < 60_000,
+    inviteCall?.body,
+  );
+  await boss.at("minted-done").click();
+
+  /* 2 — somebody with no Mac: the invite, pasted whole, signs their browser in */
+  const bo = await open("somebody with no Mac");
+  say("the whole text an owner sent, pasted at /app, signs a new person in", await bo.signIn(toSend));
+  const them = (await (await owner("/api/auth/members")).json()).members.find((m) => m.email === EMAIL);
+  const boDevice = await bo.device();
+  await bo.show("people");
+  const memberIntro = await bo.text("people-intro");
+  say(
+    "a member sees who is here, and nothing that is an owner's to do",
+    memberIntro.includes("An owner invites people and removes them") &&
+      (await bo.at("invite-open").count()) === 0 &&
+      (await bo.at(`person-${them.id}`).count()) === 1 &&
+      (await bo.page.locator('[data-testid^="remove-person-"], [data-testid^="set-role-"]').count()) === 0,
+    memberIntro,
+  );
+
+  /* 3 — they add a device of their own: a second browser, then a Mac */
+  await bo.show("devices");
+  const own = (await devicesOf(them.id)).find((d) => d.deviceId === boDevice);
+  const ownRow = await bo.text(`device-${own.id}`);
+  say(
+    "the Devices list marks this browser, and offers no way to sign it out from there",
+    // The tag is drawn in capitals.
+    /this browser/i.test(ownRow) && (await bo.at(`device-sign-out-${own.id}`).count()) === 0,
+    ownRow,
+  );
+  await bo.at("device-add").click();
+  await bo.at("minted-device").waitFor({ timeout: 15_000 });
+  const deviceLine = await bo.text("device-line");
+  const deviceTerms = await bo.text("device-terms");
+  const deviceCall = lastTo("/api/auth/devices/code");
+  const sentDevice = JSON.parse(deviceCall?.body ?? "{}");
+  const deviceCodeShown = deviceLine.split(" ").at(-1);
+  say(
+    "Add a device makes a line in the browser, good for an hour, and says where a browser pastes it",
+    new RegExp(`^doklin-invite ${ORIGIN.replaceAll(".", "\\.")} dkln(-[0-9A-HJKMNP-TV-Z]{5}){4}$`).test(deviceLine) &&
+      deviceTerms.includes(`In a browser, open ${ORIGIN}/app.`) &&
+      deviceTerms.includes("It works once, for 1 h.") &&
+      deviceCall?.status === 201 &&
+      sentDevice.codeHash === sha(canonical(deviceCodeShown)) &&
+      !deviceCall.body.includes(canonical(deviceCodeShown)) &&
+      Math.abs(sentDevice.expiresAt - (deviceCall.at + 3_600_000)) < 60_000,
+    `${deviceLine} | ${deviceTerms}`,
+  );
+  const second = await open("their second browser");
+  say("a second browser signs in with that line, as the same person", await second.signIn(deviceLine));
+  const secondDevice = await second.device();
+  await bo.at("minted-device-done").click();
+  await bo.at("device-add").click();
+  await bo.at("minted-device").waitFor({ timeout: 15_000 });
+  const macLine = await bo.text("device-line");
+  const mac = await worker("/api/auth/join", { json: { code: macLine.split(" ").at(-1), deviceId: `d-mac-${name}`, deviceName: "A Mac of Bo's" } });
+  const macToken = (await mac.json().catch(() => ({}))).token ?? "";
+  say(
+    "and the same kind of line joins a Mac: a sign-in that syncs",
+    mac.status === 201 && /^[a-f0-9]{64}$/.test(macToken) && (await worker("/api/manifest", { token: macToken })).status === 200,
+    String(mac.status),
+  );
+
+  /* 4 — and signs one of them out */
+  await bo.show("devices");
+  const theirs = await devicesOf(them.id);
+  const other = theirs.find((d) => d.deviceId === secondDevice);
+  say("all three are listed as theirs", theirs.length === 3 && (await bo.page.locator('[data-testid="device-list"] > li').count()) === 3, `${theirs.length} devices`);
+  await bo.at(`device-sign-out-${other.id}`).click();
+  const sure = (await bo.page.locator(`[data-testid="device-${other.id}"] .cloud-inline-confirm`).innerText()).replace(/\s+/g, " ");
+  await bo.at(`device-sign-out-yes-${other.id}`).click();
+  const rowGone = await until(async () => (await bo.at(`device-${other.id}`).count()) === 0, 15_000);
+  say(
+    "signing the second browser out says what it does, takes it off the list, and ends its sign-in",
+    sure.includes("It is signed out, and deletes what it keeps of Notes, the next time it is used.") &&
+      rowGone &&
+      (await second.signedOut()) &&
+      !(await second.context.cookies(ORIGIN)).some((c) => c.name === "__Host-doklin"),
+    sure,
+  );
+
+  /* 5 — an agent of their own */
+  await bo.show("agents");
+  await bo.at("agent-open").click();
+  await bo.at("agent-name").fill(`Scout ${name}`);
+  await bo.at("agent-save").click();
+  await bo.at("agent-login").waitFor({ timeout: 15_000 });
+  const prompt = await bo.text("agent-prompt");
+  const loginLine = /doklin login (\S+) (dkla(?:-[0-9A-HJKMNP-TV-Z]{5}){4})/.exec(prompt);
+  const agentCall = lastTo("/api/auth/agents");
+  const sentAgent = JSON.parse(agentCall?.body ?? "{}");
+  say(
+    "Add an agent makes its login line in the browser, and only the code's sha256 went up",
+    loginLine?.[1] === ORIGIN &&
+      agentCall?.status === 201 &&
+      sentAgent.codeHash === sha(canonical(loginLine[2])) &&
+      sentAgent.scopes?.[0] === "read" &&
+      !agentCall.body.includes(canonical(loginLine[2])),
+    prompt.slice(0, 200),
+  );
+  const login = await worker("/api/agent/login", { json: { code: loginLine?.[2], host: "a-linux-box" } });
+  const agentToken = (await login.json().catch(() => ({}))).token ?? "";
+  const whoami = await worker("/api/agent/me", { token: agentToken });
+  const agentIs = await whoami.json().catch(() => ({}));
+  say("the agent logs in with it, as an agent of that person's", login.status === 201 && whoami.status === 200 && JSON.stringify(agentIs).includes(`Scout ${name}`), JSON.stringify(agentIs).slice(0, 200));
+  await bo.show("agents");
+  const machine = bo.page.locator('[data-testid^="agent-machine-"]');
+  const listedMachine = (await machine.first().innerText({ timeout: 15_000 }).catch(() => "")).replace(/\s+/g, " ");
+  const machineId = (await machine.first().getAttribute("data-testid").catch(() => null))?.slice("agent-machine-".length);
+  await bo.at(`agent-logout-${machineId}`).click();
+  await bo.at(`agent-logout-yes-${machineId}`).click();
+  const loggedOut = await until(async () => (await worker("/api/agent/me", { token: agentToken })).status === 401, 15_000);
+  say("its machine is listed, and logged out from the browser", listedMachine.includes("a-linux-box") && loggedOut, listedMachine);
+
+  /* 6 — an owner changes their role and removes them, from a browser */
+  await boss.show("people");
+  const person = await boss.text(`person-${them.id}`);
+  say("the owner's browser lists them with their devices", person.includes(`Bo ${name}`) && person.includes("2 devices"), person);
+  await boss.at(`set-role-${them.id}`).click();
+  await boss.at(`set-role-yes-${them.id}`).click();
+  const promoted = await until(async () => (await boss.page.locator(`[data-testid="person-${them.id}"] .cloud-person-tag`, { hasText: "owner" }).count()) === 1, 15_000);
+  await bo.show("people");
+  say("made an owner, they are offered the invite door the next time they look", promoted && (await bo.at("invite-open").count()) === 1);
+  await boss.at(`remove-person-${them.id}`).click();
+  const removal = (await boss.page.locator(`[data-testid="person-${them.id}"] .cloud-inline-confirm`).innerText()).replace(/\s+/g, " ");
+  await boss.at(`remove-person-yes-${them.id}`).click();
+  const personGone = await until(async () => (await boss.at(`person-${them.id}`).count()) === 0, 15_000);
+  const macAfter = await worker("/api/poll", { token: macToken });
+  say(
+    "removed, their browser is back at the sign-in screen and the Mac their browser let in is told to delete its copy",
+    removal.includes("deletes what it keeps of Notes") &&
+      personGone &&
+      (await bo.signedOut()) &&
+      macAfter.status === 401 &&
+      (await macAfter.json().catch(() => ({}))).removed === true,
+    removal,
+  );
+  say("nothing was refused by the page's policy, and nothing threw", trouble.length === 0, trouble.join(" | "));
+
   await browser.close();
 }
 
@@ -1263,6 +1525,7 @@ for (const name of wanted) {
   if (parts.has("app")) await driveApp(name);
   if (parts.has("writing")) await driveWriting(name);
   if (parts.has("rest")) await driveRest(name);
+  if (parts.has("access")) await driveAccess(name);
 }
 if (wanted.includes("chromium") && parts.has("cache")) await driveCache();
 

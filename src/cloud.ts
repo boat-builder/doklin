@@ -805,15 +805,19 @@ export function workerAhead(s: CloudStatus): boolean {
   return s.workerVersion != null && s.workerVersion > BUNDLED_WORKER_VERSION;
 }
 
+/** Where the workspace opens in a browser, or null while the domain's worker
+ *  is not known to be the one this app was built for, which serves it. */
+export function browserAddress(s: CloudStatus): string | null {
+  return s.workerVersion == null || workerBehind(s) ? null : `${s.endpoint}/app`;
+}
+
 /** What an invite's line is sent as: the line, then where the workspace opens
  *  in a browser for somebody with no Doklin app. The sentence comes after
  *  the line because a paste is read for the first address in it
- *  (`parse_pasted`, engine/src/cloud/invite.rs); it is left off while the
- *  domain's worker is not known to be the one this app was built for, which
- *  serves the browser version. */
+ *  (`parse_pasted`, engine/src/cloud/invite.rs). */
 export function inviteToSend(line: string, s: CloudStatus): string {
-  if (s.workerVersion == null || workerBehind(s)) return line;
-  return `${line}\nNo Doklin app? Open ${s.endpoint}/app and paste the line above.`;
+  const at = browserAddress(s);
+  return at === null ? line : `${line}\nNo Doklin app? Open ${at} and paste the line above.`;
 }
 
 /** Whether the gear's badge should light for the cloud: some connected

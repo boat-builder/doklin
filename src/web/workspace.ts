@@ -174,7 +174,7 @@ export class Workspace {
   private hurried: { key: string; at: number } | null = null;
 
   private constructor(
-    private readonly meta: MetaAnswer,
+    private meta: MetaAnswer,
     workspace: NonNullable<MetaAnswer["workspace"]>,
   ) {
     this.wsId = workspace.id;
@@ -210,6 +210,18 @@ export class Workspace {
   /** The person at this browser, by their id. */
   get me(): string {
     return this.meta.you.memberId;
+  }
+
+  /** Ask the domain again who this browser is and who is here: a role is the
+   *  person's, and an owner can change it while this page is open; somebody
+   *  invited, or an agent added, has a name from then on. What the page was
+   *  told when it opened is replaced, and the status says so. */
+  async probe(): Promise<MetaAnswer> {
+    const meta = await askJson<MetaAnswer>("GET", "/api/meta");
+    this.meta = meta;
+    for (const p of meta.people) this.people.set(p.id, p.name);
+    this.restate();
+    return meta;
   }
 
   /** The folder a space is shown as: its own for a Private; under
