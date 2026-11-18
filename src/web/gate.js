@@ -20,7 +20,9 @@
   // What counts as a phone or a tablet: the browser names itself one; or it
   // is a Mac with more than one touch point (an iPad asking for the desktop
   // site); or the screen's short side is under 600 px. A laptop with a
-  // touchscreen is a computer.
+  // touchscreen is a computer. The link page asks the same of whoever
+  // follows a link, and offers such a device no browser version
+  // (site/public/open.html): change both.
   var handheld =
     /iPhone|iPad|iPod|Android/.test(ua) ||
     (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1) ||

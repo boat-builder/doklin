@@ -19,22 +19,46 @@
 <style>
   [hidden] { display: none !important; }
   .small-print a { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+  .always {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 20px;
+    max-width: 520px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .always input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+  .always + .small-print { margin-top: 8px; }
+  button.btn { font-family: inherit; background: none; cursor: pointer; }
 </style>
 <!--
   A link to a page: https://doklin.cc/open#d=<domain>&w=<workspace>&s=<space>&f=<file>.
   Everything is after the "#", which no browser sends to a server, so this
   page is all that doklin.cc ever serves for a link and it learns nothing of
   it. An iPhone with the app never gets here (.well-known/apple-app-site-association);
-  anything else hands the link on to the app as doklin://open#…
+  anything else hands the link on from here: to the app as doklin://open#…,
+  or, on a computer, to the browser version on the link's own domain,
+  https://<domain>/app#w=…&s=…&f=… (takeLink in src/web/address.ts reads it).
+
+  This page never sends anybody to a domain they have not chosen on a page
+  that names it: a link's first visit waits for a click, and only a domain
+  ticked "always" here is gone to without one. A page that skips itself is
+  never in the browser's history, so Back cannot undo "always": this
+  address with no link after it (doklin.cc/open) is where that is done.
+
   The address, the scheme and the key names are engine/src/cloud/link.rs's
-  (PAGE, SCHEME): change both.
+  (PAGE, SCHEME), and what may stand as a domain is its is_domain: change
+  both. What counts as a phone or a tablet is src/web/gate.js's: change both.
 -->
 </head>
 <body>
 <header class="band site-header">
   <div class="wrap">
     <a class="brand" href="/"><img src="/doklin.png" alt=""><span>Doklin</span></a>
-    <div class="header-actions">
+    <div class="header-actions" id="download" hidden>
       <a class="btn btn-sm btn-ghost" href="https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg">Download</a>
     </div>
   </div>
@@ -43,11 +67,35 @@
   <div class="wrap" id="link">
     <p class="eyebrow"><b>Link</b>A page in Doklin</p>
     <h1 class="h2">Open this page in Doklin.</h1>
-    <p class="lead">This link is to a page in <strong id="domain">a Doklin workspace</strong>. It opens in the Doklin app for anybody in that workspace who can see the page.</p>
+    <p class="lead">This link is to a page in <strong class="domain">a Doklin workspace</strong>. Anybody in that workspace who can see the page can open it.</p>
     <div class="actions">
       <a class="btn btn-primary" id="open" href="doklin://open">Open in Doklin</a>
+      <a class="btn btn-ghost" id="browser" href="/" hidden>Continue in browser</a>
     </div>
-    <p class="small-print">No Doklin yet? <a href="https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg">Download it for your Mac</a>, and ask whoever sent this link to invite you to the workspace. Doklin for iPhone and iPad is coming soon: <a href="mailto:hello@boatbuilder.dev?subject=Doklin%20iPhone%20beta">email the team</a> to join the beta.</p>
+    <label class="always" id="always" hidden><input type="checkbox" id="always-box"><span>Always open links to <span class="domain"></span> in the browser on this computer</span></label>
+    <p class="small-print" id="always-note" hidden>From the next link on, this page is skipped. To be asked again, open doklin.cc/open.</p>
+    <p class="small-print" id="on-mac" hidden>No Doklin yet? <a href="https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg">Download it for your Mac</a>, or continue in the browser. Not in this workspace yet? Ask whoever sent this link to invite you.</p>
+    <p class="small-print" id="on-computer" hidden>On this computer Doklin opens in the browser: the app is for a Mac. Not in this workspace yet? Ask whoever sent this link to invite you.</p>
+    <p class="small-print" id="on-apple-handheld" hidden>On an iPhone or an iPad, Doklin is an app. <a href="mailto:hello@boatbuilder.dev?subject=Doklin%20iPhone%20beta">Email the team</a> to get it, or ask whoever runs this workspace.</p>
+  </div>
+  <div class="wrap" id="going" hidden>
+    <p class="eyebrow"><b>Link</b>A page in Doklin</p>
+    <h1 class="h2">Opening this page in your browser.</h1>
+    <p class="lead">Links to <strong class="domain"></strong> open in the browser on this computer. To be asked again, open doklin.cc/open.</p>
+  </div>
+  <div class="wrap" id="kept" hidden>
+    <p class="eyebrow"><b>Link</b>A page in Doklin</p>
+    <h1 class="h2">Links open in the browser here.</h1>
+    <p class="lead" id="kept-now">On this computer, links to pages in <strong id="kept-domains"></strong> open in the browser without asking.</p>
+    <p class="lead" id="kept-gone" hidden>The next link asks where to open it.</p>
+    <div class="actions">
+      <button class="btn btn-ghost" id="forget" type="button">Ask me every time</button>
+    </div>
+  </div>
+  <div class="wrap" id="elsewhere" hidden>
+    <p class="eyebrow"><b>Link</b>A page in Doklin</p>
+    <h1 class="h2">This page opens on a computer.</h1>
+    <p class="lead">This link is to a page in <strong class="domain"></strong>. There is no Doklin for this phone or tablet: open the link on a computer.</p>
   </div>
   <div class="wrap" id="cut" hidden>
     <p class="eyebrow"><b>Link</b>A page in Doklin</p>
@@ -57,23 +105,134 @@
 </main>
 <script>
   (function () {
-    var hash = location.hash;
-    var link = new URLSearchParams(hash.slice(1));
-    var domain = link.get("d");
-    if (!domain || !link.get("w") || !link.get("f")) {
-      document.getElementById("link").hidden = true;
-      document.getElementById("cut").hidden = false;
-      return;
+    function show(id) {
+      var parts = ["link", "going", "kept", "elsewhere", "cut"];
+      for (var i = 0; i < parts.length; i++) document.getElementById(parts[i]).hidden = parts[i] !== id;
     }
+    // A host, with a port when it has one.
+    function isDomain(s) {
+      var colon = s.lastIndexOf(":");
+      var host = colon < 0 ? s : s.slice(0, colon);
+      if (colon >= 0 && !/^[0-9]{1,5}$/.test(s.slice(colon + 1))) return false;
+      if (host.length > 253) return false;
+      var labels = host.split(".");
+      for (var i = 0; i < labels.length; i++) {
+        if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(labels[i])) return false;
+      }
+      return true;
+    }
+
+    var ua = navigator.userAgent;
+    var short = Math.min(screen.width, screen.height);
+    // What counts as a phone or a tablet: the browser names itself one; or it
+    // is a Mac with more than one touch point (an iPad asking for the desktop
+    // site); or the screen's short side is under 600 px. A laptop with a
+    // touchscreen is a computer.
+    var handheld =
+      /iPhone|iPad|iPod|Android/.test(ua) ||
+      (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1) ||
+      short < 600;
+    // Where Doklin is an app: a Mac, an iPhone, an iPad.
+    var apple = /iPhone|iPad|iPod|Macintosh/.test(ua);
+    var mac = apple && !handheld;
+    document.getElementById("download").hidden = !mac;
+
+    // "Always", one key a domain. A browser that keeps nothing is not
+    // offered it, and asks every time.
+    var ALWAYS = "browser:";
+    var store = null;
+    try {
+      store = localStorage;
+      store.getItem(ALWAYS);
+    } catch (e) {
+      store = null;
+    }
+
+    var hash = location.hash;
+    // No link at all: where "always" is undone, on a computer that has it.
+    if (hash.length < 2 && store && !handheld) {
+      var kept = [];
+      for (var k = 0; k < store.length; k++) {
+        if (store.key(k).indexOf(ALWAYS) === 0) kept.push(store.key(k).slice(ALWAYS.length));
+      }
+      if (kept.length) {
+        document.getElementById("kept-domains").textContent = kept.sort().join(", ");
+        document.getElementById("forget").addEventListener("click", function () {
+          for (var j = 0; j < kept.length; j++) store.removeItem(ALWAYS + kept[j]);
+          document.getElementById("kept-now").hidden = true;
+          document.getElementById("kept-gone").hidden = false;
+          document.getElementById("forget").hidden = true;
+        });
+        return show("kept");
+      }
+    }
+    var link = new URLSearchParams(hash.slice(1));
+    var domain = (link.get("d") || "").trim().toLowerCase();
+    if (!isDomain(domain) || !link.get("w") || !link.get("f")) return show("cut");
+    var named = document.querySelectorAll(".domain");
+    for (var i = 0; i < named.length; i++) named[i].textContent = domain;
+
+    // A phone or a tablet never gets the browser version, whatever was
+    // ticked. One that got here has no app to take the link, or an in-app
+    // browser that kept it: the app waits for a tap, which never errors.
     var app = "doklin://open" + hash;
     document.getElementById("open").href = app;
-    document.getElementById("domain").textContent = domain;
+    if (handheld) {
+      if (!apple) return show("elsewhere");
+      document.getElementById("on-apple-handheld").hidden = false;
+      return;
+    }
+
+    var page = new URLSearchParams();
+    page.set("w", link.get("w"));
+    if (link.get("s")) page.set("s", link.get("s"));
+    page.set("f", link.get("f"));
+    var browser = "https://" + domain + "/app#" + page;
+    var go = document.getElementById("browser");
+    go.href = browser;
+    go.hidden = false;
+    if (mac) {
+      document.getElementById("on-mac").hidden = false;
+    } else {
+      // No app to open it: the browser is the one way in.
+      document.getElementById("open").hidden = true;
+      go.className = "btn btn-primary";
+      document.getElementById("on-computer").hidden = false;
+    }
+
+    var KEY = ALWAYS + domain;
+    function always() {
+      return store !== null && store.getItem(KEY) === "1";
+    }
+    if (store) {
+      var box = document.getElementById("always-box");
+      var ticked = function () {
+        box.checked = always();
+        document.getElementById("always-note").hidden = !box.checked;
+      };
+      box.addEventListener("change", function () {
+        try {
+          if (box.checked) store.setItem(KEY, "1");
+          else store.removeItem(KEY);
+        } catch (e) {}
+        ticked();
+      });
+      ticked();
+      document.getElementById("always").hidden = false;
+    }
+
+    // Somebody who pressed Back to get here wants this page: it hands the
+    // link to nothing, and shows the choice.
+    var arrival = performance.getEntriesByType ? performance.getEntriesByType("navigation")[0] : null;
+    if (arrival && arrival.type === "back_forward") return;
+    if (always()) {
+      show("going");
+      location.replace(browser);
+      return;
+    }
     // A Mac has no way into the app but this one: hand the link on as soon
-    // as the page is up, so the browser asks over a page that says what it
-    // is. A phone or a tablet that got here has no app to take it, or an
-    // in-app browser that kept it: there it waits for a tap, which never errors.
-    var touch = navigator.maxTouchPoints > 1;
-    if (/Macintosh/.test(navigator.userAgent) && !touch) {
+    // as the page is up, so the browser asks over a page that says what it is.
+    if (mac) {
       addEventListener("load", function () {
         location.href = app;
       });
