@@ -32,6 +32,7 @@ Tauri IPC stubbed: `(cd verify-harness && npm install)` once, a vite server on
 - Every push to `main` cuts a release, unless it only touches `site/` or `ios/`.
 - The frontend never `fetch`es. The cloud engine in Rust is the only code that
   holds a token or talks to a domain.
+- The UI asks `src/backend.ts`. Only `src/mac/` imports Tauri.
 - Contracts mirrored in two places say "change both" on both sides — change both.
 - A number with one source is parsed from it, never retyped.
 - macOS-specific Rust is tagged `macOS-only`.
@@ -43,7 +44,7 @@ Read a doc only when the change is in its area.
 
 | Area | Doc |
 |---|---|
-| App shell, saving, tabs, windows, editor, frontmatter | `docs/architecture.md` |
+| App shell, `src/backend.ts`, saving, tabs, windows, editor, frontmatter | `docs/architecture.md` |
 | `engine/` (not `versions/`), `src-tauri/src/engine.rs`, `src/cloud.ts`, sync | `docs/cloud.md` |
 | Publishing, public pages | `docs/cloud-publishing.md` |
 | People, spaces, leases, agents, document API, `cli/` | `docs/cloud-people-agents.md` |

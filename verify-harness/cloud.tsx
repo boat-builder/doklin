@@ -6,6 +6,11 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import "../src/App.css";
+import { installBackend } from "../src/backend";
+import { macBackend } from "../src/mac/backend";
+
+// The Mac's backend, answered by the page's IPC stub.
+installBackend(macBackend);
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

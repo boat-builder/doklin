@@ -23,14 +23,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BUNDLED_WORKER_VERSION,
   addsQuestion,
-  cloudConfirmAdds,
-  cloudConfirmDeletes,
-  cloudDisconnect,
-  cloudLiftWait,
-  cloudPause,
-  cloudSetPlan,
-  cloudSyncNow,
-  cloudWipe,
   mayOn,
   phaseLine,
   planName,
@@ -49,6 +41,7 @@ import {
 import { useDismiss } from "./dismiss";
 import { buildTeardownPrompt } from "./cloudPrompts";
 import { RELEASES_PAGE } from "./updater";
+import { backend } from "./backend";
 
 function CloseIcon() {
   return (
@@ -184,7 +177,7 @@ export default function CloudPanel({
     setWiping(true);
     setError(null);
     try {
-      const purged = await cloudWipe(r);
+      const purged = await backend.cloud.wipe(r);
       setTornDown({ domain, endpoint, purged });
       setView("teardown");
     } catch (e) {
@@ -344,14 +337,14 @@ export default function CloudPanel({
               className="modal-btn"
               data-testid="sync-now"
               disabled={paused || cloud.phase === "syncing" || cloud.phase === "revoked"}
-              onClick={() => void act(() => cloudSyncNow(cloud.root))}
+              onClick={() => void act(() => backend.cloud.syncNow(cloud.root))}
             >
               Sync now
             </button>
             <button
               className="modal-btn"
               data-testid="pause-toggle"
-              onClick={() => void act(() => cloudPause(cloud.root, !paused))}
+              onClick={() => void act(() => backend.cloud.pause(cloud.root, !paused))}
             >
               {paused ? "Resume" : "Pause"}
             </button>
@@ -398,7 +391,7 @@ export default function CloudPanel({
                   className="modal-btn is-primary"
                   data-testid="lift-wait"
                   disabled={busy === "lift"}
-                  onClick={() => void act(() => cloudLiftWait(cloud.root), "lift")}
+                  onClick={() => void act(() => backend.cloud.liftWait(cloud.root), "lift")}
                 >
                   {waits.waiting === 1 ? "Send it now" : "Send them now"}
                 </button>
@@ -443,7 +436,7 @@ export default function CloudPanel({
               <button
                 className="modal-btn is-primary"
                 data-testid="confirm-deletes"
-                onClick={() => void act(() => cloudConfirmDeletes(cloud.root))}
+                onClick={() => void act(() => backend.cloud.confirmDeletes(cloud.root))}
               >
                 Delete them on {cloud.domain}
               </button>
@@ -472,7 +465,7 @@ export default function CloudPanel({
                 className="modal-btn is-primary"
                 data-testid="confirm-adds"
                 disabled={busy === "adds"}
-                onClick={() => void act(() => cloudConfirmAdds(cloud.root, true), "adds")}
+                onClick={() => void act(() => backend.cloud.confirmAdds(cloud.root, true), "adds")}
               >
                 {adds === 1 ? "Sync it" : "Sync them"}
               </button>
@@ -480,7 +473,7 @@ export default function CloudPanel({
                 className="modal-btn"
                 data-testid="decline-adds"
                 disabled={busy === "adds"}
-                onClick={() => void act(() => cloudConfirmAdds(cloud.root, false), "adds")}
+                onClick={() => void act(() => backend.cloud.confirmAdds(cloud.root, false), "adds")}
               >
                 Not now
               </button>
@@ -609,7 +602,7 @@ export default function CloudPanel({
                   disabled={busy === "plan"}
                   onClick={() =>
                     void act(async () => {
-                      await cloudSetPlan(cloud.root, askPlan);
+                      await backend.cloud.setPlan(cloud.root, askPlan);
                       setAskPlan(null);
                     }, "plan")
                   }
@@ -650,7 +643,7 @@ export default function CloudPanel({
               <button
                 className="modal-btn is-primary"
                 data-testid="disconnect-yes"
-                onClick={() => void act(() => cloudDisconnect(cloud.root))}
+                onClick={() => void act(() => backend.cloud.disconnect(cloud.root))}
               >
                 Disconnect
               </button>

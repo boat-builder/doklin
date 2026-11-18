@@ -20,6 +20,28 @@ export default [
       // arrays are an established pattern here — suppress intentional ones
       // with a documented eslint-disable-next-line, as existing code does.
       "react-hooks/exhaustive-deps": "warn",
+      // The frontend never fetches: the cloud engine in Rust is the only code
+      // that holds a token or talks to a domain.
+      "no-restricted-globals": [
+        "error",
+        { name: "fetch", message: "The frontend never fetches: ask src/backend.ts for it." },
+      ],
+    },
+  },
+  // The UI is written against src/backend.ts; only the Mac's answer to it
+  // knows that Tauri is underneath.
+  {
+    files: ["src/**/*.ts", "src/**/*.tsx"],
+    ignores: ["src/mac/**"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            { group: ["@tauri-apps/**"], message: "Only src/mac/ imports Tauri: ask src/backend.ts for it." },
+          ],
+        },
+      ],
     },
   },
 ];

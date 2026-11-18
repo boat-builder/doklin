@@ -78,11 +78,17 @@ export const emptyMeta = (): EntityMeta => ({
 
 const HEADER = `{"doklin":"meta","v":1}`;
 
-// Mirrors App.tsx's document extension rules (a document is markdown, html,
-// or the same-stem pair) — the meta file is named by the shared stem.
-const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
-const HTML_EXT_RE = /\.html$/i;
+// A document is a markdown file, an html file, or the pair: same stem, side
+// by side ("notes.md" + "notes.html"), where the html is a generated
+// *rendition* of the markdown and not a document of its own. The meta file is
+// named by the shared stem.
+export const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
+export const HTML_EXT_RE = /\.html$/i;
 export const META_SUFFIX = ".meta.jsonl";
+
+export const isHtmlPath = (p: string) => HTML_EXT_RE.test(p);
+export const htmlSiblingOf = (mdPath: string) => mdPath.replace(MD_EXT_RE, "") + ".html";
+export const mdSiblingOf = (htmlPath: string) => htmlPath.replace(HTML_EXT_RE, "") + ".md";
 
 export const stemOf = (docPath: string) =>
   docPath.replace(MD_EXT_RE, "").replace(HTML_EXT_RE, "");

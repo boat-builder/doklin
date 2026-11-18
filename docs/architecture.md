@@ -4,6 +4,8 @@
 
 - `src/App.tsx` — the shell: tabs, windows, saving, links, themes. `Editor.tsx`
   wraps Milkdown Crepe; `src/tabs.ts` the tab descriptors.
+- `src/backend.ts` — what the UI asks of the platform it runs on;
+  `src/mac/backend.ts` — the Mac's answer, through Tauri (*The backend*).
 - `src-tauri/src/lib.rs` — Tauri commands (`read_file`, `write_file`,
   `list_md_tree`, `create_file`/`create_dir`, `move_path`, `copy_path`,
   `trash_file`/`restore_trashed`, `open_external`, the clipboard and window
@@ -18,6 +20,36 @@
 - `engine/src/cloud/` + `src/cloud.ts` — sync and publishing ([cloud.md](cloud.md)).
 - `engine/src/versions/` + `src/versions.ts` — history ([versioning.md](versioning.md)).
 - `src-tauri/src/pdf_export.rs` — PDF export ([pdf-export.md](pdf-export.md)).
+
+## The backend
+
+- The UI calls `backend` (`src/backend.ts`) and nothing beneath it. Only
+  `src/mac/` imports `@tauri-apps/*`, and nothing under `src/` calls `fetch`:
+  eslint fails both.
+- A Rust command or event is named in one place, `src/mac/backend.ts`. A new
+  one is a method on the interface first, then its line there.
+- A document is one thing: `open`, `save`, `move`, `copy` and `remove` take the
+  document's path and carry its sidecar and its html rendition with it. The UI
+  never names a `.meta.jsonl`, and never does to a document's parts in turn
+  what it did to the document.
+- A save is the text and the sidecar together (`writeToDisk` composes the
+  sidecar before it writes). The text lands only over the `Rev` it was read at
+  and rejects with `SaveConflict` otherwise; the sidecar is last writer wins.
+  A `Rev` is opaque outside the backend that made it.
+- What a platform may not have is an optional group on `Backend` (`versions`,
+  `windows`, `untitled`, `localFiles`, `pdf`, `updater`), never a flag and
+  never a check of which platform this is. The group is asked for where the
+  feature comes into view; what is behind that takes the group, or a handler,
+  as a prop, and a missing one is a button, a menu row or a shortcut that is
+  not there.
+- Nothing calls `backend` at import time: an entry (`src/main.tsx`, a harness
+  page) calls `installBackend` and then renders.
+- `watch` is given the whole set of documents on screen each time it changes,
+  and again after a document's first sidecar write: the Mac watches files, and
+  a file that was not there was not being watched.
+- `verify-harness/seam.tsx` is a second backend (in memory, no optional
+  group) that `drive-seam.mjs` runs the real `App` on. Nothing typechecks the
+  harness: a required member added to `Backend` is added there too.
 
 ## Saving
 

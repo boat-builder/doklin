@@ -1686,7 +1686,8 @@ pub fn run() {
         ));
         // In-app updater: checks the GitHub `latest.json` manifest, downloads the
         // signed .app.tar.gz, verifies it against the pubkey in tauri.conf.json,
-        // swaps the bundle and relaunches (process plugin). See src/updater.ts.
+        // swaps the bundle and relaunches (process plugin). See `updater` in
+        // src/mac/backend.ts.
         builder = builder
             .plugin(tauri_plugin_updater::Builder::new().build())
             .plugin(tauri_plugin_process::init());

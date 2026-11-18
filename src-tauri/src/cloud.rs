@@ -1,4 +1,5 @@
-//! The cloud commands the frontend calls (mirrored in src/cloud.ts). Each is
+//! The cloud commands the frontend calls (from src/mac/backend.ts, answering
+//! `Cloud` in src/backend.ts; what they carry is mirrored in src/cloud.ts). Each is
 //! the engine's command of the same name (engine/src/cloud/mod.rs, where what
 //! it does is written down) with this app's running engine handed in.
 

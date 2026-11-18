@@ -1,16 +1,12 @@
-// In-app auto-update, driven by Tauri's updater plugin. The plugin fetches the
-// GitHub `latest.json` manifest (endpoint + pubkey configured in
-// tauri.conf.json), and on install downloads the signed `.app.tar.gz`, verifies
-// it against the pubkey, swaps the bundle in place, and — via the process
-// plugin's relaunch() — restarts into the new version. One click, no browser,
-// no drag-to-Applications.
+// In-app auto-update: a quiet check at launch, a manual one, and one click
+// that downloads, verifies, installs and restarts into the new version. How
+// that is done is the backend's (`Updater` in backend.ts); a platform with no
+// updater has no update row at all.
 //
-// The release pipeline (.github/workflows/release.yml) publishes the updater
-// artifacts + latest.json alongside the DMG; see that file for the CI side.
+// The release pipeline (.github/workflows/release.yml) publishes what the
+// check reads.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { check, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { getVersion } from "@tauri-apps/api/app";
+import { backend, type AvailableUpdate } from "./backend";
 
 /** The rolling release page — manual-download fallback when auto-update fails. */
 export const RELEASES_PAGE =
@@ -53,9 +49,10 @@ function errMsg(e: unknown): string {
 
 /**
  * Owns updater state: a quiet check on mount, a manual re-check, and the
- * one-click download→verify→install→relaunch action.
+ * one-click download→verify→install→relaunch action. Null where the
+ * platform has no updater.
  */
-export function useUpdateCheck(): UpdateController {
+export function useUpdateCheck(): UpdateController | null {
   const [state, setState] = useState<UpdateState>({
     phase: "checking",
     current: "",
@@ -64,19 +61,21 @@ export function useUpdateCheck(): UpdateController {
     progress: 0,
     error: null,
   });
-  // The Update handle returned by check(); needed to drive the install.
-  const updateRef = useRef<Update | null>(null);
+  // What the last check found; needed to drive the install.
+  const updateRef = useRef<AvailableUpdate | null>(null);
 
   const runCheck = useCallback(async () => {
+    const updater = backend.updater;
+    if (!updater) return;
     setState((s) => ({ ...s, phase: "checking", error: null }));
     try {
-      const upd = await check();
+      const upd = await updater.check();
       updateRef.current = upd;
       setState((s) => ({
         ...s,
         phase: upd ? "available" : "uptodate",
         latest: upd?.version ?? null,
-        notes: upd?.body ?? "",
+        notes: upd?.notes ?? "",
         error: null,
       }));
     } catch (e) {
@@ -87,23 +86,12 @@ export function useUpdateCheck(): UpdateController {
   const install = useCallback(async () => {
     const upd = updateRef.current;
     if (!upd) return;
-    let total = 0;
-    let done = 0;
     setState((s) => ({ ...s, phase: "downloading", progress: 0, error: null }));
     try {
-      await upd.downloadAndInstall((ev) => {
-        if (ev.event === "Started") {
-          total = ev.data.contentLength ?? 0;
-          done = 0;
-        } else if (ev.event === "Progress") {
-          done += ev.data.chunkLength;
-          setState((s) => ({ ...s, progress: total ? done / total : 0 }));
-        } else if (ev.event === "Finished") {
-          setState((s) => ({ ...s, phase: "installing", progress: 1 }));
-        }
+      await upd.install((p) => {
+        if (p.phase === "downloading") setState((s) => ({ ...s, progress: p.fraction }));
+        else setState((s) => ({ ...s, phase: "installing", progress: 1 }));
       });
-      // Bundle swapped on disk — restart into the new version.
-      await relaunch();
     } catch (e) {
       setState((s) => ({ ...s, phase: "error", error: errMsg(e) }));
     }
@@ -111,7 +99,7 @@ export function useUpdateCheck(): UpdateController {
 
   useEffect(() => {
     let alive = true;
-    void getVersion().then((v) => {
+    void backend.updater?.version().then((v) => {
       if (alive) setState((s) => ({ ...s, current: v }));
     });
     void runCheck();
@@ -120,5 +108,5 @@ export function useUpdateCheck(): UpdateController {
     };
   }, [runCheck]);
 
-  return { ...state, check: runCheck, install };
+  return backend.updater ? { ...state, check: runCheck, install } : null;
 }

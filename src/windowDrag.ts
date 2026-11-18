@@ -1,5 +1,5 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import type React from "react";
+import { backend } from "./backend";
 
 // The title row has no drag strip of its own: every gap in it — the lead
 // beside the traffic lights, the tab bar's empty stretch — moves the window,
@@ -18,7 +18,6 @@ import type React from "react";
 export function dragWindowFromGap(e: React.MouseEvent) {
   if (e.button !== 0 || e.target !== e.currentTarget) return;
   e.preventDefault();
-  const win = getCurrentWindow();
-  if (e.detail === 2) void win.toggleMaximize();
-  else void win.startDragging();
+  if (e.detail === 2) backend.windows?.toggleMaximize();
+  else backend.windows?.startDragging();
 }

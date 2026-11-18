@@ -14,10 +14,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
 import {
-  cloudPageTakeDown,
-  cloudPages,
-  cloudSetRoot,
-  cloudUnpublish,
   pageUrl,
   placeOf,
   timeAgo,
@@ -25,6 +21,7 @@ import {
   type EveryPage,
   type PublicPage,
 } from "./cloud";
+import { backend } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -85,7 +82,7 @@ export default function PublishedPages({
   useEffect(() => {
     if (!seesAll) return;
     let live = true;
-    void cloudPages(cloud.root)
+    void backend.cloud.pages(cloud.root)
       .then((answer) => {
         if (live) setEvery(answer);
       })
@@ -190,7 +187,7 @@ export default function PublishedPages({
                         <button
                           className="modal-btn"
                           data-testid="published-home"
-                          onClick={() => void act(() => cloudSetRoot(cloud.root, page.root ? null : page.slug))}
+                          onClick={() => void act(() => backend.cloud.setRoot(cloud.root, page.root ? null : page.slug))}
                         >
                           {page.root ? "Unset as home page" : "Use as home page"}
                         </button>
@@ -200,7 +197,7 @@ export default function PublishedPages({
                           <button
                             className="modal-btn is-danger-solid"
                             data-testid="published-stop-yes"
-                            onClick={() => void act(() => cloudUnpublish(cloud.root, page.slug)).then(() => setStopping(null))}
+                            onClick={() => void act(() => backend.cloud.unpublish(cloud.root, page.slug)).then(() => setStopping(null))}
                           >
                             Stop
                           </button>
@@ -261,7 +258,7 @@ export default function PublishedPages({
                               className="modal-btn is-danger-solid"
                               data-testid="published-takedown-yes"
                               onClick={() =>
-                                void act(() => cloudPageTakeDown(cloud.root, page.slug)).then(() => {
+                                void act(() => backend.cloud.pageTakeDown(cloud.root, page.slug)).then(() => {
                                   setStopping(null);
                                   setEveryToken((t) => t + 1);
                                 })

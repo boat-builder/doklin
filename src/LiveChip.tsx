@@ -14,8 +14,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  cloudPublish,
-  cloudUnpublish,
   pageForPath,
   pageState,
   pageStateLine,
@@ -27,6 +25,7 @@ import {
   type PageState,
 } from "./cloud";
 import { useDismiss } from "./dismiss";
+import { backend } from "./backend";
 
 function CloseIcon() {
   return (
@@ -223,7 +222,7 @@ export default function LiveChip({
       </>
     );
   } else if (!page) {
-    const publish = () => void run(() => cloudPublish(absPath, typed ? { slug: typed } : {}));
+    const publish = () => void run(() => backend.cloud.publish(absPath, typed ? { slug: typed } : {}));
     body = (
       <>
         <div className="live-pop-head">Publish “{title}”</div>
@@ -272,7 +271,7 @@ export default function LiveChip({
     const canRename = !busy && typed !== "" && typed !== page.slug && typedProblem === null;
     const rename = () =>
       void run(async () => {
-        await cloudPublish(absPath, { slug: typed });
+        await backend.cloud.publish(absPath, { slug: typed });
         setEditing(false);
       });
     body = (
@@ -316,7 +315,7 @@ export default function LiveChip({
               className="modal-btn is-danger-solid"
               data-testid="publish-stop-yes"
               disabled={busy}
-              onClick={() => void run(() => cloudUnpublish(cloud.root, page.slug))}
+              onClick={() => void run(() => backend.cloud.unpublish(cloud.root, page.slug))}
             >
               Stop
             </button>

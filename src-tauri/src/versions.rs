@@ -1,4 +1,5 @@
-//! The versions commands the frontend calls (mirrored in src/versions.ts).
+//! The versions commands the frontend calls (from src/mac/backend.ts, answering
+//! `Versions` in src/backend.ts; what they carry is mirrored in src/versions.ts).
 //! Each is the engine's command of the same name (engine/src/versions/mod.rs,
 //! where what it does is written down) with this app's running engine handed
 //! in.

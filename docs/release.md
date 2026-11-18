@@ -1,6 +1,6 @@
 # Release
 
-macOS, Apple Silicon only. Producer: `.github/workflows/release.yml`. Consumer: `src/updater.ts` + `plugins.updater` in `src-tauri/tauri.conf.json`.
+macOS, Apple Silicon only. Producer: `.github/workflows/release.yml`. Consumer: `Updater` in `src/mac/backend.ts` (its state is `src/updater.ts`) + `plugins.updater` in `src-tauri/tauri.conf.json`.
 
 ## Jobs
 

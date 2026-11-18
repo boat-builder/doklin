@@ -10,12 +10,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  versionsCaptureNow,
-  versionsHistory,
   versionReasonWord,
   type FileHistory,
   type FileVersion,
 } from "./versions";
+import type { Versions } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -76,6 +75,7 @@ function PinIcon() {
 }
 
 export default function HistoryRail({
+  store,
   docPath,
   selected,
   onSelect,
@@ -83,6 +83,8 @@ export default function HistoryRail({
   reloadToken,
   onError,
 }: {
+  /** The version store: what this reads and restores from. */
+  store: Versions;
   /** The document whose versions these are — absolute. */
   docPath: string;
   /** The version being previewed, by timestamp; null while the live
@@ -107,7 +109,7 @@ export default function HistoryRail({
 
   const load = useCallback(async () => {
     try {
-      const next = await versionsHistory(docPath);
+      const next = await store.history(docPath);
       setHistory(next);
       setError(null);
     } catch (e) {
@@ -116,7 +118,7 @@ export default function HistoryRail({
     } finally {
       setLoading(false);
     }
-  }, [docPath]);
+  }, [docPath, store]);
 
   useEffect(() => {
     setLoading(true);
@@ -144,7 +146,7 @@ export default function HistoryRail({
     if (!label || !history?.root || saving) return;
     setSaving(true);
     try {
-      await versionsCaptureNow(history.root, { reason: "manual", label });
+      await store.captureNow(history.root, { reason: "manual", label });
       setNaming("");
       await load();
     } catch (e) {
@@ -152,7 +154,7 @@ export default function HistoryRail({
     } finally {
       setSaving(false);
     }
-  }, [naming, history, saving, load, onError]);
+  }, [naming, history, saving, load, onError, store]);
 
   return (
     <aside className="history-rail" aria-label="Version history" data-testid="history-rail">

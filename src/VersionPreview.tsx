@@ -10,9 +10,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useDismiss } from "./dismiss";
-import { invoke } from "@tauri-apps/api/core";
 import Editor from "./Editor";
-import { versionsDiff, versionsRead, type FileVersion } from "./versions";
+import { type FileVersion } from "./versions";
+import { backend, type Versions } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -71,6 +71,7 @@ function DiffView({ patch }: { patch: string }) {
 }
 
 export default function VersionPreview({
+  store,
   docPath,
   root,
   version,
@@ -80,6 +81,8 @@ export default function VersionPreview({
   onOpenFile,
   onError,
 }: {
+  /** The version store: what this reads and restores from. */
+  store: Versions;
   docPath: string;
   /** The store this version lives in — every version command is keyed by it. */
   root: string;
@@ -109,7 +112,7 @@ export default function VersionPreview({
       try {
         // Local or mirrored, a version is named by the same full sha256 and
         // read the same way — the command falls back to the cloud blob.
-        const loaded = await versionsRead(root, version.hash);
+        const loaded = await store.read(root, version.hash);
         if (!cancelled) setText(loaded);
       } catch (e) {
         if (!cancelled) setFailed(errText(e));
@@ -118,7 +121,7 @@ export default function VersionPreview({
     return () => {
       cancelled = true;
     };
-  }, [docPath, root, version]);
+  }, [docPath, root, version, store]);
 
   useEffect(() => {
     if (!showChanges) return;
@@ -126,7 +129,7 @@ export default function VersionPreview({
     setPatch(null);
     void (async () => {
       try {
-        const p = await versionsDiff(root, {
+        const p = await store.diff(root, {
           path: docPath,
           from: version.hash,
           to: newer?.hash ?? null,
@@ -139,7 +142,7 @@ export default function VersionPreview({
     return () => {
       cancelled = true;
     };
-  }, [showChanges, root, docPath, version, newer]);
+  }, [showChanges, root, docPath, version, newer, store]);
 
   // Esc steps back out of the preview, once whatever is above it has gone.
   useDismiss(onBack);
@@ -150,10 +153,10 @@ export default function VersionPreview({
     try {
       let target = copyName(docPath, version.ts);
       for (let n = 2; n < 50; n += 1) {
-        if (!(await invoke<boolean>("path_exists", { path: target }))) break;
+        if (!(await backend.documents.exists(target))) break;
         target = copyName(docPath, version.ts, n);
       }
-      await invoke("write_file", { path: target, contents: text, expected: null });
+      await backend.documents.save(target, { text }, null);
       onOpenFile(target);
     } catch (e) {
       onError(`Couldn't make a copy: ${errText(e)}`);

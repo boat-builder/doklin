@@ -1,9 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-
-type SearchMatch = { line: number; column: number; preview: string };
-// `named`: the document's name holds the query (search_workspace, lib.rs).
-type FileMatches = { path: string; name: string; named: boolean; matches: SearchMatch[] };
+import { backend, type FileMatches } from "./backend";
 
 type Props = {
   root: string;
@@ -57,11 +53,7 @@ export default function WorkspaceSearch({
     let cancelled = false;
     const handle = window.setTimeout(async () => {
       try {
-        const res = await invoke<FileMatches[]>("search_workspace", {
-          root,
-          query: q,
-          caseSensitive,
-        });
+        const res = await backend.documents.search(root, q, caseSensitive);
         if (cancelled) return;
         setResults(res);
         setError(null);

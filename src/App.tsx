@@ -1,30 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import {
   addsQuestion,
-  cloudConfirmAdds,
   cloudForWorkspace,
   cloudNeedsAttention,
-  cloudLink,
-  cloudPublish,
-  cloudRemoved,
-  cloudSetActivity,
-  cloudSpaceCreate,
-  cloudStatus,
-  cloudTakeOver,
-  cloudUnpublish,
   leaseFor,
   livePathsOf,
   mayOn,
-  onCloudApplied,
-  onCloudAddressTaken,
-  onCloudConflict,
-  onCloudPendingAdds,
-  onCloudPendingDeletes,
-  onCloudRemoved,
-  onCloudSpaceLeft,
-  onCloudStatus,
   placeOf,
   relPathIn,
   widerAudience,
@@ -42,18 +23,12 @@ import PeopleDialog from "./PeopleDialog";
 import RestrictedFolder, { type RestrictedSource } from "./RestrictedFolder";
 import SpaceAccess from "./SpaceAccess";
 import { LeaseBanner } from "./LeaseBanner";
-import {
-  onVersionsApplied,
-  onVersionsStatus,
-  versionsDeleted,
-  versionsRestoreFile,
-  versionsRestoreSnapshot,
-  versionsStatus,
-  type DeletedFile,
-  type FileVersion,
-  type RestoreOutcome,
-  type RestoreReport,
-  type VersionsStatus,
+import type {
+  DeletedFile,
+  FileVersion,
+  RestoreOutcome,
+  RestoreReport,
+  VersionsStatus,
 } from "./versions";
 import CloudSetup, { type CloudSetupMode } from "./CloudSetup";
 import Toasts, { type Toast, type ToastAction, type ToastTone } from "./Toasts";
@@ -68,16 +43,13 @@ import VersionPreview, { momentLabel } from "./VersionPreview";
 import WorkspaceHistory from "./WorkspaceHistory";
 import VersionsSettings from "./VersionsSettings";
 import RecentlyDeleted from "./RecentlyDeleted";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { dragWindowFromGap } from "./windowDrag";
-import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import Editor, { type EditorHandle } from "./Editor";
 import type { SearchInfo } from "./searchPlugin";
 import Sidebar, {
   forgetTreeView,
   pruneNestedSelection,
   type SidebarSelection,
-  type FileClipboardPayload,
 } from "./Sidebar";
 import TabBar from "./TabBar";
 import {
@@ -101,7 +73,11 @@ import HtmlView, { type HtmlViewHandle } from "./HtmlView";
 import { mergeHtmlThreads, type HtmlThread } from "./htmlComments";
 import { sanitizeAuthor, sanitizeBody } from "./criticMarkup";
 import {
-  metaFileOf,
+  MD_EXT_RE,
+  HTML_EXT_RE,
+  isHtmlPath,
+  htmlSiblingOf,
+  mdSiblingOf,
   parseEntityMeta,
   serializeEntityMeta,
   metaIsEmpty,
@@ -118,29 +94,38 @@ import { tableWidthsKey } from "./tableWidths";
 import { linkTargetPath } from "./docLinks";
 import { useDismiss } from "./dismiss";
 import { splitFrontmatter } from "./frontmatter";
+import {
+  backend,
+  SaveConflict,
+  type DocumentChange,
+  type DocumentPart,
+  type DocumentText,
+  type FileClipboardPayload,
+  type LeftBehind,
+  type OpenedDocument,
+  type Removed,
+  type Restored,
+  type Rev,
+  type WatchedDocument,
+  type WindowInit,
+} from "./backend";
 
-type FileSnapshot = { mtime_ms: number; size: number };
-type ReadFileResult = { contents: string; snapshot: FileSnapshot };
-type ExternalChangePayload = { path: string; snapshot: FileSnapshot };
-type WriteErrorPayload =
-  | { kind: "io"; message: string }
-  | { kind: "conflict"; current: FileSnapshot };
-type Conflict = { diskSnapshot: FileSnapshot };
+// The text changed somewhere else while this window had edits of its own:
+// `theirs` is what it is at now, and what a save over it would be made over.
+type Conflict = { theirs: Rev };
 
 const AUTOSAVE_DEBOUNCE_MS = 600;
 
-type WindowInit = {
-  isMain: boolean;
-  folder: string | null;
-  file: string | null;
-  tabs: StoredTab[];
-  activeId: string | null;
-  restored: boolean;
+// What a window opens with where the platform keeps no windows of its own:
+// the one window there is, with nothing handed to it.
+const ONLY_WINDOW: WindowInit = {
+  isMain: true,
+  folder: null,
+  file: null,
+  tabs: [],
+  activeId: null,
+  restored: false,
 };
-
-/** Something an open from outside the app asked this window to show
- *  (`Show` in src-tauri/src/external_open.rs — change both). */
-type WindowShow = { path: string; kind: "file" | "folder" };
 
 // Whether this window owns the shared tab session (doklin:session). The backend is
 // the authority (take_window_init keys off the real window label); we default to
@@ -165,26 +150,20 @@ const dirname = (p: string) => {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i > 0 ? p.slice(0, i) : p;
 };
-const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
-const HTML_EXT_RE = /\.html$/i;
 
-// A document is a markdown file, an html file, or the pair: same stem, side by
-// side ("notes.md" + "notes.html" — the html is a generated *rendition* of the
-// markdown, not a separate document). The pair opens as ONE tab keyed on the
-// markdown path, with an in-editor MD/HTML view toggle.
-const isHtmlPath = (p: string) => HTML_EXT_RE.test(p);
-const htmlSiblingOf = (mdPath: string) => mdPath.replace(MD_EXT_RE, "") + ".html";
-const mdSiblingOf = (htmlPath: string) => htmlPath.replace(HTML_EXT_RE, "") + ".md";
+// A markdown file and the html file beside it are ONE document (see
+// metaFile.ts): the pair opens as one tab keyed on the markdown path, with an
+// in-editor MD/HTML view toggle.
 
-// The companion files the document watcher rides along with a tab: the
-// entity meta file (thread bodies for both renditions) and the html
-// rendition (when the tab is its markdown side). watch_file skips paths
-// that don't exist, so companions are always offered.
-const watchExtrasOf = (tabPath: string, htmlPath: string | null): string[] => {
-  const extras = [metaFileOf(tabPath)];
-  if (htmlPath !== null && htmlPath !== tabPath) extras.push(htmlPath);
-  return extras;
-};
+// What a document's parts are called when one could not follow it.
+const PART_LABEL: Record<DocumentPart, string> = { rendition: "HTML version", meta: "comments" };
+
+// A sidecar's text as the records it holds; null (the document has none yet)
+// is no records.
+const metaOf = (text: string | null): { meta: EntityMeta; metaExists: boolean } =>
+  text === null
+    ? { meta: emptyMeta(), metaExists: false }
+    : { meta: parseEntityMeta(text), metaExists: true };
 
 // Three-way merge for markdown thread bodies (externally-changed meta vs the
 // open editor's marks): reuses the html merge — which carries the deletion-
@@ -216,10 +195,10 @@ const uniquePastePath = async (
   const ext = dot > 0 ? name.slice(dot) : "";
   const isDoc = kind === "file" && (MD_EXT_RE.test(name) || HTML_EXT_RE.test(name));
   const taken = async (p: string): Promise<boolean> => {
-    if (await invoke<boolean>("path_exists", { path: p })) return true;
+    if (await backend.documents.exists(p)) return true;
     if (!isDoc) return false;
     const sibling = HTML_EXT_RE.test(p) ? mdSiblingOf(p) : htmlSiblingOf(p);
-    return invoke<boolean>("path_exists", { path: sibling });
+    return backend.documents.exists(sibling);
   };
   for (let n = 0; ; n++) {
     const candidate = n === 0 ? name : n === 1 ? `${stem} copy${ext}` : `${stem} copy ${n}${ext}`;
@@ -268,7 +247,7 @@ type CompanionDoc = {
   kind: TabKind;
   missing: boolean;
   contents: string;
-  snapshot: FileSnapshot | null;
+  snapshot: Rev | null;
   htmlPath: string | null;
   hasHtml: boolean;
   htmlContent: string | null;
@@ -395,15 +374,17 @@ const uuid = () =>
 let untitledDir = "";
 const untitledPathFor = (id: string) => `${untitledDir}/${id}.md`;
 
-// Read a tab's document. An untitled note nothing has been typed into has no
-// buffer on disk yet — that is an empty note, not a missing file.
-const readTabDoc = async (
-  tab: StoredTab,
-): Promise<{ contents: string; snapshot: FileSnapshot | null }> => {
+// What a tab's document is loaded from. `rev` is null for a note that has
+// never been written.
+type LoadedDoc = Omit<OpenedDocument, "rev"> & { rev: Rev | null };
+
+// Open a tab's document. An untitled note nothing has been typed into has no
+// buffer yet — that is an empty note, not a missing file.
+const openTabDoc = async (tab: StoredTab): Promise<LoadedDoc> => {
   try {
-    return await invoke<ReadFileResult>("read_file", { path: tab.path });
+    return await backend.documents.open(tab.path);
   } catch (e) {
-    if (tab.kind === "untitled") return { contents: "", snapshot: null };
+    if (tab.kind === "untitled") return { text: "", rev: null, meta: null, rendition: null };
     throw e;
   }
 };
@@ -415,12 +396,12 @@ const readTabDoc = async (
 const restoreUntitled = async (id: string, path: string): Promise<UntitledTab | null> => {
   let md: string;
   try {
-    md = (await invoke<ReadFileResult>("read_file", { path })).contents;
+    md = (await backend.documents.read(path)).text;
   } catch {
     return null;
   }
   if (!noteHasText(md)) {
-    void invoke("discard_untitled", { path }).catch(() => {});
+    void backend.untitled?.discard(path).catch(() => {});
     return null;
   }
   return { id, kind: "untitled", path, title: noteTitle(md), unsaved: true };
@@ -435,7 +416,7 @@ type Question = { title: string; body: string; confirm: string; answer: (yes: bo
 
 // One in-app delete, as undo needs to see it — see deletedStackRef.
 type DeletedRecord = {
-  files: { path: string; trashPath: string }[];
+  undo: () => Promise<Restored>;
   openPaths: string[];
 };
 const THEME_LABEL: Record<Theme, string> = {
@@ -482,16 +463,6 @@ function applyTheme(t: Theme) {
 // Paint the stored theme before the first render, not after it.
 if (typeof document !== "undefined") {
   applyTheme(readStoredTheme());
-}
-
-function isWriteError(e: unknown): e is WriteErrorPayload {
-  return (
-    typeof e === "object" &&
-    e !== null &&
-    "kind" in e &&
-    ((e as { kind: unknown }).kind === "io" ||
-      (e as { kind: unknown }).kind === "conflict")
-  );
 }
 
 function readStoredSidebarOpen(): boolean {
@@ -682,7 +653,7 @@ export default function App() {
   const lastSavedRef = useRef<string>("");
   const baselineCapturedRef = useRef<boolean>(false);
   const pathRef = useRef<string | null>(null);
-  const snapshotRef = useRef<FileSnapshot | null>(null);
+  const snapshotRef = useRef<Rev | null>(null);
   const autosaveTimerRef = useRef<number | null>(null);
   const dirtyRef = useRef(false);
   const conflictRef = useRef<Conflict | null>(null);
@@ -928,11 +899,13 @@ export default function App() {
   // install from the Settings menu. See updater.ts.
   const update = useUpdateCheck();
 
-  // The name comments written on this Mac are signed with (device_name in
-  // lib.rs: the Mac's own name). Seeded once; the fallback holds until then.
+  // The name comments written here are signed with: the backend's to say
+  // (on a Mac, the Mac's own name). Seeded once; the fallback holds until
+  // then.
   const [deviceName, setDeviceName] = useState("This Mac");
   useEffect(() => {
-    void invoke<string>("device_name")
+    void backend
+      .authorName()
       .then(setDeviceName)
       .catch(() => {});
   }, []);
@@ -943,17 +916,17 @@ export default function App() {
   const [cloudStatuses, setCloudStatuses] = useState<CloudStatus[]>([]);
   useEffect(() => {
     let live = true;
-    void cloudStatus()
+    void backend.cloud.status()
       .then((s) => {
         if (live) setCloudStatuses(s);
       })
       .catch(() => {});
-    const un = onCloudStatus((s) => {
+    const un = backend.cloud.onStatus((s) => {
       if (live) setCloudStatuses(s);
     });
     return () => {
       live = false;
-      void un.then((f) => f()).catch(() => {});
+      un();
     };
   }, []);
   const cloudForRoot = useMemo(
@@ -1048,12 +1021,12 @@ export default function App() {
       const root = workspaceRoot;
       if (!root) return;
       const abs = page.path ? `${root}/${page.path}` : root;
-      void cloudUnpublish(root, page.slug)
+      void backend.cloud.unpublish(root, page.slug)
         .then(() =>
           pushToast("info", `Stopped publishing ${page.path ? basename(page.path) : "the workspace"}.`, {
             label: "Undo",
             run: () =>
-              void cloudPublish(abs, {
+              void backend.cloud.publish(abs, {
                 slug: page.slug,
                 title: page.title ?? undefined,
                 desc: page.desc ?? undefined,
@@ -1090,15 +1063,9 @@ export default function App() {
   // markdown.
   const writeMdThreadsToMeta = useCallback(
     async (target: string, hybridMd: string, mthreads: MdThread[]) => {
-      let base = emptyMeta();
-      let exists = false;
-      try {
-        const r = await invoke<ReadFileResult>("read_file", { path: metaFileOf(target) });
-        base = parseEntityMeta(r.contents);
-        exists = true;
-      } catch {
-        // no meta yet
-      }
+      const { meta: base, metaExists: exists } = metaOf(
+        await backend.documents.meta(target).catch(() => null),
+      );
       const rooted = new Set(mthreads.map((t) => t.id));
       const ids = markerIds(hybridMd);
       const out: EntityMeta = {
@@ -1111,11 +1078,9 @@ export default function App() {
         foreign: base.foreign,
       };
       if (metaIsEmpty(out) && !exists) return;
-      await invoke<FileSnapshot>("write_file", {
-        path: metaFileOf(target),
-        contents: serializeEntityMeta(out),
-        expected: null,
-      }).catch((e) => console.error("meta save failed", target, e));
+      await backend.documents
+        .save(target, { meta: serializeEntityMeta(out) }, null)
+        .catch((e) => console.error("meta save failed", target, e));
     },
     [],
   );
@@ -1173,9 +1138,7 @@ export default function App() {
     // appearance, so it matches the theme rather than the OS. A chosen theme
     // pins it; "system" hands it back to the OS, because a pinned appearance
     // also pins prefers-color-scheme, which is what resolves "system".
-    void getCurrentWindow()
-      .setTheme(theme === "system" ? null : theme === "dark" ? "dark" : "light")
-      .catch(() => {});
+    backend.windows?.setTheme(theme === "system" ? null : theme === "dark" ? "dark" : "light");
     try {
       localStorage.setItem(THEME_STORAGE_KEY, theme);
     } catch {
@@ -1219,35 +1182,94 @@ export default function App() {
     setCommentCount(0);
   }, [loadKey]);
 
-  // Defined with the meta helpers below; writeToDisk needs it before then.
-  const writeSidecarNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  // Tell the backend which documents are on screen: the active one and the
+  // split pane's. It answers with `onChange` when one of them, its sidecar
+  // or its rendition changes somewhere else, and the change handler routes
+  // that by document. Told again whenever the set changes — and after a
+  // document's FIRST sidecar write, which a backend watching files could
+  // not have been watching for.
+  const refreshWatchSet = useCallback(async () => {
+    const docs: WatchedDocument[] = [];
+    const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
+    if (active?.kind === "file" && !active.missing) {
+      if (pathRef.current) {
+        docs.push({ path: pathRef.current, rendition: htmlPathRef.current });
+      } else if (htmlPathRef.current) {
+        // html-only document: the html is its text.
+        docs.push({ path: htmlPathRef.current, rendition: null });
+      }
+    }
+    const sd = splitRef.current?.doc;
+    if (sd && sd.kind === "file" && !sd.missing && !isUnsupportedTab(sd)) {
+      docs.push({ path: sd.path, rendition: sd.htmlPath === sd.path ? null : sd.htmlPath });
+    }
+    try {
+      await backend.documents.watch(docs);
+    } catch (e) {
+      console.error("watch failed", e);
+    }
+  }, []);
+
+  // Compose the ACTIVE entity's full meta from the app refs. Every meta
+  // write goes through this one composer — the html rail and the markdown
+  // save path both mutate sections of the same file, and independent writers
+  // would clobber each other's records.
+  const composeActiveMeta = useCallback(
+    (): EntityMeta => ({
+      hthreads: htmlThreadsRef.current,
+      mthreads: [...mdThreadsRef.current, ...mdOrphansRef.current],
+      tcols: tableWidthsRef.current,
+      foreign: metaForeignRef.current,
+    }),
+    [],
+  );
 
 
-  // `contents` is the editor's serialization — FULL CriticMarkup. The disk
-  // gets the hybrid split: markers-only markdown plus thread-body records in
-  // the entity meta (see metaFile.ts). A body-only edit (a reply typed in
-  // the rail) leaves the hybrid markdown byte-identical and skips that
-  // write entirely — only the meta moves.
+  // `contents` is the editor's serialization — FULL CriticMarkup. What is
+  // saved is the hybrid split: markers-only markdown plus thread-body records
+  // in the entity meta (see metaFile.ts), the two as ONE save. A body-only
+  // edit (a reply typed in the rail) leaves the hybrid markdown
+  // byte-identical and its text is not sent at all — only the meta moves.
   const writeToDisk = useCallback(async (target: string, contents: string): Promise<void> => {
     const { md: hybrid, mthreads } = extractMarkdown(contents);
+    const isActive = pathRef.current === target;
     // The editor never saw the document's frontmatter block; put it back,
     // byte for byte, in front of what it did see. Captured now, because the
     // active document can change while the write is in flight.
-    const head = pathRef.current === target ? frontmatterRef.current : "";
+    const head = isActive ? frontmatterRef.current : "";
+    // Never skip a document's FIRST write (no snapshot = nothing saved yet:
+    // an untitled note's buffer only exists once something is typed).
+    const mdUnchanged =
+      isActive && snapshotRef.current !== null && hybrid === lastDiskMdRef.current;
+    // This save's extraction is the live thread-body set; an orphan whose
+    // marker came back (undo, paste) is live again and leaves the orphan
+    // list.
+    const rooted = new Set(mthreads.map((t) => t.id));
+    const ids = markerIds(hybrid);
+    const stillOrphan = (t: MdThread) => !rooted.has(t.id) && !ids.has(t.id);
+    // The meta as it stands once this text is down, composed now: the other
+    // sections are the active document's, and only while it IS the active
+    // one are they in the app's refs. Deleting the last thread empties the
+    // meta rather than leaving it stale; a document that never had one never
+    // gets one.
+    let meta: string | undefined;
+    if (isActive) {
+      const next: EntityMeta = {
+        ...composeActiveMeta(),
+        mthreads: [...mthreads, ...mdOrphansRef.current.filter(stillOrphan)],
+      };
+      if (!metaIsEmpty(next) || htmlSidecarExistsRef.current) meta = serializeEntityMeta(next);
+    }
     try {
-      const isActive = pathRef.current === target;
-      let newSnapshot: FileSnapshot | null = null;
-      // Never skip a document's FIRST write (no snapshot = nothing on disk
-      // yet: an untitled note's buffer only exists once something is typed).
-      const mdUnchanged =
-        isActive && snapshotRef.current !== null && hybrid === lastDiskMdRef.current;
-      if (!mdUnchanged) {
-        newSnapshot = await invoke<FileSnapshot>("write_file", {
-          path: target,
-          contents: head + hybrid,
-          expected: snapshotRef.current,
-        });
-      }
+      const saved =
+        mdUnchanged && meta === undefined
+          ? null
+          : await backend.documents.save(
+              target,
+              { text: mdUnchanged ? undefined : head + hybrid, meta },
+              snapshotRef.current,
+            );
+      const newSnapshot = saved?.rev ?? null;
       // The active tab may have switched while this write was in flight (e.g. a
       // flush of the previous doc resolving after switching tabs). Only commit
       // baseline state if `target` is still the active path — but if the doc
@@ -1263,10 +1285,12 @@ export default function App() {
             doc: { ...s.doc, snapshot: newSnapshot, contents, dirty: false },
           });
         }
-        // The doc's thread bodies still land in ITS meta — a guarded
-        // read-modify-write that preserves the sections this save doesn't
-        // own (html threads, foreign records) and any orphaned bodies.
-        await writeMdThreadsToMeta(target, hybrid, mthreads);
+        // A document that was not the active one when this began had no meta
+        // composed for it: its thread bodies still land in ITS meta — a
+        // guarded read-modify-write that preserves the sections this save
+        // doesn't own (html threads, foreign records) and any orphaned
+        // bodies.
+        if (!isActive) await writeMdThreadsToMeta(target, hybrid, mthreads);
         return;
       }
       if (newSnapshot) {
@@ -1274,20 +1298,19 @@ export default function App() {
         lastDiskMdRef.current = hybrid;
       }
       lastSavedRef.current = contents;
-      // This save's extraction is the live thread-body set; an orphan whose
-      // marker came back (undo, paste) is live again and leaves the orphan
-      // list.
       mdThreadsRef.current = mthreads;
-      const rooted = new Set(mthreads.map((t) => t.id));
-      const ids = markerIds(hybrid);
-      if (mdOrphansRef.current.some((t) => rooted.has(t.id) || ids.has(t.id))) {
-        const remaining = mdOrphansRef.current.filter(
-          (t) => !rooted.has(t.id) && !ids.has(t.id),
-        );
+      // Read again, not kept from above: the rail may have changed the
+      // orphans while the save was in flight.
+      if (mdOrphansRef.current.some((t) => !stillOrphan(t))) {
+        const remaining = mdOrphansRef.current.filter(stillOrphan);
         mdOrphansRef.current = remaining;
         setMdOrphans(remaining);
       }
-      await writeSidecarNowRef.current();
+      if (meta !== undefined && saved?.meta) {
+        const isNew = !htmlSidecarExistsRef.current;
+        htmlSidecarExistsRef.current = true;
+        if (isNew) await refreshWatchSet();
+      }
       if (currentMarkdownRef.current === contents) setDirty(false);
       // A same-document mirror pane tracks the live editor through its
       // autosaves — the cheapest safe point to sync two Milkdown instances.
@@ -1300,21 +1323,21 @@ export default function App() {
     } catch (e) {
       if ((pathRef.current) !== target) {
         const s = splitRef.current;
-        if (s?.doc && s.doc.path === target && isWriteError(e) && e.kind === "conflict") {
+        if (s?.doc && s.doc.path === target && e instanceof SaveConflict) {
           setSplitState({
             ...s,
-            doc: { ...s.doc, conflict: { diskSnapshot: e.current }, dirty: true },
+            doc: { ...s.doc, conflict: { theirs: e.current }, dirty: true },
           });
         }
         return;
       }
-      if (isWriteError(e) && e.kind === "conflict") {
-        setConflict({ diskSnapshot: e.current });
+      if (e instanceof SaveConflict) {
+        setConflict({ theirs: e.current });
       } else {
         console.error("autosave failed", e);
       }
     }
-  }, [setSplitState, refreshMirror, writeMdThreadsToMeta]);
+  }, [setSplitState, refreshMirror, writeMdThreadsToMeta, composeActiveMeta, refreshWatchSet]);
 
   const scheduleAutosave = useCallback(() => {
     if (autosaveTimerRef.current != null) {
@@ -1373,18 +1396,8 @@ export default function App() {
   // Read an entity's meta from disk WITHOUT touching the active-doc refs
   // (missing file = no comments yet). Never writes.
   const readEntityMeta = useCallback(
-    async (docPath: string): Promise<{ meta: EntityMeta; metaExists: boolean }> => {
-      let meta = emptyMeta();
-      let metaExists = false;
-      try {
-        const r = await invoke<ReadFileResult>("read_file", { path: metaFileOf(docPath) });
-        meta = parseEntityMeta(r.contents);
-        metaExists = true;
-      } catch {
-        // no meta file yet
-      }
-      return { meta, metaExists };
-    },
+    async (docPath: string): Promise<{ meta: EntityMeta; metaExists: boolean }> =>
+      metaOf(await backend.documents.meta(docPath).catch(() => null)),
     [],
   );
 
@@ -1430,57 +1443,6 @@ export default function App() {
     [adoptEntityMeta, readEntityMeta],
   );
 
-  // (Re)arm the file watcher with the full CURRENT document set: the active
-  // document and its companions, plus the split pane's document and its
-  // companions. One watcher covers both panes — events carry the path and the
-  // change handler routes them. Also the re-arm after the FIRST sidecar
-  // write: a file that didn't exist when watch_file ran isn't being watched,
-  // so external edits to it would go unseen.
-  const refreshWatchSet = useCallback(async () => {
-    const files: string[] = [];
-    const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-    if (active?.kind === "file" && !active.missing) {
-      if (pathRef.current) {
-        files.push(pathRef.current, ...watchExtrasOf(pathRef.current, htmlPathRef.current));
-      } else if (htmlPathRef.current) {
-        // html-only document: the rendition is the primary file.
-        files.push(
-          htmlPathRef.current,
-          ...watchExtrasOf(htmlPathRef.current, htmlPathRef.current),
-        );
-      }
-    }
-    const sd = splitRef.current?.doc;
-    if (sd && sd.kind === "file" && !sd.missing && !isUnsupportedTab(sd)) {
-      files.push(sd.path, ...watchExtrasOf(sd.path, sd.htmlPath));
-    }
-    const seen = new Set<string>();
-    const unique = files.filter((f) => (seen.has(f) ? false : (seen.add(f), true)));
-    try {
-      if (unique.length === 0) {
-        await invoke("unwatch_file");
-      } else {
-        await invoke("watch_file", { path: unique[0], extras: unique.slice(1) });
-      }
-    } catch (e) {
-      console.error("watch_file failed", e);
-    }
-  }, []);
-
-  // Compose the ACTIVE entity's full meta from the app refs. Every meta
-  // write goes through this one composer — the html rail and the markdown
-  // save path both mutate sections of the same file, and independent writers
-  // would clobber each other's records.
-  const composeActiveMeta = useCallback(
-    (): EntityMeta => ({
-      hthreads: htmlThreadsRef.current,
-      mthreads: [...mdThreadsRef.current, ...mdOrphansRef.current],
-      tcols: tableWidthsRef.current,
-      foreign: metaForeignRef.current,
-    }),
-    [],
-  );
-
   const writeSidecarNow = useCallback(async () => {
     const docPath = pathRef.current ?? htmlPathRef.current;
     if (!docPath) return;
@@ -1490,11 +1452,7 @@ export default function App() {
     // that never had comments never gets one.
     if (metaIsEmpty(meta) && !htmlSidecarExistsRef.current) return;
     try {
-      await invoke<FileSnapshot>("write_file", {
-        path: metaFileOf(docPath),
-        contents: serializeEntityMeta(meta),
-        expected: null,
-      });
+      await backend.documents.save(docPath, { meta: serializeEntityMeta(meta) }, null);
       const isNew = !htmlSidecarExistsRef.current;
       htmlSidecarExistsRef.current = true;
       if (isNew) await refreshWatchSet();
@@ -1502,7 +1460,6 @@ export default function App() {
       console.error("comment save failed", e);
     }
   }, [refreshWatchSet, composeActiveMeta]);
-  writeSidecarNowRef.current = writeSidecarNow;
 
   const scheduleSidecarWrite = useCallback(() => {
     if (sidecarWriteTimerRef.current != null) {
@@ -1729,28 +1686,18 @@ export default function App() {
         view: "md",
       });
       if (isUnsupportedTab(tab)) {
-        return noDocument(!(await invoke<boolean>("path_exists", { path: tab.path }).catch(() => false)));
+        return noDocument(!(await backend.documents.exists(tab.path).catch(() => false)));
       }
-      let contents = "";
-      let snapshot: FileSnapshot | null = null;
+      let opened: LoadedDoc;
       try {
-        const r = await readTabDoc(tab);
-        contents = r.contents;
-        snapshot = r.snapshot;
+        opened = await openTabDoc(tab);
       } catch (e) {
         console.error("read failed", tab.path, e);
         return noDocument(true);
       }
-      let htmlPath: string | null = null;
-      if (htmlOnly) {
-        htmlPath = tab.path;
-      } else if (tab.kind === "file") {
-        const sibling = htmlSiblingOf(tab.path);
-        const exists = await invoke<boolean>("path_exists", { path: sibling }).catch(
-          () => false,
-        );
-        if (exists) htmlPath = sibling;
-      }
+      const contents = opened.text;
+      const snapshot = opened.rev;
+      const htmlPath = htmlOnly ? tab.path : tab.kind === "file" ? opened.rendition : null;
       const view: DocView =
         htmlOnly ||
         (htmlPath != null &&
@@ -1762,14 +1709,15 @@ export default function App() {
       if (view === "html" && htmlPath) {
         htmlContentValue = htmlOnly
           ? contents
-          : await invoke<ReadFileResult>("read_file", { path: htmlPath })
-              .then((r) => r.contents)
+          : await backend.documents
+              .read(htmlPath)
+              .then((r) => r.text)
               .catch(() => null);
       }
       // The pane's threads and thread bodies come from the entity meta; the
       // pane editor gets EXPANDED markdown — same read boundary as the
       // active document.
-      const { meta, metaExists } = await readEntityMeta(tab.path);
+      const { meta, metaExists } = metaOf(opened.meta);
       // The frontmatter boundary again: this pane's editor is handed the body,
       // and the block rides along in the record.
       const fm = splitFrontmatter(htmlOnly ? "" : contents);
@@ -1800,7 +1748,7 @@ export default function App() {
         view: view === "html" && htmlContentValue === null && !htmlOnly ? "md" : view,
       };
     },
-    [readEntityMeta],
+    [],
   );
 
   // A same-document split whose focused side is moving to ANOTHER tab: the
@@ -1846,23 +1794,22 @@ export default function App() {
     // (or, once it is gone, is a ghost like any other).
     const unsupported = isUnsupportedTab(tab);
 
-    let contents = "";
-    let snapshot: FileSnapshot | null = null;
+    let opened: LoadedDoc | null = null;
     let failed = false;
     if (unsupported) {
-      failed = !(await invoke<boolean>("path_exists", { path: tab.path }).catch(() => false));
+      failed = !(await backend.documents.exists(tab.path).catch(() => false));
     } else {
       try {
-        const result = await readTabDoc(tab);
-        contents = result.contents;
-        snapshot = result.snapshot;
+        opened = await openTabDoc(tab);
       } catch (e) {
         failed = true;
         console.error("read failed", tab.path, e);
       }
     }
+    // Everything is read; from here to the editor's key the document is
+    // installed in one go — unless a newer load has started meanwhile.
     if (superseded()) return;
-    if (failed || unsupported) {
+    if (opened === null) {
       // No document: pathRef stays null so autosave can't write (or recreate)
       // the file, and nothing is watched. The editor is not rendered — the
       // pane shows the ghost state, or that the file isn't a document.
@@ -1887,22 +1834,12 @@ export default function App() {
     }
     setTabMissing(tab.id, false); // the file is back (or was never gone)
 
-    // Resolve the document's html rendition: the MD/HTML toggle and the
-    // watcher's companion set both need it.
-    let htmlPath: string | null = null;
-    if (htmlOnly) {
-      htmlPath = tab.path;
-    } else if (tab.kind === "file") {
-      const sibling = htmlSiblingOf(tab.path);
-      const exists = await invoke<boolean>("path_exists", { path: sibling }).catch(
-        () => false,
-      );
-      if (exists) htmlPath = sibling;
-    }
-    const { meta, metaExists } = await readEntityMeta(tab.path);
-    // Everything is read; from here to the editor's key the document is
-    // installed in one go — unless a newer load has started meanwhile.
-    if (superseded()) return;
+    const contents = opened.text;
+    const snapshot = opened.rev;
+    // The document's html rendition: the MD/HTML toggle and the watch set
+    // both need it.
+    const htmlPath = htmlOnly ? tab.path : tab.kind === "file" ? opened.rendition : null;
+    const { meta, metaExists } = metaOf(opened.meta);
     // The frontmatter boundary: split the leading block off the top and keep
     // it in the refs. Everything below — the meta layer, the editor, the disk
     // baseline — works on the BODY alone, so prose edits can never rewrite
@@ -1933,8 +1870,8 @@ export default function App() {
       if (htmlOnly) {
         setHtmlContent(contents);
       } else {
-        const rendition = await invoke<ReadFileResult>("read_file", { path: htmlPath }).then(
-          (r) => r.contents,
+        const rendition = await backend.documents.read(htmlPath).then(
+          (r) => r.text,
           (e) => {
             console.error("read failed", htmlPath, e);
             return null;
@@ -1962,7 +1899,6 @@ export default function App() {
     adoptFrontmatter,
     applyDocView,
     flushSidecarWrite,
-    readEntityMeta,
     adoptEntityMeta,
     refreshWatchSet,
     bumpEditorSeq,
@@ -1981,8 +1917,8 @@ export default function App() {
         continue;
       }
       const readable = isUnsupportedTab({ kind, path })
-        ? await invoke<boolean>("path_exists", { path }).catch(() => false)
-        : await invoke<ReadFileResult>("read_file", { path }).then(
+        ? await backend.documents.exists(path).catch(() => false)
+        : await backend.documents.read(path).then(
             () => true,
             () => false,
           );
@@ -2096,9 +2032,7 @@ export default function App() {
       // starting on the view the user actually asked for.
       if (isHtmlPath(p)) {
         const md = mdSiblingOf(p);
-        const paired = await invoke<boolean>("path_exists", { path: md }).catch(
-          () => false,
-        );
+        const paired = await backend.documents.exists(md).catch(() => false);
         if (paired) {
           viewPrefsRef.current.set(md, "html");
           p = md;
@@ -2124,6 +2058,7 @@ export default function App() {
   // something is typed into it. An untitled note that is still empty IS a new
   // note, so asking for another while on one changes nothing.
   const newUntitled = useCallback(async () => {
+    if (!backend.untitled) return;
     catchUpWithEditor();
     const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
     if (active?.kind === "untitled" && !noteHasText(currentMarkdownRef.current)) return;
@@ -2154,8 +2089,10 @@ export default function App() {
   useEffect(() => {
     if (!ready) return;
     let live = true;
+    const windows = backend.windows;
+    if (!windows) return;
     const take = async () => {
-      const shows = await invoke<WindowShow[]>("take_window_shows").catch(() => [] as WindowShow[]);
+      const shows = await windows.takeShows().catch(() => []);
       for (const show of shows) {
         if (!live) return;
         if (show.kind === "folder") {
@@ -2169,11 +2106,10 @@ export default function App() {
       }
     };
     void take();
-    // SHOWS_EVENT in src-tauri/src/external_open.rs — change both.
-    const un = listen("window-shows", () => void take());
+    const un = windows.onShows(() => void take());
     return () => {
       live = false;
-      void un.then((f) => f()).catch(() => {});
+      un();
     };
   }, [ready, selectSidebarEntries]);
 
@@ -2265,8 +2201,8 @@ export default function App() {
 
   const openFolderPicker = useCallback(async () => {
     try {
-      const chosen = await openDialog({ directory: true, multiple: false });
-      if (typeof chosen === "string") await openWorkspace(chosen);
+      const chosen = await backend.localFiles?.pickFolder();
+      if (chosen) await openWorkspace(chosen);
     } catch (e) {
       console.error("open folder failed", e);
     }
@@ -2274,13 +2210,8 @@ export default function App() {
 
   const openFilePicker = useCallback(async () => {
     try {
-      const chosen = await openDialog({
-        multiple: false,
-        filters: [
-          { name: "Documents", extensions: ["md", "markdown", "mdown", "mkd", "html"] },
-        ],
-      });
-      if (typeof chosen === "string") await openTab(chosen);
+      const chosen = await backend.localFiles?.pickDocument();
+      if (chosen) await openTab(chosen);
     } catch (e) {
       console.error("open file failed", e);
     }
@@ -2290,27 +2221,20 @@ export default function App() {
   // already showing the path, or spawns a fresh one — so the same file/folder is
   // never opened twice.
   const openFileInNewWindow = useCallback(async () => {
+    if (!backend.windows) return;
     try {
-      const chosen = await openDialog({
-        multiple: false,
-        filters: [
-          { name: "Documents", extensions: ["md", "markdown", "mdown", "mkd", "html"] },
-        ],
-      });
-      if (typeof chosen === "string") {
-        await invoke("open_in_window", { folder: null, file: chosen });
-      }
+      const chosen = await backend.localFiles?.pickDocument();
+      if (chosen) await backend.windows.openInNew({ file: chosen });
     } catch (e) {
       console.error("open file in new window failed", e);
     }
   }, []);
 
   const openFolderInNewWindow = useCallback(async () => {
+    if (!backend.windows) return;
     try {
-      const chosen = await openDialog({ directory: true, multiple: false });
-      if (typeof chosen === "string") {
-        await invoke("open_in_window", { folder: chosen, file: null });
-      }
+      const chosen = await backend.localFiles?.pickFolder();
+      if (chosen) await backend.windows.openInNew({ folder: chosen });
     } catch (e) {
       console.error("open folder in new window failed", e);
     }
@@ -2329,16 +2253,14 @@ export default function App() {
 
   const revealInFinder = useCallback(async (target: string) => {
     try {
-      await invoke("reveal_in_finder", { path: target });
+      await backend.localFiles?.reveal(target);
     } catch (e) {
       console.error("reveal failed", e);
     }
   }, []);
 
   const openExternal = useCallback((url: string) => {
-    void invoke("open_external", { url }).catch((e) =>
-      console.error("open external failed", e),
-    );
+    void backend.openExternal(url).catch((e) => console.error("open external failed", e));
   }, []);
 
   // *Copy link* on a file: the link that opens it in Doklin, and who that is
@@ -2349,7 +2271,7 @@ export default function App() {
   // counts by then. Nothing may be awaited before `clipboard.write`.
   const copyPageLink = useCallback(
     async (path: string) => {
-      const link = cloudLink(path);
+      const link = backend.cloud.link(path);
       const written = navigator.clipboard.write([
         new ClipboardItem({
           "text/plain": link.then((l) => new Blob([l.url], { type: "text/plain" })),
@@ -2384,7 +2306,7 @@ export default function App() {
       const target = linkTargetPath(url, fromPath);
       if (!target || !(MD_EXT_RE.test(target) || HTML_EXT_RE.test(target))) return;
       try {
-        if (await invoke<boolean>("path_exists", { path: target })) {
+        if (await backend.documents.exists(target)) {
           await openTab(target);
         }
       } catch (e) {
@@ -2406,17 +2328,17 @@ export default function App() {
     // the same place in the externally-changed document instead of jumping up.
     captureActiveScroll();
     try {
-      const result = await invoke<ReadFileResult>("read_file", { path: target });
-      // The disk holds hybrid markdown; refresh the meta alongside it and
+      const result = await backend.documents.read(target);
+      // What is stored is hybrid markdown; refresh the meta alongside it and
       // hand the editor the expanded form (same boundary as the first load).
-      const body = adoptFrontmatter(result.contents).body;
+      const body = adoptFrontmatter(result.text).body;
       const meta = await loadEntityMeta(target, body);
       const full = expandMarkdown(body, meta.mthreads).md;
       baselineCapturedRef.current = false;
       setInitialMarkdown(full);
       currentMarkdownRef.current = full;
       lastSavedRef.current = full;
-      snapshotRef.current = result.snapshot;
+      snapshotRef.current = result.rev;
       lastDiskMdRef.current = body;
       setDirty(false);
       setConflict(null);
@@ -2446,6 +2368,7 @@ export default function App() {
   // opens on the list: a rail is somewhere to look, not a jump to a version.
   const openHistory = useCallback(
     async (path: string) => {
+      if (!backend.versions) return;
       setVersionPreview(null);
       // A version shows in the document area, so the document has to be the
       // one standing in it: opening history for a file in the tree opens the
@@ -2492,7 +2415,7 @@ export default function App() {
     async (docPath: string, root: string, outcome: RestoreOutcome) => {
       if (outcome.preRestoreHash == null) return;
       try {
-        await versionsRestoreFile(root, docPath, {
+        await backend.versions?.restoreFile(root, docPath, {
           ts: outcome.preRestoreTs,
           hash: outcome.preRestoreHash,
         });
@@ -2509,8 +2432,10 @@ export default function App() {
   // between them.
   const restoreVersion = useCallback(
     async (docPath: string, root: string, version: FileVersion, text: string | null) => {
+      const versions = backend.versions;
+      if (!versions) return;
       try {
-        const outcome = await versionsRestoreFile(root, docPath, {
+        const outcome = await versions.restoreFile(root, docPath, {
           ts: version.ts,
           // Only a version this Mac's own store holds can be named by its
           // hash; a mirrored one and a manifest revision arrive as text.
@@ -2537,12 +2462,14 @@ export default function App() {
   // snapshots. Re-read whenever the tree does — a restore, a delete and a
   // sync all bump that token.
   useEffect(() => {
-    if (!workspaceRoot) {
+    const versions = backend.versions;
+    if (!workspaceRoot || !versions) {
       setDeletedFiles([]);
       return;
     }
     let cancelled = false;
-    void versionsDeleted(workspaceRoot)
+    void versions
+      .deleted(workspaceRoot)
       .then((files) => {
         if (!cancelled) setDeletedFiles(files);
       })
@@ -2556,12 +2483,14 @@ export default function App() {
   }, [workspaceRoot, treeRefreshToken]);
   // A section's own deleted files, read while its column is showing.
   useEffect(() => {
-    if (!deletedFor) {
+    const versions = backend.versions;
+    if (!deletedFor || !versions) {
       setSectionDeleted([]);
       return;
     }
     let cancelled = false;
-    void versionsDeleted(deletedFor)
+    void versions
+      .deleted(deletedFor)
       .then((files) => {
         if (!cancelled) setSectionDeleted(files);
       })
@@ -2577,9 +2506,11 @@ export default function App() {
   // keeps them current while it is open, and asking at boot would only race
   // the manager's own init.
   useEffect(() => {
-    if (!versionsSettingsOpen) return;
+    const versions = backend.versions;
+    if (!versionsSettingsOpen || !versions) return;
     let cancelled = false;
-    void versionsStatus()
+    void versions
+      .status()
       .then((s) => {
         if (!cancelled) setVersionStatuses(s);
       })
@@ -2623,7 +2554,7 @@ export default function App() {
     async (root: string, report: RestoreReport, paths: string[] | null) => {
       if (report.preRestoreTs == null) return;
       try {
-        await versionsRestoreSnapshot(root, report.preRestoreTs, paths);
+        await backend.versions?.restoreSnapshot(root, report.preRestoreTs, paths);
       } catch (e) {
         pushToast("error", `Couldn't undo that restore: ${errText(e)}`);
       }
@@ -2647,7 +2578,7 @@ export default function App() {
 
   const keepMyVersion = useCallback(() => {
     const c = conflictRef.current;
-    if (c) snapshotRef.current = c.diskSnapshot;
+    if (c) snapshotRef.current = c.theirs;
     setConflict(null);
     if (currentMarkdownRef.current !== lastSavedRef.current) {
       scheduleAutosave();
@@ -2679,8 +2610,7 @@ export default function App() {
           await flushPendingAutosave();
           let contents: string;
           try {
-            contents = (await invoke<ReadFileResult>("read_file", { path: htmlPath }))
-              .contents;
+            contents = (await backend.documents.read(htmlPath)).text;
           } catch (e) {
             console.error("read failed", htmlPath, e);
             return;
@@ -2722,11 +2652,10 @@ export default function App() {
         setFindQuery(""); // find targets the markdown editor only
         let contents: string;
         try {
-          contents = (await invoke<ReadFileResult>("read_file", { path: htmlPath }))
-            .contents;
+          contents = (await backend.documents.read(htmlPath)).text;
         } catch (e) {
           console.error("read failed", htmlPath, e);
-          return; // rendition vanished from disk; stay on markdown
+          return; // the rendition is gone; stay on markdown
         }
         // Freshen the comment threads along with the rendition (same doc, so
         // land any pending write first — the reload round-trips it).
@@ -2867,9 +2796,9 @@ export default function App() {
         // Restoring an md|html arrangement: the rendition isn't loaded yet.
         const htmlPath = htmlPathRef.current!;
         try {
-          const r = await invoke<ReadFileResult>("read_file", { path: htmlPath });
-          setHtmlContent(r.contents);
-          htmlContentRef.current = r.contents;
+          const r = await backend.documents.read(htmlPath);
+          setHtmlContent(r.text);
+          htmlContentRef.current = r.text;
         } catch (e) {
           console.error("read failed", htmlPath, e);
           v = "md"; // rendition vanished; fall back to a markdown mirror
@@ -2993,9 +2922,9 @@ export default function App() {
           if (!htmlPath) return;
           if (htmlContentRef.current == null) {
             try {
-              const r = await invoke<ReadFileResult>("read_file", { path: htmlPath });
-              setHtmlContent(r.contents);
-              htmlContentRef.current = r.contents;
+              const r = await backend.documents.read(htmlPath);
+              setHtmlContent(r.text);
+              htmlContentRef.current = r.text;
             } catch (e) {
               console.error("read failed", htmlPath, e);
               return;
@@ -3030,9 +2959,7 @@ export default function App() {
         let contents = s.doc.htmlContent;
         if (contents == null) {
           try {
-            contents = (
-              await invoke<ReadFileResult>("read_file", { path: s.doc.htmlPath })
-            ).contents;
+            contents = (await backend.documents.read(s.doc.htmlPath)).text;
           } catch (e) {
             console.error("read failed", s.doc.htmlPath, e);
             return;
@@ -3234,9 +3161,7 @@ export default function App() {
         let target = path;
         if (isHtmlPath(target)) {
           const md = mdSiblingOf(target);
-          const paired = await invoke<boolean>("path_exists", { path: md }).catch(
-            () => false,
-          );
+          const paired = await backend.documents.exists(md).catch(() => false);
           if (paired) {
             viewPrefsRef.current.set(md, "html");
             target = md;
@@ -3300,18 +3225,15 @@ export default function App() {
       // The rendition beside the chosen name, if one is already there — probed
       // before the write, because its meta is adopted below.
       const sibling = htmlSiblingOf(chosen);
-      const siblingExists = await invoke<boolean>("path_exists", { path: sibling }).catch(
-        () => false,
-      );
+      const siblingExists = await backend.documents.exists(sibling).catch(() => false);
       // The file first, and on its own: if it cannot be written, nothing has
       // changed, and the note is still an untitled note with all of its text.
-      let snapshot: FileSnapshot;
+      let snapshot: Rev | null;
       try {
-        snapshot = await invoke<FileSnapshot>("write_file", {
-          path: chosen,
-          contents: frontmatterRef.current + hybrid,
-          expected: null, // Save As: overwrite the chosen target unconditionally
-        });
+        // Save As: over whatever the chosen name holds.
+        snapshot = (
+          await backend.documents.save(chosen, { text: frontmatterRef.current + hybrid }, null)
+        ).rev;
       } catch (e) {
         console.error("save failed", chosen, e);
         pushToast("error", `Couldn't save ${basename(chosen)}. The note is still unsaved.`);
@@ -3347,9 +3269,9 @@ export default function App() {
       await writeToDisk(chosen, contents);
       // The buffer is finished with — before the tab changes, so a crash in
       // between leaves a saved file and nothing to "recover" beside it.
-      await invoke("discard_untitled", { path: note.path }).catch((e) =>
-        console.error("discard_untitled failed", e),
-      );
+      await backend.untitled
+        ?.discard(note.path)
+        .catch((e) => console.error("discard untitled failed", e));
       // The tab becomes the file's, in place.
       const nextTabs = tabsRef.current.map(
         (t): Tab => (t.id === note.id ? { id: t.id, kind: "file", path: chosen } : t),
@@ -3401,11 +3323,7 @@ export default function App() {
         setSavePrompt({ dir: contextDir, suggested });
       });
     }
-    const chosen = await saveDialog({
-      title: "Save note",
-      defaultPath: `${suggested}.md`,
-      filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
-    });
+    const chosen = await backend.localFiles?.pickSaveAs(`${suggested}.md`);
     if (!chosen) return false;
     return saveUntitledTo(note, chosen);
   }, [catchUpWithEditor, saveUntitledTo, workspaceRoot]);
@@ -3436,7 +3354,7 @@ export default function App() {
       const target = `${sp.dir}/${fileName}`;
       let exists = false;
       try {
-        exists = await invoke<boolean>("path_exists", { path: target });
+        exists = await backend.documents.exists(target);
       } catch {
         // If the check itself fails, fall through — the write will surface it.
       }
@@ -3461,11 +3379,7 @@ export default function App() {
       }
       const base = name.trim() || sp.suggested;
       const fileName = MD_EXT_RE.test(base) ? base : `${base}.md`;
-      const chosen = await saveDialog({
-        title: "Save note",
-        defaultPath: `${sp.dir}/${fileName}`,
-        filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
-      });
+      const chosen = await backend.localFiles?.pickSaveAs(`${sp.dir}/${fileName}`);
       settleSavePrompt(chosen ? await saveUntitledTo(note, chosen) : false);
     },
     [savePrompt, saveUntitledTo, settleSavePrompt],
@@ -3538,9 +3452,9 @@ export default function App() {
       }
       const isActive = id === activeIdRef.current;
       if (tab.kind === "untitled") {
-        await invoke("discard_untitled", { path: tab.path }).catch((e) =>
-          console.error("discard_untitled failed", e),
-        );
+        await backend.untitled
+          ?.discard(tab.path)
+          .catch((e) => console.error("discard untitled failed", e));
       } else if (isActive) {
         flushPendingAutosave();
       }
@@ -3581,11 +3495,10 @@ export default function App() {
     ],
   );
 
-  // Move a file or folder to the system Trash (⌘⌫ / the sidebar's context
-  // menu). The backend returns where the entry landed inside the Trash so
-  // undoDelete can pull it straight back out — a true restore that leaves no
-  // stale copy. Any tabs on the entry (or inside it, for a folder) are closed
-  // first.
+  // Delete a file or folder (⌘⌫ / the sidebar's context menu). Where a
+  // delete can be taken back the backend hands over how (on a Mac: straight
+  // back out of the Trash, leaving no stale copy), and undoDelete keeps it.
+  // Any tabs on the entry (or inside it, for a folder) are closed first.
   const deleteEntry = useCallback(
     async (target: string, kind: "file" | "dir") => {
       // Close affected tabs first (flushing their content while the files still
@@ -3597,66 +3510,23 @@ export default function App() {
           (t.path === target || (kind === "dir" && t.path.startsWith(target + "/"))),
       );
       for (const t of affected) await closeTab(t.id);
-      let trashPath: string;
+      let removed: Removed;
       try {
-        trashPath = await invoke<string>("trash_file", { path: target });
+        removed = await backend.documents.remove(target, kind);
       } catch (e) {
-        console.error("trash failed", e);
+        console.error("delete failed", e);
         alert(`Could not delete ${target}\n${e}`);
         return;
       }
-      const files = [{ path: target, trashPath }];
-      // A document's companions are trashed with it — the html rendition (for
-      // a markdown file) and the entity meta are one document with it.
-      // Best-effort: the primary is already in the Trash.
-      const trashCompanion = async (path: string, label: string) => {
-        const exists = await invoke<boolean>("path_exists", { path }).catch(() => false);
-        if (!exists) return;
-        try {
-          files.push({
-            path,
-            trashPath: await invoke<string>("trash_file", { path }),
-          });
-        } catch (e) {
-          console.error("trash failed", e);
-          alert(`Deleted ${basename(target)} but not its ${label}.\n${e}`);
-        }
-      };
-      if (kind === "file" && MD_EXT_RE.test(target)) {
-        const sibling = htmlSiblingOf(target);
-        await trashCompanion(sibling, "HTML version");
-        await trashCompanion(metaFileOf(target), "comments");
-      } else if (kind === "file" && HTML_EXT_RE.test(target)) {
-        // A standalone html document owns the entity meta; a rendition of a
-        // live pair doesn't — there, only its own (hthread) records die with
-        // it and the markdown side's stay.
-        const mdSide = mdSiblingOf(target);
-        const mdExists = await invoke<boolean>("path_exists", { path: mdSide }).catch(
-          () => false,
-        );
-        if (!mdExists) {
-          await trashCompanion(metaFileOf(target), "comments");
-        } else {
-          try {
-            const r = await invoke<ReadFileResult>("read_file", { path: metaFileOf(target) });
-            const m = parseEntityMeta(r.contents);
-            if (m.hthreads.length > 0) {
-              await invoke<FileSnapshot>("write_file", {
-                path: metaFileOf(target),
-                contents: serializeEntityMeta({ ...m, hthreads: [] }),
-                expected: r.snapshot,
-              });
-            }
-          } catch {
-            // no meta (or it moved underneath) — nothing to scrub
-          }
-        }
+      // A document's html rendition and comments go with it; one that could
+      // not is said, the document itself being gone already.
+      for (const left of removed.left) {
+        console.error("delete failed", left.error);
+        alert(`Deleted ${basename(target)} but not its ${PART_LABEL[left.part]}.\n${left.error}`);
       }
-      const record: DeletedRecord = {
-        files,
-        openPaths: affected.map((t) => t.path),
-      };
-      deletedStackRef.current.push(record);
+      if (removed.undo) {
+        deletedStackRef.current.push({ undo: removed.undo, openPaths: affected.map((t) => t.path) });
+      }
       const sels = sidebarSelectionRef.current;
       const kept = sels.filter(
         (s) => s.path !== target && !s.path.startsWith(target + "/"),
@@ -3667,26 +3537,18 @@ export default function App() {
     [closeTab, selectSidebarEntries],
   );
 
-  // Undo the most recent trash (⌘Z outside the editor): move the entry (and
-  // any rendition trashed with it) back out of the Trash to its original
-  // path, and reopen the tabs it closed.
+  // Undo the most recent delete (⌘Z outside the editor): put the entry, and
+  // what was deleted with it, back where it was, and reopen the tabs it
+  // closed.
   const undoDelete = useCallback(async () => {
     const entry = deletedStackRef.current.pop();
     if (!entry) return;
-    let restoredAny = false;
-    for (const f of entry.files) {
-      try {
-        await invoke("restore_trashed", {
-          trashPath: f.trashPath,
-          originalPath: f.path,
-        });
-        restoredAny = true;
-      } catch (e) {
-        console.error("undo delete failed", e);
-        alert(`Could not restore ${f.path}\n${e}`);
-      }
+    const { restored, failed } = await entry.undo();
+    for (const f of failed) {
+      console.error("undo delete failed", f.error);
+      alert(`Could not restore ${f.path}\n${f.error}`);
     }
-    if (!restoredAny) return;
+    if (!restored) return;
     setTreeRefreshToken((t) => t + 1);
     for (const p of entry.openPaths) await openTab(p);
   }, [openTab]);
@@ -3804,38 +3666,16 @@ export default function App() {
       // Same for a pending comment write: land it before its sidecar (or the
       // rendition it belongs to) moves out from under it.
       await flushSidecarWrite();
+      // A document's html rendition and comments move with it: the three
+      // are one document, and leaving one behind would silently split it.
+      let left: LeftBehind[];
       try {
-        await invoke("move_path", { from, to });
+        left = await backend.documents.move(from, to, kind);
       } catch (e) {
         return String(e);
       }
-      // A document's companions move/rename with it — the markdown, its html
-      // rendition and the entity meta are one document, and leaving one
-      // behind would silently split it. Best-effort: the primary file has
-      // already moved.
-      const moveCompanion = async (cFrom: string, cTo: string, label: string) => {
-        const exists = await invoke<boolean>("path_exists", { path: cFrom }).catch(
-          () => false,
-        );
-        if (!exists) return;
-        try {
-          await invoke("move_path", { from: cFrom, to: cTo });
-        } catch (e) {
-          window.alert(`Moved "${basename(from)}" but not its ${label}.\n${e}`);
-        }
-      };
-      if (kind === "file" && MD_EXT_RE.test(from) && MD_EXT_RE.test(to)) {
-        const fromHtml = htmlSiblingOf(from);
-        const toHtml = htmlSiblingOf(to);
-        await moveCompanion(fromHtml, toHtml, "HTML version");
-        await moveCompanion(metaFileOf(from), metaFileOf(to), "comments");
-      } else if (kind === "file" && HTML_EXT_RE.test(from) && HTML_EXT_RE.test(to)) {
-        // A standalone html document carries the entity meta; a rendition of
-        // a pair leaves it with the markdown side.
-        const mdExists = await invoke<boolean>("path_exists", {
-          path: mdSiblingOf(from),
-        }).catch(() => false);
-        if (!mdExists) await moveCompanion(metaFileOf(from), metaFileOf(to), "comments");
+      for (const l of left) {
+        window.alert(`Moved "${basename(from)}" but not its ${PART_LABEL[l.part]}.\n${l.error}`);
       }
       await repointMoved(from, to, kind);
       return null;
@@ -3899,10 +3739,10 @@ export default function App() {
           // Land what is being typed inside it before the folder moves.
           if (pathRef.current?.startsWith(`${source.path}/`)) await flushPendingAutosave();
           await flushSidecarWrite();
-          const made = await cloudSpaceCreate(cloud.root, name, members, source.path);
+          const made = await backend.cloud.spaceCreate(cloud.root, name, members, source.path);
           await repointMoved(source.path, `${cloud.root}/${made.path}`, "dir");
         } else {
-          const made = await cloudSpaceCreate(cloud.root, name, members);
+          const made = await backend.cloud.spaceCreate(cloud.root, name, members);
           if (source.kind === "note") {
             const to = `${cloud.root}/${made.path}/${basename(source.path)}`;
             const failed = await movePath(source.path, to, "file");
@@ -3926,15 +3766,11 @@ export default function App() {
   // paste re-reads it — so a stale mirror can't misfile anything.
   const [fileClipboard, setFileClipboard] = useState<FileClipboardPayload | null>(null);
   useEffect(() => {
-    invoke<FileClipboardPayload | null>("clipboard_get_files")
-      .then((p) => setFileClipboard(p ?? null))
+    backend.fileClipboard
+      .get()
+      .then(setFileClipboard)
       .catch(() => {});
-    const un = listen<FileClipboardPayload | null>("file-clipboard-changed", (e) => {
-      setFileClipboard(e.payload ?? null);
-    });
-    return () => {
-      void un.then((f) => f());
-    };
+    return backend.fileClipboard.onChange(setFileClipboard);
   }, []);
 
   // Cut/Copy: park the selection on the app-wide clipboard. The files aren't
@@ -3943,7 +3779,7 @@ export default function App() {
     const items = pruneNestedSelection(entries);
     if (items.length === 0) return;
     try {
-      await invoke("clipboard_set_files", { items, cut });
+      await backend.fileClipboard.set(items, cut);
     } catch (e) {
       console.error("file clipboard set failed", e);
     }
@@ -3957,7 +3793,7 @@ export default function App() {
     async (destDir: string) => {
       let clip: FileClipboardPayload | null = null;
       try {
-        clip = await invoke<FileClipboardPayload | null>("clipboard_get_files");
+        clip = await backend.fileClipboard.get();
       } catch {
         return;
       }
@@ -3991,40 +3827,18 @@ export default function App() {
           pasted.push({ path: to, kind: item.kind });
         } else {
           const to = await uniquePastePath(destDir, name, item.kind);
+          // The document's html rendition and comments are copied with it,
+          // as delete and move take them along.
+          let left: LeftBehind[];
           try {
-            await invoke("copy_path", { from: item.path, to });
+            left = await backend.documents.copy(item.path, to, item.kind);
           } catch (e) {
             window.alert(`Could not copy ${name}\n${e}`);
             continue;
           }
           copiedAny = true;
-          // The document's companions ride along, mirroring delete/move: the
-          // html rendition and the entity meta are one document with it.
-          const copyCompanion = async (cFrom: string, cTo: string, label: string) => {
-            const exists = await invoke<boolean>("path_exists", { path: cFrom }).catch(
-              () => false,
-            );
-            if (!exists) return;
-            try {
-              await invoke("copy_path", { from: cFrom, to: cTo });
-            } catch (e) {
-              window.alert(`Copied ${name} but not its ${label}.\n${e}`);
-            }
-          };
-          if (item.kind === "file" && MD_EXT_RE.test(item.path) && MD_EXT_RE.test(to)) {
-            const fromHtml = htmlSiblingOf(item.path);
-            const toHtml = htmlSiblingOf(to);
-            await copyCompanion(fromHtml, toHtml, "HTML version");
-            await copyCompanion(metaFileOf(item.path), metaFileOf(to), "comments");
-          } else if (item.kind === "file" && HTML_EXT_RE.test(item.path)) {
-            // A standalone html document owns the entity meta; a rendition of
-            // a pair leaves it with the markdown side (same rule as move).
-            // Duplicating a meta is safe by design — it carries no sync
-            // identity (see metaFile.ts).
-            const mdExists = await invoke<boolean>("path_exists", {
-              path: mdSiblingOf(item.path),
-            }).catch(() => false);
-            if (!mdExists) await copyCompanion(metaFileOf(item.path), metaFileOf(to), "comments");
+          for (const l of left) {
+            window.alert(`Copied ${name} but not its ${PART_LABEL[l.part]}.\n${l.error}`);
           }
           pasted.push({ path: to, kind: item.kind });
         }
@@ -4032,7 +3846,7 @@ export default function App() {
       if (clip.cut && pasted.length > 0) {
         // A cut is consumed by its paste (VS Code): a second ⌘V must not try
         // to move files that already left.
-        invoke("clipboard_clear_files").catch(() => {});
+        backend.fileClipboard.clear().catch(() => {});
       }
       if (copiedAny) setTreeRefreshToken((t) => t + 1); // moves refresh on their own
       if (pasted.length > 0) selectSidebarEntries(pasted);
@@ -4051,13 +3865,13 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      untitledDir = await invoke<string>("untitled_dir");
+      if (backend.untitled) untitledDir = await backend.untitled.dir();
 
       // Ask the backend who we are and what to open (the window label is the
       // authority). A spawned window initializes from its stashed file/folder
       // or its saved tabs, and skips the stored-session restore and
       // pending-open consumption — those belong to the main window.
-      const init = await invoke<WindowInit>("take_window_init");
+      const init = backend.windows ? await backend.windows.init() : ONLY_WINDOW;
       if (!init.isMain) {
         isMainWindow = false;
         if (init.restored) {
@@ -4091,7 +3905,7 @@ export default function App() {
       // directory's own tabs — a different directory's tabs never leak in.
       // (Files never arrive as a pending folder: an externally opened file
       // always gets its own spawned window, so it can't attach to this session.)
-      const pendingFolder = await invoke<string | null>("take_pending_folder");
+      const pendingFolder = (await backend.windows?.pendingFolder()) ?? null;
       const all = readAllSessions();
       const targetRoot = pendingFolder ?? all.lastRoot;
       // Adopt the target root into the module mirror BEFORE any
@@ -4116,12 +3930,12 @@ export default function App() {
       // session is lost. It is still unsaved work, so it is opened here
       // rather than left where nothing shows it. (Its tab id is its buffer's
       // name, so a note that was the active tab is the active tab again.)
-      const orphans = await invoke<string[]>("orphaned_untitled", {
-        open: restored.filter(isUntitled).map((t) => t.path),
-      }).catch((e) => {
-        console.error("orphaned_untitled failed", e);
-        return [] as string[];
-      });
+      const orphans = backend.untitled
+        ? await backend.untitled.orphans(restored.filter(isUntitled).map((t) => t.path)).catch((e) => {
+            console.error("orphaned untitled failed", e);
+            return [] as string[];
+          })
+        : [];
       for (const path of orphans) {
         const note = await restoreUntitled(basename(path).replace(MD_EXT_RE, ""), path);
         if (note && !restored.some((t) => t.id === note.id)) restored.push(note);
@@ -4159,9 +3973,7 @@ export default function App() {
         // separately). A root that doesn't read right now
         // stays in the stored session (see sessionWorkspaceRoot) but isn't
         // shown, so an unmounted drive self-heals on a later launch.
-        const exists = await invoke<boolean>("path_exists", {
-          path: targetRoot,
-        }).catch(() => false);
+        const exists = await backend.documents.exists(targetRoot).catch(() => false);
         if (exists) setWorkspaceRoot(targetRoot);
       }
       setReady(true);
@@ -4185,20 +3997,20 @@ export default function App() {
     [workspaceRoot, tabs, activeId],
   );
   useEffect(() => {
-    if (ready) void invoke("register_window_content", JSON.parse(windowReport));
+    if (ready) backend.windows?.report(JSON.parse(windowReport));
   }, [ready, windowReport]);
 
   useEffect(() => {
-    const un = listen<ExternalChangePayload>("file-externally-changed", (e) => {
-      // The split pane's document set changed externally: refresh that pane.
-      // Its documents are disjoint from the active one's (a same-document
-      // split has no record and falls through to the active branches below).
+    return backend.documents.onChange(({ path, part }: DocumentChange) => {
+      // The split pane's document changed somewhere else: refresh that pane.
+      // It is never the active document (a same-document split has no record
+      // and falls through to the active branches below).
       const sd = splitRef.current?.doc;
-      if (sd) {
-        if (e.payload.path === sd.path) {
+      if (sd && path === sd.path) {
+        if (part === "text") {
           void (async () => {
             try {
-              const r = await invoke<ReadFileResult>("read_file", { path: sd.path });
+              const r = await backend.documents.read(sd.path);
               const cur = splitRef.current;
               if (!cur?.doc || cur.doc.path !== sd.path) return;
               captureCompanionScroll(); // the pane's editor remounts on new content
@@ -4206,7 +4018,7 @@ export default function App() {
               bumpEditorSeq(cur.tabId);
               const htmlOnly = cur.doc.kind === "file" && isHtmlPath(cur.doc.path);
               const { meta } = await readEntityMeta(sd.path);
-              const fm = splitFrontmatter(htmlOnly ? "" : r.contents);
+              const fm = splitFrontmatter(htmlOnly ? "" : r.text);
               const full = htmlOnly ? "" : expandMarkdown(fm.body, meta.mthreads).md;
               setSplitState({
                 ...cur,
@@ -4215,37 +4027,36 @@ export default function App() {
                   missing: false,
                   head: htmlOnly ? cur.doc.head : fm.head,
                   contents: full,
-                  snapshot: htmlOnly ? null : r.snapshot,
-                  htmlContent: htmlOnly ? r.contents : cur.doc.htmlContent,
+                  snapshot: htmlOnly ? null : r.rev,
+                  htmlContent: htmlOnly ? r.text : cur.doc.htmlContent,
                   dirty: false,
                   conflict: null,
                 },
               });
             } catch {
-              // mid-rewrite; the next event covers it
+              // mid-rewrite; the next change covers it
             }
           })();
-          return;
-        }
-        if (sd.htmlPath && e.payload.path === sd.htmlPath && sd.htmlPath !== sd.path) {
+        } else if (part === "rendition") {
+          const htmlPath = sd.htmlPath;
+          if (!htmlPath) return;
           void (async () => {
             try {
-              const r = await invoke<ReadFileResult>("read_file", { path: sd.htmlPath! });
+              const r = await backend.documents.read(htmlPath);
               const cur = splitRef.current;
-              if (!cur?.doc || cur.doc.htmlPath !== sd.htmlPath) return;
+              if (!cur?.doc || cur.doc.htmlPath !== htmlPath) return;
               setSplitState({
                 ...cur,
-                doc: { ...cur.doc, htmlContent: cur.view === "html" ? r.contents : null },
+                doc: { ...cur.doc, htmlContent: cur.view === "html" ? r.text : null },
               });
             } catch {
-              // mid-rewrite; the next event covers it
+              // mid-rewrite; the next change covers it
             }
           })();
-          return;
-        }
-        // The pane entity's META changed (sync delivered a teammate's thread
-        // or reply): refresh the pane's threads and re-expand its markdown.
-        if (e.payload.path === metaFileOf(sd.path)) {
+        } else {
+          // The pane entity's META changed (sync delivered a teammate's
+          // thread or reply): refresh the pane's threads and re-expand its
+          // markdown.
           void (async () => {
             try {
               const { meta, metaExists } = await readEntityMeta(sd.path);
@@ -4255,8 +4066,8 @@ export default function App() {
               let contents = cur.doc.contents;
               let ids = new Set<string>();
               if (!htmlOnly) {
-                const r = await invoke<ReadFileResult>("read_file", { path: sd.path });
-                const body = splitFrontmatter(r.contents).body;
+                const r = await backend.documents.read(sd.path);
+                const body = splitFrontmatter(r.text).body;
                 ids = markerIds(body);
                 contents = expandMarkdown(body, meta.mthreads).md;
                 if (contents !== cur.doc.contents) {
@@ -4278,27 +4089,28 @@ export default function App() {
                 },
               });
             } catch {
-              // mid-rewrite; the next event covers it
+              // mid-rewrite; the next change covers it
             }
           })();
-          return;
         }
+        return;
       }
+      const activeDocPath = pathRef.current ?? htmlPathRef.current;
+      if (activeDocPath === null || path !== activeDocPath) return;
       // The active entity's META changed (cloud sync delivered a teammate's
       // thread, another window wrote): fold it in — unless a local write is
       // pending, which would clobber a comment mid-typing; that write lands
       // in a moment and last-write-wins. Html threads land on the rail;
       // markdown thread bodies land IN PLACE on the open editor's marks
-      // (three-way against the last disk state, so a reply typed here while
+      // (three-way against the last saved state, so a reply typed here while
       // the change was in flight survives).
-      const activeDocPath = pathRef.current ?? htmlPathRef.current;
-      const metaPath = activeDocPath ? metaFileOf(activeDocPath) : null;
-      if (metaPath !== null && e.payload.path === metaPath) {
+      if (part === "meta") {
         if (sidecarWriteTimerRef.current != null) return;
         void (async () => {
           try {
-            const r = await invoke<ReadFileResult>("read_file", { path: metaPath });
-            const meta = parseEntityMeta(r.contents);
+            const text = await backend.documents.meta(activeDocPath);
+            if (text === null) return; // mid-rewrite; the next change covers it
+            const meta = parseEntityMeta(text);
             htmlSidecarExistsRef.current = true;
             applyHtmlThreads(meta.hthreads);
             // Table widths adopt the incoming set for the NEXT open, but the
@@ -4326,57 +4138,56 @@ export default function App() {
               setMdOrphans([]);
             }
           } catch {
-            // mid-rewrite; the next event covers it
+            // mid-rewrite; the next change covers it
           }
         })();
         return;
       }
-      // The active document's html rendition changed (e.g. regenerated by an
-      // AI tool): re-render it. The markdown editor — and its dirty/conflict
-      // flow — is untouched.
-      if (e.payload.path === htmlPathRef.current) {
+      // The active document's html changed (e.g. regenerated by an AI tool):
+      // its rendition, or the text of a document that is html alone.
+      // Re-render it. The markdown editor — and its dirty/conflict flow — is
+      // untouched.
+      if (part === "rendition" || pathRef.current === null) {
+        const htmlPath = htmlPathRef.current;
+        if (!htmlPath) return;
         void (async () => {
           try {
-            const r = await invoke<ReadFileResult>("read_file", { path: e.payload.path });
-            setHtmlContent(r.contents);
+            const r = await backend.documents.read(htmlPath);
+            setHtmlContent(r.text);
           } catch {
-            // mid-rewrite; the next event covers it
+            // mid-rewrite; the next change covers it
           }
         })();
         return;
       }
-      if (e.payload.path !== pathRef.current) return;
-      // The active document changed on disk. A change to the frontmatter
-      // block alone — an agent tagged the note, a teammate's Mac synced one —
-      // leaves the body exactly as we last saved it, so there is nothing to
-      // reload: adopt the new block, take the new snapshot, and leave the
-      // editor and its caret alone. Only a body change from outside still
+      // The active document's text changed somewhere else. A change to the
+      // frontmatter block alone — an agent tagged the note, a teammate's Mac
+      // synced one — leaves the body exactly as we last saved it, so there is
+      // nothing to reload: adopt the new block, take the new rev, and leave
+      // the editor and its caret alone. Only a body change from outside still
       // goes through reload / conflict.
       void (async () => {
-        const target = e.payload.path;
-        let r: ReadFileResult;
+        const target = path;
+        let r: DocumentText;
         try {
-          r = await invoke<ReadFileResult>("read_file", { path: target });
+          r = await backend.documents.read(target);
         } catch {
-          return; // mid-rewrite; the next event covers it
+          return; // mid-rewrite; the next change covers it
         }
         if (pathRef.current !== target) return;
-        const fm = splitFrontmatter(r.contents);
+        const fm = splitFrontmatter(r.text);
         if (fm.body === lastDiskMdRef.current) {
-          adoptFrontmatter(r.contents);
-          snapshotRef.current = r.snapshot;
+          adoptFrontmatter(r.text);
+          snapshotRef.current = r.rev;
           return;
         }
         if (dirtyRef.current || conflictRef.current) {
-          setConflict({ diskSnapshot: r.snapshot });
+          setConflict({ theirs: r.rev });
         } else {
           await reloadFromDisk();
         }
       })();
     });
-    return () => {
-      void un.then((f) => f());
-    };
   }, [
     reloadFromDisk,
     applyHtmlThreads,
@@ -4400,14 +4211,15 @@ export default function App() {
   //
   // Then the flush: type-then-close within the autosave debounce would lose
   // the last keystrokes if the window went before the fire-and-forget
-  // write_file resolved. Intercept the close, await the pending write, then
+  // save resolved. Intercept the close, await the pending write, then
   // destroy the window for real. A second close request while the flush is in
   // flight is let through untouched — the escape hatch if the write ever
   // hangs; one that arrives while a question is up is simply held.
   const closingRef = useRef<"asking" | "flushing" | null>(null);
   useEffect(() => {
-    const win = getCurrentWindow();
-    const un = win.onCloseRequested(async (event) => {
+    const win = backend.windows;
+    if (!win) return;
+    return win.onCloseRequested(async (event) => {
       if (closingRef.current === "flushing") return;
       event.preventDefault();
       if (closingRef.current === "asking") return;
@@ -4424,34 +4236,20 @@ export default function App() {
       try {
         await Promise.all([flushPendingAutosave(), flushSidecarWrite()]);
       } finally {
-        void win.destroy();
+        win.destroy();
       }
     });
-    return () => {
-      void un.then((f) => f());
-    };
   }, [closeTab, flushPendingAutosave, flushSidecarWrite]);
 
-  // The close-requested flush above never fires on ⌘Q: the app menu's Quit
-  // would invoke NSApp terminate:, which kills the process without any window
-  // close events. So the backend replaces it with a custom Quit item (see
-  // build_app_menu in lib.rs) that broadcasts this event instead; each window
-  // flushes its pending autosave, acks, and the backend exits once every
-  // window has acked (or its ~1s timeout fires). Quitting asks nothing about
-  // untitled notes: with their buffers flushed here and their tabs in the
-  // session, the next launch brings each one back as it was — unsaved.
-  useEffect(() => {
-    const un = listen("quit-flush-requested", async () => {
-      try {
-        await Promise.all([flushPendingAutosave(), flushSidecarWrite()]);
-      } finally {
-        void invoke("quit_flush_ack");
-      }
-    });
-    return () => {
-      void un.then((f) => f());
-    };
-  }, [flushPendingAutosave, flushSidecarWrite]);
+  // The close-requested flush above never fires on a quit, which closes no
+  // window: the backend asks every window to flush instead, and goes once
+  // each has (or after about a second). Quitting asks nothing about untitled
+  // notes: with their buffers flushed here and their tabs in the session, the
+  // next launch brings each one back as it was — unsaved.
+  useEffect(
+    () => backend.windows?.onQuit(() => Promise.all([flushPendingAutosave(), flushSidecarWrite()])),
+    [flushPendingAutosave, flushSidecarWrite],
+  );
 
 
   // An untitled note is known by its first line and is unsaved for as long
@@ -4561,8 +4359,8 @@ export default function App() {
       return;
     }
     try {
-      const chosen = await openDialog({ directory: true, multiple: false });
-      if (typeof chosen === "string") {
+      const chosen = await backend.localFiles?.pickFolder();
+      if (chosen) {
         await openWorkspace(chosen);
         setSidebarMode("search");
         setWsFocusToken((t) => t + 1);
@@ -4642,7 +4440,7 @@ export default function App() {
         // VS Code / Chrome convention.
         e.preventDefault();
         if (activeIdRef.current) void closeTab(activeIdRef.current);
-        else void getCurrentWindow().close();
+        else backend.windows?.close();
       } else if (k === "backspace") {
         // ⌘⌫ moves the selected entries to the Trash — but only when focus is
         // outside the editor, so it stays Milkdown's delete-to-line-start while
@@ -4712,7 +4510,7 @@ export default function App() {
       } else if (e.code === "Backquote" && e.metaKey) {
         // ⌘` / ⌘⇧`: cycle between this app's windows (Safari style).
         e.preventDefault();
-        void invoke("focus_next_window", { backward: e.shiftKey });
+        backend.windows?.focusNext(e.shiftKey);
       } else if (e.code === "Backslash" && e.shiftKey) {
         // ⌘⇧\ (reads as "|" in e.key, hence e.code): toggle the split view.
         e.preventDefault();
@@ -4784,7 +4582,7 @@ export default function App() {
         ? tabLabel(active)
         : basename(active.path);
     const edited = active != null && (dirty || isUnsaved(active));
-    void getCurrentWindow().setTitle(`${edited ? "● " : ""}${name}`);
+    backend.setTitle(`${edited ? "● " : ""}${name}`);
   }, [tabs, activeId, dirty]);
 
   // Stable element/handle sinks for the two panes (inline arrows would
@@ -4871,6 +4669,16 @@ export default function App() {
   // Nothing to edit, find in, publish or split: a ghost, or not a document.
   const activeNoDoc = activeMissing || activeUnsupported;
   const showSidebar = workspaceRoot != null && sidebarOpen;
+
+  // Which ways in this platform has. One left undefined is a button or a
+  // menu row that is not shown; the surfaces behind it are rendered only
+  // with the group they call.
+  const versionStore = backend.versions;
+  const onNewNote = backend.untitled ? () => void newUntitled() : undefined;
+  const onPickFile = backend.localFiles ? openFilePicker : undefined;
+  const onPickFolder = backend.localFiles ? openFolderPicker : undefined;
+  const ownWindows = backend.localFiles != null && backend.windows != null;
+  const onHistory = versionStore ? (path: string) => void openHistory(path) : undefined;
   const activeFilePath = activeTab?.kind === "file" ? activeTab.path : null;
   // The document this window is editing — never a file that isn't one.
   const activeDocPath = activeUnsupported ? null : activeFilePath;
@@ -4878,7 +4686,7 @@ export default function App() {
   // file, or nothing) so other devices see "editing Projects/plan.md". The
   // Rust side decides which connected workspace, if any, it concerns.
   useEffect(() => {
-    void cloudSetActivity(activeDocPath).catch(() => {});
+    void backend.cloud.setActivity(activeDocPath).catch(() => {});
   }, [activeDocPath]);
   // Leases: the same report is this Mac's claim on the
   // document, and the status says which documents another Mac holds. One of
@@ -4891,7 +4699,7 @@ export default function App() {
   const leased = activeLease != null;
   const takeOverActive = useCallback(() => {
     const held = activeLeaseRef.current;
-    if (held && activeDocPath) void cloudTakeOver(held.status.root, activeDocPath).catch(() => {});
+    if (held && activeDocPath) void backend.cloud.takeOver(held.status.root, activeDocPath).catch(() => {});
   }, [activeDocPath]);
   // An owner took this Mac's access to a workspace away. The engine has
   // already deleted the copy here — the folder, and
@@ -4996,7 +4804,7 @@ export default function App() {
   useEffect(() => {
     if (!ready) return;
     let live = true;
-    void cloudRemoved()
+    void backend.cloud.removed()
       .then(async (removed) => {
         for (const e of removed) if (live) await leaveRemovedWorkspace(e);
       })
@@ -5007,37 +4815,28 @@ export default function App() {
   }, [ready, leaveRemovedWorkspace]);
   useEffect(() => {
     const uns = [
-      onCloudRemoved((e) => {
+      backend.cloud.onRemoved((e) => {
         if (readyRef.current) void leaveRemovedWorkspace(e);
       }),
-      onCloudApplied((e) => {
+      backend.cloud.onApplied((e) => {
         if (e.root === sessionWorkspaceRoot) setTreeRefreshToken((t) => t + 1);
       }),
-      // A restore wrote a document: the tree refreshes like sync's, and the
-      // open editor reloads — the watcher stays quiet for our own writes.
-      onVersionsApplied((e) => {
-        if (e.root === sessionWorkspaceRoot) setTreeRefreshToken((t) => t + 1);
-        if (pathRef.current && e.paths.includes(pathRef.current)) void reloadFromDisk();
-      }),
-      // Every store's size, horizon and count, on every capture and sweep —
-      // what the Versions settings reads.
-      onVersionsStatus((s) => setVersionStatuses(s)),
-      onCloudConflict((e) => {
+      backend.cloud.onConflict((e) => {
         pushToast("warn", `${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
           label: "Open the copy",
           run: () => void openTab(`${e.root}/${e.conflictPath}`),
         });
       }),
-      onCloudSpaceLeft((e) => {
+      backend.cloud.onSpaceLeft((e) => {
         if (readyRef.current) void leaveSpaceFolder(e);
       }),
-      onCloudAddressTaken((e) => {
+      backend.cloud.onAddressTaken((e) => {
         pushToast(
           "warn",
           `The address "${e.slug}" is already taken on this domain, so ${basename(e.path)} was not published.`,
         );
       }),
-      onCloudPendingDeletes((e) => {
+      backend.cloud.onPendingDeletes((e) => {
         setPendingDeletes(e);
         if (e.count > 0) {
           pushToast(
@@ -5048,14 +4847,14 @@ export default function App() {
         }
       }),
       // Many new documents at once: the notice asks, with both answers on it.
-      onCloudPendingAdds((e) => {
+      backend.cloud.onPendingAdds((e) => {
         setPendingAdds(e);
         if (e.root !== sessionWorkspaceRoot || e.count === 0) return;
         const open = cloudForRootRef.current;
         const name = open?.root === e.root ? open.name : basename(e.root);
         const answer = (sync: boolean) => () => {
           addsToastRef.current = null;
-          cloudConfirmAdds(e.root, sync).catch((err) => pushToast("error", errText(err)));
+          backend.cloud.confirmAdds(e.root, sync).catch((err) => pushToast("error", errText(err)));
         };
         if (addsToastRef.current != null) dismissToast(addsToastRef.current);
         addsToastRef.current = pushToast(
@@ -5066,8 +4865,22 @@ export default function App() {
         );
       }),
     ];
+    const versions = backend.versions;
+    if (versions) {
+      uns.push(
+        // A restore wrote a document: the tree refreshes like sync's, and the
+        // open editor reloads — the watcher stays quiet for our own writes.
+        versions.onApplied((e) => {
+          if (e.root === sessionWorkspaceRoot) setTreeRefreshToken((t) => t + 1);
+          if (pathRef.current && e.paths.includes(pathRef.current)) void reloadFromDisk();
+        }),
+        // Every store's size, horizon and count, on every capture and sweep —
+        // what the Versions settings reads.
+        versions.onStatus((s) => setVersionStatuses(s)),
+      );
+    }
     return () => {
-      for (const un of uns) void un.then((f) => f()).catch(() => {});
+      for (const un of uns) un();
     };
   }, [openTab, pushToast, dismissToast, reloadFromDisk, leaveRemovedWorkspace, leaveSpaceFolder]);
   // Answered somewhere else — the Cloud panel, another window — the question
@@ -5314,8 +5127,9 @@ export default function App() {
               onOpenLink={(href) => void followDocLink(href, paneTab?.path ?? null)}
             />
           )}
-          {previewHere && versionPreview && (
+          {previewHere && versionPreview && versionStore && (
             <VersionPreview
+              store={versionStore}
               docPath={versionPreview.docPath}
               root={versionPreview.root}
               version={versionPreview.version}
@@ -5391,9 +5205,9 @@ export default function App() {
               untitled tab in VS Code. */}
           {focused && !activeTab && (
             <ScratchEmptyState
-              onNewNote={() => void newUntitled()}
-              onOpenFile={openFilePicker}
-              onOpenFolder={openFolderPicker}
+              onNewNote={onNewNote}
+              onOpenFile={onPickFile}
+              onOpenFolder={onPickFolder}
               onJoinWorkspace={() => setCloudSetup("redeem")}
             />
           )}
@@ -5409,18 +5223,18 @@ export default function App() {
       docked={showSidebar}
       theme={theme}
       onTheme={setTheme}
-      onNewNote={() => void newUntitled()}
-      onOpenFile={openFilePicker}
-      onOpenFolder={openFolderPicker}
-      onOpenFileNewWindow={() => void openFileInNewWindow()}
-      onOpenFolderNewWindow={() => void openFolderInNewWindow()}
+      onNewNote={onNewNote}
+      onOpenFile={onPickFile}
+      onOpenFolder={onPickFolder}
+      onOpenFileNewWindow={ownWindows ? () => void openFileInNewWindow() : undefined}
+      onOpenFolderNewWindow={ownWindows ? () => void openFolderInNewWindow() : undefined}
       canCopyWithComments={activeTab != null && !activeNoDoc}
       onCopyWithComments={() => void copyWithComments()}
       update={update}
       onOpenExternal={openExternal}
       onOpenCloud={() => setCloudPanelOpen(true)}
       cloudAttention={cloudNeedsAttention(cloudStatuses)}
-      onOpenVersions={() => setVersionsSettingsOpen(true)}
+      onOpenVersions={versionStore ? () => setVersionsSettingsOpen(true) : undefined}
     />
   );
 
@@ -5459,12 +5273,12 @@ export default function App() {
         dirty={dirty}
         onSwitch={(id) => void switchTab(id)}
         onClose={(id) => void closeTab(id)}
-        onNewNote={() => void newUntitled()}
+        onNewNote={onNewNote}
         onReorder={reorderTabs}
         onDragOut={handleTabDragOut}
         onDragOutEnd={handleTabDragEnd}
         onDragOutCancel={handleTabDragCancel}
-        onHistory={(path) => void openHistory(path)}
+        onHistory={onHistory}
         live={livePaths}
         leading={showSidebar ? undefined : titleLead}
         trailing={
@@ -5541,8 +5355,9 @@ export default function App() {
           focusToken={wsFocusToken}
         />
       )}
-      {showSidebar && workspaceRoot && sidebarMode === "deleted" && (
+      {showSidebar && workspaceRoot && sidebarMode === "deleted" && versionStore && (
         <RecentlyDeleted
+          store={versionStore}
           // The workspace's own, or one section's: each folder with a
           // history has its own list.
           root={deletedFor ?? workspaceRoot}
@@ -5573,9 +5388,9 @@ export default function App() {
           refreshToken={treeRefreshToken}
           onSelect={selectSidebarEntries}
           onOpenFile={(p) => void openTab(p)}
-          onOpenFolder={openFolderPicker}
-          onOpenFilePicker={openFilePicker}
-          onRevealInFinder={revealInFinder}
+          onOpenFolder={onPickFolder}
+          onOpenFilePicker={onPickFile}
+          onRevealInFinder={backend.localFiles ? revealInFinder : undefined}
           onDelete={(entries) => void deleteEntries(entries)}
           onMovePath={movePath}
           onCopyEntries={(entries, cut) => void copyEntries(entries, cut)}
@@ -5607,17 +5422,22 @@ export default function App() {
           onStopPublishing={cloudForRoot ? stopPublishing : undefined}
           onCopyLink={(url) => void navigator.clipboard.writeText(url).catch(() => {})}
           onCopyPageLink={cloudForRoot ? (path) => void copyPageLink(path) : undefined}
-          onHistory={(path) => void openHistory(path)}
-          onWorkspaceHistory={(dir) => setHistoryRoot(dir ?? workspaceRoot)}
+          onHistory={onHistory}
+          onWorkspaceHistory={versionStore ? (dir) => setHistoryRoot(dir ?? workspaceRoot) : undefined}
           deletedCount={deletedFiles.length}
-          onRecentlyDeleted={(dir) => {
-            setDeletedFor(dir ?? null);
-            setSidebarMode("deleted");
-          }}
+          onRecentlyDeleted={
+            versionStore
+              ? (dir) => {
+                  setDeletedFor(dir ?? null);
+                  setSidebarMode("deleted");
+                }
+              : undefined
+          }
         />
       )}
-      {historyRoot && workspaceRoot && (
+      {historyRoot && workspaceRoot && versionStore && (
         <WorkspaceHistory
+          store={versionStore}
           root={historyRoot}
           onClose={() => setHistoryRoot(null)}
           onRestored={(report, paths) => snapshotRestored(historyRoot, report, paths)}
@@ -5652,8 +5472,9 @@ export default function App() {
           }}
         />
       )}
-      {versionsSettingsOpen && (
+      {versionsSettingsOpen && versionStore && (
         <VersionsSettings
+          store={versionStore}
           root={workspaceRoot}
           statuses={versionStatuses}
           cloud={cloudForRoot}
@@ -5690,9 +5511,10 @@ export default function App() {
           />
         )}
         {renderPane("right")}
-        {historyFor && (
+        {historyFor && versionStore && (
           // A right rail beside the document, never over it.
           <HistoryRail
+            store={versionStore}
             docPath={historyFor}
             selected={versionPreview?.version.ts ?? null}
             onSelect={previewVersion}
@@ -5745,14 +5567,22 @@ export default function App() {
             setCloudPanelOpen(false);
             setWorkerUpdateOpen(true);
           }}
-          onWorkspaceHistory={() => {
-            setCloudPanelOpen(false);
-            setHistoryRoot(workspaceRoot);
-          }}
-          onOpenVersions={() => {
-            setCloudPanelOpen(false);
-            setVersionsSettingsOpen(true);
-          }}
+          onWorkspaceHistory={
+            versionStore
+              ? () => {
+                  setCloudPanelOpen(false);
+                  setHistoryRoot(workspaceRoot);
+                }
+              : undefined
+          }
+          onOpenVersions={
+            versionStore
+              ? () => {
+                  setCloudPanelOpen(false);
+                  setVersionsSettingsOpen(true);
+                }
+              : undefined
+          }
           onOpenPublished={() => {
             setCloudPanelOpen(false);
             setPublishedOpen(true);
@@ -6504,14 +6334,17 @@ function Settings({
   docked: boolean;
   theme: Theme;
   onTheme: (t: Theme) => void;
-  onNewNote: () => void;
-  onOpenFile: () => void;
-  onOpenFolder: () => void;
-  onOpenFileNewWindow: () => void;
-  onOpenFolderNewWindow: () => void;
+  // The File rows: each is shown only where the platform has what it opens
+  // (a handler that is not passed is a row that is not there).
+  onNewNote?: () => void;
+  onOpenFile?: () => void;
+  onOpenFolder?: () => void;
+  onOpenFileNewWindow?: () => void;
+  onOpenFolderNewWindow?: () => void;
   canCopyWithComments: boolean;
   onCopyWithComments: () => void;
-  update: UpdateController;
+  /** Null where the app does not update itself. */
+  update: UpdateController | null;
   onOpenExternal: (url: string) => void;
   // Open the Cloud panel; `cloudAttention` lights the item (and the gear)
   // when a connected domain's worker is behind this app.
@@ -6519,37 +6352,20 @@ function Settings({
   cloudAttention: boolean;
   /** Open the Versions settings: the two horizons, the space each store
    *  uses, the export, and the folders whose history outlived them. */
-  onOpenVersions: () => void;
+  onOpenVersions?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useDismiss(() => setOpen(false), wrapRef, open);
 
-  const updateAvailable = update.phase === "available";
-  const updateBusy =
-    update.phase === "downloading" || update.phase === "installing";
-  const ver = update.current ? `v${update.current}` : "";
-  let updateStatusText: string;
-  switch (update.phase) {
-    case "checking":
-      updateStatusText = ver || "Checking for updates…";
-      break;
-    case "available":
-      updateStatusText = `Current: ${ver}`;
-      break;
-    case "installing":
-      updateStatusText = "Restarting…";
-      break;
-    case "error":
-      updateStatusText = ver ? `${ver} · Couldn't check` : "Couldn't check";
-      break;
-    case "downloading":
-      updateStatusText = "";
-      break;
-    default:
-      updateStatusText = ver ? `${ver} · Up to date` : "";
-  }
+  const updateAvailable = update?.phase === "available";
+  const hasFileRows =
+    onNewNote != null ||
+    onOpenFile != null ||
+    onOpenFolder != null ||
+    onOpenFileNewWindow != null ||
+    onOpenFolderNewWindow != null;
 
   // One badge, two reasons: an app update, or a cloud worker behind it.
   const fabLabel = updateAvailable
@@ -6562,70 +6378,80 @@ function Settings({
     <div ref={wrapRef} className={`settings-wrap${docked ? " is-docked" : ""}`}>
       {open && (
         <div className="settings-popover" role="menu" aria-label="Settings">
-          <div className="settings-section-label">File</div>
-          <button
-            role="menuitem"
-            className="settings-option"
-            onClick={() => {
-              setOpen(false);
-              onNewNote();
-            }}
-          >
-            <span className="settings-option-check" />
-            <span className="settings-option-label">New note</span>
-            <span className="settings-option-kbd">⌘N</span>
-          </button>
-          <button
-            role="menuitem"
-            className="settings-option"
-            onClick={() => {
-              setOpen(false);
-              onOpenFile();
-            }}
-          >
-            <span className="settings-option-check" />
-            <span className="settings-option-label">Open file…</span>
-            <span className="settings-option-kbd">⌘O</span>
-          </button>
-          <button
-            role="menuitem"
-            className="settings-option"
-            onClick={() => {
-              setOpen(false);
-              onOpenFolder();
-            }}
-          >
-            <span className="settings-option-check" />
-            <span className="settings-option-label">Open folder…</span>
-            <span className="settings-option-kbd">⌘⇧O</span>
-          </button>
-          <button
-            role="menuitem"
-            className="settings-option"
-            onClick={() => {
-              setOpen(false);
-              onOpenFileNewWindow();
-            }}
-          >
-            <span className="settings-option-check" />
-            <span className="settings-option-label">Open file in new window…</span>
-            <span className="settings-option-kbd">⌘⌥O</span>
-          </button>
-          <button
-            role="menuitem"
-            className="settings-option"
-            onClick={() => {
-              setOpen(false);
-              onOpenFolderNewWindow();
-            }}
-          >
-            <span className="settings-option-check" />
-            <span className="settings-option-label">Open folder in new window…</span>
-            <span className="settings-option-kbd">⌘⌥⇧O</span>
-          </button>
+          {hasFileRows && <div className="settings-section-label">File</div>}
+          {onNewNote && (
+            <button
+              role="menuitem"
+              className="settings-option"
+              onClick={() => {
+                setOpen(false);
+                onNewNote();
+              }}
+            >
+              <span className="settings-option-check" />
+              <span className="settings-option-label">New note</span>
+              <span className="settings-option-kbd">⌘N</span>
+            </button>
+          )}
+          {onOpenFile && (
+            <button
+              role="menuitem"
+              className="settings-option"
+              onClick={() => {
+                setOpen(false);
+                onOpenFile();
+              }}
+            >
+              <span className="settings-option-check" />
+              <span className="settings-option-label">Open file…</span>
+              <span className="settings-option-kbd">⌘O</span>
+            </button>
+          )}
+          {onOpenFolder && (
+            <button
+              role="menuitem"
+              className="settings-option"
+              onClick={() => {
+                setOpen(false);
+                onOpenFolder();
+              }}
+            >
+              <span className="settings-option-check" />
+              <span className="settings-option-label">Open folder…</span>
+              <span className="settings-option-kbd">⌘⇧O</span>
+            </button>
+          )}
+          {onOpenFileNewWindow && (
+            <button
+              role="menuitem"
+              className="settings-option"
+              onClick={() => {
+                setOpen(false);
+                onOpenFileNewWindow();
+              }}
+            >
+              <span className="settings-option-check" />
+              <span className="settings-option-label">Open file in new window…</span>
+              <span className="settings-option-kbd">⌘⌥O</span>
+            </button>
+          )}
+          {onOpenFolderNewWindow && (
+            <button
+              role="menuitem"
+              className="settings-option"
+              onClick={() => {
+                setOpen(false);
+                onOpenFolderNewWindow();
+              }}
+            >
+              <span className="settings-option-check" />
+              <span className="settings-option-label">Open folder in new window…</span>
+              <span className="settings-option-kbd">⌘⌥⇧O</span>
+            </button>
+          )}
           {canCopyWithComments && (
             <>
-              <div className="settings-divider" />
+              {hasFileRows && <div className="settings-divider" />}
               <div className="settings-section-label">Document</div>
               <button
                 role="menuitem"
@@ -6641,7 +6467,7 @@ function Settings({
               </button>
             </>
           )}
-          <div className="settings-divider" />
+          {(hasFileRows || canCopyWithComments) && <div className="settings-divider" />}
           <div className="settings-section-label">Cloud</div>
           <button
             role="menuitem"
@@ -6657,20 +6483,24 @@ function Settings({
             </span>
             <span className="settings-option-label">Cloud…</span>
           </button>
-          <div className="settings-divider" />
-          <div className="settings-section-label">Versions</div>
-          <button
-            role="menuitem"
-            className="settings-option"
-            data-testid="settings-versions"
-            onClick={() => {
-              setOpen(false);
-              onOpenVersions();
-            }}
-          >
-            <span className="settings-option-check" />
-            <span className="settings-option-label">Version history…</span>
-          </button>
+          {onOpenVersions && (
+            <>
+              <div className="settings-divider" />
+              <div className="settings-section-label">Versions</div>
+              <button
+                role="menuitem"
+                className="settings-option"
+                data-testid="settings-versions"
+                onClick={() => {
+                  setOpen(false);
+                  onOpenVersions();
+                }}
+              >
+                <span className="settings-option-check" />
+                <span className="settings-option-label">Version history…</span>
+              </button>
+            </>
+          )}
           <div className="settings-divider" />
           <div className="settings-section-label">Appearance</div>
           {/* Live choices: the menu stays open so the note behind it can be
@@ -6700,74 +6530,7 @@ function Settings({
               </button>
             ))}
           </div>
-          <div className="settings-divider" />
-          <div className="settings-section-label">Updates</div>
-          {updateAvailable ? (
-            <button
-              role="menuitem"
-              className="settings-option settings-option--update"
-              title={
-                update.notes || `Install Doklin v${update.latest} and restart`
-              }
-              onClick={() => void update.install()}
-            >
-              <span className="settings-option-check">
-                <DownloadIcon />
-              </span>
-              <span className="settings-option-label">
-                Update to v{update.latest} &amp; Restart
-              </span>
-            </button>
-          ) : updateBusy ? (
-            <div className="settings-option is-progress" aria-live="polite">
-              <span className="settings-option-check">
-                <DownloadIcon />
-              </span>
-              <span className="settings-option-label">
-                {update.phase === "downloading"
-                  ? `Downloading… ${Math.round(update.progress * 100)}%`
-                  : "Installing…"}
-              </span>
-            </div>
-          ) : (
-            <button
-              role="menuitem"
-              className="settings-option"
-              disabled={update.phase === "checking"}
-              onClick={() => void update.check()}
-            >
-              <span className="settings-option-check" />
-              <span className="settings-option-label">
-                {update.phase === "checking" ? "Checking…" : "Check for updates"}
-              </span>
-            </button>
-          )}
-          {update.phase === "downloading" && (
-            <div className="settings-update-bar" aria-hidden>
-              <span style={{ width: `${Math.round(update.progress * 100)}%` }} />
-            </div>
-          )}
-          {updateStatusText && (
-            <div
-              className="settings-update-status"
-              title={update.error ?? undefined}
-            >
-              {updateStatusText}
-            </div>
-          )}
-          {update.phase === "error" && (
-            <button
-              role="menuitem"
-              className="settings-option"
-              onClick={() => {
-                setOpen(false);
-                onOpenExternal(RELEASES_PAGE);
-              }}
-            >
-              <span className="settings-option-check" />
-              <span className="settings-option-label">Download manually…</span>
-            </button>
-          )}
+          {update && <UpdateRows update={update} onOpenExternal={onOpenExternal} onDone={() => setOpen(false)} />}
         </div>
       )}
       <button
@@ -6786,6 +6549,117 @@ function Settings({
   );
 }
 
+// The Updates rows of the settings menu: what the app is at, and the one
+// click that takes it to the next release.
+function UpdateRows({
+  update,
+  onOpenExternal,
+  onDone,
+}: {
+  update: UpdateController;
+  onOpenExternal: (url: string) => void;
+  /** Close the menu, for a row that leaves it. */
+  onDone: () => void;
+}) {
+  const updateAvailable = update.phase === "available";
+  const updateBusy =
+    update.phase === "downloading" || update.phase === "installing";
+  const ver = update.current ? `v${update.current}` : "";
+  let updateStatusText: string;
+  switch (update.phase) {
+    case "checking":
+      updateStatusText = ver || "Checking for updates…";
+      break;
+    case "available":
+      updateStatusText = `Current: ${ver}`;
+      break;
+    case "installing":
+      updateStatusText = "Restarting…";
+      break;
+    case "error":
+      updateStatusText = ver ? `${ver} · Couldn't check` : "Couldn't check";
+      break;
+    case "downloading":
+      updateStatusText = "";
+      break;
+    default:
+      updateStatusText = ver ? `${ver} · Up to date` : "";
+  }
+
+  return (
+    <>
+      <div className="settings-divider" />
+      <div className="settings-section-label">Updates</div>
+      {updateAvailable ? (
+        <button
+          role="menuitem"
+          className="settings-option settings-option--update"
+          title={
+            update.notes || `Install Doklin v${update.latest} and restart`
+          }
+          onClick={() => void update.install()}
+        >
+          <span className="settings-option-check">
+            <DownloadIcon />
+          </span>
+          <span className="settings-option-label">
+            Update to v{update.latest} &amp; Restart
+          </span>
+        </button>
+      ) : updateBusy ? (
+        <div className="settings-option is-progress" aria-live="polite">
+          <span className="settings-option-check">
+            <DownloadIcon />
+          </span>
+          <span className="settings-option-label">
+            {update.phase === "downloading"
+              ? `Downloading… ${Math.round(update.progress * 100)}%`
+              : "Installing…"}
+          </span>
+        </div>
+      ) : (
+        <button
+          role="menuitem"
+          className="settings-option"
+          disabled={update.phase === "checking"}
+          onClick={() => void update.check()}
+        >
+          <span className="settings-option-check" />
+          <span className="settings-option-label">
+            {update.phase === "checking" ? "Checking…" : "Check for updates"}
+          </span>
+        </button>
+      )}
+      {update.phase === "downloading" && (
+        <div className="settings-update-bar" aria-hidden>
+          <span style={{ width: `${Math.round(update.progress * 100)}%` }} />
+        </div>
+      )}
+      {updateStatusText && (
+        <div
+          className="settings-update-status"
+          title={update.error ?? undefined}
+        >
+          {updateStatusText}
+        </div>
+      )}
+      {update.phase === "error" && (
+        <button
+          role="menuitem"
+          className="settings-option"
+          onClick={() => {
+            onDone();
+            onOpenExternal(RELEASES_PAGE);
+          }}
+        >
+          <span className="settings-option-check" />
+          <span className="settings-option-label">Download manually…</span>
+        </button>
+      )}
+    </>
+  );
+}
+
 // The welcome screen shown when no document is open. (An open note, including
 // an empty untitled one, shows the bare editor instead — no overlay.)
 function ScratchEmptyState({
@@ -6794,9 +6668,10 @@ function ScratchEmptyState({
   onOpenFolder,
   onJoinWorkspace,
 }: {
-  onNewNote: () => void;
-  onOpenFile: () => void;
-  onOpenFolder: () => void;
+  // Each is shown only where the platform has what it opens.
+  onNewNote?: () => void;
+  onOpenFile?: () => void;
+  onOpenFolder?: () => void;
   /** Somebody sent an invite: the one door a new install needs. */
   onJoinWorkspace: () => void;
 }) {
@@ -6805,21 +6680,27 @@ function ScratchEmptyState({
       <div className="scratch-empty-card">
         <div className="scratch-empty-hint">No note open</div>
         <div className="scratch-empty-actions">
-          <button className="scratch-empty-button" onClick={onNewNote}>
-            <FileIcon />
-            <span>New note</span>
-            <span className="scratch-empty-kbd">⌘N</span>
-          </button>
-          <button className="scratch-empty-button" onClick={onOpenFile}>
-            <FileIcon />
-            <span>Open file</span>
-            <span className="scratch-empty-kbd">⌘O</span>
-          </button>
-          <button className="scratch-empty-button" onClick={onOpenFolder}>
-            <FolderIcon />
-            <span>Open folder</span>
-            <span className="scratch-empty-kbd">⌘⇧O</span>
-          </button>
+          {onNewNote && (
+            <button className="scratch-empty-button" onClick={onNewNote}>
+              <FileIcon />
+              <span>New note</span>
+              <span className="scratch-empty-kbd">⌘N</span>
+            </button>
+          )}
+          {onOpenFile && (
+            <button className="scratch-empty-button" onClick={onOpenFile}>
+              <FileIcon />
+              <span>Open file</span>
+              <span className="scratch-empty-kbd">⌘O</span>
+            </button>
+          )}
+          {onOpenFolder && (
+            <button className="scratch-empty-button" onClick={onOpenFolder}>
+              <FolderIcon />
+              <span>Open folder</span>
+              <span className="scratch-empty-kbd">⌘⇧O</span>
+            </button>
+          )}
           <button className="scratch-empty-button" data-testid="join-workspace" onClick={onJoinWorkspace}>
             <FolderIcon />
             <span>Join a workspace</span>

@@ -20,12 +20,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  cloudAgentAdd,
-  cloudAgentCode,
-  cloudAgentRemove,
-  cloudAgentRevokeMachine,
-  cloudAgentUpdate,
-  cloudAgents,
   revealSoon,
   timeAgo,
   timeUntil,
@@ -35,6 +29,7 @@ import {
   type CloudMember,
 } from "./cloud";
 import { buildAgentLoginPrompt } from "./cloudPrompts";
+import { backend } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -100,7 +95,7 @@ export default function CloudAgents({
 
   const load = useCallback(async () => {
     try {
-      setAgents(await cloudAgents(root));
+      setAgents(await backend.cloud.agents(root));
     } catch (e) {
       setError(errText(e));
     }
@@ -139,12 +134,12 @@ export default function CloudAgents({
     const name = draft.name.trim();
     void act(async () => {
       if (draft.id === null) {
-        const added = await cloudAgentAdd(root, name, draft.scopes);
+        const added = await backend.cloud.agentAdd(root, name, draft.scopes);
         // The one moment the code exists in the clear.
         setLogin({ name: added.agent.name, login: added.login });
         revealSoon(top);
       } else {
-        await cloudAgentUpdate(root, draft.id, name, draft.scopes);
+        await backend.cloud.agentUpdate(root, draft.id, name, draft.scopes);
       }
       setDraft(null);
     });
@@ -154,7 +149,7 @@ export default function CloudAgents({
     (agent: CloudAgent) => {
       setDraft(null);
       void act(async () => {
-        setLogin({ name: agent.name, login: await cloudAgentCode(root, agent.id) });
+        setLogin({ name: agent.name, login: await backend.cloud.agentCode(root, agent.id) });
         revealSoon(top);
       });
     },
@@ -202,7 +197,7 @@ export default function CloudAgents({
                 className="modal-btn is-danger-solid"
                 data-testid={`agent-logout-yes-${m.id}`}
                 disabled={busy}
-                onClick={() => void act(() => cloudAgentRevokeMachine(root, a.id, m.id))}
+                onClick={() => void act(() => backend.cloud.agentRevokeMachine(root, a.id, m.id))}
               >
                 Log out
               </button>
@@ -229,7 +224,7 @@ export default function CloudAgents({
           className="modal-btn is-danger-solid"
           data-testid={`agent-remove-yes-${a.id}`}
           disabled={busy}
-          onClick={() => void act(() => cloudAgentRemove(root, a.id))}
+          onClick={() => void act(() => backend.cloud.agentRemove(root, a.id))}
         >
           Remove
         </button>

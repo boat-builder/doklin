@@ -9,8 +9,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { pressedOutside } from "./dismiss";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { backend } from "./backend";
 import Avatar from "./Avatar";
 import { ThreadCard, type EditTarget, type RailThread } from "./CommentsRail";
 import {
@@ -256,9 +255,7 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
         if (onOpenExternalRef.current) {
           onOpenExternalRef.current(msg.url);
         } else {
-          void invoke("open_external", { url: msg.url }).catch((err) =>
-            console.error("open_external failed", err),
-          );
+          void backend.openExternal(msg.url).catch((err) => console.error("open external failed", err));
         }
       } else if (msg.type === "scroll") {
         onScrollRatioRef.current?.(msg.ratio);
@@ -319,17 +316,14 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
     setMode(next);
   }, []);
 
-  // One-click export (no options, by design). Subscribe to progress BEFORE
-  // invoking so the first stage event can't slip past; the backend serializes
-  // concurrent exports itself, so a second click elsewhere just errors.
+  // One-click export (no options, by design). One export runs at a time: a
+  // second click elsewhere just errors.
   const exportPdf = useCallback(async () => {
     const path = pdfPathRef.current;
-    if (!path) return;
+    if (!path || !backend.pdf) return;
     setPdf({ kind: "running", label: "Exporting…" });
-    const unlisten = await listen<{ stage: string; pct: number | null }>(
-      "pdf-export-progress",
-      (e) => {
-        const { stage, pct } = e.payload;
+    try {
+      const saved = await backend.pdf.export(path, ({ stage, pct }) => {
         const label =
           stage === "engine-download"
             ? `Fetching engine ${pct ?? 0}%`
@@ -341,15 +335,10 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
                   ? "Checking…"
                   : "Rendering…";
         setPdf((p) => (p.kind === "running" ? { kind: "running", label } : p));
-      },
-    );
-    try {
-      const saved = await invoke<string>("export_pdf", { path });
+      });
       setPdf({ kind: "saved", name: saved.split("/").pop() ?? "PDF" });
     } catch (err) {
       setPdf({ kind: "error", msg: String(err) });
-    } finally {
-      unlisten();
     }
   }, []);
 
@@ -487,7 +476,7 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   const docked = controlsSlot !== undefined;
   const controls = (
     <div className={`html-view-btns ${docked ? "is-docked" : ""}`}>
-      {pdfExportPath != null && (
+      {pdfExportPath != null && backend.pdf && (
         <button
           type="button"
           className={`html-comment-btn html-pdf-btn ${pdf.kind === "running" ? "is-busy" : ""}`}

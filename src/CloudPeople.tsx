@@ -27,12 +27,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  cloudInvite,
-  cloudPeople,
-  cloudRevokeDevice,
-  cloudRevokePerson,
-  cloudSetRole,
-  cloudWithdrawInvite,
   may,
   mayInviteAgain,
   revealSoon,
@@ -44,6 +38,7 @@ import {
 } from "./cloud";
 import CloudAgents from "./CloudAgents";
 import CloudDevices from "./CloudDevices";
+import { backend } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -102,7 +97,7 @@ export default function CloudPeople({
 
   const load = useCallback(async () => {
     try {
-      setPeople(await cloudPeople(root));
+      setPeople(await backend.cloud.people(root));
     } catch (e) {
       setError(errText(e));
     }
@@ -142,7 +137,7 @@ export default function CloudPeople({
     setBusy(true);
     setError(null);
     try {
-      const invited = await cloudInvite(root, draft.email.trim(), draft.name.trim() || null, draft.days);
+      const invited = await backend.cloud.invite(root, draft.email.trim(), draft.name.trim() || null, draft.days);
       // The one moment the code exists in the clear: nothing here writes it
       // down, and the domain kept only its sha256.
       setMinted(invited);
@@ -378,7 +373,7 @@ export default function CloudPeople({
                                   className="modal-btn is-danger-solid"
                                   data-testid={`revoke-mac-yes-${d.id}`}
                                   disabled={busy}
-                                  onClick={() => void act(() => cloudRevokeDevice(root, d.id))}
+                                  onClick={() => void act(() => backend.cloud.revokeDevice(root, d.id))}
                                 >
                                   Sign out
                                 </button>
@@ -415,7 +410,7 @@ export default function CloudPeople({
                               data-testid={`set-role-yes-${m.id}`}
                               disabled={busy}
                               onClick={() =>
-                                void act(() => cloudSetRole(root, m.id, m.role === "owner" ? "member" : "owner"))
+                                void act(() => backend.cloud.setRole(root, m.id, m.role === "owner" ? "member" : "owner"))
                               }
                             >
                               {m.role === "owner" ? "Make a member" : "Make an owner"}
@@ -446,7 +441,7 @@ export default function CloudPeople({
                               className="modal-btn is-danger-solid"
                               data-testid={`remove-person-yes-${m.id}`}
                               disabled={busy}
-                              onClick={() => void act(() => cloudRevokePerson(root, m.id))}
+                              onClick={() => void act(() => backend.cloud.revokePerson(root, m.id))}
                             >
                               Remove
                             </button>
@@ -503,7 +498,7 @@ export default function CloudPeople({
                           className="modal-btn is-danger-solid"
                           data-testid={`withdraw-yes-${i.id}`}
                           disabled={busy}
-                          onClick={() => void act(() => cloudWithdrawInvite(root, i.id))}
+                          onClick={() => void act(() => backend.cloud.withdrawInvite(root, i.id))}
                         >
                           Withdraw
                         </button>

@@ -12,14 +12,13 @@
 
 import { useCallback, useRef, useState } from "react";
 import {
-  cloudDeviceCode,
-  cloudRevokeDevice,
   revealSoon,
   timeAgo,
   timeUntil,
   type CloudDeviceCode,
   type CloudPeople,
 } from "./cloud";
+import { backend } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -59,7 +58,7 @@ export default function CloudDevices({
     try {
       // The one moment the code exists in the clear: nothing here writes it
       // down, and the domain kept only its sha256.
-      setMinted(await cloudDeviceCode(root));
+      setMinted(await backend.cloud.deviceCode(root));
       revealSoon(top);
     } catch (e) {
       setError(errText(e));
@@ -73,7 +72,7 @@ export default function CloudDevices({
       setBusy(true);
       setError(null);
       try {
-        await cloudRevokeDevice(root, id);
+        await backend.cloud.revokeDevice(root, id);
         setConfirm(null);
         await reload();
       } catch (e) {

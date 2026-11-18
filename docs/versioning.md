@@ -65,6 +65,6 @@ versions/blobs/<sha256>                       create-only, local gzip bytes
 
 ## Contracts (change both sides)
 
-- `versions/{status,history,workspace,stores}.rs` + commands in `versions/mod.rs` ⇄ `src/versions.ts` ⇄ the iPhone's `Payloads.swift` (status, history, workspace)
+- `versions/{status,history,workspace,stores}.rs` + commands in `versions/mod.rs` ⇄ `src/versions.ts` (types) and `Versions` in `src/backend.ts` (the commands, answered by `src/mac/backend.ts`) ⇄ the iPhone's `Payloads.swift` (status, history, workspace)
 - `cloud/versions.rs` ⇄ `cloud-worker/src/versions.ts` and `layout.ts`
 - `VersionsMirror` in `cloud/status.rs` ⇄ `src/cloud.ts`

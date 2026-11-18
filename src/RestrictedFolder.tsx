@@ -12,9 +12,10 @@
 // it (`onSubmit`), and answers with a sentence when it could not.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { cloudPeople, type CloudMember, type CloudStatus } from "./cloud";
+import { type CloudMember, type CloudStatus } from "./cloud";
 import Avatar from "./Avatar";
 import { useDismiss } from "./dismiss";
+import { backend } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -59,7 +60,7 @@ export default function RestrictedFolder({
 
   useEffect(() => {
     let live = true;
-    void cloudPeople(cloud.root)
+    void backend.cloud.people(cloud.root)
       .then((people) => {
         if (live) setOthers(people.members.filter((m) => m.id !== people.me));
       })

@@ -1,12 +1,8 @@
-// The frontend's half of the versioning contract:
-// the types the versioner's status event and
-// commands carry, one typed wrapper per command, and the listener. No
-// `fetch` and no filesystem here — the Rust versioner owns the store; this
-// file only asks it things. Mirrored by engine/src/versions/status.rs and
-// the iPhone's Payloads.swift — change all three.
-
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+// The frontend's half of the versioning contract: the types the versioner's
+// status event and commands carry, and what the UI reads out of them. The
+// commands and events themselves are `Versions` in src/backend.ts. Mirrored by
+// engine/src/versions/status.rs and the iPhone's Payloads.swift — change all
+// three.
 
 export type VersionsPhase = "idle" | "capturing" | "too-large" | "disabled" | "error";
 
@@ -158,134 +154,10 @@ export type SnapshotMeta = {
   label: string | null;
   /** For a `restore`: the ts of the snapshot its content came from. */
   restoredFrom: number | null;
-  /** Only `versionsSnapshots` fills this in — it reads both file maps to
+  /** Only `snapshots` fills this in — it reads both file maps to
    *  work it out. Null for the oldest row and for a capture's answer. */
   delta: SnapshotDelta | null;
 };
-
-/* ---------- Commands ---------- */
-
-/** Every version store's status. Tolerates a harness that answers nothing
- *  (the IPC stubs return null for unknown commands). */
-export async function versionsStatus(): Promise<VersionsStatus[]> {
-  const r = await invoke<unknown>("versions_status");
-  return Array.isArray(r) ? (r as VersionsStatus[]) : [];
-}
-
-/** A folder's retained snapshots, newest first. */
-export async function versionsSnapshots(root: string): Promise<SnapshotMeta[]> {
-  const r = await invoke<unknown>("versions_snapshots", { root });
-  return Array.isArray(r) ? (r as SnapshotMeta[]) : [];
-}
-
-/** Capture now, whatever the cadence says. A `manual` capture (the default)
- *  is pinned and may carry a name; the answer is null when the folder is
- *  already exactly what the newest snapshot holds. */
-export const versionsCaptureNow = (
-  root: string,
-  opts: { reason?: VersionReason; label?: string } = {},
-) => invoke<SnapshotMeta | null>("versions_capture_now", { root, reason: opts.reason ?? null, label: opts.label ?? null });
-
-/** Keep a version out of the ladder's reach, and optionally name it. */
-export const versionsSetPinned = (root: string, ts: number, pinned: boolean, label?: string) =>
-  invoke<void>("versions_set_pinned", { root, ts, pinned, label: label ?? null });
-
-/** The kill switch. Nothing already captured is touched. */
-export const versionsSetEnabled = (enabled: boolean) => invoke<void>("versions_set_enabled", { enabled });
-
-/** Every version of one document, newest first — this Mac's snapshots and
- *  the ones other Macs mirrored, in one walk. */
-export async function versionsHistory(path: string): Promise<FileHistory> {
-  const r = await invoke<FileHistory | null>("versions_history", { path });
-  return r ?? { root: "", currentHash: null, versions: [] };
-}
-
-/** One version's text, for the preview. */
-export const versionsRead = (root: string, hash: string) =>
-  invoke<string>("versions_read", { root, hash });
-
-/** A unified diff between two versions. A null hash means the file on disk,
- *  which is how the newest version is compared against now. */
-export const versionsDiff = (
-  root: string,
-  opts: { path?: string; from?: string | null; to?: string | null } = {},
-) =>
-  invoke<string>("versions_diff", {
-    root,
-    path: opts.path ?? null,
-    from: opts.from ?? null,
-    to: opts.to ?? null,
-  });
-
-/** Put an earlier version back. The content is named either by `hash` (a
- *  version in this store) or by `text` (one only the cloud still holds).
- *  One command, never a capture and a write from here: the cadence could
- *  capture between them and the state being left would go unrecorded. */
-export const versionsRestoreFile = (
-  root: string,
-  path: string,
-  opts: { ts?: number | null; hash?: string | null; text?: string | null } = {},
-) =>
-  invoke<RestoreOutcome>("versions_restore_file", {
-    root,
-    path,
-    ts: opts.ts ?? null,
-    hash: opts.hash ?? null,
-    text: opts.text ?? null,
-  });
-
-/** What restoring one snapshot would do to the folder as it is now — the
- *  three lists the workspace timeline shows before anything happens. */
-export const versionsSnapshotDiff = (root: string, ts: number) =>
-  invoke<SnapshotDiff>("versions_snapshot_diff", { root, ts });
-
-/** Every file this folder's history holds and the folder itself does not,
- *  most recently seen first. */
-export async function versionsDeleted(root: string): Promise<DeletedFile[]> {
-  const r = await invoke<unknown>("versions_deleted", { root });
-  return Array.isArray(r) ? (r as DeletedFile[]) : [];
-}
-
-/** Put a whole moment back — or, with `paths`, the part of it the user
- *  ticked. Like the file restore it captures the state it leaves first, so
- *  the whole thing is undone by restoring `preRestoreTs` with the same
- *  paths. */
-export const versionsRestoreSnapshot = (root: string, ts: number, paths?: string[] | null) =>
-  invoke<RestoreReport>("versions_restore_snapshot", { root, ts, paths: paths ?? null });
-
-/** How far back this folder keeps, null for forever. Written into the
- *  store's own index, so two folders can answer differently. */
-export const versionsSetHorizon = (root: string, days: number | null) =>
-  invoke<void>("versions_set_horizon", { root, days });
-
-/** How far back the *bucket* keeps — one CAS on the cloud index, so every
- *  device agrees. Errors when the folder isn't connected. */
-export const versionsSetCloudHorizon = (root: string, days: number | null) =>
-  invoke<void>("versions_set_cloud_horizon", { root, days });
-
-/** Every version store on this Mac, newest first. */
-export async function versionsStores(): Promise<StoreInfo[]> {
-  const r = await invoke<unknown>("versions_stores");
-  return Array.isArray(r) ? (r as StoreInfo[]) : [];
-}
-
-/** Delete one store outright. Refused while its folder is open. */
-export const versionsForget = (key: string) => invoke<void>("versions_forget", { key });
-
-/** One archive of the folder and its whole history, written into `dest`. */
-export const versionsExport = (root: string, dest: string) =>
-  invoke<ExportReport>("versions_export", { root, dest });
-
-/* ---------- Events ---------- */
-
-export const onVersionsStatus = (cb: (statuses: VersionsStatus[]) => void): Promise<UnlistenFn> =>
-  listen<unknown>("versions-status", (e) => cb(Array.isArray(e.payload) ? (e.payload as VersionsStatus[]) : []));
-
-export const onVersionsApplied = (cb: (e: VersionsAppliedEvent) => void): Promise<UnlistenFn> =>
-  listen<VersionsAppliedEvent>("versions-applied", (e) => cb(e.payload));
-
-export const onVersionsProgress = (cb: (e: VersionsProgressEvent) => void): Promise<UnlistenFn> =>
-  listen<VersionsProgressEvent>("versions-progress", (e) => cb(e.payload));
 
 /* ---------- Derivations ---------- */
 
