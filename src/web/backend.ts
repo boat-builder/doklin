@@ -4,8 +4,9 @@
 // untitled notes, version history, PDF export, an updater.
 //
 // Here a document is stored copies named by a manifest: the note, the html
-// rendition beside it and its sidecar are three files of one section, and
-// what a text was read at is the copy it was.
+// rendition beside it and its sidecar are three files of one section. What
+// the worker holds is workspace.ts's; what this page has yet to send it, and
+// what it changes, is saving.ts's.
 
 import type {
   Backend,
@@ -13,13 +14,13 @@ import type {
   Documents,
   FileClipboard,
   FileClipboardPayload,
+  Leaving,
   Shows,
 } from "../backend";
 import { takeLink } from "./address";
+import type { Saving } from "./saving";
 import type { Workspace } from "./workspace";
 
-/** What changing a document is answered with until the browser version writes. */
-const READS_ONLY = "The browser version can't change documents yet.";
 /** What the app's own business with a domain is answered with. */
 const IN_THE_APP = "That is done in the Doklin app, not in a browser.";
 
@@ -27,27 +28,35 @@ const refuse = (sentence: string) => async (): Promise<never> => {
   throw new Error(sentence);
 };
 
-function documentsOf(ws: Workspace): Documents {
+/** A change to the tree that fails is said under the row it was asked on,
+ *  as it is: rejected with the sentence itself, as the Mac's commands are. */
+const said =
+  <A extends unknown[], T>(change: (...args: A) => Promise<T>) =>
+  async (...args: A): Promise<T> => {
+    try {
+      return await change(...args);
+    } catch (e) {
+      throw e instanceof Error ? e.message : String(e);
+    }
+  };
+
+function documentsOf(ws: Workspace, saving: Saving): Documents {
   return {
-    async open(path) {
-      const doc = await ws.read(path);
-      return { ...doc, meta: await ws.sidecar(path), rendition: ws.renditionOf(path) };
-    },
-    read: (path) => ws.read(path),
-    meta: (path) => ws.sidecar(path),
-    exists: async (path) => ws.exists(path),
+    open: (path) => saving.open(path),
+    read: (path) => saving.read(path),
+    meta: (path) => saving.meta(path),
+    save: (path, parts, over) => saving.save(path, parts, over),
+    exists: async (path) => saving.exists(path),
     // A manifest names documents and nothing else, so every file is the same list.
     tree: async (root) => ws.tree(root),
+    create: said((path, kind) => saving.create(path, kind)),
+    move: said((from, to, kind) => saving.move(from, to, kind)),
+    copy: said((from, to, kind) => saving.copy(from, to, kind)),
+    remove: said((path, kind) => saving.remove(path, kind)),
     async watch(docs) {
       ws.watch(docs);
     },
     onChange: (cb) => ws.onChange(cb),
-
-    save: refuse(READS_ONLY),
-    create: refuse(READS_ONLY),
-    move: refuse(READS_ONLY),
-    copy: refuse(READS_ONLY),
-    remove: refuse(READS_ONLY),
     search: refuse("Search isn't in the browser version yet."),
   };
 }
@@ -71,20 +80,25 @@ function fileClipboard(): FileClipboard {
   };
 }
 
-/** The cloud as a browser answers it: the status and what changed, from the
- *  picture it holds. Everything else `Cloud` lists is the app's own business
- *  with a domain (setting one up, people, devices, agents) or is not built
- *  here yet, and is refused in a sentence; an event nothing here raises is
- *  listened to and never heard. */
+/** The cloud as a browser answers it: the status, what changed, and which
+ *  document this tab is editing, from the picture it holds. Everything else
+ *  `Cloud` lists is the app's own business with a domain (setting one up,
+ *  people, devices, agents) or is not built here yet, and is refused in a
+ *  sentence; an event nothing here raises is listened to and never heard. */
 function cloudOf(ws: Workspace): Cloud {
   const answered: Partial<Cloud> = {
     status: async () => [ws.status()],
     onStatus: (cb) => ws.onStatus(cb),
     removed: async () => [],
     onApplied: (cb) => ws.onApplied(cb),
+    onConflict: (cb) => ws.onConflict(cb),
     onSpaceLeft: (cb) => ws.onSpaceLeft(cb),
-    // What is open is said to the worker by the beat, which is not sent yet.
-    setActivity: async () => {},
+    async setActivity(path) {
+      ws.setActivity(path);
+    },
+    async takeOver(_root, path) {
+      ws.takeOver(path);
+    },
   };
   return new Proxy(answered as Cloud, {
     get(target, name) {
@@ -94,7 +108,8 @@ function cloudOf(ws: Workspace): Cloud {
   });
 }
 
-export function webBackend(ws: Workspace): Backend {
+export function webBackend(ws: Workspace, saving: Saving): Backend {
+  const leaving: Leaving = { onLeave: (flush) => saving.onLeave(flush) };
   const shows: Shows = {
     take: async () => takeLink(ws),
     onArrive(cb) {
@@ -103,7 +118,7 @@ export function webBackend(ws: Workspace): Backend {
     },
   };
   return {
-    documents: documentsOf(ws),
+    documents: documentsOf(ws, saving),
     cloud: cloudOf(ws),
     fileClipboard: fileClipboard(),
     // The addresses the Mac agrees to open, and no others (`open_external`,
@@ -120,5 +135,6 @@ export function webBackend(ws: Workspace): Backend {
     home: ws.root,
     htmlFrame: "/app/frame",
     shows,
+    leaving,
   };
 }

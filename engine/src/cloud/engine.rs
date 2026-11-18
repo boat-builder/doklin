@@ -62,7 +62,8 @@ pub(crate) const IDLE_AFTER: Duration = Duration::from_secs(5 * 60);
 pub(crate) const AWAY_AFTER: Duration = Duration::from_secs(30 * 60);
 /// How long a beat says it holds (`Beat::Here::ttl`): two and a half of the
 /// gaps to the next one, so one lost beat is survivable, within the
-/// worker's bounds.
+/// worker's bounds. A browser beats by these and the two numbers below
+/// (`BEAT_MS`, `ACTIVITY_FRESH_MS`, src/web/workspace.ts): change both.
 const BEAT_TTL_MIN: Duration = Duration::from_secs(90);
 const BEAT_TTL_MAX: Duration = Duration::from_secs(15 * 60);
 /// The retry clock: how long after the n-th failure in a row the next try
@@ -1805,7 +1806,8 @@ impl<R: Remote> Engine<R> {
     /// holds it — this Mac included, which is what a lease another Mac has
     /// just let go of looks like from here. Not while somebody else holds it
     /// (the poll will say when they stop), and not when the domain could not
-    /// say who holds what: then there is no lock to claim.
+    /// say who holds what: then there is no lock to claim. A browser claims
+    /// by the same rule (`claimOwed`, src/web/workspace.ts): change both.
     fn claim_owed(&self) -> bool {
         // A path the worker would not take records no claim, so it could
         // never stop being owed one.

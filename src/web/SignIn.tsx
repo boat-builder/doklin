@@ -5,7 +5,7 @@
 
 import { useCallback, useState } from "react";
 import { normalizeCode } from "../../cloud-worker/src/layout";
-import { Unreachable, deviceId, refused, send } from "./http";
+import { Unreachable, deviceId, deviceName, refused, send } from "./http";
 
 /** The word an invite line starts with (`KEYWORD`, engine/src/cloud/invite.rs). */
 const KEYWORD = "doklin-invite";
@@ -35,30 +35,6 @@ export function parsePasted(text: string): { host: string | null; code: string |
   return { host, code };
 }
 
-/** What this browser is called in Devices: "Chrome on Windows". */
-function browserName(): string {
-  const ua = navigator.userAgent;
-  const browser = /Edg\//.test(ua)
-    ? "Edge"
-    : /Firefox\//.test(ua)
-      ? "Firefox"
-      : /Chrome\//.test(ua)
-        ? "Chrome"
-        : /Safari\//.test(ua)
-          ? "Safari"
-          : "A browser";
-  const system = /Windows/.test(ua)
-    ? "Windows"
-    : /Macintosh|Mac OS X/.test(ua)
-      ? "a Mac"
-      : /CrOS/.test(ua)
-        ? "a Chromebook"
-        : /Linux/.test(ua)
-          ? "Linux"
-          : null;
-  return system ? `${browser} on ${system}` : browser;
-}
-
 export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -78,7 +54,7 @@ export default function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
     setError(null);
     try {
       const res = await send("POST", "/api/web/session", {
-        body: { code, deviceId: deviceId(), deviceName: browserName() },
+        body: { code, deviceId: deviceId(), deviceName: deviceName() },
       });
       if (res.ok) {
         onSignedIn();

@@ -6,7 +6,12 @@
 // restricted folders they are in — and reads a document's stored copy when
 // the document is opened. From those and the poll it tells the UI what the
 // engine tells it on a Mac: one `CloudStatus` (src/cloud.ts), the tree, and
-// what changed somewhere else.
+// what changed somewhere else. What is here is what the worker holds; what
+// this page has yet to send is saving.ts's.
+//
+// The poll carries this browser's beat, as a Mac's does: that it is here,
+// and which document it is editing — which is its claim on that document.
+// One tab of a browser asks and beats for all of them (tabs.ts).
 //
 // Paths. The UI names a document by an absolute path, as on a disk. Here
 // that is the workspace's name as a root, then the path the Mac app would
@@ -14,12 +19,13 @@
 // or `Restricted/<name>` (`PRIVATE_DIR`, `RESTRICTED_DIR`,
 // engine/src/cloud/space.rs — change both), the shared workspace's at the top.
 
-import { reservedTop, syncs } from "../../cloud-worker/src/layout";
+import { reservedTop, syncs, validPath } from "../../cloud-worker/src/layout";
 import type { Manifest, ManifestFile } from "../../cloud-worker/src/manifest";
 import type { Limits, MetaAnswer, PollAnswer, Space } from "../../cloud-worker/src/wire";
-import type { DocumentChange, Rev, TreeNode, WatchedDocument } from "../backend";
+import type { DocumentChange, TreeNode, WatchedDocument } from "../backend";
 import type {
   CloudAppliedEvent,
+  CloudConflictEvent,
   CloudSpace,
   CloudSpaceLeftEvent,
   CloudStatus,
@@ -29,7 +35,8 @@ import type {
   PublicPage,
 } from "../cloud";
 import { HTML_EXT_RE, MD_EXT_RE, META_SUFFIX, htmlSiblingOf, metaFileOf } from "../metaFile";
-import { Refused, Unreachable, ask, askJson, deviceId, nextDay, usedToday } from "./http";
+import { Refused, Unreachable, ask, askJson, deviceId, deviceName, nextDay, send, usedToday } from "./http";
+import { tabs, type Tabs } from "./tabs";
 
 const PRIVATE_DIR = "Private";
 const RESTRICTED_DIR = "Restricted";
@@ -44,6 +51,17 @@ const POLL_BACKGROUND_MS = 60_000;
 const POLL_AWAY_MS = 5 * 60_000;
 const IDLE_AFTER_MS = 5 * 60_000;
 const AWAY_AFTER_MS = 30 * 60_000;
+
+/** How often a poll carries the beat, and how long a beat says it holds: two
+ *  and a half of the gaps to the next one, within the worker's bounds
+ *  (`PRESENCE_BEAT`, `beat_ttl`, engine.rs — change both). */
+const BEAT_MS = 45_000;
+const BEAT_TTL_MIN_MS = 90_000;
+const BEAT_TTL_MAX_MS = 15 * 60_000;
+/** A document is being edited for this long after it was last opened or
+ *  written here (`ACTIVITY_FRESH`, engine.rs): after it, the beat names none
+ *  and the claim on it lapses. */
+const ACTIVITY_FRESH_MS = 5 * 60_000;
 
 /** How many stored copies are kept in memory. The browser's own cache keeps
  *  the rest: a copy never changes under its address. */
@@ -64,9 +82,14 @@ type Section = {
   files: Map<string, Entry>;
 };
 
-/** What a document's text was read at: the stored copy it was. */
-type Read = { fid: string; rev: number; hash: string };
-const revOf = (e: Entry) => ({ fid: e.fid, rev: e.file.rev, hash: e.file.hash }) satisfies Read as unknown as Rev;
+/** A file as a section stores it. `space` is the section's id, "" the
+ *  shared workspace. */
+export type StoredFile = { space: string; fid: string; file: ManifestFile };
+
+/** A section's manifest as it was read, or that the section is gone. */
+type ReadSection =
+  | { id: string; space: Space | null; etag: string; held: Section | undefined; fresh: Manifest | null }
+  | { id: string; gone: true };
 
 /** A name as a folder can carry it (`sanitize_folder_name`, engine/src/cloud/config.rs). */
 const folderName = (name: string): string =>
@@ -119,17 +142,36 @@ export class Workspace {
 
   private watched: WatchedDocument[] = [];
   private readonly texts = new Map<string, Promise<string>>();
+  /** Folders made on this page that hold nothing yet, workspace-relative. A
+   *  folder is its documents everywhere else: one with none is only here. */
+  private readonly made = new Set<string>();
+  /** What this page has yet to send (saving.ts): whether anything waits,
+   *  and why something could not be sent. */
+  private outbox: () => { waiting: boolean; error: string | null } = () => ({ waiting: false, error: null });
 
   private readonly statusHeard: Listeners<CloudStatus[]> = new Set();
   private readonly changeHeard: Listeners<DocumentChange> = new Set();
   private readonly appliedHeard: Listeners<CloudAppliedEvent> = new Set();
+  private readonly conflictHeard: Listeners<CloudConflictEvent> = new Set();
   private readonly spaceLeftHeard: Listeners<CloudSpaceLeftEvent> = new Set();
 
+  private tabs: Tabs | null = null;
   private timer: number | null = null;
   private passing: Promise<void> | null = null;
   private activeAt = Date.now();
   private hiddenAt: number | null = null;
   private waitUntil = 0;
+
+  /** The document this tab is editing, and when it was last opened or
+   *  written: what the beat names while that is fresh. */
+  private activity: { abs: string; at: number } | null = null;
+  /** A *Take over* waiting for the beat that carries it. */
+  private taking: string | null = null;
+  /** When the last beat was sent from this tab, and the document it named
+   *  ("" for none). Null: this tab owes one. */
+  private lastBeat: { at: number; named: string } | null = null;
+  /** The last beat sent ahead of the clock: what for, and when. */
+  private hurried: { key: string; at: number } | null = null;
 
   private constructor(
     private readonly meta: MetaAnswer,
@@ -161,8 +203,13 @@ export class Workspace {
   /* ---------- Names and places ---------- */
 
   /** A `by` in words. An id nobody can name stays an id. */
-  private nameOf(by: string): string {
+  nameOf(by: string): string {
     return this.people.get(by) ?? by;
+  }
+
+  /** The person at this browser, by their id. */
+  get me(): string {
+    return this.meta.you.memberId;
   }
 
   /** The folder a space is shown as: its own for a Private; under
@@ -212,6 +259,25 @@ export class Workspace {
     return place && entry ? { section: place.section, entry } : null;
   }
 
+  /** Where an absolute path is: the section, and the path as that section
+   *  stores it ("" is the section itself). Null for a path in no section. */
+  place(abs: string): { space: string; path: string } | null {
+    const rel = this.relOf(abs);
+    const place = rel === null ? null : this.placeOf(rel);
+    return place ? { space: place.section.id, path: place.path } : null;
+  }
+
+  /** A path under the root, as sentences and events name it; null outside it. */
+  rel(abs: string): string | null {
+    return this.relOf(abs);
+  }
+
+  /** The file stored at an absolute path, or null. */
+  stored(abs: string): StoredFile | null {
+    const found = this.fileAt(abs);
+    return found ? { space: found.section.id, fid: found.entry.fid, file: found.entry.file } : null;
+  }
+
   /** The document a file id names, by its absolute path; null when no
    *  section this person is in holds it. `space` is the section's id, ""
    *  the shared workspace. */
@@ -224,29 +290,18 @@ export class Workspace {
 
   /* ---------- Reading ---------- */
 
-  private text(section: Section, entry: Entry): Promise<string> {
-    const key = `${section.id}/${entry.fid}/${entry.file.hash}`;
+  /** A stored copy's text. A copy never changes under its address, so one
+   *  read is kept, and a text this page wrote is kept without a read. */
+  textOf(copy: { space: string; fid: string; hash: string }, known?: string): Promise<string> {
+    const key = `${copy.space}/${copy.fid}/${copy.hash}`;
     const kept = this.texts.get(key);
     if (kept) return kept;
-    const at = section.id === "" ? "/api/blobs" : `/api/spaces/${section.id}/blobs`;
-    const read = ask("GET", `${at}/${entry.fid}/${entry.file.hash}`).then((res) => res.text());
+    const at = copy.space === "" ? "/api/blobs" : `/api/spaces/${copy.space}/blobs`;
+    const read = known !== undefined ? Promise.resolve(known) : ask("GET", `${at}/${copy.fid}/${copy.hash}`).then((res) => res.text());
     this.texts.set(key, read);
     read.catch(() => this.texts.delete(key));
     if (this.texts.size > TEXTS_KEPT) this.texts.delete(this.texts.keys().next().value as string);
     return read;
-  }
-
-  /** A file's text and what it was read at. Rejects when there is none. */
-  async read(abs: string): Promise<{ text: string; rev: Rev }> {
-    const found = this.fileAt(abs);
-    if (!found) throw new Error(`There is no document at ${this.relOf(abs) ?? abs}.`);
-    return { text: await this.text(found.section, found.entry), rev: revOf(found.entry) };
-  }
-
-  /** A document's sidecar; null when it has none. */
-  async sidecar(abs: string): Promise<string | null> {
-    const found = this.fileAt(metaFileOf(abs));
-    return found ? this.text(found.section, found.entry) : null;
   }
 
   /** The html rendition beside a markdown document, by its path. */
@@ -264,6 +319,35 @@ export class Workspace {
     return this.dirs().has(rel);
   }
 
+  /** Whether a folder holds a stored file, at any depth. */
+  holdsFiles(abs: string): boolean {
+    const rel = this.relOf(abs);
+    if (rel === null) return false;
+    for (const path of this.placed()) if (rel === "" || path.startsWith(`${rel}/`)) return true;
+    return false;
+  }
+
+  /* ---------- Folders with nothing in them ---------- */
+
+  /** Make a folder: on this page only, until a document is in it. */
+  makeFolder(abs: string): void {
+    const rel = this.relOf(abs);
+    if (rel) this.made.add(rel);
+  }
+
+  /** A folder was moved or removed: the empty ones made here go with it.
+   *  `to` null: removed. */
+  movedFolder(from: string, to: string | null): void {
+    const was = this.relOf(from);
+    const now = to === null ? null : this.relOf(to);
+    if (was === null) return;
+    for (const dir of [...this.made]) {
+      if (dir !== was && !dir.startsWith(`${was}/`)) continue;
+      this.made.delete(dir);
+      if (now !== null) this.made.add(`${now}${dir.slice(was.length)}`);
+    }
+  }
+
   /* ---------- The tree ---------- */
 
   /** Every file as the tree places it: its workspace-relative path. */
@@ -273,7 +357,8 @@ export class Workspace {
     }
   }
 
-  /** Every folder there is: one holding a document, and each section's own. */
+  /** Every folder there is: one holding a document, each section's own, and
+   *  the empty ones made on this page. */
   private dirs(): Set<string> {
     const dirs = new Set<string>();
     const add = (dir: string) => {
@@ -281,6 +366,7 @@ export class Workspace {
     };
     for (const section of this.sections.values()) add(section.mount);
     for (const path of this.placed()) add(dirIn(path));
+    for (const dir of this.made) add(dir);
     return dirs;
   }
 
@@ -341,8 +427,35 @@ export class Workspace {
   onApplied(cb: (e: CloudAppliedEvent) => void) {
     return hear(this.appliedHeard, cb);
   }
+  onConflict(cb: (e: CloudConflictEvent) => void) {
+    return hear(this.conflictHeard, cb);
+  }
   onSpaceLeft(cb: (e: CloudSpaceLeftEvent) => void) {
     return hear(this.spaceLeftHeard, cb);
+  }
+
+  /** What this page has yet to send, asked each time the status is said. */
+  setOutbox(probe: () => { waiting: boolean; error: string | null }): void {
+    this.outbox = probe;
+  }
+
+  /** Two changes to one document overlapped, and both versions were kept. */
+  conflicted(e: CloudConflictEvent): void {
+    tell(this.conflictHeard, e);
+  }
+
+  /** Files changed, by their absolute paths: the tree is told, and each
+   *  document on screen that one of them belongs to. */
+  changed(files: string[]): void {
+    const paths = files.flatMap((file) => this.relOf(file) ?? []);
+    if (paths.length > 0) tell(this.appliedHeard, { root: this.root, paths });
+    for (const file of files) {
+      for (const doc of this.watched) {
+        if (file === doc.path) tell(this.changeHeard, { path: doc.path, part: "text" });
+        else if (file === metaFileOf(doc.path)) tell(this.changeHeard, { path: doc.path, part: "meta" });
+        else if (doc.rendition !== null && file === doc.rendition) tell(this.changeHeard, { path: doc.path, part: "rendition" });
+      }
+    }
   }
 
   /** The documents on screen: `onChange` speaks only of these. */
@@ -456,15 +569,19 @@ export class Workspace {
 
   status(): CloudStatus {
     const you = this.meta.you;
+    // What waits to be sent shows as a Mac's own unsent changes do; a save
+    // the worker would not take is an error until it is taken.
+    const out = this.outbox();
+    const settled = this.phase === "idle";
     return {
       root: this.root,
       domain: location.host,
       endpoint: location.origin,
       wsId: this.wsId,
       name: this.name,
-      phase: this.phase,
+      phase: settled && out.error ? "error" : settled && out.waiting ? "syncing" : this.phase,
       lastSyncMs: this.lastSyncMs,
-      error: this.error,
+      error: this.error ?? out.error,
       pendingDeletes: 0,
       pendingAdds: 0,
       usage: this.usage(),
@@ -485,7 +602,7 @@ export class Workspace {
   /** Say the status again when it is not what was last said. When it was
    *  last in step counts to the minute, and today's requests not at all:
    *  both move with every pass. */
-  private say(): void {
+  restate(): void {
     const status = this.status();
     const said = JSON.stringify({
       ...status,
@@ -499,35 +616,29 @@ export class Workspace {
 
   /* ---------- Keeping in step ---------- */
 
-  /** Take in what a poll says: read every manifest that moved, drop the
-   *  sections this person is no longer in, and say what changed. */
-  private async take(poll: PollAnswer): Promise<void> {
-    this.limits = poll.limits;
-    // Null: the database could not say. What is held stays as it is.
-    const spaces = poll.spaces ?? [...this.sections.values()].flatMap((s) => (s.space ? [s.space] : []));
-    const wanted: { id: string; space: Space | null; etag: string }[] = [
-      { id: "", space: null, etag: poll.manifestEtag },
-      ...spaces.map((space) => ({ id: space.id, space, etag: space.etag })),
-    ];
-    const before = new Map([...this.sections].map(([id, s]) => [id, s] as const));
-    const read = await Promise.all(
-      wanted.map(async (w) => {
-        const held = this.sections.get(w.id);
-        if (held && held.etag === w.etag) return { ...w, held, fresh: null };
-        const at = w.id === "" ? "/api/manifest" : `/api/spaces/${w.id}/manifest`;
-        let res: Response;
-        try {
-          res = await ask("GET", held ? `${at}?since=${encodeURIComponent(held.etag)}` : at);
-        } catch (e) {
-          // Gone since the poll named it: taken out of it, or it was deleted.
-          if (e instanceof Refused && e.status === 404 && w.space) return { ...w, held: undefined, fresh: null, gone: true };
-          throw e;
-        }
-        const etag = res.headers.get("x-manifest-etag") ?? w.etag;
-        return { ...w, etag, held, fresh: res.status === 304 ? null : ((await res.json()) as Manifest) };
-      }),
-    );
+  /** Read one section's manifest: all of it when the one held is not at
+   *  `etag` (null: whatever it is at now), nothing when it is. */
+  private async readSection(id: string, space: Space | null, etag: string | null): Promise<ReadSection> {
+    const held = this.sections.get(id);
+    if (held && held.etag === etag) return { id, space, etag, held, fresh: null };
+    const at = id === "" ? "/api/manifest" : `/api/spaces/${id}/manifest`;
+    let res: Response;
+    try {
+      res = await ask("GET", held ? `${at}?since=${encodeURIComponent(held.etag)}` : at);
+    } catch (e) {
+      // Gone since it was named: this person was taken out of it, or it was deleted.
+      if (e instanceof Refused && e.status === 404 && id !== "") return { id, gone: true };
+      throw e;
+    }
+    const now = res.headers.get("x-manifest-etag") ?? etag ?? held?.etag ?? "";
+    return { id, space, etag: now, held, fresh: res.status === 304 ? null : ((await res.json()) as Manifest) };
+  }
 
+  /** Put the sections that were read in place of the ones held, and say what
+   *  changed. With `only`, the sections not read are left as they are;
+   *  without, they are ones this person is no longer in. */
+  private adopt(read: ReadSection[], only: boolean): void {
+    const before = new Map(this.sections);
     const changed: string[] = [];
     const kept = new Set<string>();
     for (const r of read) {
@@ -552,7 +663,7 @@ export class Workspace {
       for (const path of old.keys()) if (!section.files.has(path)) changed.push(join(section.mount, path));
     }
     for (const [id, section] of before) {
-      if (kept.has(id)) continue;
+      if (kept.has(id) || (only && !read.some((r) => r.id === id))) continue;
       this.sections.delete(id);
       this.mounts.delete(id);
       for (const path of section.files.keys()) changed.push(join(section.mount, path));
@@ -560,34 +671,157 @@ export class Workspace {
         tell(this.spaceLeftHeard, { root: this.root, name: section.space.name, path: section.mount });
       }
     }
+    // A folder made here that a document now sits in is a folder like any other.
+    for (const dir of [...this.made]) if (this.holdsFiles(join(this.root, dir))) this.made.delete(dir);
+    // Nothing is said of the first reading: it is what the app opens on.
+    if (before.size > 0 && changed.length > 0) this.changed(changed.map((rel) => `${this.root}/${rel}`));
+  }
 
+  /** Take in what a poll says: read every manifest that moved, drop the
+   *  sections this person is no longer in, and say what changed. */
+  private async take(poll: PollAnswer): Promise<void> {
+    this.limits = poll.limits;
+    // Null: the database could not say. What is held stays as it is.
+    const spaces = poll.spaces ?? [...this.sections.values()].flatMap((s) => (s.space ? [s.space] : []));
+    const read = await Promise.all([
+      this.readSection("", null, poll.manifestEtag),
+      ...spaces.map((space) => this.readSection(space.id, space, space.etag)),
+    ]);
+    this.adopt(read, false);
     this.poll = poll;
     this.phase = "idle";
     this.error = null;
     this.lastSyncMs = Date.now();
-    // Nothing is said of the first reading: it is what the app opens on.
-    if (before.size > 0 && changed.length > 0) {
-      tell(this.appliedHeard, { root: this.root, paths: changed });
-      for (const rel of changed) {
-        const file = `${this.root}/${rel}`;
-        for (const doc of this.watched) {
-          if (file === doc.path) tell(this.changeHeard, { path: doc.path, part: "text" });
-          else if (file === metaFileOf(doc.path)) tell(this.changeHeard, { path: doc.path, part: "meta" });
-          else if (doc.rendition !== null && file === doc.rendition) {
-            tell(this.changeHeard, { path: doc.path, part: "rendition" });
-          }
-        }
-      }
-    }
-    this.say();
+    this.restate();
   }
 
-  /** Ask the worker whether anything moved, and take in what did. One at a
-   *  time: a second ask joins the first. */
+  /** Read sections again now, by their ids: after a change this page made
+   *  to them that it cannot work out for itself. */
+  async reread(spaces: string[]): Promise<void> {
+    const read = await Promise.all(
+      [...new Set(spaces)].flatMap((id) => {
+        const held = this.sections.get(id);
+        return held ? [this.readSection(id, held.space, null)] : [];
+      }),
+    );
+    this.adopt(read, true);
+    this.restate();
+  }
+
+  /**
+   * Files this page wrote, as the worker says the manifest now has them
+   * (`{fid, …entry}`, cloud-worker/src/webDocs.ts), put into the manifest
+   * held. `over` is the manifest the write was made to: when that is the one
+   * held, the one held is now at `etag` and nothing is asked for.
+   */
+  keep(space: string, files: (ManifestFile & { fid: string })[], etag: string, over: string): void {
+    const section = this.sections.get(space);
+    if (!section) return;
+    for (const { fid, ...file } of files) {
+      const old = section.manifest.files[fid];
+      if (old && old.path !== file.path) section.files.delete(old.path);
+      section.manifest.files[fid] = file;
+      delete section.manifest.tombstones?.[fid];
+      if (syncs(file.path) && !(space === "" && reservedTop(file.path))) section.files.set(file.path, { fid, file });
+    }
+    if (section.etag === over) section.etag = etag;
+    for (const dir of [...this.made]) if (this.holdsFiles(join(this.root, dir))) this.made.delete(dir);
+  }
+
+  /* ---------- The beat ---------- */
+
+  /** The document this tab is editing, as the worker is told it: its
+   *  section, and its path there. Null when there is none, the last touch
+   *  is no longer fresh, or the path is one the worker would not record. */
+  private editing(now: number): { space: string; path: string; key: string } | null {
+    if (!this.activity || now - this.activity.at >= ACTIVITY_FRESH_MS) return null;
+    const place = this.place(this.activity.abs);
+    if (!place || !validPath(place.path)) return null;
+    return { ...place, key: `${place.space}/${place.path}` };
+  }
+
+  /** Whether the document being edited is owed a claim now: *Take over* was
+   *  asked, or the last poll said nobody holds it (`claim_owed`, engine.rs).
+   *  Not when the domain could not say who holds what. */
+  private claimOwed(editing: { space: string; path: string }): boolean {
+    if (this.taking !== null && this.taking === this.activity?.abs) return true;
+    const key = editing.path.toLowerCase();
+    return this.poll?.leases != null && !this.poll.leases.some((l) => l.path === key && (l.space ?? "") === editing.space);
+  }
+
+  /** Whether the next poll carries a beat: on a cadence, at once when the
+   *  document being edited is another, and at once when it is there to claim. */
+  private beatDue(now: number): boolean {
+    const editing = this.editing(now);
+    return (
+      this.lastBeat === null ||
+      now - this.lastBeat.at >= BEAT_MS ||
+      this.lastBeat.named !== (editing?.key ?? "") ||
+      (editing !== null && this.claimOwed(editing))
+    );
+  }
+
+  /** Ask ahead of the clock when a beat is owed for something that just
+   *  happened here — and once for it, not until the worker agrees: a claim
+   *  it will not record would otherwise be asked for without end. */
+  private hurry(): void {
+    const now = Date.now();
+    const editing = this.editing(now);
+    const key = `${editing?.key ?? ""}|${this.taking ?? ""}`;
+    const moved = this.lastBeat !== null && this.lastBeat.named !== (editing?.key ?? "");
+    if (!this.tabs?.leading() || !(moved || (editing !== null && this.claimOwed(editing)))) return;
+    if (this.hurried && this.hurried.key === key && now - this.hurried.at < BEAT_MS) return;
+    this.hurried = { key, at: now };
+    // After the ask that is under way, if one is: it was made before this.
+    void (this.passing ?? Promise.resolve()).then(() => this.pass()).then(() => this.schedule());
+  }
+
+  /** Which document this tab is editing (its absolute path), or none. */
+  setActivity(abs: string | null): void {
+    if (abs === (this.activity?.abs ?? null)) return;
+    this.activity = abs === null ? null : { abs, at: Date.now() };
+    this.hurry();
+  }
+
+  /** A document was written here: typing is what keeps a document this
+   *  browser's, not only having opened it. */
+  touch(abs: string): void {
+    this.activeAt = Date.now();
+    if (this.activity?.abs !== abs) return;
+    this.activity.at = Date.now();
+    this.hurry();
+  }
+
+  /** *Take over* a document another device holds: it is the one being
+   *  edited from this moment, and the next beat claims it. */
+  takeOver(abs: string): void {
+    this.activity = { abs, at: Date.now() };
+    this.taking = abs;
+    this.hurry();
+  }
+
+  /** Ask the worker whether anything moved, and take in what did; the beat
+   *  rides along when one is owed. One at a time: a second ask joins the
+   *  first. Only the tab that asks for its browser does (tabs.ts). */
   pass(): Promise<void> {
+    if (this.tabs && !this.tabs.leading()) return Promise.resolve();
     this.passing ??= (async () => {
       try {
-        await this.take(await askJson<PollAnswer>("GET", "/api/poll"));
+        const now = Date.now();
+        const editing = this.editing(now);
+        const taking = editing !== null && this.taking !== null && this.taking === this.activity?.abs;
+        const beat = this.beatDue(now)
+          ? { name: deviceName(), ...(editing ? { path: editing.path, space: editing.space } : {}), take: taking, ttl: this.beatTtl(now) }
+          : null;
+        const poll = await askJson<PollAnswer>(beat ? "POST" : "GET", "/api/poll", beat ? { body: beat } : {});
+        if (beat) {
+          // From when it was sent: the next is then owed a little early
+          // rather than a poll late.
+          this.lastBeat = { at: now, named: editing?.key ?? "" };
+          if (taking) this.taking = null;
+        }
+        await this.take(poll);
+        this.tabs?.tell(poll);
       } catch (e) {
         if (e instanceof Unreachable) {
           this.phase = "offline";
@@ -600,7 +834,7 @@ export class Workspace {
           this.phase = "error";
           this.error = e instanceof Error ? e.message : String(e);
         }
-        this.say();
+        this.restate();
       } finally {
         this.passing = null;
       }
@@ -619,22 +853,46 @@ export class Workspace {
     return Math.max(slow ? Math.max(gap, POLL_BACKGROUND_MS) : gap, this.waitUntil - now);
   }
 
+  /** How long the beat sent now holds. */
+  private beatTtl(now: number): number {
+    const gap = Math.max(this.gap(now) ?? POLL_AWAY_MS, BEAT_MS) * 2.5;
+    return Math.min(Math.max(gap, BEAT_TTL_MIN_MS), BEAT_TTL_MAX_MS);
+  }
+
   private schedule(): void {
     if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    if (!this.tabs?.leading()) return;
     const gap = this.gap(Date.now());
-    this.timer = gap === null ? null : window.setTimeout(() => void this.pass().then(() => this.schedule()), gap);
+    if (gap !== null) this.timer = window.setTimeout(() => void this.pass().then(() => this.schedule()), gap);
   }
 
   /** Start keeping in step, for as long as the page lives. */
   follow(): void {
+    this.tabs = tabs({
+      // This tab asks for its browser from now on. Which document the
+      // browser was last said to be editing is another tab's to know, so a
+      // beat is owed; and what is held here may be as old as that tab's
+      // last answer.
+      lead: () => {
+        this.lastBeat = null;
+        void this.pass().then(() => this.schedule());
+      },
+      follow: () => this.schedule(),
+      heard: (poll) => void this.take(poll).catch(() => {}),
+    });
     const used = () => {
       const idle = Date.now() - this.activeAt;
       this.activeAt = Date.now();
+      this.tabs?.claim();
       // Back after a while: what is on screen may be old.
       if (idle >= IDLE_AFTER_MS) void this.pass().then(() => this.schedule());
     };
     for (const event of ["pointerdown", "keydown", "wheel"]) addEventListener(event, used, { passive: true, capture: true });
-    addEventListener("focus", () => this.schedule());
+    addEventListener("focus", () => {
+      this.tabs?.claim();
+      this.schedule();
+    });
     addEventListener("blur", () => this.schedule());
     document.addEventListener("visibilitychange", () => {
       const away = this.hiddenAt !== null && Date.now() - this.hiddenAt >= POLL_BACKGROUND_MS;
@@ -642,7 +900,14 @@ export class Workspace {
       if (!document.hidden && away) void this.pass().then(() => this.schedule());
       else this.schedule();
     });
+    // The page is going: the others stop showing this browser now rather
+    // than when its last beat lapses. Best effort, and only from the tab
+    // that beats; another tab of this browser beats again when it takes over.
+    addEventListener("pagehide", () => {
+      if (this.tabs?.leading() && this.lastBeat !== null) {
+        void send("POST", "/api/poll", { body: { leave: true }, keepalive: true }).catch(() => {});
+      }
+    });
     this.hiddenAt = document.hidden ? Date.now() : null;
-    this.schedule();
   }
 }

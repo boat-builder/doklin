@@ -6114,15 +6114,18 @@ await test("web: a note and its comments are saved in one manifest write, each o
   const save = (path, body, extra = "") => browser(`/api/web/doc?path=${encodeURIComponent(path)}${extra}`, { method: "PUT", cookie: WEB, body });
   const TEXT = "# Browser\n\nThe {==opening==}{>>#m1web<<} is here.\n";
 
+  const held = await currentEtag();
   const made = await save("browser/First.md", { md: { text: TEXT, ifRev: null }, meta: { text: SIDECAR("m1web", "stronger"), ifRev: null } });
   assert.equal(made.status, 200);
   let m = await sharedManifest();
   assert.equal(m.seq, start.seq + 1, "one write for both files");
   assert.equal(made.json.etag, await currentEtag(), "…and the answer names the manifest it left");
+  assert.equal(made.json.over, held, "…and the one it was made to: a browser that held that one need not read it again");
   const [mdFid, md] = fileAt(m, "browser/First.md");
   const [metaFid, meta] = fileAt(m, "browser/First.meta.jsonl");
-  assert.deepEqual(made.json.md, { fid: mdFid, path: "browser/First.md", rev: 1, hash: md.hash, size: md.size });
-  assert.deepEqual(made.json.meta, { fid: metaFid, path: "browser/First.meta.jsonl", rev: 1, hash: meta.hash, size: meta.size });
+  assert.deepEqual([md.path, md.rev, meta.path, meta.rev], ["browser/First.md", 1, "browser/First.meta.jsonl", 1]);
+  assert.deepEqual(made.json.md, { fid: mdFid, ...md }, "each file as the manifest now has it");
+  assert.deepEqual(made.json.meta, { fid: metaFid, ...meta });
   assert.equal(md.by, (await browser("/api/meta", { cookie: WEB })).json.you.memberId, "signed with the person, as their Mac's write would be");
   assert.equal(await blobText(mdFid, md.hash), TEXT, "the text as the editor made it, markers and all");
   assert.equal(await blobText(metaFid, meta.hash), SIDECAR("m1web", "stronger"));
@@ -6154,12 +6157,17 @@ await test("web: a note and its comments are saved in one manifest write, each o
 
   // The same bytes are not a revision, and wake no Mac.
   const same = await save("browser/First.md", { md: { text: `${TEXT}\nMore.\n`, ifRev: 2 } });
-  assert.deepEqual([same.status, same.json.md.rev, same.json.etag], [200, 2, settled]);
+  assert.deepEqual([same.status, same.json.md.rev, same.json.etag, same.json.over], [200, 2, settled, settled]);
 
   // A thread is a person's to remove by editing: nothing polices the markers.
   const plain = await save("browser/First.md", { md: { text: "# Browser\n\nNo comments now.\n", ifRev: 2 }, meta: { text: '{"doklin":"meta","v":1}\n', ifRev: 2 } });
   assert.equal(plain.status, 200);
   assert.deepEqual([plain.json.md.rev, plain.json.meta.rev], [3, 3]);
+
+  // A new note has nothing in it yet.
+  const empty = await save("browser/Empty.md", { md: { text: "", ifRev: null } });
+  assert.deepEqual([empty.status, empty.json.md.rev, empty.json.md.size], [200, 1, 0]);
+  assert.equal(await blobText(empty.json.md.fid, empty.json.md.hash), "");
 
   // What is asked wrongly, or of nothing.
   assert.equal((await save("browser/First.md", {})).status, 400);
@@ -6172,7 +6180,7 @@ await test("web: a note and its comments are saved in one manifest write, each o
   assert.equal((await save("browser/First.meta.jsonl", { md: { text: "x", ifRev: null } })).status, 400, "the sidecar is saved as the document's comments");
   assert.equal((await save("browser/chart.png", { md: { text: "x", ifRev: null } })).status, 400, "only documents sync");
   assert.equal((await save("Private/x.md", { md: { text: "x", ifRev: null } })).status, 409, "the shared workspace holds nothing under Private");
-  assert.equal(await currentEtag(), plain.json.etag);
+  assert.equal(await currentEtag(), empty.json.etag);
 
   // A section is named by its id, and its paths are its own.
   const space = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
@@ -6265,6 +6273,66 @@ await test("web: a document or a folder is moved to exactly where the browser sa
   assert.equal((await remove("folder", "browser")).status, 404, "a folder is its files");
   assert.equal((await remove("doc", "Roadmap.md", `&space=${space}`)).status, 200);
   assert.equal((await remove("doc", "Diary.md", `&space=${space}`)).status, 200);
+});
+
+await test("web: a document or a folder is copied to exactly where the browser said, every file of it a new one, in its section or in another", async () => {
+  const save = (path, body, extra = "") => browser(`/api/web/doc?path=${encodeURIComponent(path)}${extra}`, { method: "PUT", cookie: WEB, body });
+  const copy = (body) => browser("/api/web/copy", { method: "POST", cookie: WEB, body });
+  const remove = (route, path, extra = "") => browser(`/api/web/${route}?path=${encodeURIComponent(path)}${extra}`, { method: "DELETE", cookie: WEB });
+  const space = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  for (const name of ["copies/Plan.md", "copies/Sub/Deep.md"]) {
+    assert.equal((await save(name, { md: { text: `# ${name}\n`, ifRev: null }, meta: { text: SIDECAR("m1", name), ifRev: null } })).status, 200);
+  }
+  let m = await sharedManifest();
+  const [planFid, plan] = fileAt(m, "copies/Plan.md");
+  const held = await currentEtag();
+
+  // Beside what it was copied from: the note and its comments, in one write.
+  const made = await copy({ from: { path: "copies/Plan.md" }, to: { path: "copies/Plan copy.md" }, kind: "document" });
+  assert.equal(made.status, 200);
+  assert.deepEqual([made.json.kind, made.json.from, made.json.to, made.json.files], ["document", "copies/Plan", "copies/Plan copy", 2]);
+  assert.deepEqual([made.json.over, made.json.etag], [held, await currentEtag()]);
+  assert.equal((await sharedManifest()).seq, m.seq + 1, "one write");
+  m = await sharedManifest();
+  const [copyFid, copied] = fileAt(m, "copies/Plan copy.md");
+  assert.ok(copyFid && copyFid !== planFid, "a file of its own");
+  assert.deepEqual([copied.rev, copied.hash], [1, plan.hash], "…holding the same bytes, at its first revision");
+  assert.equal(await blobText(copyFid, copied.hash), "# copies/Plan.md\n");
+  assert.ok(fileAt(m, "copies/Plan copy.meta.jsonl")[0], "its comments came with it");
+  assert.deepEqual(m.files[planFid], plan, "and what it was copied from is as it was");
+  assert.equal(m.tombstones?.[planFid], undefined);
+
+  assert.equal((await copy({ from: { path: "copies/Plan.md" }, to: { path: "copies/Plan copy.md" }, kind: "document" })).status, 409, "a name that is taken");
+  assert.equal((await copy({ from: { path: "copies/Nope.md" }, to: { path: "copies/X.md" }, kind: "document" })).status, 404);
+  assert.equal((await copy({ from: { path: "copies/Sub" }, to: { path: "copies/Sub2" }, kind: "document" })).status, 404, "a folder is not a document");
+  assert.equal((await copy({ from: { path: "copies/Plan.md" }, to: { path: "copies/Y.md" } })).status, 400, "the kind is said");
+  assert.equal((await copy({ from: { path: "copies/Plan.md" }, to: { path: ".hidden/x.md" }, kind: "document" })).status, 400);
+  assert.equal((await call("/api/web/copy", { method: "POST", token: OWNER, body: {} })).status, 403, "a browser's route, like the rest");
+
+  // A folder, with everything under it.
+  const folder = await copy({ from: { path: "copies/Sub" }, to: { path: "copies/Sub copy" }, kind: "folder" });
+  assert.deepEqual([folder.status, folder.json.kind, folder.json.to, folder.json.files], [200, "folder", "copies/Sub copy", 2]);
+  m = await sharedManifest();
+  assert.ok(fileAt(m, "copies/Sub copy/Deep.md")[0] && fileAt(m, "copies/Sub/Deep.md")[0]);
+
+  // To another section: there, and still here.
+  const across = await copy({ from: { path: "copies/Plan.md" }, to: { space, path: "Plan.md" }, kind: "document" });
+  assert.deepEqual([across.status, across.json.files], [200, 2]);
+  const there = (await call(`/api/spaces/${space}/manifest`, { token: OWNER })).json;
+  assert.ok(fileAt(there, "Plan.md")[0] && fileAt(there, "Plan.meta.jsonl")[0]);
+  assert.equal(across.json.etag, db.value("SELECT etag FROM spaces WHERE id = ?", space), "the etags are the section's it went to");
+  assert.ok((await sharedManifest()).files[planFid], "nothing left where it was copied from");
+  assert.equal((await copy({ from: { space: "s-00000000", path: "x.md" }, to: { path: "x.md" }, kind: "document" })).status, 404);
+
+  // More files than one request carries.
+  for (let i = 0; i < 17; i++) assert.equal((await save(`copies/Many/n${i}.md`, { md: { text: `${i}\n`, ifRev: null } })).status, 200);
+  const many = await copy({ from: { path: "copies/Many" }, to: { path: "copies/Many copy" }, kind: "folder" });
+  assert.equal(many.status, 400);
+  assert.ok(/17 files, and 16 are copied at a time/.test(many.json.error), many.json.error);
+  assert.equal(fileAt(await sharedManifest(), "copies/Many copy/n0.md")[0], null, "and none of it was");
+
+  assert.equal((await remove("folder", "copies")).status, 200);
+  assert.equal((await remove("doc", "Plan.md", `&space=${space}`)).status, 200);
 });
 
 await test("web: search covers every section the person is in, and names what it found by section and file id; what the browser just saved is found at once", async () => {

@@ -417,6 +417,15 @@ export interface Shows {
   onArrive(cb: () => void): Unsubscribe;
 }
 
+/** A page that can go at any moment, with no window of the app's own to
+ *  ask first (`Windows` has that): a browser's tab. */
+export interface Leaving {
+  /** The page is going out of use — left for another, hidden, closing.
+   *  `flush` is called at once and must hand the backend what the app still
+   *  holds before it first waits for anything: there may be no later. */
+  onLeave(flush: () => Promise<unknown>): Unsubscribe;
+}
+
 /** What a window says it is showing, so another open of the same thing
  *  finds it and a quit can bring it back. */
 export type WindowContent = { folder: string | null; tabs: StoredTab[]; activeId: string | null };
@@ -527,6 +536,7 @@ export interface Backend {
 
   readonly versions?: Versions;
   readonly shows?: Shows;
+  readonly leaving?: Leaving;
   readonly windows?: Windows;
   readonly untitled?: UntitledNotes;
   readonly localFiles?: LocalFiles;

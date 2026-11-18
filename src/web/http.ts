@@ -47,6 +47,31 @@ export function deviceId(): string {
   return made;
 }
 
+/** What this browser is called wherever a device is named — Devices, who is
+ *  here, who holds a document: "Chrome on Windows". */
+export function deviceName(): string {
+  const ua = navigator.userAgent;
+  const browser = /Edg\//.test(ua)
+    ? "Edge"
+    : /Firefox\//.test(ua)
+      ? "Firefox"
+      : /Chrome\//.test(ua)
+        ? "Chrome"
+        : /Safari\//.test(ua)
+          ? "Safari"
+          : "A browser";
+  const system = /Windows/.test(ua)
+    ? "Windows"
+    : /Macintosh|Mac OS X/.test(ua)
+      ? "a Mac"
+      : /CrOS/.test(ua)
+        ? "a Chromebook"
+        : /Linux/.test(ua)
+          ? "Linux"
+          : null;
+  return system ? `${browser} on ${system}` : browser;
+}
+
 type Used = { day: number; sent: number; told: number };
 
 function readUsed(now: number): Used {
@@ -99,7 +124,17 @@ export function onSignedOut(cb: () => void): void {
   signedOut = cb;
 }
 
-export type Ask = { body?: unknown; headers?: Record<string, string> };
+export type Ask = {
+  body?: unknown;
+  headers?: Record<string, string>;
+  /** The request is to outlive the page that made it: one sent as the tab
+   *  goes. A browser carries 64 KB of these at a time (`KEEPALIVE_BYTES`). */
+  keepalive?: boolean;
+};
+
+/** How much a request that outlives its page may carry: the browsers' limit
+ *  is 64 KiB for all of a page's at once, headers aside. */
+export const KEEPALIVE_BYTES = 60_000;
 
 /** One request to the worker. The answer is returned whatever its status;
  *  `Unreachable` is thrown when there is none. */
@@ -119,6 +154,7 @@ export async function send(method: string, path: string, ask: Ask = {}): Promise
       method,
       headers,
       body: ask.body === undefined ? undefined : JSON.stringify(ask.body),
+      keepalive: ask.keepalive === true,
       // Never another origin's answer, and never a redirect followed there.
       mode: "same-origin",
       credentials: "same-origin",

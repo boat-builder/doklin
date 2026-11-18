@@ -39,8 +39,8 @@
   and rejects with `SaveConflict` otherwise; the sidecar is last writer wins.
   A `Rev` is opaque outside the backend that made it.
 - What a platform may not have is an optional group on `Backend` (`versions`,
-  `shows`, `windows`, `untitled`, `localFiles`, `pdf`, `updater`), never a
-  flag and never a check of which platform this is. The group is asked for where the
+  `shows`, `leaving`, `windows`, `untitled`, `localFiles`, `pdf`, `updater`),
+  never a flag and never a check of which platform this is. The group is asked for where the
   feature comes into view; what is behind that takes the group, or a handler,
   as a prop, and a missing one is a button, a menu row or a shortcut that is
   not there.
@@ -48,6 +48,10 @@
   data: `home` (the one workspace it is for, which the app opens at start in
   place of the last one) and `htmlFrame` (a page that arbitrary html is
   shown in, in place of a frame handed the markup).
+- `leaving.onLeave` is handed the app's flush where a page can go with no
+  window to ask first. **The flush must reach `documents.save` before it
+  first awaits anything**: it is called as a tab closes, and what it has not
+  handed over by the time it returns is lost.
 - Nothing calls `backend` at import time: an entry (`src/main.tsx`,
   `src/web/start.tsx`, a harness page) calls `installBackend` and then
   renders.
@@ -97,6 +101,46 @@ Its sign-in and the worker's routes: [cloud-people-agents.md](cloud-people-agent
 - What a browser has not got is no group at all: `windows`, `untitled`,
   `localFiles`, `versions`, `pdf`, `updater`.
 - `verify-harness/drive-web.mjs` drives the built page, not a dev server.
+
+Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
+
+- **`documents.save` takes the text at once and sends it later**: it is the
+  Mac's write to disk, and the send is the engine's sync. A document is sent
+  2 s after its last save, at most once in 10 s, and at once when the page
+  loses attention. Everything that reads a document reads what is waiting
+  for it first. `save` does all of this before its first `await` (see
+  `leaving`, above).
+- A `Rev` is a mark that moves whenever the text a read would give changes: a
+  save, a change taken in from elsewhere, a merge. It does not move when a
+  save lands or the document is moved, so a text read before either is still
+  the text.
+- **A send goes over the stored copy its text was made from, and nothing is
+  ever written over a version nobody here has read.** When the copy moved
+  on, the two are merged against the text both started from; where they
+  overlap, the other version is written beside the document as a conflict
+  copy and ours stays. That is the engine's rule and its naming
+  (`merge_texts`, `conflict_copy_path`, `engine/src/cloud/merge.rs`): change
+  both. `mergeText` treats changes that touch as an overlap, as diff3 does.
+- A sidecar is merged by its records, not its lines (`mergeMeta`): two
+  replies to one thread are both kept. It never gets a conflict copy.
+- What waits is also in `localStorage`, under the tab that holds it
+  (`doklin:web:draft:<workspace>:<person>:<tab>:<path>`), and a tab holds a
+  Web Lock for as long as it lives. **A tab takes over a draft only when the
+  tab that wrote it holds no lock**: two tabs sending one draft would merge
+  a text with an older copy of itself. A request made as the page goes
+  carries 64 KB (`KEEPALIVE_BYTES`); the draft is what covers a larger note.
+- After its own save the page puts the files the worker answered into the
+  manifest it holds, and takes the answer's `etag` when it held `over`. A
+  move, a copy and a delete read the section's manifest again instead.
+- An empty folder exists on the page that made it and nowhere else, until a
+  document is in it.
+- The beat is the engine's (`PRESENCE_BEAT`, `beat_ttl`, `ACTIVITY_FRESH`,
+  `claim_owed`, `engine.rs`): change both. One tab of a browser polls and
+  beats, the one last used (`tabs.ts`: a Web Lock it takes from the others),
+  and the rest are told what it was answered. The document the beat names is
+  that tab's.
+- A change to the tree that fails rejects with the sentence itself, not an
+  `Error`: the UI prints `String(e)`, as it does for a Mac's command.
 
 ## Saving
 

@@ -13,6 +13,7 @@ import { installBackend } from "../backend";
 import { applyTheme, readStoredTheme } from "../theme";
 import { webBackend } from "./backend";
 import { Unreachable, onSignedOut, refused, send } from "./http";
+import { Saving } from "./saving";
 import SignIn from "./SignIn";
 import { Workspace } from "./workspace";
 
@@ -70,7 +71,12 @@ async function start(): Promise<void> {
     // Signed out somewhere else, or taken off the workspace: the worker has
     // said to drop the cookie and what the page kept. Back to the sign-in.
     onSignedOut(() => location.reload());
-    installBackend(webBackend(ws));
+    const saving = new Saving(ws);
+    // What a closed tab left unsent is taken over before the app reads a
+    // document, so the one it opens shows what was typed.
+    await saving.recover();
+    installBackend(webBackend(ws, saving));
+    saving.attend();
     ws.follow();
     root.render(
       <React.StrictMode>

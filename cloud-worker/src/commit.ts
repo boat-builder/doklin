@@ -180,8 +180,9 @@ export const newFileId = (): string => `f-${randomHex(6)}`;
 /** `wrote` is false when the change left the manifest as it was, or was a
  *  dry run: nothing was stored and `etag` is the manifest's own. `manifest`
  *  is the manifest as this call left it, in its stored form — what `etag`
- *  names when it wrote. */
-export type Committed<T> = { value: T; etag: string; manifest: Manifest; wrote: boolean };
+ *  names when it wrote. `over` is the etag of the manifest the change was
+ *  made to: a caller that held that one knows nothing else moved. */
+export type Committed<T> = { value: T; etag: string; over: string; manifest: Manifest; wrote: boolean };
 
 /**
  * Apply `change` to the manifest and store the result, or answer why not.
@@ -244,7 +245,7 @@ export async function commit<T>(
     }
     if (!tx.changed) {
       await sweep(before);
-      return { value, etag: obj.etag, manifest: parsed as Manifest, wrote: false };
+      return { value, etag: obj.etag, over: obj.etag, manifest: parsed as Manifest, wrote: false };
     }
 
     const next = unmounted(tx.m, mount);
@@ -274,7 +275,7 @@ export async function commit<T>(
       await sweep(before);
       return refusal;
     }
-    if (opts.dryRun) return { value, etag: obj.etag, manifest: next, wrote: false };
+    if (opts.dryRun) return { value, etag: obj.etag, over: obj.etag, manifest: next, wrote: false };
 
     // Only a change to which addresses the map names is the registry's
     // business — an ordinary write asks it nothing.
@@ -308,7 +309,7 @@ export async function commit<T>(
       await sweep(named(next));
       if (claim) await releaseAddresses(env, claim.stale);
       await noteEtag(env, put.etag);
-      return { value, etag: put.etag, manifest: next, wrote: true };
+      return { value, etag: put.etag, over: obj.etag, manifest: next, wrote: true };
     }
   }
   await sweep(lastSeen);

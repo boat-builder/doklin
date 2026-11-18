@@ -27,19 +27,27 @@
 //                                      to the app's own script (auth.ts, `ownScript`)
 //
 //   PUT    /api/web/doc?space=&path=   {md?: {text, ifRev}, meta?: {text, ifRev}} → {md?, meta?,
-//                                      etag}: a note and its comments in ONE write. `ifRev` is
-//                                      the revision that was read, or null for a file that must
-//                                      not exist yet. 409 {part, rev} when either moved on —
-//                                      and then nothing was written
+//                                      etag, over}: a note and its comments in ONE write. `ifRev`
+//                                      is the revision that was read, or null for a file that
+//                                      must not exist yet. 409 {part, rev} when either moved on —
+//                                      and then nothing was written. `md` and `meta` are each
+//                                      {fid, …the file's entry in the manifest}
 //   DELETE /api/web/doc?space=&path=[&v=md|html]   the document, or one version of two
 //   DELETE /api/web/folder?space=&path=            everything under a folder
 //   POST   /api/web/move               {from: {space, path}, to: {space, path}, kind: "document" |
 //                                      "folder"}: to exactly `to`, in the same section or another
+//   POST   /api/web/copy               the same body: the document or the folder again, at `to`,
+//                                      every file of it a new one. 16 files at most
 //   GET    /api/web/search?q=&limit=   every section the person is in (search.ts); 202
 //                                      {indexing, pending} while the mirror catches up
 //   PUT    /api/web/pages              {space, path, kind, slug?, title?, desc?} → {slug, url, …}
 //   DELETE /api/web/pages?slug=        stop a page, in whichever section of theirs holds it
 //   PUT    /api/web/home               {slug: string | null}: the page at `/`, or none
+//
+// A change to documents answers two etags beside what it did: `etag`, the
+// section's manifest once the change was made, and `over`, the manifest it
+// was made to. (A move between sections is more than one write and answers
+// neither.)
 //
 // A browser's sign-in is answered here and on the routes `ALSO` lists, and on
 // nothing else — and that is a property of the sign-in, not of the cookie: a
@@ -56,7 +64,7 @@ import { json, readJsonObject } from "./http";
 import { ID_RE, normalizeCode } from "./layout";
 import { redeemInvite } from "./members";
 import type { WebCall } from "./webCall";
-import { deleteDoc, deleteFolder, getSearch, postMove, putDoc } from "./webDocs";
+import { deleteDoc, deleteFolder, getSearch, postCopy, postMove, putDoc } from "./webDocs";
 import { deletePage, putHome, putPage } from "./webPages";
 
 /* ---------- Signing in ---------- */
@@ -118,6 +126,7 @@ const ROUTES: Record<string, Partial<Record<string, Handler>>> = {
   doc: { PUT: putDoc, DELETE: deleteDoc },
   folder: { DELETE: deleteFolder },
   move: { POST: postMove },
+  copy: { POST: postCopy },
   search: { GET: getSearch },
   pages: { PUT: putPage, DELETE: deletePage },
   home: { PUT: putHome },

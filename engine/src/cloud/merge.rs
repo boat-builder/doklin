@@ -1,6 +1,9 @@
 //! Concurrent edits to one file: a three-way text merge against the last
 //! synced base, and — when the edits overlap or the content isn't text — a
 //! conflict copy beside the file, so nothing is ever lost.
+//!
+//! A browser does the same to a save the worker refused, with a merge of its
+//! own and the same name for the copy (src/web/merge.ts): change both.
 
 use std::path::{Path, PathBuf};
 

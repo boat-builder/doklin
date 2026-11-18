@@ -10,9 +10,9 @@
 // Everything here goes through `commit` (commit.ts), so a document's files
 // land in one manifest write or not at all. A move from one section to
 // another is the one change that is more than one write: the place it goes to
-// first.
+// first. A copy is that first write and nothing after it.
 
-import { Refusal, commit, newFileId, type Tx } from "./commit";
+import { Refusal, commit, newFileId, type Committed, type Tx } from "./commit";
 import { Index, VERSION_WORD, basename, docExists, locate, nameOf, pathProblem, type Doc, type Entry, type Named, type Version } from "./documents";
 import { blobKey, contentTypeOf } from "./layout";
 import type { Manifest, PublicEntry } from "./manifest";
@@ -151,8 +151,8 @@ export async function removeVersion(tx: Tx, doc: Doc, version: Version): Promise
 
 /* ---------- Moving ---------- */
 
-/** Files a move from one section to another carries: each is read from one
- *  part of the bucket and written to the other, and a request has a budget. */
+/** Files a move from one section to another carries, or a copy: each is
+ *  read from the bucket and written to it again, and a request has a budget. */
 const MAX_FILES_ACROSS = 16;
 
 /** What a move was asked to do. Both paths are without their slashes. */
@@ -266,6 +266,72 @@ export function moveWithin(tx: Tx, ask: MoveAsk): Record<string, unknown> | Refu
   return { kind, ...label, files: plan.length };
 }
 
+/** What a move between sections, or a copy, takes: what was picked, and the
+ *  bytes of each of its files as they were read. */
+type Lifted = { picked: Picked; contents: Map<string, Uint8Array> };
+
+/** Read what `ask.from` names out of the section it is in. `limit` is what
+ *  is said of one that is more files than a request carries. */
+async function lift(source: Where, ask: MoveAsk, limit: (files: number) => string): Promise<Lifted | Refusal> {
+  const ws = await openWorkspace(source.env);
+  if (!ws) return new Refusal(404, "this domain holds no workspace yet");
+  const picked = pick(new Index(mounted(ws.manifest, source.mount).files), ask.from, ask.what);
+  if (picked instanceof Refusal) return picked;
+  if (picked.moving.length > MAX_FILES_ACROSS) return new Refusal(400, limit(picked.moving.length));
+  const contents = new Map<string, Uint8Array>();
+  for (const e of picked.moving) {
+    const obj = await source.env.DATA.get(blobKey(e.fid, e.file.hash));
+    if (!obj) return new Refusal(503, "its content has not finished syncing — try again in a moment");
+    contents.set(e.fid, new Uint8Array(await obj.arrayBuffer()));
+  }
+  return { picked, contents };
+}
+
+/** Where what was lifted landed: what the change is called, and the id each
+ *  file has there, by the id it had where it was read. */
+type Landed = { label: Route["label"]; ids: [string, string][] };
+
+/** Write what was lifted where it goes. Each file is a new one there, with
+ *  an id of its own. */
+function land(who: Mover, dest: Where, lifted: Lifted, ask: MoveAsk, dryRun: boolean): Promise<Committed<Landed> | Refusal> {
+  return commit(
+    dest.env,
+    who.by,
+    async (tx) => {
+      const index = new Index(tx.files);
+      const routed = route(index, lifted.picked, ask.to, ask.into(index));
+      if (routed instanceof Refusal) return routed;
+      const ids = new Map<string, string>();
+      for (const step of routed.plan) {
+        const fid = newFileId();
+        ids.set(step.fid, fid);
+        await tx.write(fid, step.to, lifted.contents.get(step.fid)!, contentTypeOf(step.to));
+      }
+      keepPublic(tx);
+      return { label: routed.label, ids: [...ids] };
+    },
+    { dryRun, mount: dest.mount },
+  );
+}
+
+/**
+ * Copy a document or a folder, in its section or to another: every file of
+ * it is written again where the copy goes, as a new file. A copy has no page
+ * and no link of its own: both belong to the files it was made from.
+ */
+export async function copyTo(who: Mover, source: Where, dest: Where, ask: MoveAsk): Promise<Committed<Record<string, unknown>> | Refusal> {
+  const lifted = await lift(
+    source,
+    ask,
+    (files) => `that is ${files} files, and ${MAX_FILES_ACROSS} are copied at a time — copy it in parts, or in the Doklin app`,
+  );
+  if (lifted instanceof Refusal) return lifted;
+  const arrived = await land(who, dest, lifted, ask, false);
+  if (arrived instanceof Refusal) return arrived;
+  await mirrorAfter({ env: dest.env, ctx: who.ctx }, arrived);
+  return { ...arrived, value: { kind: lifted.picked.kind, ...arrived.value.label, files: lifted.picked.moving.length } };
+}
+
 /**
  * Move something from one section to another: its files are written where
  * they go, and only then taken out of where they were — with a tombstone
@@ -283,43 +349,17 @@ export async function moveAcross(
   ask: MoveAsk,
   dryRun = false,
 ): Promise<Record<string, unknown> | Refusal> {
-  const change = <T>(at: Where, fn: (tx: Tx) => Promise<T | Refusal>, dry = false) =>
-    commit(at.env, who.by, fn, { dryRun: dry, mount: at.mount });
-  const ws = await openWorkspace(source.env);
-  if (!ws) return new Refusal(404, "this domain holds no workspace yet");
-  const picked = pick(new Index(mounted(ws.manifest, source.mount).files), ask.from, ask.what);
-  if (picked instanceof Refusal) return picked;
-  if (picked.moving.length > MAX_FILES_ACROSS) {
-    return new Refusal(
-      400,
-      `that is ${picked.moving.length} files, and ${MAX_FILES_ACROSS} move between sections at a time — move it in parts, or in the Doklin app`,
-    );
-  }
-  const contents = new Map<string, Uint8Array>();
-  for (const e of picked.moving) {
-    const obj = await source.env.DATA.get(blobKey(e.fid, e.file.hash));
-    if (!obj) return new Refusal(503, "its content has not finished syncing — try again in a moment");
-    contents.set(e.fid, new Uint8Array(await obj.arrayBuffer()));
-  }
-
-  // Where it goes, first. Each file is a new one there, with an id of its own.
-  const arrived = await change(
-    dest,
-    async (tx) => {
-      const index = new Index(tx.files);
-      const routed = route(index, picked, ask.to, ask.into(index));
-      if (routed instanceof Refusal) return routed;
-      const ids = new Map<string, string>();
-      for (const step of routed.plan) {
-        const fid = newFileId();
-        ids.set(step.fid, fid);
-        await tx.write(fid, step.to, contents.get(step.fid)!, contentTypeOf(step.to));
-      }
-      keepPublic(tx);
-      return { label: routed.label, ids: [...ids] };
-    },
-    dryRun,
+  const change = <T>(at: Where, fn: (tx: Tx) => Promise<T | Refusal>) => commit(at.env, who.by, fn, { mount: at.mount });
+  const lifted = await lift(
+    source,
+    ask,
+    (files) => `that is ${files} files, and ${MAX_FILES_ACROSS} move between sections at a time — move it in parts, or in the Doklin app`,
   );
+  if (lifted instanceof Refusal) return lifted;
+  const { picked } = lifted;
+
+  // Where it goes, first.
+  const arrived = await land(who, dest, lifted, ask, dryRun);
   if (arrived instanceof Refusal) return arrived;
   const { label } = arrived.value;
   // New file ids where it went: a link to it from before finds nothing.

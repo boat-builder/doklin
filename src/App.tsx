@@ -4229,6 +4229,15 @@ export default function App() {
     [flushPendingAutosave, flushSidecarWrite],
   );
 
+  // Where the page itself can go with no window to ask first, the same
+  // flush is handed over whenever it may be about to. Both writes are begun
+  // before either is waited for: the backend has them by the time this
+  // returns.
+  useEffect(
+    () => backend.leaving?.onLeave(() => Promise.all([flushPendingAutosave(), flushSidecarWrite()])),
+    [flushPendingAutosave, flushSidecarWrite],
+  );
+
 
   // An untitled note is known by its first line and is unsaved for as long
   // as it has text: keep its tab saying both as the text changes. Neither is

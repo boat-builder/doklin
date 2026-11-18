@@ -278,20 +278,26 @@ authenticates (400 days from the app's last start).
 A section is its id (`""`/absent the shared workspace, else a space the
 person is in; any other → `404`), a path is as that section stores it, never
 under `Private/` or `Restricted/`. Signed with the person's member id. Every
-write answers the manifest's new `etag`. Commit lost 5 times → `503`.
+change to documents answers `etag`, the section's manifest once it was made,
+and `over`, the manifest it was made to (a move between sections is more than
+one write and answers neither). Commit lost 5 times → `503`.
 
 ```
 POST   session  no credential; {code, deviceId?, deviceName?} → 201 {tokenId, member} + the cookie;
        400 not a code; 401 unknown/expired (identical); 403 not the app's own script; 503
-PUT    doc?space=&path=  {md?: {text, ifRev}, meta?: {text, ifRev}} → {md?, meta?, etag}; each
-       saved file is {fid, path, rev, hash, size}. ONE manifest write. ifRev = the revision read,
-       null = the file must not exist yet. Either part moved on → 409 {part: "md"|"meta",
-       rev: now|null}, nothing written. `meta` is the sidecar's whole text. No marker or anchor
-       check: a thread is a person's to move or remove. An html page is never written here (400)
+PUT    doc?space=&path=  {md?: {text, ifRev}, meta?: {text, ifRev}} → {md?, meta?, etag, over};
+       each saved file is {fid, …its entry in the manifest}. ONE manifest write. ifRev = the
+       revision read, null = the file must not exist yet. Either part moved on → 409 {part:
+       "md"|"meta", rev: now|null}, nothing written. `meta` is the sidecar's whole text. No marker
+       or anchor check: a thread is a person's to move or remove. An html page is never written
+       here (400). The same bytes are no revision: etag = over
 DELETE doc?space=&path=[&v=md|html]  the document, or one version of two (last_version → 409)
 DELETE folder?space=&path=  every file under it → {kind: "folder", path, files}; 404 none
 POST   move  {from: {space?, path}, to: {space?, path}, kind: "document"|"folder"} → {kind, from, to,
        files}; to exactly `to`, never "into it". Across sections: newLinks, unpublished?, 16 files
+POST   copy  the same body → {kind, from, to, files}: every file written again at `to` as a new
+       file (new id, rev 1), in the same section or another; 16 files; 409 a name that is taken.
+       A copy takes no page and no link with it
 GET    search?q=&limit=  every section the person is in → {query, results: [{space, fid, path,
        matches, moreLines?, inName?, inComments?}], total, truncated?, notSearched?: [{space, path}],
        sectionsNotSearched?: [space]}; 202 {indexing, pending}
@@ -302,7 +308,7 @@ PUT    home  {slug | null} → {home}; a page of the shared workspace (another s
 ```
 
 Shared with the document API, never copied: `commit.ts`; `changes.ts`
-(removing a document or a version, moving in and across sections,
+(removing a document or a version, moving in and across sections, copying,
 `keepPublic`); `publishing.ts`; `search.ts` (`searchIn`).
 
 ## Public routes (`src/public.ts`; no auth; GET/HEAD, else 405)

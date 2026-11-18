@@ -11,9 +11,13 @@
 // What is written is what the person's editor made of the document, markers
 // and sidecar included: nothing here second-guesses it, as nothing
 // second-guesses the files a Mac syncs.
+//
+// Every change answers `etag`, the manifest's once it was made, and `over`,
+// the manifest's it was made to. A browser that held `over` holds the
+// manifest still, with this one change in it, and asks for nothing.
 
-import { keepPublic, moveAcross, moveWithin, removeDocument, removeVersion, repointPages, versionPath, type MoveAsk } from "./changes";
-import { Refusal, commit, newFileId, type Tx } from "./commit";
+import { copyTo, keepPublic, moveAcross, moveWithin, removeDocument, removeVersion, repointPages, versionPath, type MoveAsk } from "./changes";
+import { Refusal, commit, newFileId, type Committed, type Tx } from "./commit";
 import { Index, docExists, locate, nameOf, pathProblem, primaryOf, versionFlag, type Entry } from "./documents";
 import { json, readJsonObject } from "./http";
 import { MAX_FILE_BYTES, contentTypeOf } from "./layout";
@@ -25,6 +29,9 @@ import { META_SUFFIX } from "../../src/metaFile";
 /** `commit` in a section, signed with the person at the browser. */
 const change = <T>(c: WebCall, where: Where, fn: (tx: Tx) => Promise<T | Refusal>) =>
   commit(where.env, c.auth.memberId, fn, { mount: where.mount });
+
+/** What a change is answered with: what it did, and the two etags. */
+const answered = (made: Committed<Record<string, unknown>>): Response => json({ ...made.value, etag: made.etag, over: made.over });
 
 /* ---------- Saving ---------- */
 
@@ -59,8 +66,8 @@ function movedOn(part: Part, ifRev: number | null, current: Entry | null): Refus
   return new Refusal(409, `${it} ${part === "md" ? "was" : "were"} ${how}`, { part, rev });
 }
 
-/** What a saved file is now. */
-const savedAs = ({ fid, file }: Entry): Record<string, unknown> => ({ fid, path: file.path, rev: file.rev, hash: file.hash, size: file.size });
+/** What a saved file is now: its id, and its entry in the manifest. */
+const savedAs = ({ fid, file }: Entry): Record<string, unknown> => ({ fid, ...file });
 
 export async function putDoc(c: WebCall): Promise<Response> {
   const q = c.url.searchParams;
@@ -75,7 +82,7 @@ export async function putDoc(c: WebCall): Promise<Response> {
   if (meta instanceof Refusal) return refuse(meta);
   if (!md && !meta) return json({ error: "say what to save: md, meta or both" }, 400);
 
-  const done = await change(c, where, async (tx) => {
+  const made = await change(c, where, async (tx) => {
     const index = new Index(tx.files);
     const at = locate(index, path, null);
     if (at instanceof Refusal) return at;
@@ -110,11 +117,9 @@ export async function putDoc(c: WebCall): Promise<Response> {
     keepPublic(tx);
     return { ...(text ? { md: savedAs(text) } : {}), ...(comments ? { meta: savedAs(comments) } : {}) };
   });
-  if (done instanceof Refusal) return refuse(done);
-  await mirrorAfter({ env: where.env, ctx: c.ctx }, done);
-  // The etag is the manifest's after this save: a browser that held the one
-  // before it knows nothing else moved.
-  return json({ ...done.value, etag: done.etag });
+  if (made instanceof Refusal) return refuse(made);
+  await mirrorAfter({ env: where.env, ctx: c.ctx }, made);
+  return answered(made);
 }
 
 /* ---------- Removing ---------- */
@@ -127,15 +132,15 @@ export async function deleteDoc(c: WebCall): Promise<Response> {
   const version = versionFlag(q.get("v"));
   if (version instanceof Refusal) return refuse(version);
 
-  const done = await change(c, where, async (tx) => {
+  const made = await change(c, where, async (tx) => {
     const at = locate(new Index(tx.files), path, version);
     if (at instanceof Refusal) return at;
     if (!docExists(at.doc)) return new Refusal(404, `there is no document at "${path}"`);
     return version ? removeVersion(tx, at.doc, version) : removeDocument(tx, at.doc, c.url.origin);
   });
-  if (done instanceof Refusal) return refuse(done);
-  await mirrorAfter({ env: where.env, ctx: c.ctx }, done);
-  return json({ ...done.value, etag: done.etag });
+  if (made instanceof Refusal) return refuse(made);
+  await mirrorAfter({ env: where.env, ctx: c.ctx }, made);
+  return answered(made);
 }
 
 /** Everything under a folder. A folder is its files: once they are gone, so is it. */
@@ -147,16 +152,16 @@ export async function deleteFolder(c: WebCall): Promise<Response> {
   const problem = path === "" ? "say which folder" : pathProblem(path);
   if (problem) return json({ error: problem }, 400);
 
-  const done = await change(c, where, async (tx) => {
+  const made = await change(c, where, async (tx) => {
     const inside = new Index(tx.files).under(path);
     if (inside.length === 0) return new Refusal(404, `there is no folder "${path}"`);
     for (const e of inside) tx.remove(e.fid);
     // The folder as it is spelled, which is not always how it was named.
     return { kind: "folder", path: inside[0].file.path.slice(0, path.length), files: inside.length };
   });
-  if (done instanceof Refusal) return refuse(done);
-  await mirrorAfter({ env: where.env, ctx: c.ctx }, done);
-  return json({ ...done.value, etag: done.etag });
+  if (made instanceof Refusal) return refuse(made);
+  await mirrorAfter({ env: where.env, ctx: c.ctx }, made);
+  return answered(made);
 }
 
 /* ---------- Moving ---------- */
@@ -168,35 +173,53 @@ function endOf(raw: unknown): { space: unknown; path: string } | null {
   return path === "" ? null : { space: given.space, path };
 }
 
-/** A document or a folder, to exactly where the browser said: a rename, a
- *  move to another folder, or a move to another section. */
-export async function postMove(c: WebCall): Promise<Response> {
+/** What a move or a copy names: what it is, the section it is in and the
+ *  one it goes to. */
+type Placed = { ask: MoveAsk; source: Where; dest: Where };
+
+async function placedOf(c: WebCall, verb: "move" | "copy"): Promise<Placed | Refusal> {
   const body = await readJsonObject(c.request);
-  if (!body) return json({ error: "invalid json body" }, 400);
+  if (!body) return new Refusal(400, "invalid json body");
   const from = endOf(body.from);
   const to = endOf(body.to);
   const { kind } = body;
   if (!from || !to || (kind !== "document" && kind !== "folder")) {
-    return json({ error: 'a move is {from: {space, path}, to: {space, path}, kind: "document" | "folder"}' }, 400);
+    return new Refusal(400, `a ${verb} is {from: {space, path}, to: {space, path}, kind: "document" | "folder"}`);
   }
   const problem = pathProblem(from.path) ?? pathProblem(to.path);
-  if (problem) return json({ error: problem }, 400);
+  if (problem) return new Refusal(400, problem);
   const source = await sectionOf(c, from.space);
-  if (source instanceof Refusal) return refuse(source);
+  if (source instanceof Refusal) return source;
   const dest = await sectionOf(c, to.space);
-  if (dest instanceof Refusal) return refuse(dest);
+  if (dest instanceof Refusal) return dest;
   // The browser shows the tree and names the place: never "into this folder".
-  const ask: MoveAsk = { from: from.path, to: to.path, what: kind, into: () => false };
+  return { ask: { from: from.path, to: to.path, what: kind, into: () => false }, source, dest };
+}
 
+/** A document or a folder, to exactly where the browser said: a rename, a
+ *  move to another folder, or a move to another section. */
+export async function postMove(c: WebCall): Promise<Response> {
+  const placed = await placedOf(c, "move");
+  if (placed instanceof Refusal) return refuse(placed);
+  const { ask, source, dest } = placed;
   if (source.space !== dest.space) {
     const moved = await moveAcross({ by: c.auth.memberId, ctx: c.ctx, origin: c.url.origin }, source, dest, ask);
     return moved instanceof Refusal ? refuse(moved) : json(moved);
   }
-  const done = await change(c, source, async (tx) => moveWithin(tx, ask));
-  if (done instanceof Refusal) return refuse(done);
+  const made = await change(c, source, async (tx) => moveWithin(tx, ask));
+  if (made instanceof Refusal) return refuse(made);
   // A move changes no text, but it moves the etag the mirror is whole at.
-  await mirrorAfter({ env: source.env, ctx: c.ctx }, done);
-  return json({ ...done.value, etag: done.etag });
+  await mirrorAfter({ env: source.env, ctx: c.ctx }, made);
+  return answered(made);
+}
+
+/** A document or a folder again, at exactly where the browser said: beside
+ *  what it was copied from, in another folder, or in another section. */
+export async function postCopy(c: WebCall): Promise<Response> {
+  const placed = await placedOf(c, "copy");
+  if (placed instanceof Refusal) return refuse(placed);
+  const made = await copyTo({ by: c.auth.memberId, ctx: c.ctx, origin: c.url.origin }, placed.source, placed.dest, placed.ask);
+  return made instanceof Refusal ? refuse(made) : answered(made);
 }
 
 /* ---------- Searching ---------- */

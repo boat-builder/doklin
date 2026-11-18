@@ -33,6 +33,22 @@
 //     sentence and none of the app, and a browser signed out from elsewhere
 //     is back at the sign-in screen.
 //
+// And what it writes (src/web/saving.ts), with a second browser as somebody
+// else:
+//
+//   - what is typed is saved once the typing settles, no more often than a
+//     document's pace allows, and at once when the page loses attention;
+//   - a save over a document that moved on is merged, and one that overlaps
+//     leaves the other version beside it as a conflict copy;
+//   - the browser says which document it is editing: a Mac that takes the
+//     document over turns it view-only here, until it is taken back;
+//   - a note made, renamed, copied and deleted from the tree, and a folder
+//     that is real once a note is in it;
+//   - closing with unsaved text asks first, and what was typed is sent as
+//     the page goes; what could not be sent is sent the next time the
+//     workspace is opened in that browser;
+//   - two tabs ask the worker as one.
+//
 // A real domain is https, and a Secure cookie needs it (WebKit keeps none
 // over http, localhost included), so the worker is driven through a TLS
 // front this file runs, with a certificate it makes for the run (`openssl`).
@@ -43,6 +59,7 @@
 //   (cd verify-harness && npm install && npx playwright install)   # once
 //   node verify-harness/drive-web.mjs                 # every engine installed
 //   ENGINES=chromium node verify-harness/drive-web.mjs
+//   PARTS=writing node verify-harness/drive-web.mjs   # files, cookie, app, writing, cache
 import { chromium, firefox, webkit } from "playwright";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -57,6 +74,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ENGINES = { chromium, firefox, webkit };
 const wanted = (process.env.ENGINES ?? "chromium,firefox,webkit").split(",").map((s) => s.trim()).filter(Boolean);
+const parts = new Set((process.env.PARTS ?? "files,cookie,app,writing,cache").split(",").map((s) => s.trim()));
 
 const results = [];
 const step = (name, ok, detail = "") => {
@@ -125,10 +143,20 @@ const answered = [];
 /** The worker behind a front of this file's own, which writes down what passes. */
 function front(listen) {
   return listen((req, res) => {
+    // What a save carried: which of a document's parts.
+    const save = req.method === "PUT" && req.url.startsWith("/api/web/doc");
+    const sent = [];
+    if (save) req.on("data", (chunk) => sent.push(chunk));
     const upstream = httpRequest(
       { host: "localhost", port: WORKER_PORT, method: req.method, path: req.url, headers: req.headers },
       (answer) => {
-        answered.push({ method: req.method, path: req.url, status: answer.statusCode, cookie: Boolean(req.headers.cookie), dest: req.headers["sec-fetch-dest"], site: req.headers["sec-fetch-site"] });
+        let parts;
+        try {
+          if (save) parts = Object.keys(JSON.parse(Buffer.concat(sent).toString()));
+        } catch {
+          // not a save's body
+        }
+        answered.push({ method: req.method, path: req.url, status: answer.statusCode, at: Date.now(), parts, cookie: Boolean(req.headers.cookie), dest: req.headers["sec-fetch-dest"], site: req.headers["sec-fetch-site"] });
         res.writeHead(answer.statusCode, answer.headers);
         answer.pipe(res);
       },
@@ -194,15 +222,20 @@ const ROOT_NAME = "/Notes";
 
 /* ---------- One engine ---------- */
 
-async function drive(name) {
-  const say = (what, ok, detail) => step(`${name}: ${what}`, ok, detail);
-  let browser;
+/** Whether an engine is there to drive; one that is not is skipped, and said. */
+async function installed(name) {
   try {
-    browser = await ENGINES[name].launch();
+    await (await ENGINES[name].launch()).close();
+    return true;
   } catch (e) {
     console.log(`SKIP  ${name}: not installed here (${String(e.message).split("\n")[0]})`);
     return false;
   }
+}
+
+async function drive(name) {
+  const say = (what, ok, detail) => step(`${name}: ${what}`, ok, detail);
+  const browser = await ENGINES[name].launch();
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const page = await context.newPage();
   // A document of the domain that is under no policy of its own, as the
@@ -608,6 +641,298 @@ async function driveApp(name) {
   await browser.close();
 }
 
+/* ---------- What the app writes ---------- */
+
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+/** `probe`'s first truthy answer, asked until `ms` have gone; null after. */
+async function until(probe, ms = 20_000, every = 200) {
+  for (const end = Date.now() + ms; ; ) {
+    const got = await probe();
+    if (got) return got;
+    if (Date.now() > end) return null;
+    await sleep(every);
+  }
+}
+/** A file of the shared workspace as the worker holds it now, with its text. */
+async function storedAt(path) {
+  const m = await (await owner("/api/manifest")).json();
+  const found = Object.entries(m.files).find(([, f]) => f.path === path);
+  if (!found) return null;
+  const [fid, file] = found;
+  return { fid, ...file, text: await (await owner(`/api/blobs/${fid}/${file.hash}`)).text() };
+}
+
+async function driveWriting(name) {
+  const say = (what, ok, detail) => step(`${name}, writing: ${what}`, Boolean(ok), detail);
+  const browser = await ENGINES[name].launch();
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
+  let page = await context.newPage();
+  const trouble = [];
+  let stage = "starting";
+  const watch = (p) => {
+    p.on("console", (m) => {
+      if (process.env.DEBUG_DRIVE) console.log(`  [${stage}] console.${m.type()}: ${m.text().slice(0, 200)}`);
+      if (/Content Security Policy|Content-Security-Policy|Refused to/i.test(m.text())) trouble.push(`${stage}: ${m.text().slice(0, 200)}`);
+    });
+    p.on("pageerror", (e) => trouble.push(`${stage}: ${String(e).slice(0, 200)}`));
+    if (process.env.DEBUG_DRIVE) {
+      p.on("response", (r) => r.status() >= 400 && console.log(`  [${stage}] ${r.status()} ${r.request().method()} ${r.url()}`));
+    }
+  };
+  watch(page);
+
+  // A folder of this engine's own: the engines share one worker.
+  const DIR = `Writing in ${name}`;
+  const DRAFT = `${DIR}/Draft.md`;
+  const other = await elsewhere(browser);
+  const put = (path, body) => other.ask(`/api/web/doc?path=${encodeURIComponent(path)}`, { method: "PUT", body: JSON.stringify(body) });
+  await put(DRAFT, { md: { text: "# Draft\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n", ifRev: null } });
+
+  const row = (path, on = page) => on.locator(`[data-tree-path="${ROOT_NAME}/${path}"]`);
+  const para = (text) => page.locator(".ProseMirror p", { hasText: text }).first();
+  const editorHas = (text, on = page, ms = 30_000) =>
+    on.waitForFunction((t) => (document.querySelector(".ProseMirror")?.innerText ?? "").includes(t), text, { timeout: ms }).then(() => true, () => false);
+  const typeAfter = async (paragraph, text) => {
+    await para(paragraph).click();
+    await page.keyboard.press("End");
+    await page.keyboard.type(text);
+  };
+  const saves = (from) => answered.slice(from).filter((a) => a.method === "PUT" && a.path.startsWith("/api/web/doc") && a.status === 200);
+  const polls = (from) => answered.slice(from).filter((a) => a.path === "/api/poll" && a.status === 200);
+  const pick = async (path, label) => {
+    await row(path).click({ button: "right" });
+    // By the whole label: "Copy" is not "Copy link".
+    await page.locator(".sidebar-menu-item").filter({ hasText: new RegExp(`^${label}$`) }).click();
+  };
+  const signIn = async (on) => {
+    await on.goto(`${ORIGIN}/app`);
+    await on.locator('[data-testid="web-invite"]').fill(`doklin-invite ${ORIGIN} ${await deviceCode()}`);
+    await on.click('[data-testid="web-sign-in"]');
+    await row("Home.md", on).waitFor({ timeout: 60_000 });
+  };
+
+  await signIn(page);
+  const mine = await page.evaluate(() => localStorage.getItem("doklin:web:device"));
+  await row(DIR).click();
+  await row(DRAFT).click();
+  await editorHas("First paragraph.");
+
+  /* 1 — typing is saved, at a pace */
+  stage = "typing is saved, at a pace";
+  let from = answered.length;
+  await typeAfter("First paragraph.", " Typed here.");
+  const typedAt = Date.now();
+  await sleep(1500);
+  say("what is typed is not sent the moment the typing stops", saves(from).length === 0, `${saves(from).length} save(s) after 1.5 s`);
+  const first = await until(() => saves(from)[0], 10_000);
+  const afterFirst = await storedAt(DRAFT);
+  say(
+    "it is saved once the typing has settled, in one request",
+    first && first.at - typedAt >= 1900 && saves(from).length === 1 && afterFirst.text.includes("First paragraph. Typed here."),
+    first ? `${first.at - typedAt} ms after the last key, ${saves(from).length} save(s)` : "never",
+  );
+  await typeAfter("Second paragraph.", " And again.");
+  const second = await until(() => saves(from)[1], 20_000);
+  say(
+    "a document is not sent more often than its pace, however the typing goes",
+    second && second.at - first.at >= 9500 && (await storedAt(DRAFT)).text.includes("Second paragraph. And again."),
+    second ? `${second.at - first.at} ms between two saves` : "the second never went",
+  );
+  const polled = await until(() => polls(answered.indexOf(second) + 1)[0], 25_000);
+  const reasked = answered.slice(answered.indexOf(first)).filter((a) => a.path.startsWith("/api/manifest"));
+  say("after its own saves the page asks for no manifest: the answer said which one it was made to", polled && reasked.length === 0, `${reasked.length} manifest read(s)`);
+
+  const here = async () => (await (await owner("/api/poll")).json());
+  const seen = await until(async () => {
+    const poll = await here();
+    return poll.presence[mine]?.path === DRAFT && (poll.leases ?? []).some((l) => l.deviceId === mine && l.path === DRAFT.toLowerCase()) && poll;
+  }, 30_000);
+  say("everyone is told which document the browser is editing, and it holds it", seen, seen ? seen.presence[mine].name : "not in presence with the document");
+
+  /* 2 — sent at once when the page loses attention */
+  stage = "sent at once when the page loses attention";
+  from = answered.length;
+  await typeAfter("Third paragraph.", " Then away.");
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  const blurred = await until(() => saves(from)[0], 3000, 50);
+  say("leaving the page for another window sends what was typed at once", blurred && (await storedAt(DRAFT)).text.includes("Then away."), blurred ? "sent" : "not sent within 3 s");
+
+  /* 3 — somebody else changed another paragraph */
+  stage = "somebody else changed another paragraph";
+  await typeAfter("First paragraph.", " Mine.");
+  await sleep(900);
+  let cur = await storedAt(DRAFT);
+  const elsewhereThird = await put(DRAFT, { md: { text: cur.text.replace("Third paragraph. Then away.", "Third paragraph, theirs."), ifRev: cur.rev } });
+  const merged = await until(async () => {
+    const now = await storedAt(DRAFT);
+    return now.text.includes("Mine.") && now.text.includes("Third paragraph, theirs.") && now;
+  }, 30_000);
+  say("a save over a document that moved on is merged: both changes are in it", elsewhereThird.status === 200 && merged, merged ? `rev ${merged.rev}` : (await storedAt(DRAFT)).text.replace(/\s+/g, " "));
+  say("and the page shows the other change too", await editorHas("Third paragraph, theirs."));
+  const copiesAfterMerge = Object.values((await (await owner("/api/manifest")).json()).files).filter((f) => f.path.startsWith(`${DIR}/`) && f.path.includes("(conflict"));
+  say("nothing was set aside: there was nothing to choose between", copiesAfterMerge.length === 0, copiesAfterMerge.map((f) => f.path).join(", "));
+
+  /* 4 — somebody else changed the same line */
+  stage = "somebody else changed the same line";
+  await sleep(1200);
+  await typeAfter("Second paragraph.", " Ours.");
+  await sleep(900);
+  cur = await storedAt(DRAFT);
+  const elsewhereSecond = await put(DRAFT, { md: { text: cur.text.replace("Second paragraph. And again.", "Second paragraph, rewritten elsewhere."), ifRev: cur.rev } });
+  const copy = await until(async () => {
+    const m = await (await owner("/api/manifest")).json();
+    return Object.values(m.files).find((f) => f.path.startsWith(`${DIR}/Draft (conflict — `));
+  }, 30_000);
+  const copyText = copy ? (await storedAt(copy.path)).text : "";
+  const kept = await until(async () => {
+    const now = await storedAt(DRAFT);
+    return now.text.includes("Ours.") && now;
+  }, 20_000);
+  say(
+    "changes that overlap are not merged: the other version is kept beside the document, named for who and when",
+    elsewhereSecond.status === 200 && copy && /^Draft \(conflict — .+, [A-Z][a-z]{2} \d{1,2} \d\d\.\d\d\)\.md$/.test(copy.path.slice(DIR.length + 1)) && copyText.includes("rewritten elsewhere") && !copyText.includes("Ours."),
+    copy ? copy.path : "no copy",
+  );
+  say("and the document is the one being typed", kept && !kept.text.includes("rewritten elsewhere"), kept ? "" : "ours did not land");
+  const told = await page.locator(".toast-text", { hasText: "both versions are kept" }).first().waitFor({ timeout: 10_000 }).then(() => true, () => false);
+  say("the page says so, and the copy is in the tree", told && copy && (await row(copy.path).count()) === 1);
+
+  /* 5 — held somewhere else, and taken back */
+  stage = "held somewhere else, and taken back";
+  const taken = await owner("/api/poll", { method: "POST", json: { name: "The Mac", path: DRAFT, take: true } });
+  const banner = page.locator('[data-testid="lease-banner"]');
+  const viewOnly = await banner.waitFor({ timeout: 40_000 }).then(() => true, () => false);
+  say("a document a Mac takes over is view-only here, and says who has it", taken.status === 200 && viewOnly && /The Mac/.test(await banner.innerText().catch(() => "")), await banner.innerText().catch(() => "no banner"));
+  await page.locator('[data-testid="lease-take-over"]').click();
+  const back = await banner.waitFor({ state: "detached", timeout: 20_000 }).then(() => true, () => false);
+  const holder = (await here()).leases?.find((l) => l.path === DRAFT.toLowerCase())?.deviceId;
+  say("Take over takes it back, on the very next beat", back && holder === mine, `held by ${holder === mine ? "this browser" : holder}`);
+
+  /* 6 — the tree's changes */
+  stage = "the tree's changes";
+  const name1 = `${DIR}/Made here.md`;
+  await pick(DIR, "New File…");
+  await page.locator(".tree-create-input").fill("Made here");
+  await page.keyboard.press("Enter");
+  await row(name1).waitFor({ timeout: 15_000 });
+  const made = await until(() => storedAt(name1), 10_000);
+  say("a new note is made on the domain as it is named, with nothing in it", made && made.size === 0);
+  await page.locator(".ProseMirror").click();
+  await page.keyboard.type("Hello from the tree.");
+  say("and what is typed into it is saved", await until(async () => (await storedAt(name1))?.text.includes("Hello from the tree."), 15_000));
+
+  const name2 = `${DIR}/Renamed here.md`;
+  await pick(name1, "Rename…");
+  await page.locator(".tree-create-input").fill("Renamed here.md");
+  await page.keyboard.press("Enter");
+  await row(name2).waitFor({ timeout: 15_000 });
+  const renamed = await storedAt(name2);
+  say("a rename moves the note, the same file under its new name", renamed && renamed.fid === made.fid && !(await storedAt(name1)) && renamed.text.includes("Hello from the tree."));
+  await page.locator(".ProseMirror").click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" And after the rename.");
+  const afterRename = await until(async () => (await storedAt(name2))?.text.includes("And after the rename."), 20_000);
+  say("what is typed after the rename is saved where the note now is, with no conflict", afterRename && (await page.locator(".conflict-banner").count()) === 0);
+
+  await pick(name2, "Copy");
+  await pick(DIR, "Paste");
+  const name3 = `${DIR}/Renamed here copy.md`;
+  await row(name3).waitFor({ timeout: 15_000 });
+  const copied = await storedAt(name3);
+  say("a copy is a note of its own with the same text", copied && copied.fid !== renamed.fid && copied.text.includes("And after the rename."));
+
+  await pick(DIR, "New Folder…");
+  await page.locator(".tree-create-input").fill("Empty here");
+  await page.keyboard.press("Enter");
+  await row(`${DIR}/Empty here`).waitFor({ timeout: 10_000 });
+  const filesUnder = async (dir) => Object.values((await (await owner("/api/manifest")).json()).files).filter((f) => f.path.startsWith(`${dir}/`)).map((f) => f.path);
+  say("a new folder is in the tree, and on the domain there is nothing yet", (await filesUnder(`${DIR}/Empty here`)).length === 0);
+  await pick(`${DIR}/Empty here`, "New File…");
+  await page.locator(".tree-create-input").fill("Inside");
+  await page.keyboard.press("Enter");
+  await row(`${DIR}/Empty here/Inside.md`).waitFor({ timeout: 15_000 });
+  say("it is a folder for everyone once a note is in it", (await filesUnder(`${DIR}/Empty here`)).includes(`${DIR}/Empty here/Inside.md`));
+
+  await pick(name3, "Delete");
+  const deleted = await until(async () => !(await storedAt(name3)), 15_000);
+  const tombstones = (await (await owner("/api/manifest")).json()).tombstones ?? {};
+  const rowGone = await until(async () => (await row(name3).count()) === 0, 10_000);
+  say(
+    "a delete takes the note off the domain, leaving what a Mac needs to do the same",
+    deleted && tombstones[copied.fid] && rowGone,
+    `${deleted ? "gone" : "still stored"}, ${tombstones[copied.fid] ? "a tombstone" : "no tombstone"}, ${rowGone ? "out of the tree" : "still in the tree"}`,
+  );
+
+  /* 7 — comments travel with the text */
+  stage = "comments travel with the text";
+  await row("Comments.md").click();
+  await page.getByText("Say it plainer.").first().waitFor({ timeout: 30_000 });
+  from = answered.length;
+  await page.locator(".ProseMirror p").last().click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(` Edited in ${name}.`);
+  const both = await until(() => saves(from)[0], 15_000);
+  const sidecar = await storedAt("Comments.meta.jsonl");
+  say("a note with comments is saved with them, in one write", both && both.parts.includes("md") && both.parts.includes("meta") && sidecar.text.includes("Say it plainer."), both ? both.parts.join(" + ") : "not saved");
+
+  /* 8 — leaving with unsaved text */
+  stage = "leaving with unsaved text";
+  await row(DRAFT).click();
+  await editorHas("Third paragraph, theirs.");
+  let asked = null;
+  page.on("dialog", (d) => {
+    asked = d.type();
+    void d.accept();
+  });
+  await typeAfter("Third paragraph, theirs.", " Typed, then gone.");
+  await page.goto(`${OTHER}/`).catch(() => {});
+  const sentGoing = await until(async () => (await storedAt(DRAFT)).text.includes("Typed, then gone."), 8000);
+  say("a tab left with text that is not saved yet asks first", asked === "beforeunload", asked ?? "no question");
+  say("and what was typed is sent as the page goes", sentGoing);
+
+  /* 9 — what could not be sent */
+  stage = "what could not be sent";
+  await page.goto(`${ORIGIN}/app`);
+  await editorHas("Typed, then gone.");
+  page.removeAllListeners("dialog");
+  await context.setOffline(true);
+  await typeAfter("First paragraph.", " Typed with no network.");
+  const draftKept = await until(() => page.evaluate(() => Object.keys(localStorage).some((k) => k.startsWith("doklin:web:draft:"))), 5000);
+  await page.close();
+  await context.setOffline(false);
+  const beforeReopen = await storedAt(DRAFT);
+  page = await context.newPage();
+  watch(page);
+  await page.goto(`${ORIGIN}/app`);
+  const shownAgain = await editorHas("Typed with no network.");
+  const sentLater = await until(async () => (await storedAt(DRAFT)).text.includes("Typed with no network."), 20_000);
+  say("text that could not be sent before the tab closed is kept in the browser", draftKept && !beforeReopen.text.includes("Typed with no network."));
+  say("the next time the workspace is opened there it is on the page, and sent", shownAgain && sentLater);
+  const cleared = await until(() => page.evaluate(() => !Object.keys(localStorage).some((k) => k.startsWith("doklin:web:draft:"))), 10_000);
+  say("and is kept no longer once it is saved", cleared);
+
+  /* 10 — two tabs ask as one */
+  stage = "two tabs ask as one";
+  const beside = await context.newPage();
+  watch(beside);
+  await beside.goto(`${ORIGIN}/app`);
+  await row("Home.md", beside).waitFor({ timeout: 60_000 });
+  for (const tab of [page, beside]) if ((await row(DRAFT, tab).count()) === 0) await row(DIR, tab).click();
+  await sleep(3000);
+  from = answered.length;
+  const news = `${DIR}/Seen by both.md`;
+  await put(news, { md: { text: "# Seen by both\n", ifRev: null } });
+  await sleep(50_000);
+  const asks = polls(from).length;
+  say("two tabs of one browser ask the worker as one would", asks >= 2 && asks <= 4, `${asks} poll(s) in 50 s`);
+  say("and both are told what the one that asks was told", (await row(news).count()) === 1 && (await row(news, beside).count()) === 1);
+  await beside.close();
+
+  say("the page's policy refused nothing, and the page threw nothing", trouble.length === 0, trouble.slice(0, 3).join(" | "));
+  await other.close();
+  await browser.close();
+}
+
 /* ---------- What a browser keeps, and stops keeping ---------- */
 
 /** Over plain http, where Chromium caches as it does on a real domain (and
@@ -656,14 +981,16 @@ async function driveCache() {
 }
 
 let driven = 0;
-await driveFiles();
+if (parts.has("files")) await driveFiles();
 for (const name of wanted) {
   if (!ENGINES[name]) throw new Error(`no such engine: ${name} (chromium, firefox, webkit)`);
-  if (!(await drive(name))) continue;
+  if (!(await installed(name))) continue;
   driven += 1;
-  await driveApp(name);
+  if (parts.has("cookie")) await drive(name);
+  if (parts.has("app")) await driveApp(name);
+  if (parts.has("writing")) await driveWriting(name);
 }
-if (wanted.includes("chromium")) await driveCache();
+if (wanted.includes("chromium") && parts.has("cache")) await driveCache();
 
 const passed = results.filter((r) => r.ok).length;
 console.log(`\n${passed}/${results.length} passed, in ${driven} of ${wanted.length} engines`);
