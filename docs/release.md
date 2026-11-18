@@ -1,12 +1,12 @@
 # Release
 
-macOS, Apple Silicon, plus a temporary Intel build ([below](#intel-temporary), intel-mac). Producer: `.github/workflows/release.yml`. Consumer: `src/updater.ts` + `plugins.updater` in `src-tauri/tauri.conf.json`.
+macOS, Apple Silicon only. Producer: `.github/workflows/release.yml`. Consumer: `src/updater.ts` + `plugins.updater` in `src-tauri/tauri.conf.json`.
 
 ## Jobs
 
 - `ci.yml` (PRs): `checks` (eslint, tsc, cloud worker tests + bundle, max 3 MB gzipped), `cli` (`--locked` build, `cargo test`, `verify-harness/drive-cli.mjs`), `engine` (`cargo test --workspace --locked` in `engine/`), `ios` (colour sets + `verify-harness/drive-ios.mjs`).
 - `ios.yml` (push touching `ios/`): on macos-15, the iOS core's tests, a simulator build, and the app driven in a simulator (`verify-harness/drive-ios.mjs --app`). Nothing ships the iOS app: [ios.md](ios.md).
-- `release.yml` (push to `main`): `bump` → `build-cli` (Linux x64/arm64 musl) → `build-release` (macos-15, publishes); beside them `build-intel` → `publish-intel` (intel-mac).
+- `release.yml` (push to `main`): `bump` → `build-cli` (Linux x64/arm64 musl) → `build-release` (macos-15, publishes).
 
 ## Rules
 
@@ -29,7 +29,7 @@ macOS, Apple Silicon, plus a temporary Intel build ([below](#intel-temporary), i
   {"version": "X.Y.Z", "notes": "…", "pub_date": "<UTC>", "platforms": {"darwin-aarch64":
     {"signature": "<.sig contents>", "url": "…/releases/download/vX.Y.Z/Doklin.app.tar.gz"}}}
   ```
-  Bare semver; `url` pinned to the tag; `.sig` inlined, not published; `notes` = Update button tooltip. A missing key for the running platform (`<os>-<arch>-app`, then `<os>-<arch>`) is an error, even with no newer version: Settings shows "Couldn't check".
+  Bare semver; `url` pinned to the tag; `.sig` inlined, not published; `notes` = Update button tooltip. A missing platform key means "up to date" forever, silently.
 - `bundle.createUpdaterArtifacts: true` emits `.app.tar.gz` + `.sig`; the build fails without `TAURI_SIGNING_PRIVATE_KEY`.
 - `src-tauri/capabilities/default.json` needs `updater:default` and `process:default` (relaunch).
 
@@ -40,23 +40,11 @@ At `releases/latest/download/<name>`. A rename breaks its consumers, including d
 | Asset | Consumer |
 | --- | --- |
 | `Doklin-<version>-macos-arm64.dmg` | archival |
-| `Doklin-macos-arm64.dmg` (copied after stapling) | `DOWNLOAD_URL` in `cloud-worker/src/static.ts`, `site/public/*.html` |
-| `Doklin-<version>-macos-x64.dmg`, `Doklin-macos-x64.dmg`, `Doklin-x64.app.tar.gz`, `doklin-macos-x64` (intel-mac) | as their arm64 twins: archival, `site/public/index.html`, updater, `scripts/install-doklin.sh` |
+| `Doklin-macos-arm64.dmg` (copied after stapling) | `DOWNLOAD_URL` in `cloud-worker/src/static.ts` |
 | `Doklin.app.tar.gz`, `latest.json` | updater |
 | `doklin-cloud-worker.js`, `doklin-cloud-web.tar.gz` (unpacks to `doklin-cloud-web/`) | `src/cloudPrompts.ts`, `scripts/doklin-cloud-update.sh` |
 | `doklin-cloud-update.sh`, `install-doklin.sh` | `src/cloudPrompts.ts` |
 | `doklin-linux-x64`, `doklin-linux-arm64`, `doklin-macos-arm64`, `SHA256SUMS` | `scripts/install-doklin.sh` |
-
-## Intel (temporary)
-
-One Intel Mac on macOS 12 runs Doklin until it is replaced; then Intel goes.
-
-- Every piece is tagged `intel-mac`: `git grep -n intel-mac` lists them. Removing Intel is deleting each tagged piece and this section, and putting back the installer's refusal (`die "there is no doklin for Intel Macs — Apple Silicon only."` after the `uname -m` case, and its case in `cloudprompts.test.mjs`'s refusals).
-- `build-intel` cross-builds the same tag for `x86_64-apple-darwin` on the arm64 `macos-15` runner (its Rosetta runs the CLI's `--version` check; `macos-15-intel` has a stapling bug), signed and notarized as `build-release` is. Its `--config` sets `minimumSystemVersion` 12.0 and the x86_64 `Contents/Helpers/doklin`; `tauri.conf.json`'s 14.0 is the Apple Silicon build's. `MACOSX_DEPLOYMENT_TARGET` 12.0 covers rustc and C; the verify step refuses any binary whose `minos` is above 12.0.
-- The web engine check: on macOS 12, WKWebView is whatever engine Safari last installed. The Intel build injects `src-tauri/src/safari_check.js` into every window ahead of its page; if the engine lacks what the frontend needs (regex lookbehind, `URL.canParse`: Safari 17), it makes the page's module scripts inert and shows how to update Safari. A frontend dependency that needs a newer engine feature adds it to that test.
-- No PDF export on Intel: `pdf_export` and the crates only it uses compile for `not(target_arch = "x86_64")`, and the frontend hides the button when `pdf_export_supported` says no.
-- `publish-intel` runs after `build-release` has published: it attaches the Intel files, appends their `SHA256SUMS` lines and adds `darwin-x86_64` to `latest.json`, replacing both in place. It starts from `build-release`'s copies (the `release-manifests` artifact), never the release's: `--clobber` deletes before it uploads, and a lost upload must be repairable by a re-run. A failed Intel build never holds back the Apple Silicon release, but until `publish-intel` succeeds the latest release has no Intel files: `releases/latest/download/Doklin-macos-x64.dmg` (the site's Intel button) 404s and Intel installs' update check fails (Settings shows "Couldn't check"). A re-run within a day (artifact retention) is safe.
-- Once Intel goes, `latest.json` has no `darwin-x86_64` and installed Intel copies say "Couldn't check" for good.
 
 ## Secrets
 

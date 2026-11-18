@@ -7,8 +7,6 @@ HTML rendition → `<stem>.pdf` beside it: `src-tauri/src/pdf_export.rs`
 
 - Pinned `chrome-headless-shell` (Chrome for Testing) over a hand-rolled CDP
   client. Not WKWebView: its engine rides macOS and it has no `printToPDF`.
-- Apple Silicon only: `pdf_export` and the crates only it uses compile for
-  `not(target_arch = "x86_64")` (intel-mac, [release.md](release.md#intel-temporary)).
 - Engine and pdfium download on first export, sha256-verified, into
   `<app data>/pdf-engine/`. Overrides: `DOKLIN_PDF_ENGINE`, `DOKLIN_PDFIUM`.
 - Bundled Carlito is injected under `Carlito` and `Calibri`.
