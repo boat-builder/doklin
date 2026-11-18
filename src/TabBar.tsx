@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
 import ContextMenu from "./ContextMenu";
+import { backend } from "./backend";
+import { keys } from "./keys";
 import { dragWindowFromGap } from "./windowDrag";
 import { isUnsaved, isUnsupportedTab, tabLabel, type Tab } from "./tabs";
 
@@ -260,7 +262,8 @@ export default function TabBar({
                 aria-label={
                   edited ? `Close ${tabLabel(t)} (unsaved changes)` : `Close ${tabLabel(t)}`
                 }
-                title="Close tab (⌘W)"
+                // In a window that is not the app's, ⌘W is the window's own.
+                title={backend.windows ? `Close tab (${keys("⌘W")})` : "Close tab"}
                 onClick={(e) => {
                   e.stopPropagation();
                   onClose(t.id);
@@ -277,7 +280,7 @@ export default function TabBar({
             className="tab-new"
             onClick={onNewNote}
             aria-label="New note"
-            title="New note (⌘N / ⌘T)"
+            title={`New note (${keys("⌘N")} / ${keys("⌘T")})`}
           >
             <PlusIcon />
           </button>

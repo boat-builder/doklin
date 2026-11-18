@@ -18,11 +18,12 @@ import {
   type CloudDeviceCode,
   type CloudPeople,
 } from "./cloud";
-import { backend } from "./backend";
+import type { CloudAccess } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export default function CloudDevices({
+  access,
   root,
   name,
   domain,
@@ -32,6 +33,7 @@ export default function CloudDevices({
   copy,
   copied,
 }: {
+  access: CloudAccess;
   /** The connected workspace's folder — every command is keyed by it. */
   root: string;
   name: string;
@@ -58,21 +60,21 @@ export default function CloudDevices({
     try {
       // The one moment the code exists in the clear: nothing here writes it
       // down, and the domain kept only its sha256.
-      setMinted(await backend.cloud.deviceCode(root));
+      setMinted(await access.deviceCode(root));
       revealSoon(top);
     } catch (e) {
       setError(errText(e));
     } finally {
       setBusy(false);
     }
-  }, [root]);
+  }, [root, access]);
 
   const signOut = useCallback(
     async (id: string) => {
       setBusy(true);
       setError(null);
       try {
-        await backend.cloud.revokeDevice(root, id);
+        await access.revokeDevice(root, id);
         setConfirm(null);
         await reload();
       } catch (e) {
@@ -81,7 +83,7 @@ export default function CloudDevices({
         setBusy(false);
       }
     },
-    [root, reload],
+    [root, reload, access],
   );
 
   const mine = people.devices.filter((d) => d.memberId === people.me);

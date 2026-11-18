@@ -24,6 +24,7 @@ import { MAX_FILE_BYTES, contentTypeOf } from "./layout";
 import { askOf, mirrorAfter, searchIn } from "./search";
 import { listSpaces, sharedEnv, spaceEnv, type Where } from "./spaces";
 import { refuse, sectionOf, trimSlashes, type WebCall } from "./webCall";
+import type { SearchAnswer, SearchIndexing } from "./wire";
 import { META_SUFFIX } from "../../src/metaFile";
 
 /** `commit` in a section, signed with the person at the browser. */
@@ -238,7 +239,7 @@ export async function getSearch(c: WebCall): Promise<Response> {
 
   const found = await searchIn(c.env, sections, ask);
   if (found instanceof Refusal) return refuse(found);
-  if ("indexing" in found) return json({ indexing: true, pending: found.indexing }, 202);
+  if ("indexing" in found) return json({ indexing: true, pending: found.indexing } satisfies SearchIndexing, 202);
   return json({
     query: ask.query,
     results: found.hits.map((hit) => ({
@@ -256,5 +257,5 @@ export async function getSearch(c: WebCall): Promise<Response> {
     ...(found.notSearched.length > 0 ? { notSearched: found.notSearched } : {}),
     // More sections than one request opens.
     ...(found.left.length > 0 ? { sectionsNotSearched: found.left.map((s) => s.space) } : {}),
-  });
+  } satisfies SearchAnswer);
 }

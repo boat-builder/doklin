@@ -29,7 +29,7 @@ import {
   type CloudMember,
 } from "./cloud";
 import { buildAgentLoginPrompt } from "./cloudPrompts";
-import { backend } from "./backend";
+import type { CloudAccess } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -65,6 +65,7 @@ const scopesOf = (a: CloudAgent) =>
     .join(" · ");
 
 export default function CloudAgents({
+  access,
   root,
   domain,
   people,
@@ -72,6 +73,7 @@ export default function CloudAgents({
   copy,
   copied,
 }: {
+  access: CloudAccess;
   root: string;
   domain: string;
   /** Everyone on the workspace: whose somebody else's agent is, by name. */
@@ -95,11 +97,11 @@ export default function CloudAgents({
 
   const load = useCallback(async () => {
     try {
-      setAgents(await backend.cloud.agents(root));
+      setAgents(await access.agents(root));
     } catch (e) {
       setError(errText(e));
     }
-  }, [root]);
+  }, [root, access]);
 
   useEffect(() => {
     void load();
@@ -134,26 +136,26 @@ export default function CloudAgents({
     const name = draft.name.trim();
     void act(async () => {
       if (draft.id === null) {
-        const added = await backend.cloud.agentAdd(root, name, draft.scopes);
+        const added = await access.agentAdd(root, name, draft.scopes);
         // The one moment the code exists in the clear.
         setLogin({ name: added.agent.name, login: added.login });
         revealSoon(top);
       } else {
-        await backend.cloud.agentUpdate(root, draft.id, name, draft.scopes);
+        await access.agentUpdate(root, draft.id, name, draft.scopes);
       }
       setDraft(null);
     });
-  }, [act, draft, root]);
+  }, [act, draft, root, access]);
 
   const newCode = useCallback(
     (agent: CloudAgent) => {
       setDraft(null);
       void act(async () => {
-        setLogin({ name: agent.name, login: await backend.cloud.agentCode(root, agent.id) });
+        setLogin({ name: agent.name, login: await access.agentCode(root, agent.id) });
         revealSoon(top);
       });
     },
-    [act, root],
+    [act, root, access],
   );
 
   const toggle = (scope: AgentScope) => {
@@ -197,7 +199,7 @@ export default function CloudAgents({
                 className="modal-btn is-danger-solid"
                 data-testid={`agent-logout-yes-${m.id}`}
                 disabled={busy}
-                onClick={() => void act(() => backend.cloud.agentRevokeMachine(root, a.id, m.id))}
+                onClick={() => void act(() => access.agentRevokeMachine(root, a.id, m.id))}
               >
                 Log out
               </button>
@@ -224,7 +226,7 @@ export default function CloudAgents({
           className="modal-btn is-danger-solid"
           data-testid={`agent-remove-yes-${a.id}`}
           disabled={busy}
-          onClick={() => void act(() => backend.cloud.agentRemove(root, a.id))}
+          onClick={() => void act(() => access.agentRemove(root, a.id))}
         >
           Remove
         </button>

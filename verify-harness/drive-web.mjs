@@ -59,7 +59,7 @@
 //   (cd verify-harness && npm install && npx playwright install)   # once
 //   node verify-harness/drive-web.mjs                 # every engine installed
 //   ENGINES=chromium node verify-harness/drive-web.mjs
-//   PARTS=writing node verify-harness/drive-web.mjs   # files, cookie, app, writing, cache
+//   PARTS=writing node verify-harness/drive-web.mjs   # files, cookie, app, writing, rest, cache
 import { chromium, firefox, webkit } from "playwright";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -74,7 +74,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ENGINES = { chromium, firefox, webkit };
 const wanted = (process.env.ENGINES ?? "chromium,firefox,webkit").split(",").map((s) => s.trim()).filter(Boolean);
-const parts = new Set((process.env.PARTS ?? "files,cookie,app,writing,cache").split(",").map((s) => s.trim()));
+const parts = new Set((process.env.PARTS ?? "files,cookie,app,writing,rest,cache").split(",").map((s) => s.trim()));
 
 const results = [];
 const step = (name, ok, detail = "") => {
@@ -143,20 +143,24 @@ const answered = [];
 /** The worker behind a front of this file's own, which writes down what passes. */
 function front(listen) {
   return listen((req, res) => {
-    // What a save carried: which of a document's parts.
+    // What a save carried: which of a document's parts. And what was asked
+    // of a page: its address.
     const save = req.method === "PUT" && req.url.startsWith("/api/web/doc");
+    const publish = req.method === "PUT" && req.url.startsWith("/api/web/pages");
     const sent = [];
-    if (save) req.on("data", (chunk) => sent.push(chunk));
+    if (save || publish) req.on("data", (chunk) => sent.push(chunk));
     const upstream = httpRequest(
       { host: "localhost", port: WORKER_PORT, method: req.method, path: req.url, headers: req.headers },
       (answer) => {
         let parts;
+        let slug;
         try {
           if (save) parts = Object.keys(JSON.parse(Buffer.concat(sent).toString()));
+          if (publish) slug = JSON.parse(Buffer.concat(sent).toString()).slug ?? null;
         } catch {
-          // not a save's body
+          // not a body of the app's
         }
-        answered.push({ method: req.method, path: req.url, status: answer.statusCode, at: Date.now(), parts, cookie: Boolean(req.headers.cookie), dest: req.headers["sec-fetch-dest"], site: req.headers["sec-fetch-site"] });
+        answered.push({ method: req.method, path: req.url, status: answer.statusCode, at: Date.now(), parts, slug, cookie: Boolean(req.headers.cookie), dest: req.headers["sec-fetch-dest"], site: req.headers["sec-fetch-site"] });
         res.writeHead(answer.statusCode, answer.headers);
         answer.pipe(res);
       },
@@ -854,6 +858,8 @@ async function driveWriting(name) {
   say("it is a folder for everyone once a note is in it", (await filesUnder(`${DIR}/Empty here`)).includes(`${DIR}/Empty here/Inside.md`));
 
   await pick(name3, "Delete");
+  // A delete here cannot be taken back, so it is asked first (the rest).
+  await page.locator('[data-testid="question-yes"]').click();
   const deleted = await until(async () => !(await storedAt(name3)), 15_000);
   const tombstones = (await (await owner("/api/manifest")).json()).tombstones ?? {};
   const rowGone = await until(async () => (await row(name3).count()) === 0, 10_000);
@@ -933,6 +939,273 @@ async function driveWriting(name) {
   await browser.close();
 }
 
+/* ---------- The rest of what a browser does: search, links, pages, the way out ---------- */
+
+async function driveRest(name) {
+  const say = (what, ok, detail) => step(`${name}, the rest: ${what}`, Boolean(ok), detail);
+  const browser = await ENGINES[name].launch();
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
+  // A keyboard with no ⌘, and what the page copies kept where the drive can
+  // read it: a browser hands its clipboard to no script that did not ask.
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", { get: () => "Win32" });
+    if (!navigator.clipboard) return;
+    navigator.clipboard.write = async (items) => {
+      for (const item of items) window.__copied = await (await item.getType("text/plain")).text();
+    };
+    navigator.clipboard.writeText = async (text) => {
+      window.__copied = text;
+    };
+  });
+  const page = await context.newPage();
+  const trouble = [];
+  let stage = "starting";
+  page.on("console", (m) => {
+    if (process.env.DEBUG_DRIVE) console.log(`  [${stage}] console.${m.type()}: ${m.text().slice(0, 200)}`);
+    if (/Content Security Policy|Content-Security-Policy|Refused to/i.test(m.text())) trouble.push(`${stage}: ${m.text().slice(0, 200)}`);
+  });
+  page.on("pageerror", (e) => trouble.push(`${stage}: ${String(e).slice(0, 200)}`));
+  if (process.env.DEBUG_DRIVE) {
+    page.on("response", (r) => r.status() >= 400 && console.log(`  [${stage}] ${r.status()} ${r.request().method()} ${r.url()}`));
+  }
+
+  // A folder of this engine's own: the engines share one worker.
+  const DIR = `Rest in ${name}`;
+  const ALPHA = `${DIR}/Alpha.md`;
+  const BETA = `${DIR}/Beta.md`;
+  const LINKS = `${DIR}/Links.md`;
+  const WORD = `zebra${name}`;
+  const other = await elsewhere(browser);
+  const put = (path, text) =>
+    other.ask(`/api/web/doc?path=${encodeURIComponent(path)}`, { method: "PUT", body: JSON.stringify({ md: { text, ifRev: null } }) });
+  await put(ALPHA, `# Alpha\n\nThe quick ${WORD} jumps.\n`);
+  await put(BETA, "# Beta\n\nNothing to find here.\n");
+  const meta = await (await owner("/api/meta")).json();
+  const alpha = await storedAt(ALPHA);
+  const linkTo = (fid) => `https://doklin.cc/open#d=${encodeURIComponent(new URL(ORIGIN).host)}&w=${meta.workspace.id}&f=${fid}`;
+  await put(LINKS, `# Links\n\n[to alpha](${linkTo(alpha.fid)})\n\n[to nothing](${linkTo("f-0000000000000000")})\n`);
+
+  const row = (path) => page.locator(`[data-tree-path="${ROOT_NAME}/${path}"]`);
+  const editorHas = (text, ms = 30_000) =>
+    page.waitForFunction((t) => (document.querySelector(".ProseMirror")?.innerText ?? "").includes(t), text, { timeout: ms }).then(() => true, () => false);
+  const menu = () => page.locator(".sidebar-menu-item");
+  const pick = async (path, label) => {
+    await row(path).click({ button: "right" });
+    await menu().filter({ hasText: new RegExp(`^${label}$`) }).click();
+  };
+  const labels = async (path) => {
+    await row(path).click({ button: "right" });
+    const all = await menu().allInnerTexts();
+    await page.keyboard.press("Escape");
+    return all.map((l) => l.trim());
+  };
+  const toast = (text, ms = 15_000) =>
+    page.locator(".toast-text", { hasText: text }).first().waitFor({ timeout: ms }).then(() => true, () => false);
+  const copied = () => page.evaluate(() => window.__copied ?? null);
+  const publicPage = (path) => fetch(`http://localhost:${WORKER_PORT}${path}`, { redirect: "manual" });
+  const asked = (from, method, start) => answered.slice(from).filter((a) => a.method === method && a.path.startsWith(start));
+
+  await page.goto(`${ORIGIN}/app`);
+  await page.locator('[data-testid="web-invite"]').fill(`doklin-invite ${ORIGIN} ${await deviceCode()}`);
+  await page.click('[data-testid="web-sign-in"]');
+  await row("Home.md").waitFor({ timeout: 60_000 });
+  const mine = await page.evaluate(() => localStorage.getItem("doklin:web:device"));
+
+  /* 1 — nothing on screen is the Mac's */
+  stage = "nothing on screen is the Mac's";
+  await page.locator(".scratch-empty").waitFor();
+  say("the empty screen offers no way to join a workspace: this one is the only one here", (await page.locator('[data-testid="join-workspace"]').count()) === 0);
+  const lead = await page.locator(".title-lead").first().evaluate((el) => parseFloat(getComputedStyle(el).paddingLeft));
+  say("the title row leaves no room for a window's buttons", lead < 30, `${lead}px`);
+  const hint = await page.locator(".sidebar-search kbd").innerText();
+  say("a shortcut is written for the keyboard in front of it", hint === "Ctrl+Shift+F", hint);
+  await row(DIR).click();
+  const offered = await labels(ALPHA);
+  say(
+    "the tree offers nothing a browser cannot do",
+    offered.includes("Copy link") && offered.includes("Delete") && !offered.some((l) => /Finder|Restrict|Share with|history|Recently deleted/i.test(l)),
+    offered.join(" · "),
+  );
+  await page.locator(".settings-fab").click();
+  const gear = (await page.locator(".settings-popover").innerText()).replace(/\s+/g, " ");
+  await page.keyboard.press("Escape");
+  say("the settings menu names no Mac and no key a Windows keyboard has not got", /Cloud…/.test(gear) && !/\bMac\b|⌘|⌥|⇧/.test(gear), gear);
+  await page.locator(".sidebar-header-button").first().click();
+  const workspaceMenu = (await page.locator('[data-testid^="sidebar-menu-"]').evaluateAll((els) => els.map((el) => el.dataset.testid))).join(" ");
+  await page.keyboard.press("Escape");
+  say("the workspace's menu has no people, devices, agents or joining in it", workspaceMenu.includes("sidebar-menu-cloud") && !/join|people|devices|agents/.test(workspaceMenu), workspaceMenu);
+
+  /* 2 — search */
+  stage = "search";
+  let from = answered.length;
+  await page.locator(".sidebar-search").click();
+  await page.locator(".ws-search-input").fill(WORD);
+  const hit = page.locator(".ws-result-row", { hasText: WORD }).first();
+  const found = await hit.waitFor({ timeout: 30_000 }).then(() => true, () => false);
+  const searches = asked(from, "GET", "/api/web/search");
+  say(
+    "a word is found in the document that holds it, by the worker",
+    found && searches.some((a) => a.status === 200) && (await page.locator(".ws-result-file-name").first().innerText()) === "Alpha",
+    `${searches.map((a) => a.status).join(", ")}`,
+  );
+  say("matching case is not offered where the search cannot do it", (await page.locator(".ws-search-case").count()) === 0);
+  if (found) await hit.click();
+  say("a result opens its document", await editorHas(`The quick ${WORD} jumps.`));
+  await page.locator(".ws-search-input").fill("Beta");
+  const named = await page.locator(".ws-result-file-name mark", { hasText: "Beta" }).first().waitFor({ timeout: 20_000 }).then(() => true, () => false);
+  say("and a document is found by its name", named);
+  await page.locator('button[title="Back to files"]').click();
+
+  /* 3 — a page's link */
+  stage = "a page's link";
+  await pick(ALPHA, "Copy link");
+  const said = await toast("Link copied. Everyone in Notes can open it.");
+  say("Copy link copies the link that opens the page anywhere, and says who can open it", said && (await copied()) === linkTo(alpha.fid), String(await copied()));
+  await row(LINKS).click();
+  await editorHas("to alpha");
+  const pagesBefore = context.pages().length;
+  await page.locator(".ProseMirror a", { hasText: "to alpha" }).click();
+  say(
+    "a link to a page of this workspace, clicked in a note, opens that page here",
+    (await editorHas(`The quick ${WORD} jumps.`, 15_000)) && context.pages().length === pagesBefore && !new URL(page.url()).hash,
+    `${context.pages().length} page(s), at ${page.url()}`,
+  );
+  await row(LINKS).click();
+  await editorHas("to nothing");
+  await page.locator(".ProseMirror a", { hasText: "to nothing" }).click();
+  say("and one to a page that is not there says so", await toast("That page isn't one you can open in Notes"));
+
+  /* 4 — publishing */
+  stage = "publishing";
+  const SLUG = `alpha-${name}`;
+  await row(ALPHA).click();
+  await editorHas(`The quick ${WORD} jumps.`);
+  await page.locator('[data-testid="live-chip"]').click();
+  await page.locator('[data-testid="publish-slug"]').fill(SLUG);
+  from = answered.length;
+  await page.locator('[data-testid="publish-go"]').click();
+  const live = await until(async () => (await publicPage(`/${SLUG}`)).status === 200, 15_000);
+  const shown = live ? await (await publicPage(`/${SLUG}`)).text() : "";
+  say("a note is published at the address asked for, and the page answers at once", live && shown.includes(WORD), `${asked(from, "PUT", "/api/web/pages").map((a) => a.status).join(", ")}`);
+  await page.locator('[data-testid="publish-url"]').waitFor({ timeout: 15_000 }).catch(() => {});
+  say(
+    "the app shows it as live, in the note and in the tree",
+    (await page.locator('[data-testid="publish-url"]').innerText().catch(() => "")).includes(SLUG) &&
+      (await row(ALPHA).locator('[data-testid="tree-published"]').count()) === 1,
+  );
+  await page.keyboard.press("Escape");
+  await row(BETA).click();
+  await editorHas("Nothing to find here.");
+  await page.locator('[data-testid="live-chip"]').click();
+  // The form starts over for this note a moment after it opens: typed into
+  // before that, an address is the last note's and is taken for no change.
+  await page.waitForFunction(() => document.querySelector('[data-testid="publish-slug"]')?.value === "");
+  await page.locator('[data-testid="publish-slug"]').fill(SLUG);
+  from = answered.length;
+  await page.locator('[data-testid="publish-go"]').click();
+  const taken = await page.locator('[data-testid="publish-pop"] .modal-error', { hasText: "is already the address of" }).waitFor({ timeout: 10_000 }).then(() => true, () => false);
+  say(
+    "an address another page has is refused in the worker's own words",
+    taken && (await storedAt(BETA)) !== null && !Object.values((await (await owner("/api/manifest")).json()).public ?? {}).some((e) => e.path === BETA),
+    `${asked(from, "PUT", "/api/web/pages").map((a) => `${a.status} ${a.slug}`).join(", ")} — ${(await page.locator('[data-testid="publish-pop"]').innerText().catch(() => "")).replace(/\s+/g, " ")}`,
+  );
+  await page.keyboard.press("Escape");
+
+  const FOLDER = `rest-${name}`;
+  await pick(DIR, "Publish folder…");
+  await page.locator('[data-testid="folder-slug"]').fill(FOLDER);
+  await page.locator('[data-testid="folder-publish"]').click();
+  const folderLive = await until(async () => (await publicPage(`/${FOLDER}/Beta`)).status === 200, 15_000);
+  say("a folder is published, and a note in it answers under the folder's address", folderLive);
+
+  await page.locator(".settings-fab").click();
+  await page.locator('[data-testid="settings-cloud"]').click();
+  const listed = answered.length;
+  await page.locator('[data-testid="published-pages"]').click();
+  const pageRow = (slug) => page.locator(`[data-testid="published-row"][data-slug="${slug}"]`);
+  await pageRow(SLUG).waitFor({ timeout: 10_000 });
+  say("the list of pages has both", (await pageRow(FOLDER).count()) === 1);
+  await pageRow(SLUG).locator('[data-testid="published-home"]').click();
+  const home = await until(async () => (await (await publicPage("/")).text()).includes(WORD), 15_000);
+  say("a page is made the domain's home page", home);
+  await pageRow(SLUG).locator('[data-testid="published-home"]').click();
+  say("and unmade", await until(async () => !(await (await publicPage("/")).text()).includes(WORD), 15_000));
+  from = answered.length;
+  await pageRow(FOLDER).locator('[data-testid="published-stop"]').click();
+  await page.locator('[data-testid="published-stop-yes"]').click();
+  const stopped = await until(async () => (await publicPage(`/${FOLDER}/Beta`)).status === 404, 15_000);
+  const gone = await until(async () => (await pageRow(FOLDER).count()) === 0, 10_000);
+  say(
+    "a page is stopped, and its address stops answering",
+    stopped && gone,
+    `${asked(from, "DELETE", "/api/web/pages").map((a) => a.status).join(", ")}; the address answers ${(await publicPage(`/${FOLDER}/Beta`)).status}; ${await pageRow(FOLDER).count()} row(s)`,
+  );
+  // The pages of sections this person is not in are listed under the rest;
+  // here there are none, and what matters is that the domain was asked.
+  const every = asked(listed, "GET", "/api/pages");
+  say(
+    "an owner's browser asks the domain for every page on it, and is answered",
+    every.some((a) => a.status === 200) && (await page.locator('[data-testid="published-elsewhere-note"]').count()) === 0,
+    every.map((a) => a.status).join(", "),
+  );
+  await page.keyboard.press("Escape");
+
+  /* 5 — a delete is asked first */
+  stage = "a delete is asked first";
+  await pick(BETA, "Delete");
+  const question = page.locator('[data-testid="question-prompt"]');
+  await question.waitFor({ timeout: 10_000 });
+  const words = (await question.innerText()).replace(/\s+/g, " ");
+  await page.locator('[data-testid="question-no"]').click();
+  await sleep(500);
+  say("a delete that cannot be taken back is asked first, and Cancel deletes nothing", /Delete “Beta”\?/.test(words) && /this browser can’t bring it back/.test(words) && (await storedAt(BETA)) !== null, words);
+  await pick(BETA, "Delete");
+  await page.locator('[data-testid="question-yes"]').click();
+  say("Delete deletes it", (await until(async () => (await storedAt(BETA)) === null, 15_000)) && (await until(async () => (await row(BETA).count()) === 0, 10_000)));
+
+  /* 6 — the panel, and the way out */
+  stage = "the panel, and the way out";
+  await page.locator(".settings-fab").click();
+  await page.locator('[data-testid="settings-cloud"]').click();
+  const panel = page.locator(".cloud-modal");
+  await panel.locator('[data-testid="usage-line"]').waitFor({ timeout: 10_000 });
+  const panelText = (await panel.innerText()).replace(/\s+/g, " ");
+  const absent = ["sync-now", "pause-toggle", "disconnect", "add-device", "wipe-open", "versions-line", "update-worker-quiet", "plan-free"];
+  const drawn = [];
+  for (const id of absent) if ((await panel.locator(`[data-testid="${id}"]`).count()) > 0) drawn.push(id);
+  say(
+    "the Cloud panel speaks of this browser, and offers nothing a browser has not got",
+    // Whoever else is here is named as their device names itself, a Mac among them.
+    drawn.length === 0 && /This browser today: /.test(panelText) && !/this Mac|other Macs/i.test(panelText) && (await panel.locator('[data-testid="sign-out"]').count()) === 1,
+    drawn.length > 0 ? `drawn: ${drawn.join(", ")}` : panelText.slice(0, 300),
+  );
+  await page.keyboard.press("Escape");
+
+  // Typed, and signed out before its turn to be sent comes.
+  await row(ALPHA).click();
+  await editorHas(`The quick ${WORD} jumps.`);
+  await page.locator(".ProseMirror p", { hasText: WORD }).first().click();
+  await page.keyboard.press("End");
+  await page.keyboard.type(" Written just before leaving.");
+  await page.locator(".settings-fab").click();
+  await page.locator('[data-testid="settings-cloud"]').click();
+  await page.locator('[data-testid="sign-out"]').click();
+  const sure = (await page.locator('[data-testid="sign-out-confirm"]').innerText()).replace(/\s+/g, " ");
+  from = answered.length;
+  await page.locator('[data-testid="sign-out-yes"]').click();
+  const out = await page.locator('[data-testid="web-invite"]').waitFor({ timeout: 30_000 }).then(() => true, () => false);
+  const cookies = await context.cookies(ORIGIN);
+  say("signing out asks first, and ends at the sign-in screen with the cookie gone", /Sign out of Notes in this browser\?/.test(sure) && out && !cookies.some((c) => c.name === "__Host-doklin"), sure);
+  say("what was typed was sent before the sign-in ended", (await storedAt(ALPHA)).text.includes("Written just before leaving."));
+  const devices = await (await owner("/api/auth/devices")).json().catch(() => null);
+  const still = JSON.stringify(devices ?? {}).includes(mine);
+  say("the browser is no longer one of the person's devices", devices !== null && !still, devices === null ? "no list of devices" : "");
+  say("nothing was refused by the page's policy, and nothing threw", trouble.length === 0, trouble.join(" | "));
+
+  await other.close();
+  await browser.close();
+}
+
 /* ---------- What a browser keeps, and stops keeping ---------- */
 
 /** Over plain http, where Chromium caches as it does on a real domain (and
@@ -989,6 +1262,7 @@ for (const name of wanted) {
   if (parts.has("cookie")) await drive(name);
   if (parts.has("app")) await driveApp(name);
   if (parts.has("writing")) await driveWriting(name);
+  if (parts.has("rest")) await driveRest(name);
 }
 if (wanted.includes("chromium") && parts.has("cache")) await driveCache();
 

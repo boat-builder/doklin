@@ -511,6 +511,13 @@ export class Workspace {
     return pages;
   }
 
+  /** The section whose public map holds an address: its id, "" for the
+   *  shared workspace — and for an address none of the sections held has. */
+  pageSpace(slug: string): string {
+    for (const section of this.sections.values()) if (section.manifest.public?.[slug]) return section.id;
+    return "";
+  }
+
   /** Everybody else here, named as the engine names them (`presence_of`,
    *  engine.rs): a person by their name; this person's own other device, and
    *  one nobody can name, by the device's. */

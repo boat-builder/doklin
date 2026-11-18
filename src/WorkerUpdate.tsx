@@ -22,7 +22,7 @@ import {
 } from "./cloud";
 import { buildUpdatePrompt, updateCommands } from "./cloudPrompts";
 import { RELEASES_PAGE } from "./updater";
-import { backend } from "./backend";
+import type { CloudDomain } from "./backend";
 
 function CloseIcon() {
   return (
@@ -34,10 +34,12 @@ function CloseIcon() {
 }
 
 export default function WorkerUpdate({
+  domain,
   cloud,
   onClose,
   onOpenExternal,
 }: {
+  domain: CloudDomain;
   cloud: CloudStatus;
   onClose: () => void;
   onOpenExternal: (url: string) => void;
@@ -76,12 +78,12 @@ export default function WorkerUpdate({
   const check = useCallback(async () => {
     setChecking(true);
     try {
-      await backend.cloud.checkWorker(cloud.root);
+      await domain.checkWorker(cloud.root);
     } catch {
       /* the status carries whatever the engine learned */
     }
     window.setTimeout(() => setChecking(false), 1500);
-  }, [cloud.root]);
+  }, [cloud.root, domain]);
 
   const running = cloud.workerVersion != null ? `v${cloud.workerVersion}` : "v?";
   let explain: string;

@@ -38,16 +38,27 @@
   sidecar before it writes). The text lands only over the `Rev` it was read at
   and rejects with `SaveConflict` otherwise; the sidecar is last writer wins.
   A `Rev` is opaque outside the backend that made it.
-- What a platform may not have is an optional group on `Backend` (`versions`,
-  `shows`, `leaving`, `windows`, `untitled`, `localFiles`, `pdf`, `updater`),
-  never a flag and never a check of which platform this is. The group is asked for where the
+- What a platform may not have is an optional group on `Backend` (`setup`,
+  `sync`, `domain`, `access`, `session`, `versions`, `shows`, `leaving`,
+  `windows`, `untitled`, `localFiles`, `pdf`, `updater`), never a flag and
+  never a check of which platform this is. The group is asked for where the
   feature comes into view; what is behind that takes the group, or a handler,
   as a prop, and a missing one is a button, a menu row or a shortcut that is
   not there.
+- `cloud` holds only what every backend answers of a workspace it shows:
+  its status, what changed, who edits what, a page's link, publishing. A
+  command that takes a copy of the workspace on the device (`setup`,
+  `sync`), the domain's upkeep (`domain`) or who may open what (`access`)
+  goes in that group, never in `cloud` with a refusal behind it. An event a
+  backend never raises is in a group it has not got.
 - Where platforms differ in kind and not in ability, the backend says so as
   data: `home` (the one workspace it is for, which the app opens at start in
-  place of the last one) and `htmlFrame` (a page that arbitrary html is
-  shown in, in place of a frame handed the markup).
+  place of the last one), `htmlFrame` (a page that arbitrary html is shown
+  in, in place of a frame handed the markup), `device` (what a sentence
+  calls this device: "this Mac", "this browser"), `documents.removeUndoes`
+  (false: the app asks before a delete) and `documents.searchByCase`.
+- A shortcut's hint is written with `keys()` (`src/keys.ts`): `⌘` on an Apple
+  keyboard, `Ctrl+` on any other. The handlers take either key.
 - `leaving.onLeave` is handed the app's flush where a page can go with no
   window to ask first. **The flush must reach `documents.save` before it
   first awaits anything**: it is called as a tab closes, and what it has not
@@ -97,9 +108,19 @@ Its sign-in and the worker's routes: [cloud-people-agents.md](cloud-people-agent
   app's typecheck has no Workers types, so one that came to import `env.ts`
   fails it.
 - A link is `/app#w=&s=&f=`, taken out of the address by the `shows` group
-  and resolved in the manifests held (`address.ts`).
-- What a browser has not got is no group at all: `windows`, `untitled`,
-  `localFiles`, `versions`, `pdf`, `updater`.
+  and resolved in the manifests held (`address.ts`). A page link of this
+  domain that the app hands to `openExternal` becomes that address, so it
+  opens here. *Copy link* makes the link the engine makes
+  (`engine/src/cloud/link.rs`, whose test holds `address.ts` to it).
+- What a browser has not got is no group at all: `setup`, `sync`, `domain`,
+  `access`, `windows`, `untitled`, `localFiles`, `versions`, `pdf`,
+  `updater`. What it has that a Mac has not is `session`: the sign-out, which
+  sends what waits, ends the sign-in and starts the page again.
+- Search is the worker's (`GET /api/web/search`): it does not see what this
+  page has yet to send, cannot match case, and answers `202` while its
+  mirror catches up, which is asked again a few times and then said.
+- Publishing is the worker's too; after a page is published, stopped or made
+  the home page, the section's manifest is read again.
 - `verify-harness/drive-web.mjs` drives the built page, not a dev server.
 
 Writing (`saving.ts`, `merge.ts`, `tabs.ts`):

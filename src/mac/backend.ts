@@ -18,6 +18,10 @@ import {
   SaveConflict,
   type Backend,
   type Cloud,
+  type CloudAccess,
+  type CloudDomain,
+  type CloudSetup,
+  type CloudSync,
   type DocumentChange,
   type DocumentPart,
   type Documents,
@@ -194,6 +198,7 @@ const documents: Documents = {
     return carryParts(from, to, kind, (a, b) => invoke("copy_path", { from: a, to: b }));
   },
 
+  removeUndoes: true,
   async remove(path, kind) {
     const files = [{ path, trashPath: await trash(path) }];
     const left: LeftBehind[] = [];
@@ -262,8 +267,13 @@ const documents: Documents = {
       for (const change of changesAt(e.path)) cb(change);
     }),
 
-  search: (root, query, caseSensitive) =>
-    invoke<FileMatches[]>("search_workspace", { root, query, caseSensitive }),
+  // What the search lists is capped far past what a screen holds
+  // (`MAX_SEARCH_FILES`, lib.rs), and it does not count what it left out.
+  search: async (root, query, caseSensitive) => ({
+    files: await invoke<FileMatches[]>("search_workspace", { root, query, caseSensitive }),
+    more: 0,
+  }),
+  searchByCase: true,
 };
 
 /* ---------- The file clipboard (`FileClipboard` in lib.rs) ---------- */
@@ -280,7 +290,28 @@ const fileClipboard: FileClipboard = {
 const cloud: Cloud = {
   status: async () => listOf<CloudStatus>(await invoke<unknown>("cloud_status")),
   onStatus: (cb) => on<unknown>("cloud-status", (statuses) => cb(listOf<CloudStatus>(statuses))),
+  onApplied: (cb) => on("cloud-applied", cb),
+  onConflict: (cb) => on("cloud-conflict", cb),
+  onSpaceLeft: (cb) => on("cloud-space-left", cb),
 
+  setActivity: (path) => invoke("cloud_set_activity", { path }),
+  takeOver: (root, path) => invoke("cloud_take_over", { root, path }),
+  link: (path) => invoke("cloud_link", { path }),
+
+  publish: (path, opts = {}) =>
+    invoke("cloud_publish", {
+      path,
+      slug: opts.slug ?? null,
+      title: opts.title ?? null,
+      desc: opts.desc ?? null,
+    }),
+  unpublish: (root, slug) => invoke("cloud_unpublish", { root, slug }),
+  setRoot: (root, slug) => invoke("cloud_set_root", { root, slug }),
+  pages: (root) => invoke("cloud_pages", { root }),
+  pageTakeDown: (root, slug) => invoke("cloud_page_take_down", { root, slug }),
+};
+
+const setup: CloudSetup = {
   mintToken: () => invoke("cloud_mint_token"),
   probe: (endpoint, token) => invoke("cloud_probe", { endpoint, token }),
   marker: (root) => invoke("cloud_marker", { root }),
@@ -292,41 +323,30 @@ const cloud: Cloud = {
   join: (endpoint, token) => invoke("cloud_join", { endpoint, token }),
   resume: (root, endpoint, token) => invoke("cloud_resume", { root, endpoint, token }),
   onProgress: (cb) => on("cloud-progress", cb),
-  checkWorker: (root) => invoke("cloud_check_worker", { root }),
+};
 
-  disconnect: (root) => invoke("cloud_disconnect", { root }),
+const sync: CloudSync = {
   syncNow: (root) => invoke("cloud_sync_now", { root }),
   pause: (root, paused) => invoke("cloud_pause", { root, paused }),
+  disconnect: (root) => invoke("cloud_disconnect", { root }),
   confirmDeletes: (root) => invoke("cloud_confirm_deletes", { root }),
   confirmAdds: (root, sync) => invoke("cloud_confirm_adds", { root, sync }),
   liftWait: (root) => invoke("cloud_lift_wait", { root }),
-  setPlan: (root, plan) => invoke("cloud_set_plan", { root, plan }),
-  wipe: (root) => invoke("cloud_wipe", { root }),
-  onApplied: (cb) => on("cloud-applied", cb),
-  onConflict: (cb) => on("cloud-conflict", cb),
   onPendingDeletes: (cb) => on("cloud-pending-deletes", cb),
   onPendingAdds: (cb) => on("cloud-pending-adds", cb),
+  onAddressTaken: (cb) => on("cloud-address-taken", cb),
   removed: async () => listOf<CloudRemovedEvent>(await invoke<unknown>("cloud_removed")),
   onRemoved: (cb) => on("cloud-removed", cb),
-
-  setActivity: (path) => invoke("cloud_set_activity", { path }),
-  takeOver: (root, path) => invoke("cloud_take_over", { root, path }),
-  link: (path) => invoke("cloud_link", { path }),
   recent: (root, limit = null) => invoke("cloud_recent", { root, limit }),
+};
 
-  publish: (path, opts = {}) =>
-    invoke("cloud_publish", {
-      path,
-      slug: opts.slug ?? null,
-      title: opts.title ?? null,
-      desc: opts.desc ?? null,
-    }),
-  unpublish: (root, slug) => invoke("cloud_unpublish", { root, slug }),
-  setRoot: (root, slug) => invoke("cloud_set_root", { root, slug }),
-  onAddressTaken: (cb) => on("cloud-address-taken", cb),
-  pages: (root) => invoke("cloud_pages", { root }),
-  pageTakeDown: (root, slug) => invoke("cloud_page_take_down", { root, slug }),
+const domain: CloudDomain = {
+  checkWorker: (root) => invoke("cloud_check_worker", { root }),
+  setPlan: (root, plan) => invoke("cloud_set_plan", { root, plan }),
+  wipe: (root) => invoke("cloud_wipe", { root }),
+};
 
+const access: CloudAccess = {
   people: (root) => invoke("cloud_people", { root }),
   invite: (root, email, name, days) => invoke("cloud_invite", { root, email, name, days }),
   withdrawInvite: (root, inviteId) => invoke("cloud_withdraw_invite", { root, inviteId }),
@@ -346,7 +366,6 @@ const cloud: Cloud = {
   spaceCreate: (root, name, members, from = null) => invoke("cloud_space_create", { root, name, members, from }),
   spaceMember: (root, id, memberId, add) => invoke("cloud_space_member", { root, id, memberId, add }),
   spaceDelete: (root, id) => invoke("cloud_space_delete", { root, id }),
-  onSpaceLeft: (cb) => on("cloud-space-left", cb),
 };
 
 /* ---------- Version history (src-tauri/src/versions.rs) ---------- */
@@ -514,6 +533,11 @@ export const macBackend: Backend = {
   // `device_name` in lib.rs: the Mac's own name.
   authorName: () => invoke<string>("device_name"),
   setTitle: (title) => void getCurrentWindow().setTitle(title),
+  device: "Mac",
+  setup,
+  sync,
+  domain,
+  access,
   versions,
   shows,
   windows,

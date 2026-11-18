@@ -30,6 +30,10 @@ export default function WorkspaceSearch({
   focusToken,
 }: Props) {
   const [results, setResults] = useState<FileMatches[]>([]);
+  // Documents that matched beyond the ones listed.
+  const [more, setMore] = useState(0);
+  // Where a search cannot be told to match case, it is not offered.
+  const byCase = backend.documents.searchByCase;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
@@ -45,6 +49,7 @@ export default function WorkspaceSearch({
     const q = query.trim();
     if (!q) {
       setResults([]);
+      setMore(0);
       setError(null);
       setLoading(false);
       return;
@@ -53,14 +58,16 @@ export default function WorkspaceSearch({
     let cancelled = false;
     const handle = window.setTimeout(async () => {
       try {
-        const res = await backend.documents.search(root, q, caseSensitive);
+        const res = await backend.documents.search(root, q, byCase && caseSensitive);
         if (cancelled) return;
-        setResults(res);
+        setResults(res.files);
+        setMore(res.more);
         setError(null);
       } catch (e) {
         if (cancelled) return;
         setResults([]);
-        setError(String(e));
+        setMore(0);
+        setError(e instanceof Error ? e.message : String(e));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -69,7 +76,7 @@ export default function WorkspaceSearch({
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [root, query, caseSensitive]);
+  }, [root, query, caseSensitive, byCase]);
 
   // A name that holds the query is a result of its own, beside its lines.
   const totals = useMemo(() => {
@@ -117,14 +124,16 @@ export default function WorkspaceSearch({
             }
           }}
         />
-        <button
-          className={`ws-search-case ${caseSensitive ? "is-active" : ""}`}
-          onClick={onToggleCase}
-          title="Match case"
-          aria-pressed={caseSensitive}
-        >
-          Aa
-        </button>
+        {byCase && (
+          <button
+            className={`ws-search-case ${caseSensitive ? "is-active" : ""}`}
+            onClick={onToggleCase}
+            title="Match case"
+            aria-pressed={caseSensitive}
+          >
+            Aa
+          </button>
+        )}
       </div>
 
       <div className="sidebar-body ws-search-body">
@@ -140,6 +149,13 @@ export default function WorkspaceSearch({
             <div className="ws-search-summary">
               {totals.matches} {totals.matches === 1 ? "result" : "results"} in{" "}
               {totals.files} {totals.files === 1 ? "file" : "files"}
+              {more > 0 && (
+                <span data-testid="ws-search-more">
+                  {" "}
+                  — {more.toLocaleString()} more {more === 1 ? "document matches" : "documents match"}; a longer
+                  search narrows it
+                </span>
+              )}
             </div>
             <ul className="ws-result-list">
               {results.map((file) => {
@@ -162,7 +178,7 @@ export default function WorkspaceSearch({
                         {!nameOnly && <ChevronRightIcon />}
                       </span>
                       <span className="ws-result-file-name">
-                        {file.named ? highlight(name, query.trim(), caseSensitive) : name}
+                        {file.named ? highlight(name, query.trim(), byCase && caseSensitive) : name}
                       </span>
                       {!nameOnly && (
                         <span className="ws-result-file-count">{file.matches.length}</span>
@@ -175,11 +191,11 @@ export default function WorkspaceSearch({
                             <button
                               className="ws-result-row"
                               onClick={() => onOpenResult(file.path, query.trim())}
-                              title={`${basename(file.path)}:${m.line}`}
+                              title={m.line == null ? basename(file.path) : `${basename(file.path)}:${m.line}`}
                             >
                               <span className="ws-result-line">{m.line}</span>
                               <span className="ws-result-preview">
-                                {highlight(m.preview, query.trim(), caseSensitive)}
+                                {highlight(m.preview, query.trim(), byCase && caseSensitive)}
                               </span>
                             </button>
                           </li>

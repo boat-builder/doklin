@@ -484,6 +484,21 @@ export class Saving {
     }
   }
 
+  /** Send what waits for a document — for every document, with no path —
+   *  and wait for it to land, the text the app still holds included: for
+   *  what needs the workspace to have it first. Rejects when something
+   *  could not be sent. */
+  async flush(path?: string): Promise<void> {
+    await this.handOver();
+    await this.land((waiting) => path === undefined || waiting === path);
+  }
+
+  /** Let go of everything that waits, drafts and all: the sign-in has
+   *  ended, and with it anywhere to send them. */
+  drop(): void {
+    this.forget(() => true);
+  }
+
   /** Let go of everything held under a path: it is being removed. */
   private forget(under: (file: string) => boolean): void {
     for (const [path, doc] of [...this.docs]) {

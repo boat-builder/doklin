@@ -538,7 +538,9 @@ impl<R: Remote> Engine<R> {
     /* ----- links ----- */
 
     /// What a link to the file at `ws_rel` names, and who can open it. None
-    /// for a path in no section, and for a file with no id yet.
+    /// for a path in no section, and for a file with no id yet. The browser
+    /// version says who in the same words (`linkTo`, src/web/address.ts):
+    /// change both.
     pub(crate) fn linked(&self, ws_rel: &str) -> Option<Linked> {
         let (id, rel) = self.place(ws_rel)?;
         let unit = self.units.get(&id)?;

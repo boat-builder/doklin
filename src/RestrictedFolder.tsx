@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { type CloudMember, type CloudStatus } from "./cloud";
 import Avatar from "./Avatar";
 import { useDismiss } from "./dismiss";
-import { backend } from "./backend";
+import type { CloudAccess } from "./backend";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -34,11 +34,13 @@ function CloseIcon() {
 }
 
 export default function RestrictedFolder({
+  access,
   cloud,
   source,
   onSubmit,
   onClose,
 }: {
+  access: CloudAccess;
   cloud: CloudStatus;
   source: RestrictedSource;
   /** Make it. Resolves to a sentence when it could not be done, null when it was. */
@@ -60,7 +62,7 @@ export default function RestrictedFolder({
 
   useEffect(() => {
     let live = true;
-    void backend.cloud.people(cloud.root)
+    void access.people(cloud.root)
       .then((people) => {
         if (live) setOthers(people.members.filter((m) => m.id !== people.me));
       })
@@ -70,7 +72,7 @@ export default function RestrictedFolder({
     return () => {
       live = false;
     };
-  }, [cloud.root]);
+  }, [cloud.root, access]);
 
   // Nothing closes while the folder is being made.
   const cardRef = useRef<HTMLDivElement>(null);

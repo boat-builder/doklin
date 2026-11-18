@@ -6086,7 +6086,7 @@ await test("web: a browser's sign-in is answered on /api/web and the reads a bro
     ["/api/spaces", "GET"],
     ["/api/spaces", "POST", { name: "Mine" }],
     [`/api/spaces/${space}`, "DELETE"],
-    ["/api/pages/notes", "DELETE"],
+    ["/api/pages/notes", "PUT", {}],
     ["/api/admin/wipe", "POST", { confirm: "wipe" }],
     ["/api/agent/me", "GET"],
   ]) {
@@ -6457,12 +6457,20 @@ await test("web: publishing from a browser is the same entry in the public map â
   assert.equal((await home(null)).status, 200);
   assert.equal(Object.values((await sharedManifest()).public).some((e) => e.root), false);
 
+  // An owner's browser takes a page down as their Mac does, whoever published it.
+  assert.equal((await publish({ path: "published/Handbook.md", kind: "document", slug: "handbook" })).status, 200);
+  const listed = await browser("/api/pages", { cookie: WEB });
+  assert.ok(listed.json.pages.some((p) => p.slug === "handbook" && p.shared), "every page on the domain, to an owner");
+  assert.equal((await browser("/api/pages/aside-notes", { method: "DELETE", cookie: WEB })).status, 204);
+  assert.equal((await visit("/aside-notes/Aside")).status, 404);
+  assert.equal((await browser("/api/pages/aside-notes", { method: "DELETE", cookie: WEB })).status, 404);
+
   // Stopping: in whichever section of theirs holds the address.
   assert.equal((await stop("mine-alone")).status, 200);
   assert.equal((await visit("/mine-alone")).status, 404);
   assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'mine-alone'"), 0, "the address is let go");
   assert.equal((await stop("handbook")).status, 200);
-  assert.equal((await stop("aside-notes")).status, 200);
+  assert.equal((await stop("aside-notes")).status, 404, "taken down already");
   assert.equal((await stop("handbook")).status, 404);
   assert.equal((await stop("x")).status, 400);
   if (wasHome) assert.equal((await home(wasHome)).status, 200);

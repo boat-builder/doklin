@@ -118,6 +118,8 @@ export const MAX_NAME_LEN = 80;
 export const MAX_EMAIL_LEN = 254;
 export const MAX_TITLE_LEN = 300;
 export const MAX_DESC_LEN = 600;
+/** The most documents one search answers with (search.ts). */
+export const SEARCH_LIMIT_MAX = 30;
 /** The shortest a beat keeps a device "here", and how long one holds that
  *  says nothing: a beat says how long it holds (`ttl`, presence.ts), clamped
  *  to these two. */

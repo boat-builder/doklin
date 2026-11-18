@@ -80,6 +80,42 @@ export type LeaseEntry = {
   until: number;
 };
 
+/* ---------- Searching ---------- */
+
+/** One document `GET /api/web/search` found: its section and its file there
+ *  (the markdown, or the html of a document that has no markdown). */
+export type SearchHit = {
+  space: string;
+  fid: string;
+  path: string;
+  /** The lines that hold the text, a markdown file's numbered as the file
+   *  numbers them. */
+  matches: { line?: number; text: string }[];
+  /** Matching lines beyond the ones in `matches`. */
+  moreLines?: number;
+  /** Its name holds the text. */
+  inName?: true;
+  /** Its text does not, on any line: the text was said in a comment. */
+  inComments?: true;
+};
+
+/** `GET /api/web/search`, answered `200`. */
+export type SearchAnswer = {
+  query: string;
+  results: SearchHit[];
+  /** Every document that matched, listed or not. */
+  total: number;
+  truncated?: true;
+  /** Documents too large to search. */
+  notSearched?: { space: string; path: string }[];
+  /** Sections beyond what one request opens. */
+  sectionsNotSearched?: string[];
+};
+
+/** The same, answered `202`: the search's mirror has `pending` documents
+ *  still to read, and the caller asks again. */
+export type SearchIndexing = { indexing: true; pending: number };
+
 /* ---------- The answers ---------- */
 
 /** One row of the directory: a person, or an agent with whose it is. */

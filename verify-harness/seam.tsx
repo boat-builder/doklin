@@ -109,7 +109,8 @@ const documents: Documents = {
     docs.set(to, { ...need(from), rev: 1 });
     return [];
   },
-  // Nothing here takes a delete back.
+  // Nothing here takes a delete back, so the app asks first.
+  removeUndoes: false,
   async remove(path) {
     need(path);
     docs.delete(path);
@@ -123,7 +124,8 @@ const documents: Documents = {
     listeners.add(cb);
     return () => listeners.delete(cb);
   },
-  search: async () => [],
+  search: async () => ({ files: [], more: 0 }),
+  searchByCase: true,
 };
 
 let clip: FileClipboardPayload | null = null;
@@ -137,7 +139,7 @@ const setClip = (next: FileClipboardPayload | null) => {
 // and refuses whatever else it is asked.
 const cloud = new Proxy({} as Cloud, {
   get: (_, name: string) =>
-    name === "status" || name === "removed"
+    name === "status"
       ? async () => []
       : name.startsWith("on")
         ? () => () => {}
@@ -165,6 +167,7 @@ const backend: Backend = {
   setTitle(title) {
     document.title = title;
   },
+  device: "harness",
 };
 
 declare global {

@@ -15,6 +15,10 @@
 // teardown prompt for the agent. Who is in the workspace, their devices and
 // its agents are the workspace menu's (PeopleDialog.tsx).
 //
+// What a backend has no group for is not drawn: with no copy of the
+// workspace on the device there is no sync to press or pause and nothing to
+// disconnect, and the way out is the sign-out (`backend.session`).
+//
 // What only the superadmin may do — the worker, the plan, the danger zone —
 // is hidden from everyone else by the same table the domain decides with
 // (`mayOn`).
@@ -108,8 +112,8 @@ export default function CloudPanel({
    *  device of its person's: the wizard's third mode (CloudSetup.tsx). */
   onRedeem: () => void;
   /** The Devices tab, where a code for another device is made (CloudDevices.tsx). */
-  onAddDevice: () => void;
-  onUpdateWorker: () => void;
+  onAddDevice?: () => void;
+  onUpdateWorker?: () => void;
   /** The list of every published page (PublishedPages.tsx). */
   onOpenPublished: () => void;
   onOpenExternal: (url: string) => void;
@@ -124,10 +128,12 @@ export default function CloudPanel({
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const { sync, domain, session, device } = backend;
   // The plan a press asked for, waiting for its confirmation.
   const [askPlan, setAskPlan] = useState<CloudPlan | null>(null);
   // A command in flight whose button should not be pressed twice.
-  const [busy, setBusy] = useState<"lift" | "adds" | "plan" | null>(null);
+  const [busy, setBusy] = useState<"lift" | "adds" | "plan" | "leave" | null>(null);
   const [wipeInput, setWipeInput] = useState("");
   const [wiping, setWiping] = useState(false);
   // Captured before the wipe: the status is gone once the domain is empty.
@@ -172,20 +178,20 @@ export default function CloudPanel({
   }, []);
 
   const wipe = useCallback(async () => {
-    if (!cloud) return;
-    const { domain, endpoint, root: r } = cloud;
+    if (!cloud || !domain) return;
+    const { endpoint, root: r } = cloud;
     setWiping(true);
     setError(null);
     try {
-      const purged = await backend.cloud.wipe(r);
-      setTornDown({ domain, endpoint, purged });
+      const purged = await domain.wipe(r);
+      setTornDown({ domain: cloud.domain, endpoint, purged });
       setView("teardown");
     } catch (e) {
       setError(errText(e));
     } finally {
       setWiping(false);
     }
-  }, [cloud]);
+  }, [cloud, domain]);
 
   const title =
     view === "wipe"
@@ -302,8 +308,9 @@ export default function CloudPanel({
     const paused = cloud.phase === "paused";
     const others = cloud.presence;
     const pages = cloud.public.length;
-    // The superadmin's, hidden from everyone else (`mayOn`).
-    const manages = mayOn(cloud, "workspace.manage");
+    // The superadmin's, hidden from everyone else (`mayOn`), and from a
+    // backend that does not keep the domain up.
+    const manages = domain != null && mayOn(cloud, "workspace.manage");
     const usage = usageState(cloud.usage);
     const plan = cloud.usage.plan;
     // Nothing held on this Mac's own allowance is nothing to say; everyone's
@@ -332,23 +339,25 @@ export default function CloudPanel({
           <span className="cloud-phase-text" data-testid="phase-text">
             {cap(phaseLine(cloud, now))}
           </span>
-          <div className="cloud-phase-actions">
-            <button
-              className="modal-btn"
-              data-testid="sync-now"
-              disabled={paused || cloud.phase === "syncing" || cloud.phase === "revoked"}
-              onClick={() => void act(() => backend.cloud.syncNow(cloud.root))}
-            >
-              Sync now
-            </button>
-            <button
-              className="modal-btn"
-              data-testid="pause-toggle"
-              onClick={() => void act(() => backend.cloud.pause(cloud.root, !paused))}
-            >
-              {paused ? "Resume" : "Pause"}
-            </button>
-          </div>
+          {sync && (
+            <div className="cloud-phase-actions">
+              <button
+                className="modal-btn"
+                data-testid="sync-now"
+                disabled={paused || cloud.phase === "syncing" || cloud.phase === "revoked"}
+                onClick={() => void act(() => sync.syncNow(cloud.root))}
+              >
+                Sync now
+              </button>
+              <button
+                className="modal-btn"
+                data-testid="pause-toggle"
+                onClick={() => void act(() => sync.pause(cloud.root, !paused))}
+              >
+                {paused ? "Resume" : "Pause"}
+              </button>
+            </div>
+          )}
         </div>
         {cloud.phase === "error" && cloud.error && <div className="modal-error">{cloud.error}</div>}
         {cloud.phase === "revoked" && (
@@ -385,13 +394,13 @@ export default function CloudPanel({
               The rest go out {after(waits.until)}, so nothing else on this workspace slows down.
             </p>
             {waits.cause === "fleet" && planHint && <p className="cloud-hint">{planHint}</p>}
-            {waits.cause === "device" && cloud.usage.liftable && (
+            {sync && waits.cause === "device" && cloud.usage.liftable && (
               <div className="modal-buttons">
                 <button
                   className="modal-btn is-primary"
                   data-testid="lift-wait"
                   disabled={busy === "lift"}
-                  onClick={() => void act(() => backend.cloud.liftWait(cloud.root), "lift")}
+                  onClick={() => void act(() => sync.liftWait(cloud.root), "lift")}
                 >
                   {waits.waiting === 1 ? "Send it now" : "Send them now"}
                 </button>
@@ -407,13 +416,13 @@ export default function CloudPanel({
         {usage.kind === "slow" && (
           <p className="cloud-hint cloud-warn" data-testid="usage-slow">
             {plan === "paid"
-              ? "Sync is slower for the rest of today because this Mac has sent an unusual number of requests — edits still go out, about once a minute."
+              ? `Sync is slower for the rest of today because this ${device} has sent an unusual number of requests — edits still go out, about once a minute.`
               : "Sync is slower for the rest of today to stay inside Cloudflare’s free requests — edits still go out, about once a minute."}
             {cloud.usage.cause === "fleet" && planHint && ` ${planHint}`}
           </p>
         )}
 
-        {cloud.phase === "pending-deletes" && (
+        {sync && cloud.phase === "pending-deletes" && (
           <div className="cloud-card cloud-card--attention" data-testid="pending-deletes">
             <div className="cloud-card-title">
               {cloud.pendingDeletes} file{cloud.pendingDeletes === 1 ? "" : "s"} disappeared from this folder
@@ -436,7 +445,7 @@ export default function CloudPanel({
               <button
                 className="modal-btn is-primary"
                 data-testid="confirm-deletes"
-                onClick={() => void act(() => backend.cloud.confirmDeletes(cloud.root))}
+                onClick={() => void act(() => sync.confirmDeletes(cloud.root))}
               >
                 Delete them on {cloud.domain}
               </button>
@@ -444,7 +453,7 @@ export default function CloudPanel({
           </div>
         )}
 
-        {cloud.phase === "pending-adds" && (
+        {sync && cloud.phase === "pending-adds" && (
           <div className="cloud-card cloud-card--attention" data-testid="pending-adds">
             <div className="cloud-card-title">{addsQuestion(adds, addsFolders, cloud.name)}</div>
             <p className="cloud-hint">
@@ -465,7 +474,7 @@ export default function CloudPanel({
                 className="modal-btn is-primary"
                 data-testid="confirm-adds"
                 disabled={busy === "adds"}
-                onClick={() => void act(() => backend.cloud.confirmAdds(cloud.root, true), "adds")}
+                onClick={() => void act(() => sync.confirmAdds(cloud.root, true), "adds")}
               >
                 {adds === 1 ? "Sync it" : "Sync them"}
               </button>
@@ -473,7 +482,7 @@ export default function CloudPanel({
                 className="modal-btn"
                 data-testid="decline-adds"
                 disabled={busy === "adds"}
-                onClick={() => void act(() => backend.cloud.confirmAdds(cloud.root, false), "adds")}
+                onClick={() => void act(() => sync.confirmAdds(cloud.root, false), "adds")}
               >
                 Not now
               </button>
@@ -496,7 +505,7 @@ export default function CloudPanel({
                   ? ` Updating it is the superadmin’s — ask ${cloud.superadmin}.`
                   : " Updating it is the superadmin’s — whoever set the domain up.")}
             </p>
-            {manages && (
+            {manages && onUpdateWorker && (
               <div className="modal-buttons">
                 <button className="modal-btn is-primary" data-testid="update-worker" onClick={onUpdateWorker}>
                   Update the worker
@@ -516,10 +525,14 @@ export default function CloudPanel({
           </div>
         )}
 
-        <div className="cloud-section-label">Version history</div>
-        <p className="cloud-hint" data-testid="versions-line">
-          {versionsLine(cloud, now)}
-        </p>
+        {backend.versions && (
+          <>
+            <div className="cloud-section-label">Version history</div>
+            <p className="cloud-hint" data-testid="versions-line">
+              {versionsLine(cloud, now)}
+            </p>
+          </>
+        )}
         {onWorkspaceHistory && (
           <div className="cloud-phase-actions">
             <button
@@ -535,7 +548,7 @@ export default function CloudPanel({
         <div className="cloud-section-label">Here now</div>
         {others.length === 0 ? (
           <p className="cloud-hint" data-testid="presence-empty">
-            Only this Mac.
+            Only this {device}.
           </p>
         ) : (
           <ul className="cloud-presence" data-testid="presence-list">
@@ -562,7 +575,7 @@ export default function CloudPanel({
 
         <div className="cloud-section-label">Cloudflare</div>
         <p className="cloud-hint" data-testid="usage-line">
-          {usageLine(cloud.usage)}
+          {usageLine(cloud.usage, device)}
         </p>
         {(manages || plan) && (
           <>
@@ -602,7 +615,7 @@ export default function CloudPanel({
                   disabled={busy === "plan"}
                   onClick={() =>
                     void act(async () => {
-                      await backend.cloud.setPlan(cloud.root, askPlan);
+                      await domain?.setPlan(cloud.root, askPlan);
                       setAskPlan(null);
                     }, "plan")
                   }
@@ -617,9 +630,9 @@ export default function CloudPanel({
           </>
         )}
 
-        <div className="cloud-section-label">This Mac</div>
+        <div className="cloud-section-label">This {device}</div>
         <div className="cloud-actions">
-          {mayOn(cloud, "devices.own") && (
+          {onAddDevice && mayOn(cloud, "devices.own") && (
             <button className="modal-btn" data-testid="add-device" onClick={onAddDevice}>
               Add a device
             </button>
@@ -629,33 +642,59 @@ export default function CloudPanel({
               Version settings
             </button>
           )}
-          {!behind && manages && (
+          {!behind && manages && onUpdateWorker && (
             <button className="modal-btn" data-testid="update-worker-quiet" onClick={onUpdateWorker}>
               Update the worker
             </button>
           )}
-          {confirmDisconnect ? (
-            <span className="cloud-inline-confirm" data-testid="disconnect-confirm">
-              <span className="cloud-hint">
-                Stop syncing on this Mac? The folder and the cloud stay, and this Mac’s sign-in ends:
-                to sync here again it joins with a new line.
+          {sync &&
+            (confirmDisconnect ? (
+              <span className="cloud-inline-confirm" data-testid="disconnect-confirm">
+                <span className="cloud-hint">
+                  Stop syncing on this Mac? The folder and the cloud stay, and this Mac’s sign-in ends:
+                  to sync here again it joins with a new line.
+                </span>
+                <button
+                  className="modal-btn is-primary"
+                  data-testid="disconnect-yes"
+                  onClick={() => void act(() => sync.disconnect(cloud.root))}
+                >
+                  Disconnect
+                </button>
+                <button className="modal-btn" onClick={() => setConfirmDisconnect(false)}>
+                  Cancel
+                </button>
               </span>
-              <button
-                className="modal-btn is-primary"
-                data-testid="disconnect-yes"
-                onClick={() => void act(() => backend.cloud.disconnect(cloud.root))}
-              >
-                Disconnect
+            ) : (
+              <button className="modal-btn" data-testid="disconnect" onClick={() => setConfirmDisconnect(true)}>
+                Disconnect this Mac
               </button>
-              <button className="modal-btn" onClick={() => setConfirmDisconnect(false)}>
-                Cancel
+            ))}
+          {session &&
+            (confirmSignOut ? (
+              <span className="cloud-inline-confirm" data-testid="sign-out-confirm">
+                <span className="cloud-hint">
+                  Sign out of {cloud.name} in this {device}? What you wrote is sent first, and what can’t be sent
+                  is lost. To sign in here again you need a new line: from another device of yours, or from
+                  whoever runs the workspace.
+                </span>
+                <button
+                  className="modal-btn is-primary"
+                  data-testid="sign-out-yes"
+                  disabled={busy === "leave"}
+                  onClick={() => void act(() => session.signOut(), "leave")}
+                >
+                  Sign out
+                </button>
+                <button className="modal-btn" disabled={busy === "leave"} onClick={() => setConfirmSignOut(false)}>
+                  Cancel
+                </button>
+              </span>
+            ) : (
+              <button className="modal-btn" data-testid="sign-out" onClick={() => setConfirmSignOut(true)}>
+                Sign out
               </button>
-            </span>
-          ) : (
-            <button className="modal-btn" data-testid="disconnect" onClick={() => setConfirmDisconnect(true)}>
-              Disconnect this Mac
-            </button>
-          )}
+            ))}
         </div>
         {error && <div className="modal-error">{error}</div>}
 

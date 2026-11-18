@@ -42,7 +42,7 @@ import { Refusal, type Committed } from "./commit";
 import { Index, nameOf, type Entry } from "./documents";
 import type { Env } from "./env";
 import { textOf } from "./htmlText";
-import { blobKey } from "./layout";
+import { SEARCH_LIMIT_MAX, blobKey } from "./layout";
 import type { Manifest } from "./manifest";
 import { ensureSchema } from "./schema";
 import { MAX_SECTIONS_READ, spaceOf, type Where } from "./spaces";
@@ -59,7 +59,6 @@ const CATCH_UP_BYTES = 1024 * 1024;
 /** Stale documents a search still catches up and answers in one request. */
 const INLINE_READS = 8;
 const DEFAULT_LIMIT = 20;
-const MAX_LIMIT = 30;
 /** Matching lines shown per document. */
 const MAX_LINES = 5;
 const LINE_PREVIEW = 200;
@@ -286,7 +285,7 @@ export function askOf(params: URLSearchParams, dir: string): Ask | Refusal {
   if (query === "") return new Refusal(400, "say what to search for");
   if (/[\r\n]/.test(query)) return new Refusal(400, "search for text within one line");
   const asked = Number(params.get("limit") ?? DEFAULT_LIMIT);
-  const limit = Number.isInteger(asked) && asked > 0 ? Math.min(asked, MAX_LIMIT) : DEFAULT_LIMIT;
+  const limit = Number.isInteger(asked) && asked > 0 ? Math.min(asked, SEARCH_LIMIT_MAX) : DEFAULT_LIMIT;
   return { query, dir, limit };
 }
 

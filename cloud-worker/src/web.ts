@@ -49,6 +49,11 @@
 // was made to. (A move between sections is more than one write and answers
 // neither.)
 //
+// A page's own people publish and stop it here. An owner's list of every
+// page on the domain, and taking one down whoever published it, are the
+// routes a Mac's owner uses (`/api/pages`, everyPage.ts), which `ALSO` lets
+// a browser reach.
+//
 // A browser's sign-in is answered here and on the routes `ALSO` lists, and on
 // nothing else — and that is a property of the sign-in, not of the cookie: a
 // browser's token is refused as a bearer (auth.ts). What is left out is what
@@ -97,8 +102,9 @@ export async function signIn(request: Request, env: Env): Promise<Response> {
 /* ---------- What else a browser's sign-in is answered on ---------- */
 
 /** Outside /api/web: the reads a client with no copy of the workspace is
- *  built from, the beat that says where it is, its person's own Private, and
- *  its own sign-out. By method and by the path after `/api/`. */
+ *  built from, the beat that says where it is, its person's own Private, an
+ *  owner's view of every public page, and its own sign-out. By method and by
+ *  the path after `/api/`. */
 const ALSO: readonly (readonly [method: string, path: RegExp])[] = [
   ["GET", /^meta$/],
   ["GET", /^poll$/],
@@ -109,6 +115,7 @@ const ALSO: readonly (readonly [method: string, path: RegExp])[] = [
   ["GET", /^spaces\/[^/]+\/manifest$/],
   ["GET", /^spaces\/[^/]+\/blobs\/[^/]+\/[^/]+$/],
   ["GET", /^pages$/],
+  ["DELETE", /^pages\/[^/]+$/],
   ["DELETE", /^auth\/session$/],
 ];
 

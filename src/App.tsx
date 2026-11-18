@@ -44,6 +44,7 @@ import WorkspaceHistory from "./WorkspaceHistory";
 import VersionsSettings from "./VersionsSettings";
 import RecentlyDeleted from "./RecentlyDeleted";
 import { dragWindowFromGap } from "./windowDrag";
+import { keys } from "./keys";
 import Editor, { type EditorHandle } from "./Editor";
 import type { SearchInfo } from "./searchPlugin";
 import Sidebar, {
@@ -1002,10 +1003,10 @@ export default function App() {
                 slug: page.slug,
                 title: page.title ?? undefined,
                 desc: page.desc ?? undefined,
-              }).catch((e) => pushToast("error", `Couldn't publish again: ${String(e)}`)),
+              }).catch((e) => pushToast("error", `Couldn't publish again: ${errText(e)}`)),
           }),
         )
-        .catch((e) => pushToast("error", `Couldn't stop publishing: ${String(e)}`));
+        .catch((e) => pushToast("error", `Couldn't stop publishing: ${errText(e)}`));
     },
     [workspaceRoot, pushToast],
   );
@@ -3680,7 +3681,9 @@ export default function App() {
       const what = one ? `“${label(entries[0])}”` : `${entries.length} items`;
       const to = placeOf(cloud, toRel);
       if (to.kind === "nowhere") {
-        if (toRel.toLowerCase() !== "restricted") return true;
+        // Where no restricted folder can be made, the move is refused in its
+        // own words and there is nothing to ask first.
+        if (toRel.toLowerCase() !== "restricted" || !backend.access) return true;
         return askUser({
           title: `Restrict ${what}?`,
           body: `${one ? "It becomes a restricted folder" : "Each becomes a restricted folder"} only you can open until you add people, and is removed from everyone else’s Mac.`,
@@ -3710,16 +3713,17 @@ export default function App() {
   const makeRestricted = useCallback(
     async (source: RestrictedSource, name: string, members: string[]): Promise<string | null> => {
       const cloud = cloudForRootRef.current;
-      if (!cloud) return "This workspace isn’t connected.";
+      const access = backend.access;
+      if (!cloud || !access) return "This workspace isn’t connected.";
       try {
         if (source.kind === "folder") {
           // Land what is being typed inside it before the folder moves.
           if (pathRef.current?.startsWith(`${source.path}/`)) await flushPendingAutosave();
           await flushSidecarWrite();
-          const made = await backend.cloud.spaceCreate(cloud.root, name, members, source.path);
+          const made = await access.spaceCreate(cloud.root, name, members, source.path);
           await repointMoved(source.path, `${cloud.root}/${made.path}`, "dir");
         } else {
-          const made = await backend.cloud.spaceCreate(cloud.root, name, members);
+          const made = await access.spaceCreate(cloud.root, name, members);
           if (source.kind === "note") {
             const to = `${cloud.root}/${made.path}/${basename(source.path)}`;
             const failed = await movePath(source.path, to, "file");
@@ -3835,9 +3839,27 @@ export default function App() {
   // already takes its selected children with it.
   const deleteEntries = useCallback(
     async (entries: SidebarSelection[]) => {
-      for (const s of pruneNestedSelection(entries)) await deleteEntry(s.path, s.kind);
+      const outer = pruneNestedSelection(entries);
+      if (outer.length === 0) return;
+      // Where a delete cannot be taken back, it is asked first.
+      if (!backend.documents.removeUndoes) {
+        const [first] = outer;
+        const one = outer.length === 1;
+        const name = first.kind === "file" ? basename(first.path).replace(/\.(md|markdown|mdown|mkd|html)$/i, "") : basename(first.path);
+        const sure = await askUser({
+          title: one ? `Delete “${name}”?` : `Delete ${outer.length} items?`,
+          body: `${
+            !one ? "They are" : first.kind === "dir" ? "The folder and everything in it are" : "It is"
+          } deleted for everyone who can open ${one ? "it" : "them"}, and this ${backend.device} can’t bring ${
+            one ? "it" : "them"
+          } back.`,
+          confirm: "Delete",
+        });
+        if (!sure) return;
+      }
+      for (const s of outer) await deleteEntry(s.path, s.kind);
     },
-    [deleteEntry],
+    [deleteEntry, askUser],
   );
 
   useEffect(() => {
@@ -4436,6 +4458,9 @@ export default function App() {
         // key.)
         const t = e.target as HTMLElement | null;
         if (t?.isContentEditable || t?.closest(".editor-wrap")) return;
+        // In a text field it is the field's own: delete to the line's start,
+        // or the word before the caret.
+        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
         const sels = sidebarSelectionRef.current;
         if (
           workspaceRoot != null &&
@@ -4453,7 +4478,7 @@ export default function App() {
           const active = tabsRef.current.find((tb) => tb.id === activeIdRef.current);
           if (active?.kind === "file") {
             e.preventDefault();
-            void deleteEntry(active.path, "file");
+            void deleteEntries([{ path: active.path, kind: "file" }]);
           }
         }
       } else if ((k === "c" || k === "x" || k === "v") && !e.shiftKey && !e.altKey) {
@@ -4661,6 +4686,8 @@ export default function App() {
   // menu row that is not shown; the surfaces behind it are rendered only
   // with the group they call.
   const versionStore = backend.versions;
+  const { setup, sync, domain, access } = backend;
+  const onJoinWorkspace = setup ? () => setCloudSetup("redeem") : undefined;
   const onNewNote = backend.untitled ? () => void newUntitled() : undefined;
   const onPickFile = backend.localFiles ? openFilePicker : undefined;
   const onPickFolder = backend.localFiles ? openFolderPicker : undefined;
@@ -4774,7 +4801,10 @@ export default function App() {
       setDeletedFor((d) => (d && under(d) ? null : d));
       setTreeRefreshToken((t) => t + 1);
       if (!mine) {
-        pushToast("info", `“${e.name}” is no longer on this Mac — you were taken out of it, or it was deleted.`);
+        pushToast(
+          "info",
+          `“${e.name}” is no longer on this ${backend.device} — you were taken out of it, or it was deleted.`,
+        );
       }
     },
     [closeGoneTabs, pushToast],
@@ -4791,7 +4821,8 @@ export default function App() {
   useEffect(() => {
     if (!ready) return;
     let live = true;
-    void backend.cloud.removed()
+    void backend.sync
+      ?.removed()
       .then(async (removed) => {
         for (const e of removed) if (live) await leaveRemovedWorkspace(e);
       })
@@ -4801,15 +4832,13 @@ export default function App() {
     };
   }, [ready, leaveRemovedWorkspace]);
   useEffect(() => {
+    const sync = backend.sync;
     const uns = [
-      backend.cloud.onRemoved((e) => {
-        if (readyRef.current) void leaveRemovedWorkspace(e);
-      }),
       backend.cloud.onApplied((e) => {
         if (e.root === sessionWorkspaceRoot) setTreeRefreshToken((t) => t + 1);
       }),
       backend.cloud.onConflict((e) => {
-        pushToast("warn", `${e.by} and this Mac both changed ${e.path} — both versions are kept.`, {
+        pushToast("warn", `${e.by} and this ${backend.device} both changed ${e.path} — both versions are kept.`, {
           label: "Open the copy",
           run: () => void openTab(`${e.root}/${e.conflictPath}`),
         });
@@ -4817,41 +4846,49 @@ export default function App() {
       backend.cloud.onSpaceLeft((e) => {
         if (readyRef.current) void leaveSpaceFolder(e);
       }),
-      backend.cloud.onAddressTaken((e) => {
-        pushToast(
-          "warn",
-          `The address "${e.slug}" is already taken on this domain, so ${basename(e.path)} was not published.`,
-        );
-      }),
-      backend.cloud.onPendingDeletes((e) => {
-        setPendingDeletes(e);
-        if (e.count > 0) {
+    ];
+    // What only a device with a copy of its own hears.
+    if (sync) {
+      uns.push(
+        sync.onRemoved((e) => {
+          if (readyRef.current) void leaveRemovedWorkspace(e);
+        }),
+        sync.onAddressTaken((e) => {
           pushToast(
             "warn",
-            `${e.count} files disappeared from ${basename(e.root)} — sync is holding the deletion.`,
-            { label: "Review…", run: () => setCloudPanelOpen(true) },
+            `The address "${e.slug}" is already taken on this domain, so ${basename(e.path)} was not published.`,
           );
-        }
-      }),
-      // Many new documents at once: the notice asks, with both answers on it.
-      backend.cloud.onPendingAdds((e) => {
-        setPendingAdds(e);
-        if (e.root !== sessionWorkspaceRoot || e.count === 0) return;
-        const open = cloudForRootRef.current;
-        const name = open?.root === e.root ? open.name : basename(e.root);
-        const answer = (sync: boolean) => () => {
-          addsToastRef.current = null;
-          backend.cloud.confirmAdds(e.root, sync).catch((err) => pushToast("error", errText(err)));
-        };
-        if (addsToastRef.current != null) dismissToast(addsToastRef.current);
-        addsToastRef.current = pushToast(
-          "warn",
-          addsQuestion(e.count, e.folders, name),
-          { label: e.count === 1 ? "Sync it" : "Sync them", run: answer(true) },
-          { label: "Not now", run: answer(false) },
-        );
-      }),
-    ];
+        }),
+        sync.onPendingDeletes((e) => {
+          setPendingDeletes(e);
+          if (e.count > 0) {
+            pushToast(
+              "warn",
+              `${e.count} files disappeared from ${basename(e.root)} — sync is holding the deletion.`,
+              { label: "Review…", run: () => setCloudPanelOpen(true) },
+            );
+          }
+        }),
+        // Many new documents at once: the notice asks, with both answers on it.
+        sync.onPendingAdds((e) => {
+          setPendingAdds(e);
+          if (e.root !== sessionWorkspaceRoot || e.count === 0) return;
+          const open = cloudForRootRef.current;
+          const name = open?.root === e.root ? open.name : basename(e.root);
+          const answer = (yes: boolean) => () => {
+            addsToastRef.current = null;
+            sync.confirmAdds(e.root, yes).catch((err) => pushToast("error", errText(err)));
+          };
+          if (addsToastRef.current != null) dismissToast(addsToastRef.current);
+          addsToastRef.current = pushToast(
+            "warn",
+            addsQuestion(e.count, e.folders, name),
+            { label: e.count === 1 ? "Sync it" : "Sync them", run: answer(true) },
+            { label: "Not now", run: answer(false) },
+          );
+        }),
+      );
+    }
     const versions = backend.versions;
     if (versions) {
       uns.push(
@@ -5195,7 +5232,7 @@ export default function App() {
               onNewNote={onNewNote}
               onOpenFile={onPickFile}
               onOpenFolder={onPickFolder}
-              onJoinWorkspace={() => setCloudSetup("redeem")}
+              onJoinWorkspace={onJoinWorkspace}
             />
           )}
         </div>
@@ -5230,12 +5267,15 @@ export default function App() {
   // rides at the start of the tab bar, so the tabs begin after it and the
   // toggles never move. Its gaps drag the window.
   const titleLead = (
-    <div className="title-lead" onMouseDown={dragWindowFromGap}>
+    <div
+      className={`title-lead${backend.windows ? " clears-window-buttons" : ""}`}
+      onMouseDown={dragWindowFromGap}
+    >
       {workspaceRoot && (
         <button
           className="title-toggle"
           onClick={() => setSidebarOpen((v) => !v)}
-          title={sidebarOpen ? "Hide sidebar (⌘\\)" : "Show sidebar (⌘\\)"}
+          title={`${sidebarOpen ? "Hide" : "Show"} sidebar (${keys("⌘\\")})`}
           aria-label="Toggle sidebar"
           aria-pressed={sidebarOpen}
         >
@@ -5281,7 +5321,7 @@ export default function App() {
               />
               {/* Publishing: a file inside the open workspace only — not an
                   untitled note, not a file from outside. */}
-              {activeRel !== null && (
+              {activeRel !== null && (cloudForRoot || setup) && (
                 <LiveChip
                   cloud={cloudForRoot}
                   absPath={activeTab.path}
@@ -5391,20 +5431,20 @@ export default function App() {
           onDragFileCancel={handleTreeDragCancel}
           onResizeWidth={resizeSidebar}
           onOpenCloud={() => setCloudPanelOpen(true)}
-          onOpenPeople={cloudForRoot ? () => setAccessTab("people") : undefined}
-          onOpenDevices={mayOn(cloudForRoot, "devices.own") ? () => setAccessTab("devices") : undefined}
-          onOpenAgents={mayOn(cloudForRoot, "agents.own") ? () => setAccessTab("agents") : undefined}
+          onOpenPeople={access && cloudForRoot ? () => setAccessTab("people") : undefined}
+          onOpenDevices={access && mayOn(cloudForRoot, "devices.own") ? () => setAccessTab("devices") : undefined}
+          onOpenAgents={access && mayOn(cloudForRoot, "agents.own") ? () => setAccessTab("agents") : undefined}
           onNewRestricted={
-            cloudForRoot
+            access && cloudForRoot
               ? (from) => setRestrictedSource(from ? { kind: "folder", path: from } : { kind: "new" })
               : undefined
           }
-          onManageAccess={(space) => setAccessSpaceId(space.id)}
-          onShareWith={(path) => setRestrictedSource({ kind: "note", path })}
+          onManageAccess={access ? (space) => setAccessSpaceId(space.id) : undefined}
+          onShareWith={access ? (path) => setRestrictedSource({ kind: "note", path }) : undefined}
           onConfirmMove={confirmMove}
           workspaces={myWorkspaces}
           onOpenWorkspace={(root) => void openWorkspace(root)}
-          onJoinWorkspace={() => setCloudSetup("redeem")}
+          onJoinWorkspace={onJoinWorkspace}
           onPublishFolder={cloudForRoot ? (dir) => setPublishFolder(dir) : undefined}
           onStopPublishing={cloudForRoot ? stopPublishing : undefined}
           onCopyLink={(url) => void navigator.clipboard.writeText(url).catch(() => {})}
@@ -5431,19 +5471,27 @@ export default function App() {
           onError={(message) => pushToast("error", message)}
         />
       )}
-      {accessTab && cloudForRoot && (
-        <PeopleDialog cloud={cloudForRoot} tab={accessTab} onTab={setAccessTab} onClose={() => setAccessTab(null)} />
+      {accessTab && cloudForRoot && access && (
+        <PeopleDialog
+          access={access}
+          cloud={cloudForRoot}
+          tab={accessTab}
+          onTab={setAccessTab}
+          onClose={() => setAccessTab(null)}
+        />
       )}
-      {restrictedSource && cloudForRoot && (
+      {restrictedSource && cloudForRoot && access && (
         <RestrictedFolder
+          access={access}
           cloud={cloudForRoot}
           source={restrictedSource}
           onSubmit={(name, members) => makeRestricted(restrictedSource, name, members)}
           onClose={() => setRestrictedSource(null)}
         />
       )}
-      {accessSpace && cloudForRoot && (
+      {accessSpace && cloudForRoot && access && (
         <SpaceAccess
+          access={access}
           cloud={cloudForRoot}
           space={accessSpace}
           onLeaving={(space) => givenUpRef.current.add(`${cloudForRoot.root}/${space.path}`)}
@@ -5525,7 +5573,7 @@ export default function App() {
           </div>
         )}
       </main>
-      {cloudPanelOpen && (
+      {cloudPanelOpen && (cloudForRoot || setup) && (
         <CloudPanel
           root={workspaceRoot}
           cloud={cloudForRoot}
@@ -5546,14 +5594,22 @@ export default function App() {
             setCloudPanelOpen(false);
             setCloudSetup("redeem");
           }}
-          onAddDevice={() => {
-            setCloudPanelOpen(false);
-            setAccessTab("devices");
-          }}
-          onUpdateWorker={() => {
-            setCloudPanelOpen(false);
-            setWorkerUpdateOpen(true);
-          }}
+          onAddDevice={
+            access
+              ? () => {
+                  setCloudPanelOpen(false);
+                  setAccessTab("devices");
+                }
+              : undefined
+          }
+          onUpdateWorker={
+            domain
+              ? () => {
+                  setCloudPanelOpen(false);
+                  setWorkerUpdateOpen(true);
+                }
+              : undefined
+          }
           onWorkspaceHistory={
             versionStore
               ? () => {
@@ -5600,8 +5656,10 @@ export default function App() {
           }}
         />
       )}
-      {cloudSetup && (
+      {cloudSetup && setup && sync && (
         <CloudSetup
+          setup={setup}
+          sync={sync}
           mode={cloudSetup}
           root={workspaceRoot}
           onClose={() => setCloudSetup(null)}
@@ -5615,8 +5673,9 @@ export default function App() {
           }}
         />
       )}
-      {workerUpdateOpen && cloudForRoot && (
+      {workerUpdateOpen && cloudForRoot && domain && (
         <WorkerUpdate
+          domain={domain}
           cloud={cloudForRoot}
           onClose={() => setWorkerUpdateOpen(false)}
           onOpenExternal={openExternal}
@@ -5862,7 +5921,7 @@ function SplitToggle({
       className={`split-toggle ${active ? "is-active" : ""}`}
       aria-pressed={active}
       disabled={disabled}
-      title={active ? "Close split (⌘⇧\\)" : "Split editor right (⌘⇧\\)"}
+      title={`${active ? "Close split" : "Split editor right"} (${keys("⌘⇧\\")})`}
       onClick={onToggle}
     >
       <svg
@@ -6268,12 +6327,14 @@ function ConflictBanner({
 }) {
   return (
     <div className="conflict-banner" role="alert">
+      {/* Where documents are files on this computer the other version is
+          the one on disk; anywhere else it is whatever the workspace now has. */}
       <span className="conflict-banner-text">
-        This file has changed on disk.
+        {backend.localFiles ? "This file has changed on disk." : "This document was changed somewhere else."}
       </span>
       <div className="conflict-banner-actions">
         <button className="conflict-banner-btn" onClick={onReload}>
-          Reload from disk
+          {backend.localFiles ? "Reload from disk" : "Show that version"}
         </button>
         <button
           className="conflict-banner-btn is-primary"
@@ -6377,7 +6438,7 @@ function Settings({
             >
               <span className="settings-option-check" />
               <span className="settings-option-label">New note</span>
-              <span className="settings-option-kbd">⌘N</span>
+              <span className="settings-option-kbd">{keys("⌘N")}</span>
             </button>
           )}
           {onOpenFile && (
@@ -6391,7 +6452,7 @@ function Settings({
             >
               <span className="settings-option-check" />
               <span className="settings-option-label">Open file…</span>
-              <span className="settings-option-kbd">⌘O</span>
+              <span className="settings-option-kbd">{keys("⌘O")}</span>
             </button>
           )}
           {onOpenFolder && (
@@ -6405,7 +6466,7 @@ function Settings({
             >
               <span className="settings-option-check" />
               <span className="settings-option-label">Open folder…</span>
-              <span className="settings-option-kbd">⌘⇧O</span>
+              <span className="settings-option-kbd">{keys("⌘⇧O")}</span>
             </button>
           )}
           {onOpenFileNewWindow && (
@@ -6419,7 +6480,7 @@ function Settings({
             >
               <span className="settings-option-check" />
               <span className="settings-option-label">Open file in new window…</span>
-              <span className="settings-option-kbd">⌘⌥O</span>
+              <span className="settings-option-kbd">{keys("⌘⌥O")}</span>
             </button>
           )}
           {onOpenFolderNewWindow && (
@@ -6433,7 +6494,7 @@ function Settings({
             >
               <span className="settings-option-check" />
               <span className="settings-option-label">Open folder in new window…</span>
-              <span className="settings-option-kbd">⌘⌥⇧O</span>
+              <span className="settings-option-kbd">{keys("⌘⌥⇧O")}</span>
             </button>
           )}
           {canCopyWithComments && (
@@ -6660,7 +6721,7 @@ function ScratchEmptyState({
   onOpenFile?: () => void;
   onOpenFolder?: () => void;
   /** Somebody sent an invite: the one door a new install needs. */
-  onJoinWorkspace: () => void;
+  onJoinWorkspace?: () => void;
 }) {
   return (
     <div className="scratch-empty" aria-hidden={false}>
@@ -6671,27 +6732,29 @@ function ScratchEmptyState({
             <button className="scratch-empty-button" onClick={onNewNote}>
               <FileIcon />
               <span>New note</span>
-              <span className="scratch-empty-kbd">⌘N</span>
+              <span className="scratch-empty-kbd">{keys("⌘N")}</span>
             </button>
           )}
           {onOpenFile && (
             <button className="scratch-empty-button" onClick={onOpenFile}>
               <FileIcon />
               <span>Open file</span>
-              <span className="scratch-empty-kbd">⌘O</span>
+              <span className="scratch-empty-kbd">{keys("⌘O")}</span>
             </button>
           )}
           {onOpenFolder && (
             <button className="scratch-empty-button" onClick={onOpenFolder}>
               <FolderIcon />
               <span>Open folder</span>
-              <span className="scratch-empty-kbd">⌘⇧O</span>
+              <span className="scratch-empty-kbd">{keys("⌘⇧O")}</span>
             </button>
           )}
-          <button className="scratch-empty-button" data-testid="join-workspace" onClick={onJoinWorkspace}>
-            <FolderIcon />
-            <span>Join a workspace</span>
-          </button>
+          {onJoinWorkspace && (
+            <button className="scratch-empty-button" data-testid="join-workspace" onClick={onJoinWorkspace}>
+              <FolderIcon />
+              <span>Join a workspace</span>
+            </button>
+          )}
         </div>
       </div>
     </div>

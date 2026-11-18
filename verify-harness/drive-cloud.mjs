@@ -792,7 +792,7 @@ step(
     before16b === after16b &&
     take?.args.root === "/docs" &&
     take?.args.path === "/docs/other.md" &&
-    ownText === "Open on your other Mac, Studio — view only" &&
+    ownText === "Open on your other device, Studio — view only" &&
     (await editable()) === "true",
 );
 await setStatuses([status()]);
@@ -1329,7 +1329,8 @@ step(
     (await tid("mac-t-bob-1").textContent()).includes("Bob\u2019s MacBook") &&
     inviteCall.args.days === 30 &&
     shownCode === "dkln-9F4TR-2QWXM-7NBKD-5HGVZ" &&
-    copiedLine === `doklin-invite https://notes.example.com ${shownCode}` &&
+    copiedLine ===
+      `doklin-invite https://notes.example.com ${shownCode}\nNo Doklin app? Open https://notes.example.com/app and paste the line above.` &&
     (await tid("invite-list").textContent()).includes("carol@example.com"),
   shownCode,
 );

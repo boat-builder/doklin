@@ -139,9 +139,14 @@ export type TreeNode =
   | { kind: "file"; name: string; path: string; paired?: boolean; supported?: boolean }
   | { kind: "dir"; name: string; path: string; children: TreeNode[] };
 
-export type SearchMatch = { line: number; column: number; preview: string };
+/** `line`: null in a document whose lines are not numbered (html, searched
+ *  as the text it shows). */
+export type SearchMatch = { line: number | null; column: number; preview: string };
 /** `named`: the document's name holds the query. */
 export type FileMatches = { path: string; name: string; named: boolean; matches: SearchMatch[] };
+/** `more`: documents that matched and are not among `files`, where the
+ *  backend lists only the first of many. */
+export type SearchResults = { files: FileMatches[]; more: number };
 
 export interface Documents {
   /** Everything a document is shown from. Rejects when there is none at `path`. */
@@ -167,11 +172,16 @@ export interface Documents {
   copy(from: string, to: string, kind: EntryKind): Promise<LeftBehind[]>;
   /** Delete; a document's parts go with it. Rejects when nothing was deleted. */
   remove(path: string, kind: EntryKind): Promise<Removed>;
+  /** Whether a delete here can be taken back (`Removed.undo`). Where it
+   *  cannot, the app asks before it deletes. */
+  readonly removeUndoes: boolean;
   /** The documents on screen, all of them, each time the set changes.
    *  `onChange` speaks only of these. */
   watch(docs: WatchedDocument[]): Promise<void>;
   onChange(cb: (change: DocumentChange) => void): Unsubscribe;
-  search(root: string, query: string, caseSensitive: boolean): Promise<FileMatches[]>;
+  search(root: string, query: string, caseSensitive: boolean): Promise<SearchResults>;
+  /** Whether a search can be told to match case. */
+  readonly searchByCase: boolean;
 }
 
 /* ---------- The file clipboard ---------- */
@@ -187,14 +197,49 @@ export interface FileClipboard {
 }
 
 /* ---------- The cloud ----------
-   One method per engine command, and the engine's events. The types, and
-   what each status means, are src/cloud.ts's. */
+   What a backend answers of a workspace it shows: its status, what changed
+   in it, who is editing what, a page's link, and publishing. The types, and
+   what each status means, are src/cloud.ts's. What only some backends have —
+   a copy of the workspace on the device, the way onto a device, the domain's
+   upkeep, who may open what — is in the optional groups further down. */
 
 export interface Cloud {
   /** Every connected workspace's status. */
   status(): Promise<CloudStatus[]>;
   onStatus(cb: (statuses: CloudStatus[]) => void): Unsubscribe;
+  onApplied(cb: (e: CloudAppliedEvent) => void): Unsubscribe;
+  onConflict(cb: (e: CloudConflictEvent) => void): Unsubscribe;
+  onSpaceLeft(cb: (e: CloudSpaceLeftEvent) => void): Unsubscribe;
 
+  /** Which document this window is editing (its path), or none: what
+   *  presence reports, and the document this device claims the lease on. */
+  setActivity(path: string | null): Promise<void>;
+  /** *Take over* a document another device holds: claimed on the next beat,
+   *  and the device it is taken from goes view-only on its next poll. The
+   *  banner clears when the status says the lease moved. */
+  takeOver(root: string, path: string): Promise<void>;
+  /** The link to the document at `path`. Waits for one made a moment ago,
+   *  which has no id until the workspace has taken it in. */
+  link(path: string): Promise<CloudPageLink>;
+
+  /** Publish a file or a folder (the path decides); resolves to the slug.
+   *  Rejects when the address asked for is another page's, where the backend
+   *  knows at once (`CloudSync.onAddressTaken` is where it does not). */
+  publish(path: string, opts?: { slug?: string; title?: string; desc?: string }): Promise<string>;
+  unpublish(root: string, slug: string): Promise<void>;
+  setRoot(root: string, slug: string | null): Promise<void>;
+  /** Every public address on the domain (an owner's to read). `truncated`
+   *  when the domain holds more than one answer carries. */
+  pages(root: string): Promise<{ pages: EveryPage[]; truncated: boolean }>;
+  /** Take a page down, whoever published it (an owner's to do). */
+  pageTakeDown(root: string, slug: string): Promise<void>;
+}
+
+/* ---------- What a platform may not have ---------- */
+
+/** Bringing a workspace onto this device: making one from a folder, joining
+ *  one with a line, getting back into one with its Cloudflare account. */
+export interface CloudSetup {
   /** 32 random bytes, hex: a fresh key for the domain, which the setup and
    *  recovery prompts have an agent put on the worker. Traded once, by
    *  `recover`, for this device's own sign-in. */
@@ -226,13 +271,15 @@ export interface Cloud {
   /** Adopt a folder carrying the domain's marker in place; resolves to the workspace id. */
   resume(root: string, endpoint: string, token: string): Promise<string>;
   onProgress(cb: (e: CloudProgressEvent) => void): Unsubscribe;
-  /** Ask the domain's worker what it is again ("Check again" after an
-   *  update); the fresh version arrives in the next status. */
-  checkWorker(root: string): Promise<void>;
+}
 
-  disconnect(root: string): Promise<void>;
+/** This device's own copy of a workspace, and the sync that keeps it in
+ *  step: what is held back for a word, what is paused, what is forgotten. */
+export interface CloudSync {
   syncNow(root: string): Promise<void>;
   pause(root: string, paused: boolean): Promise<void>;
+  /** Stop syncing here and end this device's sign-in. The folder stays. */
+  disconnect(root: string): Promise<void>;
   confirmDeletes(root: string): Promise<void>;
   /** Answer the many-new-documents question: `sync` sends them (and lifts
    *  the day's wait for them); false ("Not now") leaves them here until it
@@ -241,45 +288,34 @@ export interface Cloud {
   /** Send what this device's spent allowance holds back, now. Holds until
    *  the next 00:00 UTC, so it is never asked twice in a day. */
   liftWait(root: string): Promise<void>;
-  /** Tell the domain which Cloudflare plan the account is on (the
-   *  superadmin's to do); the new limits arrive in the next status. */
-  setPlan(root: string, plan: CloudPlan): Promise<void>;
-  /** Erase everything on the workspace's domain and forget it here; resolves to the purged count. */
-  wipe(root: string): Promise<number>;
-  onApplied(cb: (e: CloudAppliedEvent) => void): Unsubscribe;
-  onConflict(cb: (e: CloudConflictEvent) => void): Unsubscribe;
   onPendingDeletes(cb: (e: CloudPendingDeletesEvent) => void): Unsubscribe;
   onPendingAdds(cb: (e: CloudPendingAddsEvent) => void): Unsubscribe;
+  /** A page queued here asked for an address that turned out to be taken. */
+  onAddressTaken(cb: (e: CloudAddressTakenEvent) => void): Unsubscribe;
   /** Every workspace taken off this device since the app started. The event
    *  says so as it happens; this answers a window that was not listening
    *  yet. */
   removed(): Promise<CloudRemovedEvent[]>;
   onRemoved(cb: (e: CloudRemovedEvent) => void): Unsubscribe;
-
-  /** Which document this window is editing (its path), or none: what
-   *  presence reports, and the document this device claims the lease on. */
-  setActivity(path: string | null): Promise<void>;
-  /** *Take over* a document another device holds: claimed on the next beat,
-   *  and the device it is taken from goes view-only on its next poll. The
-   *  banner clears when the status says the lease moved. */
-  takeOver(root: string, path: string): Promise<void>;
-  /** The link to the document at `path`. Waits a pass for one made a moment
-   *  ago, which has no id until one has taken it in. */
-  link(path: string): Promise<CloudPageLink>;
   /** What changed lately in the workspace at `root`, at most `limit` documents. */
   recent(root: string, limit?: number | null): Promise<CloudRecentFiles>;
+}
 
-  /** Publish a file or a folder (the path decides); resolves to the slug. */
-  publish(path: string, opts?: { slug?: string; title?: string; desc?: string }): Promise<string>;
-  unpublish(root: string, slug: string): Promise<void>;
-  setRoot(root: string, slug: string | null): Promise<void>;
-  onAddressTaken(cb: (e: CloudAddressTakenEvent) => void): Unsubscribe;
-  /** Every public address on the domain (an owner's to read). `truncated`
-   *  when the domain holds more than one answer carries. */
-  pages(root: string): Promise<{ pages: EveryPage[]; truncated: boolean }>;
-  /** Take a page down, whoever published it (an owner's to do). */
-  pageTakeDown(root: string, slug: string): Promise<void>;
+/** The domain's own upkeep, which is its superadmin's. */
+export interface CloudDomain {
+  /** Ask the domain's worker what it is again ("Check again" after an
+   *  update); the fresh version arrives in the next status. */
+  checkWorker(root: string): Promise<void>;
+  /** Tell the domain which Cloudflare plan the account is on; the new
+   *  limits arrive in the next status. */
+  setPlan(root: string, plan: CloudPlan): Promise<void>;
+  /** Erase everything on the workspace's domain and forget it here; resolves to the purged count. */
+  wipe(root: string): Promise<number>;
+}
 
+/** Who may open a workspace and what each may do in it: its people and
+ *  their devices, its agents, its restricted folders. */
+export interface CloudAccess {
   /** Who is on this workspace and what each of them holds: the People
    *  view's whole answer, this device's own role included. */
   people(root: string): Promise<CloudPeople>;
@@ -327,10 +363,15 @@ export interface Cloud {
   spaceMember(root: string, id: string, memberId: string, add: boolean): Promise<void>;
   /** Delete a restricted folder for everyone in it. */
   spaceDelete(root: string, id: string): Promise<void>;
-  onSpaceLeft(cb: (e: CloudSpaceLeftEvent) => void): Unsubscribe;
 }
 
-/* ---------- What a platform may not have ---------- */
+/** A sign-in the page itself holds, where there is no copy of the workspace
+ *  on the device to disconnect: a browser's. */
+export interface Session {
+  /** End it. Text not yet sent goes first where it can; the page then
+   *  starts again, signed out. */
+  signOut(): Promise<void>;
+}
 
 /** Version history: the store beside each folder (src/versions.ts has the
  *  types and what they mean). */
@@ -523,6 +564,8 @@ export interface Backend {
   authorName(): Promise<string>;
   /** What the window, or the browser's tab, is called. */
   setTitle(title: string): void;
+  /** What this device is in a sentence, after "this": "Mac", "browser". */
+  readonly device: string;
 
   /** The one workspace this backend is for, by its root, where there is only
    *  one: the app opens it at start and offers no other. */
@@ -534,6 +577,11 @@ export interface Backend {
    *  markup itself. */
   readonly htmlFrame?: string;
 
+  readonly setup?: CloudSetup;
+  readonly sync?: CloudSync;
+  readonly domain?: CloudDomain;
+  readonly access?: CloudAccess;
+  readonly session?: Session;
   readonly versions?: Versions;
   readonly shows?: Shows;
   readonly leaving?: Leaving;

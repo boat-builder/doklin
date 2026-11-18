@@ -1,4 +1,4 @@
-// The view-only banner over a document another Mac holds.
+// The view-only banner over a document another device holds.
 // The lease is advisory: the editor goes read-only because someone else
 // has the document open, never because a write would be refused — so *Take
 // over* is one click, and what both of you typed in the moment it takes
@@ -24,7 +24,7 @@ export function LeaseBanner({ lease, onTakeOver }: { lease: LeaseHolder; onTakeO
           disabled={taking}
           title={
             lease.own
-              ? "Edit here instead — the other Mac goes view-only"
+              ? "Edit here instead — the other device goes view-only"
               : `Edit here instead — ${lease.name}'s copy goes view-only`
           }
           onClick={() => {

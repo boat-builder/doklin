@@ -9,7 +9,8 @@
 //     backend refuses becomes the conflict banner;
 //   - a feature whose group the backend lacks has no button, no menu row and
 //     no shortcut (untitled notes, this computer's files, history, updates);
-//   - a delete the backend cannot take back leaves nothing for ⌘Z.
+//   - a delete the backend cannot take back is asked first, and leaves
+//     nothing for ⌘Z.
 //
 // Needs a vite server on the worktree (see CLAUDE.md).
 // HARNESS_ORIGIN overrides it (default http://localhost:1420).
@@ -191,12 +192,27 @@ await seam(() => document.activeElement?.blur());
 {
   const before = await tabCount();
   await page.keyboard.press("Meta+Backspace");
+  const question = page.getByTestId("question-prompt");
+  await question.waitFor();
+  const asked = (await question.innerText()).replace(/\s+/g, " ");
+  await page.getByTestId("question-no").click();
+  await settle(300);
+  step(
+    "⌘⌫ asks before a delete that cannot be taken back, and Cancel deletes nothing",
+    /Delete “notes”\?/.test(asked) &&
+      /can’t bring it back/.test(asked) &&
+      (await seam(() => window.__seam.removed.length)) === 0 &&
+      (await tabCount()) === before,
+    asked,
+  );
+  await page.keyboard.press("Meta+Backspace");
+  await page.getByTestId("question-yes").click();
   await poll(async () => (await seam(() => window.__seam.removed.length)) === 1);
   await poll(async () => (await tabCount()) === before - 1);
   await page.keyboard.press("Meta+z");
   await settle(600);
   step(
-    "⌘⌫ deletes the document as one thing; with no undo offered, ⌘Z brings nothing back",
+    "Delete deletes the document as one thing; with no undo offered, ⌘Z brings nothing back",
     (await seam(() => window.__seam.removed[0])) === NOTES &&
       (await stored(NOTES)) === null &&
       (await tabCount()) === before - 1,

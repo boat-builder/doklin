@@ -508,9 +508,11 @@ export function leaseFor(
   return null;
 }
 
-/** What the view-only banner says about a lease. */
+/** What the view-only banner says about a lease. The holder may be a Mac, an
+ *  iPhone or a browser. The iPhone says the same (ios/Doklin/DocumentView.swift)
+ *  — change both. */
 export function leaseLine(lease: LeaseHolder): string {
-  return lease.own ? `Open on your other Mac, ${lease.name} — view only` : `${lease.name} is editing — view only`;
+  return lease.own ? `Open on your other device, ${lease.name} — view only` : `${lease.name} is editing — view only`;
 }
 
 /** Bring what has just opened at the top of a list into view: the row that
@@ -620,9 +622,10 @@ export function usageWords(u: CloudUsage): { tone: SyncTone; text: string; whole
 }
 
 /** The Cloud panel's quiet line: "This Mac today: 1,240 requests · everyone
- *  ≈ 8,900 of 100,000". A number the domain could not give is left out. */
-export function usageLine(u: CloudUsage): string {
-  const mine = `This Mac today: ${counted(u.today, "request", "requests")}`;
+ *  ≈ 8,900 of 100,000". A number the domain could not give is left out.
+ *  `device` is what this one is called (`Backend.device`). */
+export function usageLine(u: CloudUsage, device: string): string {
+  const mine = `This ${device} today: ${counted(u.today, "request", "requests")}`;
   if (u.fleetToday == null) return mine;
   return `${mine} · everyone ≈ ${u.fleetToday.toLocaleString()}${u.cap == null ? "" : ` of ${u.cap.toLocaleString()}`}`;
 }
@@ -800,6 +803,17 @@ export function workerBehind(s: CloudStatus): boolean {
 /** The domain's worker is newer than this app: Doklin is what needs updating. */
 export function workerAhead(s: CloudStatus): boolean {
   return s.workerVersion != null && s.workerVersion > BUNDLED_WORKER_VERSION;
+}
+
+/** What an invite's line is sent as: the line, then where the workspace opens
+ *  in a browser for somebody with no Doklin app. The sentence comes after
+ *  the line because a paste is read for the first address in it
+ *  (`parse_pasted`, engine/src/cloud/invite.rs); it is left off while the
+ *  domain's worker is not known to be the one this app was built for, which
+ *  serves the browser version. */
+export function inviteToSend(line: string, s: CloudStatus): string {
+  if (s.workerVersion == null || workerBehind(s)) return line;
+  return `${line}\nNo Doklin app? Open ${s.endpoint}/app and paste the line above.`;
 }
 
 /** Whether the gear's badge should light for the cloud: some connected

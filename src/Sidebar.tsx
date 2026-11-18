@@ -4,6 +4,7 @@ import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { Facepile } from "./Avatar";
 import { pageUrl, placeOf, publishedByPath, type CloudSpace, type CloudStatus, type PublicPage } from "./cloud";
 import { backend, type FileClipboardPayload, type TreeNode } from "./backend";
+import { keys } from "./keys";
 
 // A file row the app can open (markdown, html, or a bundled pair). Folders and
 // documents-only trees are always openable; only "show every file" rows differ.
@@ -590,14 +591,17 @@ export default function Sidebar({
       if (!toDir) return false;
       if (entries.every((en) => dirname(en.path) === toDir)) return false;
       // Straight under Restricted is where the restricted folders are: a
-      // folder dropped there becomes one, and a note there would be in none.
-      if (sectioned && toDir === restrictedDir && entries.some((en) => en.kind === "file")) return false;
+      // folder dropped there becomes one — where one can be made at all —
+      // and a note there would be in none.
+      if (sectioned && toDir === restrictedDir && (!onNewRestricted || entries.some((en) => en.kind === "file"))) {
+        return false;
+      }
       return !entries.some(
         (en) =>
           en.kind === "dir" && (toDir === en.path || toDir.startsWith(en.path + "/")),
       );
     },
-    [sectioned, restrictedDir],
+    [sectioned, restrictedDir, onNewRestricted],
   );
 
   const setDropState = useCallback((dir: string | null) => {
@@ -1711,12 +1715,12 @@ function SidebarHeader({
         <button
           className="sidebar-search"
           onClick={onSwitchToSearch}
-          title="Search in folder (⌘⇧F)"
+          title={`Search in folder (${keys("⌘⇧F")})`}
           aria-label="Search in folder"
         >
           <SearchIcon />
           <span className="sidebar-search-label">Search</span>
-          <kbd>⌘⇧F</kbd>
+          <kbd>{keys("⌘⇧F")}</kbd>
         </button>
         <button
           className="sidebar-new"
