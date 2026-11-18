@@ -57,13 +57,16 @@ final class DoklinUITests: UITestCase {
         // A new note, a task in it, and the box ticked from the reading view.
         marked("new").tap()
         expect(app.buttons["New note"], "New note in the menu").tap()
-        let name = expect(app.alerts.textFields.firstMatch, "the new note's name field")
-        name.tap()
-        name.typeText("Phone list")
+        type("Phone list", into: expect(app.alerts.textFields.firstMatch, "the new note's name field"))
         app.alerts.buttons["Create"].tap()
         expect(app.staticTexts["Phone list"], "the new note's heading")
         let fresh = editAtTheEnd()
-        fresh.typeText("\n- [ ] milk")
+        fresh.typeText("\n- [ ] ")
+        // The line is drawn again as a to-do, with its box, and words typed
+        // while that happens can land in the line above: they wait until the
+        // bar says the caret is in a to-do.
+        _ = app.buttons.matching(NSPredicate(format: "label == %@ AND selected == true", "To-do")).firstMatch.waitForExistence(timeout: 10)
+        fresh.typeText("milk")
         marked("done").tap()
         expect(app.buttons["Not done"], "the unticked box").tap()
         expect(app.buttons["Done"], "the ticked box")
@@ -82,9 +85,7 @@ final class DoklinUITests: UITestCase {
 
         // Search finds a note by words in it.
         tab("Search")
-        let search = expect(app.searchFields.firstMatch, "the search field")
-        search.tap()
-        search.typeText("ship it by june")
+        type("ship it by june", into: expect(app.searchFields.firstMatch, "the search field"))
         expect(marked("result-plan"), "the plan among the results")
         record("search")
 

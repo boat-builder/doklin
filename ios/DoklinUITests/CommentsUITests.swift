@@ -16,11 +16,6 @@ final class CommentsUITests: UITestCase {
         return app.descendants(matching: .any).matching(NSPredicate(format: format, argumentArray: arguments)).firstMatch
     }
 
-    private func type(_ words: String, into field: XCUIElement) {
-        field.tap()
-        field.typeText(words)
-    }
-
     func testCommentsAndPublishing() throws {
         launchAndJoin()
 
@@ -122,8 +117,7 @@ final class CommentsUITests: UITestCase {
         XCTAssertEqual(folderAddress.value as? String, "roadmap", "the address offered for Roadmap")
         expect(text(containing: "/roadmap · a note at"), "where the folder's pages will be")
         record("a folder, about to be published")
-        folderAddress.tap()
-        folderAddress.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 7))
+        type(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 7), into: folderAddress)
         expect(text(containing: "An address is 3 to 64 characters"), "why no address is not one")
         XCTAssertFalse(marked("publish-go").isEnabled, "Publish folder, with no address")
         record("a folder, with no address")
