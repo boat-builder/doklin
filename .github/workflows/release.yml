@@ -9,19 +9,17 @@ name: release
 #      `doklin` command in cli/), committed back to main and tagged vX.Y.Z.
 #   2. `build-cli` builds the `doklin` command for Linux (x64 and arm64,
 #      static musl binaries) from that tag.
-#   3. `build-release` builds the Apple Silicon (arm64-only) macOS .dmg via
-#      Tauri (Developer ID signed + notarized + stapled — REQUIRED, the job
-#      fails loudly if the signing secrets are absent; there is no unsigned
-#      fallback) and publishes a GitHub Release for that tag, marked latest, so
+#   3. `build-release` builds the Apple Silicon (arm64-only — Intel is not
+#      supported) macOS .dmg via Tauri (Developer ID signed + notarized +
+#      stapled — REQUIRED, the job fails loudly if the signing secrets are
+#      absent; there is no unsigned fallback) and publishes a GitHub Release
+#      for that tag, marked latest, so
 #        https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-arm64.dmg
 #      always resolves to the newest build. It also builds the macOS `doklin`
 #      command — signed, inside the app at Contents/Helpers/doklin — and
 #      attaches it beside the two Linux ones with their installer, so
 #        curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh | sh
 #      always installs the newest one.
-#   4. `build-intel` and `publish-intel` (intel-mac, temporary) build the
-#      same app for Intel Macs and add it to that release, at
-#        https://github.com/boat-builder/doklin/releases/latest/download/Doklin-macos-x64.dmg
 #
 # The bump commit is pushed with GITHUB_TOKEN, and GitHub never triggers
 # workflows from GITHUB_TOKEN pushes — so the bump cannot re-trigger this
@@ -478,18 +476,6 @@ jobs:
           cat release-assets/SHA256SUMS
           ls -la release-assets
 
-      # intel-mac: publish-intel adds the Intel lines to these two, starting
-      # from this run's copies on every attempt, never from the release's.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-manifests
-          path: |
-            release-assets/SHA256SUMS
-            release-assets/latest.json
-          if-no-files-found: error
-          retention-days: 1
-
-      # intel-mac: the release notes name the Intel .dmg and command.
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -499,203 +485,6 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            **macOS** Apple Silicon (M-series) `.dmg`, Developer ID signed and notarized — opens with no Gatekeeper prompt. Intel Macs (macOS 12 or later): the `macos-x64` `.dmg`, without PDF export.
+            **macOS** Apple Silicon (M-series) `.dmg`, Developer ID signed and notarized — opens with no Gatekeeper prompt. Intel Macs are not supported.
 
-            **`doklin` command** for agents (Linux x64 and arm64, macOS arm64 and x64): `curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh | sh`
-
-  # ------------------------------------- Intel build (intel-mac, temporary)
-  # One person runs Doklin on an Intel Mac with macOS 12, until that Mac is
-  # replaced. Then these two jobs go, with every other piece tagged
-  # intel-mac (`git grep -n intel-mac`). Nothing above depends on them: the
-  # Apple Silicon release builds and publishes on its own, and an Intel
-  # failure never holds it back.
-  #
-  # The same app, built for x86_64-apple-darwin and macOS 12, without PDF
-  # export (src-tauri compiles it only for Apple Silicon: its engine is a
-  # pinned arm64 Chrome, and no current Chrome runs on macOS 12).
-  # `build-intel` builds, signs and notarizes it beside `build-release`;
-  # `publish-intel` adds it to the release `build-release` published.
-  build-intel:
-    name: Build .dmg (Intel, signed + notarized)
-    needs: bump
-    # Cross-built on build-release's arm64 runner: macos-15-intel's stapler
-    # fails (actions/runner-images#14924), and this one has Rosetta.
-    runs-on: macos-15
-    timeout-minutes: 360   # as build-release: notarization can hold a submission
-    env:
-      VERSION: ${{ needs.bump.outputs.version }}
-      TARGET: x86_64-apple-darwin
-      # Every compiler in the build — rustc, and the cc crate's C — targets
-      # the oldest macOS this build claims; the verify step checks each binary.
-      MACOSX_DEPLOYMENT_TARGET: "12.0"
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.bump.outputs.tag }}   # the exact stamped commit
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            src-tauri
-            cli
-          key: x86_64-apple-darwin
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          cache: pnpm
-
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      # As in build-release: the command inside the app is signed here, in a
-      # keychain of its own on the user search list, deleted before Tauri
-      # imports the same certificate. Its --version check runs under the
-      # runner's Rosetta.
-      - name: Build and sign the doklin CLI (macOS x86_64)
-        env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-        run: |
-          set -euo pipefail
-          cargo build --release --locked --manifest-path cli/Cargo.toml --target "$TARGET"
-          BIN="cli/target/$TARGET/release/doklin"
-          archs="$(lipo -archs "$BIN")"
-          [ "$archs" = "x86_64" ] || { echo "::error::$BIN is not x86_64-only: $archs"; exit 1; }
-          [ "$("$BIN" --version)" = "doklin $VERSION" ] ||
-            { echo "::error::$BIN reports '$("$BIN" --version)', not 'doklin $VERSION'"; exit 1; }
-          KC="$RUNNER_TEMP/cli-signing.keychain-db"
-          KC_PWD="$(openssl rand -hex 16)"
-          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cli-signing.p12"
-          security create-keychain -p "$KC_PWD" "$KC"
-          security set-keychain-settings -lut 900 "$KC"
-          security unlock-keychain -p "$KC_PWD" "$KC"
-          security import "$RUNNER_TEMP/cli-signing.p12" -k "$KC" -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PWD" "$KC" >/dev/null
-          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
-          codesign --force --options runtime --timestamp --keychain "$KC" --sign "$MACOS_SIGNING_IDENTITY" "$BIN"
-          security delete-keychain "$KC"
-          rm -f "$RUNNER_TEMP/cli-signing.p12"
-          codesign --verify --strict "$BIN"
-
-      # build-release's command, for x86_64. The --config adds to
-      # tauri.conf.json: the oldest macOS this build opens on (Info.plist's
-      # LSMinimumSystemVersion), and the x86_64 command for Contents/Helpers.
-      - name: Build, sign and notarize
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: >-
-          pnpm tauri build --target "$TARGET" --config
-          '{"build":{"beforeBuildCommand":"pnpm build"},"bundle":{"macOS":{"minimumSystemVersion":"12.0","files":{"Helpers/doklin":"../cli/target/x86_64-apple-darwin/release/doklin"}}}}'
-
-      # What build-release checks, for x86_64 — and that every binary in it
-      # loads on macOS 12: a minos above 12.0 is an app that will not open.
-      - name: Verify signature, notarization and macOS 12
-        run: |
-          set -euo pipefail
-          APP="src-tauri/target/$TARGET/release/bundle/macos/Doklin.app"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          xcrun stapler validate "$APP"
-          plist_min="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist")"
-          [ "$plist_min" = "12.0" ] || { echo "::error::LSMinimumSystemVersion is $plist_min, not 12.0"; exit 1; }
-          for bin in "$APP"/Contents/MacOS/* "$APP"/Contents/Helpers/*; do
-            archs="$(lipo -archs "$bin")"
-            [ "$archs" = "x86_64" ] || { echo "::error::$bin is not x86_64-only: $archs"; exit 1; }
-            minos="$(otool -l "$bin" | awk '$1 == "minos" { print $2; exit }')"
-            [ -n "$minos" ] || { echo "::error::$bin carries no minimum macOS version"; exit 1; }
-            [ "$(printf '%s\n%s\n' "$minos" 12.0 | sort -V | tail -n1)" = "12.0" ] ||
-              { echo "::error::$bin needs macOS $minos, above 12.0"; exit 1; }
-          done
-          CLI="$APP/Contents/Helpers/doklin"
-          signed="$(codesign -dv --verbose=2 "$CLI" 2>&1)"
-          echo "$signed" | grep -q '^Authority=Developer ID Application' ||
-            { echo "::error::$CLI is not signed with the Developer ID"; echo "$signed"; exit 1; }
-          echo "$signed" | grep -q 'flags=.*runtime' ||
-            { echo "::error::$CLI lacks the hardened runtime"; echo "$signed"; exit 1; }
-
-      # The files publish-intel attaches, under their release names, plus the
-      # updater signature it writes into latest.json (not itself published).
-      - name: Stage, notarize and staple the DMG
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          OUT="src-tauri/target/$TARGET/release/bundle"
-          mkdir -p intel-assets
-          DMG="intel-assets/Doklin-${VERSION}-macos-x64.dmg"
-          cp "$OUT"/dmg/*.dmg "$DMG"
-          xcrun notarytool submit "$DMG" --wait \
-            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
-          xcrun stapler staple "$DMG"
-          cp "$DMG" intel-assets/Doklin-macos-x64.dmg
-          cp "$(ls "$OUT"/macos/*.app.tar.gz | head -n1)" intel-assets/Doklin-x64.app.tar.gz
-          cp "$(ls "$OUT"/macos/*.app.tar.gz.sig | head -n1)" intel-assets/Doklin-x64.app.tar.gz.sig
-          cp "$OUT/macos/Doklin.app/Contents/Helpers/doklin" intel-assets/doklin-macos-x64
-          ls -la intel-assets
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos-x64
-          path: intel-assets/
-          if-no-files-found: error
-          retention-days: 1
-
-  # Adds the Intel build to the release build-release published: its files,
-  # their checksums in SHA256SUMS, and darwin-x86_64 in latest.json. Both
-  # lists are rebuilt from build-release's own copies (its release-manifests
-  # artifact), so every attempt writes the same result: --clobber deletes an
-  # asset before uploading its replacement, and if that upload fails, a
-  # re-run puts it back. In that gap an update check or a `doklin` install
-  # fails, and the next one works.
-  publish-intel:
-    name: Add the Intel build to the release
-    needs: [bump, build-release, build-intel]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      VERSION: ${{ needs.bump.outputs.version }}
-      TAG: ${{ needs.bump.outputs.tag }}
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: macos-x64
-          path: intel-assets
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-manifests
-          path: intel-assets
-
-      - name: Attach it, and list it in SHA256SUMS and latest.json
-        working-directory: intel-assets
-        run: |
-          set -euo pipefail
-          shasum -a 256 Doklin-${VERSION}-macos-x64.dmg Doklin-macos-x64.dmg doklin-macos-x64 >> SHA256SUMS
-          URL="https://github.com/boat-builder/doklin/releases/download/${TAG}/Doklin-x64.app.tar.gz"
-          jq --arg sig "$(cat Doklin-x64.app.tar.gz.sig)" --arg url "$URL" \
-            '.platforms["darwin-x86_64"] = { signature: $sig, url: $url }' latest.json > latest.json.new
-          mv latest.json.new latest.json
-          echo "=== latest.json ==="; cat latest.json
-          echo "=== SHA256SUMS ==="; cat SHA256SUMS
-          # --clobber: a re-run finds this job's files already there.
-          gh release upload "$TAG" --clobber \
-            Doklin-${VERSION}-macos-x64.dmg Doklin-macos-x64.dmg Doklin-x64.app.tar.gz doklin-macos-x64
-          gh release upload "$TAG" --clobber SHA256SUMS latest.json
+            **`doklin` command** for agents (Linux x64 and arm64, macOS arm64): `curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh | sh`

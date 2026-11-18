@@ -28,8 +28,6 @@ notify-debouncer-full = "0.3"
 # The sync engine and the version store (engine/), shared with the iPhone
 # app: this crate is its Tauri commands and its host.
 doklin-engine = { path = "../engine" }
-# intel-mac: PDF export is not built for Intel, nor the crates only it uses.
-[target.'cfg(not(target_arch = "x86_64"))'.dependencies]
 # PDF export (src/pdf_export.rs): a hand-rolled CDP client over websocket
 # drives the pinned headless-Chromium engine, and the validation gate reads
 # the emitted PDF (structure via lopdf — default features off, its `time`

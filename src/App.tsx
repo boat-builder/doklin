@@ -937,15 +937,6 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // Whether this build has PDF export (pdf_export_supported in lib.rs);
-  // the button stays hidden until it says so. intel-mac: the Intel build has none.
-  const [pdfExportSupported, setPdfExportSupported] = useState(false);
-  useEffect(() => {
-    void invoke<boolean>("pdf_export_supported")
-      .then(setPdfExportSupported)
-      .catch(() => {});
-  }, []);
-
   // The cloud: every connected workspace's status, as the engine reports it
   // — one array, replaced whole on every `cloud-status` event (src/cloud.ts).
   // Everything cloud-shaped in the UI derives from this and nothing else.
@@ -5356,9 +5347,8 @@ export default function App() {
               // Validated PDF export (a host that omits the prop hides the
               // button). Panes showing the ACTIVE
               // document get it; a two-document split's unfocused pane has
-              // its comment layer disabled anyway. intel-mac: and only a
-              // build with PDF export (pdfExportSupported).
-              pdfExportPath={pdfExportSupported && (focused || !doc) ? activeHtmlPath : undefined}
+              // its comment layer disabled anyway.
+              pdfExportPath={focused || !doc ? activeHtmlPath : undefined}
               controlsSlot={
                 effectiveSplit
                   ? side === "left"

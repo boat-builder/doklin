@@ -12,8 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 // pub: the e2e suite in tests/pdf_export_e2e.rs drives run_export directly.
-// intel-mac: not built for Intel — its engine is a pinned arm64 Chrome.
-#[cfg(not(target_arch = "x86_64"))]
 pub mod pdf_export;
 // The sync engine and the version store are a crate of their own (engine/),
 // shared with the iPhone app: engine.rs is this app's side of it, and
@@ -34,9 +32,6 @@ mod external_open;
 mod links;
 #[cfg(target_os = "macos")]
 mod cli_install;
-// intel-mac: the Intel build's check that macOS 12's web engine can run the app.
-#[cfg(target_arch = "x86_64")]
-mod safari_check;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
@@ -1626,13 +1621,6 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
     }
 }
 
-/// Whether this build has PDF export; the frontend shows its button only then.
-/// intel-mac: the Intel build has none.
-#[tauri::command]
-fn pdf_export_supported() -> bool {
-    cfg!(not(target_arch = "x86_64"))
-}
-
 /// This Mac's user-facing name (System Settings → General → About), the
 /// hostname as a fallback: the author stamped on comments written here. The
 /// same name the cloud engine attributes revisions and presence to.
@@ -1727,11 +1715,6 @@ pub fn run() {
         });
     }
 
-    #[cfg(not(target_arch = "x86_64"))] // intel-mac: no PDF export on Intel
-    let builder = builder.manage(pdf_export::PdfExportLock::default());
-    #[cfg(target_arch = "x86_64")] // intel-mac: the web engine check
-    let builder = builder.plugin(safari_check::plugin());
-
     let app = builder
         .plugin(tauri_plugin_dialog::init())
         .manage(QuitFlush::default())
@@ -1743,17 +1726,10 @@ pub fn run() {
         .manage(AppReady::default())
         .manage(PendingWindowOpen::default())
         .manage(Quitting::default())
+        .manage(pdf_export::PdfExportLock::default())
         .manage(FileClipboard::default())
         .invoke_handler(tauri::generate_handler![
-            #[cfg(not(target_arch = "x86_64"))] // intel-mac: no PDF export on Intel
             pdf_export::export_pdf,
-            pdf_export_supported, // intel-mac
-            #[cfg(target_arch = "x86_64")] // intel-mac: the web engine check
-            safari_check::safari_check_version,
-            #[cfg(target_arch = "x86_64")] // intel-mac
-            safari_check::safari_check_open_update,
-            #[cfg(target_arch = "x86_64")] // intel-mac
-            safari_check::safari_check_quit,
             read_file,
             write_file,
             watch_file,

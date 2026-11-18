@@ -35,7 +35,6 @@ Tauri IPC stubbed: `(cd verify-harness && npm install)` once, a vite server on
 - Contracts mirrored in two places say "change both" on both sides — change both.
 - A number with one source is parsed from it, never retyped.
 - macOS-specific Rust is tagged `macOS-only`.
-- The temporary Intel build's pieces are tagged `intel-mac` (`docs/release.md`).
 - User-facing errors are sentences.
 
 ## Docs

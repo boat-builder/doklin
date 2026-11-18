@@ -447,7 +447,7 @@ eq(
   const script = path.join(repoRoot, "scripts", "install-doklin.sh");
   const text = fs.readFileSync(script, "utf8");
   const release = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
-  const ASSETS = ["doklin-linux-x64", "doklin-linux-arm64", "doklin-macos-arm64", "doklin-macos-x64"]; // intel-mac
+  const ASSETS = ["doklin-linux-x64", "doklin-linux-arm64", "doklin-macos-arm64"];
 
   eq(path.basename(CLI_INSTALL_SCRIPT_URL), "install-doklin.sh", "the release asset's name");
   eq(CLI_INSTALL_LINE, `curl -fsSL ${CLI_INSTALL_SCRIPT_URL} | sh`, "the line the card hands out");
@@ -522,7 +522,6 @@ eq(
       ["Linux", "aarch64", "doklin-linux-arm64"],
       ["Linux", "arm64", "doklin-linux-arm64"],
       ["Darwin", "arm64", "doklin-macos-arm64"],
-      ["Darwin", "x86_64", "doklin-macos-x64"], // intel-mac
     ]) {
       const r = install(osName, arch);
       eq(r.status, 0, `${osName} ${arch}: installs (${r.stderr})`);
@@ -554,6 +553,7 @@ eq(
 
     // What it refuses, leaving nothing behind.
     for (const [osName, arch, why] of [
+      ["Darwin", "x86_64", /no doklin for Intel Macs/],
       ["Linux", "riscv64", /no doklin for riscv64/],
       ["MINGW64_NT", "x86_64", /Linux and macOS/],
     ]) {
