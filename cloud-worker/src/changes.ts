@@ -11,6 +11,12 @@
 // land in one manifest write or not at all. A move from one section to
 // another is the one change that is more than one write: the place it goes to
 // first. A copy is that first write and nothing after it.
+//
+// And a folder too large for one request to carry between sections is the
+// one change that is more than one request, for an asker who said it will
+// ask again (`MoveAsk.parts`): each request moves whole documents, the answer
+// says how many files are still where they were, and until it says none the
+// folder is in both places.
 
 import { Refusal, commit, newFileId, type Committed, type Tx } from "./commit";
 import { Index, VERSION_WORD, basename, docExists, locate, nameOf, pathProblem, type Doc, type Entry, type Named, type Version } from "./documents";
@@ -158,12 +164,18 @@ const MAX_FILES_ACROSS = 16;
 /** What a move was asked to do. Both paths are without their slashes. */
 export type MoveAsk = {
   from: string;
+  /** "" is the top of the section it goes to, for a folder moved from
+   *  another: what was in the folder is then what is in the section. */
   to: string;
   /** What `from` is known to be. "either": a document, else a folder. */
   what: "document" | "folder" | "either";
   /** Whether `to` means "into this folder" rather than "as this name" —
    *  asked of what is at the destination. */
   into: (there: Index) => boolean;
+  /** Whether a folder of more files than a request carries between sections
+   *  goes in parts, the asker asking again while the answer says `remaining`.
+   *  Otherwise it is refused. */
+  parts?: boolean;
 };
 
 /** What a move takes with it. */
@@ -191,6 +203,13 @@ function pick(index: Index, from: string, what: MoveAsk["what"]): Picked | Refus
 /** Where each file goes, and what the move is called. */
 type Route = { plan: { fid: string; to: string }[]; label: { from: string; to: string } };
 
+/** A path at or under the folder `from`, as it is once that folder is `to` —
+ *  "" the top of a section. */
+const rebased = (path: string, from: string, to: string): string => {
+  const rest = path.slice(from.length);
+  return to === "" ? rest.slice(1) : `${to}${rest}`;
+};
+
 /**
  * Where what was picked lands. `there` is everything already at the
  * destination — never the files being moved, which is what lets a rename
@@ -215,7 +234,7 @@ function route(there: Index, picked: Picked, to: string, into: boolean): Route |
     if (`${dest.toLowerCase()}/`.startsWith(`${from.toLowerCase()}/`) && dest.toLowerCase() !== from.toLowerCase()) {
       return new Refusal(400, "a folder cannot be moved inside itself");
     }
-    for (const e of moving) plan.push({ fid: e.fid, to: `${dest}${e.file.path.slice(from.length)}` });
+    for (const e of moving) plan.push({ fid: e.fid, to: rebased(e.file.path, from, dest) });
     label = { from: folder, to: dest };
   }
 
@@ -258,7 +277,7 @@ export function moveWithin(tx: Tx, ask: MoveAsk): Record<string, unknown> | Refu
     // A published folder follows its folder; so does one published beneath it.
     for (const entry of Object.values(tx.m.public ?? {})) {
       if (entry.kind !== "dir" || !within(entry.path, label.from)) continue;
-      entry.path = `${label.to}${entry.path.slice(label.from.length)}`;
+      entry.path = rebased(entry.path, label.from, label.to);
       tx.touch();
     }
   }
@@ -266,25 +285,47 @@ export function moveWithin(tx: Tx, ask: MoveAsk): Record<string, unknown> | Refu
   return { kind, ...label, files: plan.length };
 }
 
-/** What a move between sections, or a copy, takes: what was picked, and the
- *  bytes of each of its files as they were read. */
-type Lifted = { picked: Picked; contents: Map<string, Uint8Array> };
+/** What a move between sections, or a copy, takes: what was picked, the
+ *  bytes of each of its files as they were read, and how many files of a
+ *  folder taken in parts are left for the next request. */
+type Lifted = { picked: Picked; contents: Map<string, Uint8Array>; remaining: number };
+
+/** As much of a folder as one request carries, in whole documents: a note
+ *  never arrives ahead of its comments, or its html ahead of the note. By
+ *  path, so every request that asks takes the same ones first. */
+function firstPart(moving: readonly Entry[]): Entry[] {
+  const documents = new Map<string, Entry[]>();
+  for (const e of [...moving].sort((a, b) => (a.file.path < b.file.path ? -1 : 1))) {
+    const path = e.file.path.toLowerCase();
+    const stem = path.endsWith(META_SUFFIX) ? path.slice(0, -META_SUFFIX.length) : nameOf(path).stem;
+    documents.set(stem, [...(documents.get(stem) ?? []), e]);
+  }
+  const part: Entry[] = [];
+  for (const files of documents.values()) {
+    if (part.length > 0 && part.length + files.length > MAX_FILES_ACROSS) break;
+    part.push(...files);
+  }
+  return part;
+}
 
 /** Read what `ask.from` names out of the section it is in. `limit` is what
- *  is said of one that is more files than a request carries. */
+ *  is said of one that is more files than a request carries, when it is not
+ *  a folder that goes in parts. */
 async function lift(source: Where, ask: MoveAsk, limit: (files: number) => string): Promise<Lifted | Refusal> {
   const ws = await openWorkspace(source.env);
   if (!ws) return new Refusal(404, "this domain holds no workspace yet");
-  const picked = pick(new Index(mounted(ws.manifest, source.mount).files), ask.from, ask.what);
-  if (picked instanceof Refusal) return picked;
-  if (picked.moving.length > MAX_FILES_ACROSS) return new Refusal(400, limit(picked.moving.length));
+  const whole = pick(new Index(mounted(ws.manifest, source.mount).files), ask.from, ask.what);
+  if (whole instanceof Refusal) return whole;
+  const files = whole.moving.length;
+  if (files > MAX_FILES_ACROSS && !(ask.parts && whole.kind === "folder")) return new Refusal(400, limit(files));
+  const picked = files > MAX_FILES_ACROSS ? { ...whole, moving: firstPart(whole.moving) } : whole;
   const contents = new Map<string, Uint8Array>();
   for (const e of picked.moving) {
     const obj = await source.env.DATA.get(blobKey(e.fid, e.file.hash));
     if (!obj) return new Refusal(503, "its content has not finished syncing — try again in a moment");
     contents.set(e.fid, new Uint8Array(await obj.arrayBuffer()));
   }
-  return { picked, contents };
+  return { picked, contents, remaining: files - picked.moving.length };
 }
 
 /** Where what was lifted landed: what the change is called, and the id each
@@ -363,7 +404,13 @@ export async function moveAcross(
   if (arrived instanceof Refusal) return arrived;
   const { label } = arrived.value;
   // New file ids where it went: a link to it from before finds nothing.
-  const answer = { kind: picked.kind, ...label, files: picked.moving.length, newLinks: true };
+  const answer = {
+    kind: picked.kind,
+    ...label,
+    files: picked.moving.length,
+    newLinks: true,
+    ...(lifted.remaining > 0 ? { remaining: lifted.remaining } : {}),
+  };
   if (dryRun) return { ...answer, moved: false };
   await mirrorAfter({ env: dest.env, ctx: who.ctx }, arrived);
 
@@ -417,7 +464,7 @@ export async function moveAcross(
           if (!fid || !file) continue;
           map[slug] = { ...common, kind: "file", file: fid, path: file.path };
         } else {
-          map[slug] = { ...common, kind: "dir", path: `${label.to}${entry.path.slice(label.from.length)}` };
+          map[slug] = { ...common, kind: "dir", path: rebased(entry.path, label.from, label.to) };
         }
       }
       tx.touch();

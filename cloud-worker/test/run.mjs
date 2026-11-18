@@ -6076,16 +6076,11 @@ await test("web: a browser's sign-in is answered on /api/web and the reads a bro
     ["/api/workspace", "GET"],
     ["/api/workspace", "POST", { name: "Mine now" }],
     ["/api/settings/plan", "PUT", { plan: "paid" }],
-    ["/api/auth/members", "GET"],
-    ["/api/auth/invites", "GET"],
-    ["/api/auth/invites", "POST", { email: "mallory@example.com", codeHash: sha256("x"), expiresAt: Date.now() + DAY }],
-    ["/api/auth/devices", "GET"],
-    ["/api/auth/devices/code", "POST", { codeHash: sha256("x"), expiresAt: Date.now() + 1000 }],
-    [`/api/auth/devices/${WEB_TOKEN_ID}`, "DELETE"],
-    ["/api/auth/agents", "GET"],
+    ["/api/auth/recover", "POST", { email: "mallory@example.com" }],
+    ["/api/auth/join", "GET"],
     ["/api/spaces", "GET"],
-    ["/api/spaces", "POST", { name: "Mine" }],
-    [`/api/spaces/${space}`, "DELETE"],
+    [`/api/spaces/${space}`, "PATCH", { name: "Mine" }],
+    [`/api/spaces/${space}/versions/index`, "GET"],
     ["/api/pages/notes", "PUT", {}],
     ["/api/admin/wipe", "POST", { confirm: "wipe" }],
     ["/api/agent/me", "GET"],
@@ -6107,6 +6102,242 @@ await test("web: a browser's sign-in is answered on /api/web and the reads a bro
   assert.equal((await browser("/api/web/doc?path=notes.md", { cookie: WEB })).status, 405, "a document is read from the stored copies, not from here");
   assert.equal((await browser("/api/web/session", { cookie: WEB })).status, 405);
   assert.equal((await browser("/api/web/search?q=x")).status, 401, "no cookie, nobody");
+});
+
+await test("web: people, devices and agents are a browser's too, by its person's role — a code it makes is a way in like any other, and outlasts the browser that made it", async () => {
+  const me = (await browser("/api/meta", { cookie: WEB })).json.you.memberId;
+
+  // A device of one's own: the line a browser made, joined as a Mac.
+  const made = await browser("/api/auth/devices/code", {
+    method: "POST",
+    cookie: WEB,
+    body: { codeHash: sha256("WEB000000000000000D1"), expiresAt: Date.now() + HOUR },
+  });
+  assert.equal(made.status, 201, made.text);
+  const mac = await call("/api/auth/join", {
+    method: "POST",
+    body: { code: code("WEB000000000000000D1"), deviceId: "d-from-web", deviceName: "A Mac added from a browser" },
+  });
+  assert.equal(mac.status, 201);
+  assert.ok(/^[a-f0-9]{64}$/.test(mac.json.token), "a Mac's sign-in: a bearer, with nothing in front");
+  assert.equal(mac.json.member.id, me, "as the person whose browser made the code");
+  assert.equal((await call("/api/manifest", { token: mac.json.token })).status, 200, "…and it syncs");
+
+  const listed = await browser("/api/auth/devices", { cookie: WEB });
+  assert.equal(listed.status, 200);
+  assert.ok(listed.json.devices.some((d) => d.id === mac.json.tokenId && d.deviceName === "A Mac added from a browser"));
+  assert.ok(listed.json.devices.some((d) => d.id === WEB_TOKEN_ID), "the browser itself is one of them");
+  const own = await browser(`/api/auth/devices/${WEB_TOKEN_ID}`, { method: "DELETE", cookie: WEB });
+  assert.equal(own.status, 409, "never the sign-in that is asking");
+  assert.ok(/sign out of it instead/.test(own.json.error), own.json.error);
+  assert.equal((await browser(`/api/auth/devices/${mac.json.tokenId}`, { method: "DELETE", cookie: WEB })).status, 204);
+  const gone = await call("/api/poll", { token: mac.json.token });
+  assert.deepEqual([gone.status, gone.json.removed], [401, true], "signed out from a browser, as from a Mac");
+
+  // An agent of one's own, logged in with the code a browser made.
+  const body = nextCodeBody();
+  const added = await browser("/api/auth/agents", {
+    method: "POST",
+    cookie: WEB,
+    body: { name: "Made in a browser", scopes: ["read", "comment"], codeHash: sha256(body), expiresAt: Date.now() + HOUR },
+  });
+  assert.equal(added.status, 201, added.text);
+  const agent = added.json.agent.id;
+  const login = await loginWith(agentCode(body), "a-linux-box");
+  assert.equal(login.status, 201, login.text);
+  assert.equal((await call("/api/agent/me", { token: login.json.token, device: null })).status, 200);
+  const agents = await browser("/api/auth/agents", { cookie: WEB });
+  const mine = agents.json.agents.find((a) => a.id === agent);
+  assert.deepEqual([mine.mine, mine.machines.length], [true, 1]);
+  assert.equal((await browser(`/api/auth/agents/${agent}`, { method: "POST", cookie: WEB, body: { name: "Renamed in a browser" } })).status, 200);
+  const again = nextCodeBody();
+  const recode = await browser(`/api/auth/agents/${agent}/code`, {
+    method: "POST",
+    cookie: WEB,
+    body: { codeHash: sha256(again), expiresAt: Date.now() + HOUR },
+  });
+  assert.equal(recode.status, 201, recode.text);
+  assert.equal((await browser(`/api/auth/agents/${agent}/tokens/${mine.machines[0].id}`, { method: "DELETE", cookie: WEB })).status, 204);
+  assert.equal((await call("/api/agent/me", { token: login.json.token, device: null })).status, 401, "that machine is logged out");
+  assert.equal((await browser(`/api/auth/agents/${agent}`, { method: "DELETE", cookie: WEB })).status, 204);
+  assert.equal((await loginWith(agentCode(again), "late")).status, 401, "its code went with it");
+
+  // People: an owner's, from a browser as from a Mac.
+  assert.equal((await browser("/api/auth/members", { cookie: WEB })).status, 200);
+  const invite = await browser("/api/auth/invites", {
+    method: "POST",
+    cookie: WEB,
+    body: { email: "browser-only@example.com", name: "Bo", codeHash: sha256("WEB000000000000000P1"), expiresAt: Date.now() + DAY },
+  });
+  assert.equal(invite.status, 201, invite.text);
+  assert.ok((await browser("/api/auth/invites", { cookie: WEB })).json.invites.some((i) => i.id === invite.json.invite.id));
+  assert.equal((await browser(`/api/auth/invites/${invite.json.invite.id}`, { method: "DELETE", cookie: WEB })).status, 204);
+  assert.equal(
+    (await browser("/api/web/session", { method: "POST", body: { code: code("WEB000000000000000P1") } })).status,
+    401,
+    "a withdrawn code signs nobody in",
+  );
+  const second = await browser("/api/auth/invites", {
+    method: "POST",
+    cookie: WEB,
+    body: { email: "browser-only@example.com", codeHash: sha256("WEB000000000000000P2"), expiresAt: Date.now() + DAY },
+  });
+  assert.equal(second.status, 201);
+
+  // Somebody with no Mac at all: every device they will ever have starts here.
+  const only = await browser("/api/web/session", {
+    method: "POST",
+    body: { code: code("WEB000000000000000P2"), deviceId: "d-only", deviceName: "Firefox on Linux" },
+    device: "d-only",
+  });
+  assert.equal(only.status, 201);
+  const theirs = cookieOf(only);
+  const them = only.json.member.id;
+  const asThem = (path, opts = {}) => browser(path, { cookie: theirs, device: "d-only", ...opts });
+  assert.deepEqual((await asThem("/api/meta")).json.you.role, "member");
+  const theirDevices = await asThem("/api/auth/devices");
+  assert.deepEqual(theirDevices.json.devices.map((d) => d.id), [only.json.tokenId], "a member is told of their own devices only");
+  const theirCode = await asThem("/api/auth/devices/code", {
+    method: "POST",
+    body: { codeHash: sha256("WEB000000000000000P3"), expiresAt: Date.now() + HOUR },
+  });
+  assert.equal(theirCode.status, 201, "another device of their own, with nobody's help");
+  const phone = await call("/api/auth/join", { method: "POST", body: { code: code("WEB000000000000000P3"), deviceId: "d-phone", deviceName: "iPhone" } });
+  assert.deepEqual([phone.status, phone.json.member.id], [201, them]);
+  const theirAgent = await asThem("/api/auth/agents", {
+    method: "POST",
+    body: { name: "Bo's agent", scopes: ["read"], codeHash: sha256(nextCodeBody()), expiresAt: Date.now() + HOUR },
+  });
+  assert.equal(theirAgent.status, 201, "and an agent of their own");
+  assert.equal((await asThem("/api/auth/agents")).json.agents.length, 1, "a member is listed their own agents only");
+  // What an owner may do, a member may not, in a browser as anywhere.
+  for (const [path, method, sent] of [
+    ["/api/auth/invites", "GET"],
+    ["/api/auth/invites", "POST", { email: "x@example.com", codeHash: sha256("x"), expiresAt: Date.now() + DAY }],
+    [`/api/auth/members/${me}`, "PATCH", { role: "member" }],
+    [`/api/auth/members/${me}`, "DELETE"],
+  ]) {
+    const res = await asThem(path, { method, body: sent });
+    assert.equal(res.status, 403, `${method} ${path}`);
+    assert.ok(/only an owner/.test(res.json.error), res.json.error);
+  }
+  assert.equal((await asThem(`/api/auth/devices/${WEB_TOKEN_ID}`, { method: "DELETE" })).status, 404, "somebody else's device is no device");
+
+  // The owner's browser makes them an owner, and takes them off again.
+  const promoted = await browser(`/api/auth/members/${them}`, { method: "PATCH", cookie: WEB, body: { role: "owner" } });
+  assert.deepEqual([promoted.status, promoted.json.member.role], [200, "owner"]);
+  assert.equal((await asThem("/api/auth/invites")).status, 200, "the role bites on their very next request");
+  assert.equal((await browser(`/api/auth/members/${them}`, { method: "DELETE", cookie: WEB })).status, 204);
+  const out = await asThem("/api/poll");
+  assert.deepEqual([out.status, out.json.removed], [401, true]);
+  assert.equal(out.headers.get("clear-site-data"), '"cache", "storage"');
+  assert.equal((await call("/api/poll", { token: phone.json.token })).json.removed, true, "every device they had, the one a browser's code let in among them");
+  assert.equal(db.value("SELECT COUNT(*) FROM agents WHERE member_id = ?", them), 0, "and their agents");
+});
+
+await test("web: restricted folders are a browser's too — one is made, people are put in and taken out, a folder of the workspace becomes one in parts, and it is deleted", async () => {
+  const save = (path, body) => browser(`/api/web/doc?path=${encodeURIComponent(path)}`, { method: "PUT", cookie: WEB, body });
+  const move = (body) => browser("/api/web/move", { method: "POST", cookie: WEB, body });
+  const me = (await browser("/api/meta", { cookie: WEB })).json.you.memberId;
+  const other = (await call("/api/meta", { token: MEMBER })).json.you.memberId;
+
+  // Made from a browser, by the route a Mac calls: its maker is in it.
+  const made = await browser("/api/spaces", { method: "POST", cookie: WEB, body: { name: "Board" } });
+  assert.equal(made.status, 201, made.text);
+  const board = made.json.space;
+  assert.deepEqual([board.kind, board.name, board.members], ["restricted", "Board", [me]]);
+  const at = `/api/spaces/${board.id}`;
+  assert.ok((await browser("/api/poll", { cookie: WEB })).json.spaces.some((s) => s.id === board.id), "the poll lists it from then on");
+  assert.equal((await call(`${at}/manifest`, { token: MEMBER })).status, 404, "and to everybody else it does not exist");
+
+  // Who is in it: anyone in a folder adds and takes out, from a browser as from a Mac.
+  const added = await browser(`${at}/members/${other}`, { method: "PUT", cookie: WEB });
+  assert.deepEqual([added.status, added.json.space.members], [200, [me, other].sort()]);
+  assert.equal((await call(`${at}/manifest`, { token: MEMBER })).status, 200);
+  assert.equal((await browser(`${at}/members/m-00000000`, { method: "PUT", cookie: WEB })).status, 404, "only people here");
+  assert.equal((await browser(`${at}/members/${other}`, { method: "DELETE", cookie: WEB })).status, 204);
+  assert.equal((await call(`${at}/manifest`, { token: MEMBER })).status, 404);
+  const last = await browser(`${at}/members/${me}`, { method: "DELETE", cookie: WEB });
+  assert.equal(last.status, 409, "never left with nobody in it");
+  assert.ok(/delete it, or add somebody first/.test(last.json.error), last.json.error);
+  const mine = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  assert.equal((await browser(`/api/spaces/${mine}`, { method: "DELETE", cookie: WEB })).status, 409, "a Private is not deleted, from a browser either");
+
+  // A folder of the workspace becomes it. Twenty notes with their comments
+  // and two more beneath: 42 files, where one request carries 16.
+  for (let i = 0; i < 20; i += 1) {
+    const name = `board/n${String(i).padStart(2, "0")}.md`;
+    assert.equal((await save(name, { md: { text: `# ${i}\n`, ifRev: null }, meta: { text: SIDECAR("m1", name), ifRev: null } })).status, 200);
+  }
+  for (const name of ["board/Sub/Deep.md", "board/Sub/Deeper/Last.md"]) {
+    assert.equal((await save(name, { md: { text: `# ${name}\n`, ifRev: null } })).status, 200);
+  }
+  const page = await browser("/api/web/pages", { method: "PUT", cookie: WEB, body: { path: "board/n19.md", kind: "document", slug: "board-minutes" } });
+  assert.equal(page.status, 201, page.text);
+  const site = await browser("/api/web/pages", { method: "PUT", cookie: WEB, body: { path: "board/Sub", kind: "folder", slug: "board-papers" } });
+  assert.equal(site.status, 201, site.text);
+  const before = await sharedManifest();
+  const fids = Object.keys(before.files).filter((fid) => before.files[fid].path.startsWith("board/"));
+  assert.equal(fids.length, 42);
+
+  const ask = { from: { path: "board" }, to: { space: board.id, path: "" }, kind: "folder" };
+  const parts = [];
+  for (let left = 42; left > 0; ) {
+    const part = await move(ask);
+    assert.equal(part.status, 200, part.text);
+    assert.deepEqual([part.json.kind, part.json.from, part.json.to], ["folder", "board", ""]);
+    parts.push(part.json.files);
+    left -= part.json.files;
+    assert.equal(part.json.remaining ?? 0, left, "each answer says how many files are still where they were");
+    // Whole documents: no note is ever in one section and its comments in the other.
+    const here = Object.values((await sharedManifest()).files).map((f) => f.path).filter((x) => x.startsWith("board/"));
+    for (const x of here.filter((x) => x.endsWith(".meta.jsonl"))) assert.ok(here.includes(x.replace(/\.meta\.jsonl$/, ".md")), x);
+    assert.equal(here.length, left);
+  }
+  assert.deepEqual(parts, [16, 16, 10], "sixteen files a request, by path");
+  let shared = await sharedManifest();
+  assert.equal(Object.values(shared.files).filter((f) => f.path.startsWith("board/")).length, 0);
+  for (const fid of fids) assert.equal(shared.tombstones[fid].to, board.id, "each with the tombstone that says where it went");
+  let there = (await browser(`${at}/manifest`, { cookie: WEB })).json;
+  assert.deepEqual(
+    Object.values(there.files).map((f) => f.path).filter((x) => !x.endsWith(".meta.jsonl")).sort(),
+    [...Array.from({ length: 20 }, (_, i) => `n${String(i).padStart(2, "0")}.md`), "Sub/Deep.md", "Sub/Deeper/Last.md"].sort(),
+    "what was in the folder is what is in the section, at its top",
+  );
+  assert.equal(Object.values(there.files).filter((f) => f.path.endsWith(".meta.jsonl")).length, 20);
+  // Its pages keep their addresses, in the section they now belong to.
+  assert.ok(!shared.public?.["board-minutes"] && !shared.public?.["board-papers"]);
+  assert.equal(there.public["board-minutes"].path, "n19.md");
+  assert.equal(there.files[there.public["board-minutes"].file].path, "n19.md");
+  assert.deepEqual([there.public["board-papers"].kind, there.public["board-papers"].path], ["dir", "Sub"]);
+  assert.equal((await move(ask)).status, 404, "and nothing is left to ask for");
+
+  // The top of a section is for a folder that comes from another one.
+  for (const [body, route] of [
+    [{ from: { space: board.id, path: "Sub" }, to: { space: board.id, path: "" }, kind: "folder" }, "move"],
+    [{ from: { path: "notes.md" }, to: { space: board.id, path: "" }, kind: "document" }, "move"],
+    [{ from: { space: board.id, path: "Sub" }, to: { path: "" }, kind: "folder" }, "copy"],
+    [{ from: { path: "" }, to: { space: board.id, path: "x" }, kind: "folder" }, "move"],
+  ]) {
+    const res = await browser(`/api/web/${route}`, { method: "POST", cookie: WEB, body });
+    assert.equal(res.status, 400, `${route} ${JSON.stringify(body)}: ${res.text}`);
+  }
+  // A folder moved back out, to a name: in parts as well, and nothing is lost.
+  const back = { from: { space: board.id, path: "Sub" }, to: { path: "papers" }, kind: "folder" };
+  const out = await move(back);
+  assert.deepEqual([out.status, out.json.files, out.json.remaining], [200, 2, undefined], "a folder one request carries says nothing of parts");
+  shared = await sharedManifest();
+  assert.ok(fileAt(shared, "papers/Deep.md")[0] && fileAt(shared, "papers/Deeper/Last.md")[0]);
+  assert.deepEqual([shared.public["board-papers"].kind, shared.public["board-papers"].path], ["dir", "papers"], "its page with it");
+
+  // Deleted for everyone in it, from a browser.
+  const gone = await browser(at, { method: "DELETE", cookie: WEB });
+  assert.deepEqual([gone.status, gone.json.deleted, gone.json.remaining], [200, true, false]);
+  assert.deepEqual([...fake.store.keys()].filter((k) => k.startsWith(`spaces/${board.id}/`)), []);
+  assert.equal((await browser(`${at}/manifest`, { cookie: WEB })).status, 404);
+  assert.ok(!(await browser("/api/poll", { cookie: WEB })).json.spaces.some((s) => s.id === board.id));
+  assert.equal((await browser("/api/web/folder?path=papers", { method: "DELETE", cookie: WEB })).status, 200);
+  assert.equal((await browser("/api/web/pages?slug=board-papers", { method: "DELETE", cookie: WEB })).status, 200);
 });
 
 await test("web: a note and its comments are saved in one manifest write, each over the revision that was read — and when either has moved on, neither is written", async () => {

@@ -5,7 +5,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import type { CloudAccess } from "./backend";
-import { inviteToSend, mayOn, type CloudStatus } from "./cloud";
+import { browserAddress, inviteToSend, mayOn, type CloudStatus } from "./cloud";
 import CloudPeople, { type AccessTab } from "./CloudPeople";
 import { useDismiss } from "./dismiss";
 
@@ -63,6 +63,7 @@ export default function PeopleDialog({
             name={cloud.name}
             domain={cloud.domain}
             toSend={(line) => inviteToSend(line, cloud)}
+            browserAt={browserAddress(cloud)}
             tab={tab}
             onTab={onTab}
             copy={(k, t) => void copy(k, t)}

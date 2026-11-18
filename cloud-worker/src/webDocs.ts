@@ -167,11 +167,11 @@ export async function deleteFolder(c: WebCall): Promise<Response> {
 
 /* ---------- Moving ---------- */
 
-/** One end of a move: a section, and a path in it. */
+/** One end of a move: a section, and a path in it — "" the section's top. */
 function endOf(raw: unknown): { space: unknown; path: string } | null {
-  const given = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-  const path = trimSlashes(given.path);
-  return path === "" ? null : { space: given.space, path };
+  if (raw === null || typeof raw !== "object") return null;
+  const given = raw as Record<string, unknown>;
+  return typeof given.path === "string" ? { space: given.space, path: trimSlashes(given.path) } : null;
 }
 
 /** What a move or a copy names: what it is, the section it is in and the
@@ -184,21 +184,29 @@ async function placedOf(c: WebCall, verb: "move" | "copy"): Promise<Placed | Ref
   const from = endOf(body.from);
   const to = endOf(body.to);
   const { kind } = body;
-  if (!from || !to || (kind !== "document" && kind !== "folder")) {
+  if (!from || !to || from.path === "" || (kind !== "document" && kind !== "folder")) {
     return new Refusal(400, `a ${verb} is {from: {space, path}, to: {space, path}, kind: "document" | "folder"}`);
   }
-  const problem = pathProblem(from.path) ?? pathProblem(to.path);
-  if (problem) return new Refusal(400, problem);
   const source = await sectionOf(c, from.space);
   if (source instanceof Refusal) return source;
   const dest = await sectionOf(c, to.space);
   if (dest instanceof Refusal) return dest;
+  // The top of a section is where a folder moved from another one goes when
+  // it is to be that section: a folder made into a restricted one.
+  const top = to.path === "";
+  if (top && !(verb === "move" && kind === "folder" && source.space !== dest.space)) {
+    return new Refusal(400, "only a folder moved from another section goes to the top of one — say where this goes");
+  }
+  const problem = pathProblem(from.path) ?? (top ? null : pathProblem(to.path));
+  if (problem) return new Refusal(400, problem);
   // The browser shows the tree and names the place: never "into this folder".
-  return { ask: { from: from.path, to: to.path, what: kind, into: () => false }, source, dest };
+  // And it asks again for a folder that is more than one request carries.
+  return { ask: { from: from.path, to: to.path, what: kind, into: () => false, parts: verb === "move" }, source, dest };
 }
 
 /** A document or a folder, to exactly where the browser said: a rename, a
- *  move to another folder, or a move to another section. */
+ *  move to another folder, or a move to another section — where a folder of
+ *  more files than a request carries goes in parts (`remaining`, changes.ts). */
 export async function postMove(c: WebCall): Promise<Response> {
   const placed = await placedOf(c, "move");
   if (placed instanceof Refusal) return refuse(placed);

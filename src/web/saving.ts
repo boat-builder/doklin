@@ -24,9 +24,13 @@
 //
 // The other changes — a new document, a move, a copy, a delete — are asked
 // of the worker when they are made, after anything waiting for what they
-// touch has gone.
+// touch has gone. One of them is more than one request: a folder too large
+// for the worker to carry between sections at once, which it moves in parts
+// and this page asks for until none is left. A folder that becomes a
+// restricted one is that move, to the top of the folder just made for it.
 
 import type { ManifestFile } from "../../cloud-worker/src/manifest";
+import type { CloudSpace } from "../cloud";
 import {
   SaveConflict,
   type DocumentText,
@@ -65,6 +69,30 @@ const DRAFTS_LOCK = "doklin:web:drafts";
 
 /** What is said of a place the browser version does not change. */
 const IN_THE_APP = "That is done in the Doklin app, not in a browser.";
+
+/** Why something failed, as a sentence that ends. */
+const whyOf = (e: unknown): string => (e instanceof Error ? e.message : String(e)).replace(/[.]?$/, ".");
+
+/** A folder moving between sections stopped part of the way: `moved` of its
+ *  files are where they were going, and `left` are where they were. */
+class Partway extends Error {
+  constructor(
+    readonly moved: number,
+    readonly left: number,
+    readonly why: string,
+  ) {
+    super(`${moved} of ${moved + left} files were moved before it stopped: ${why} Move it again to move the rest.`);
+    this.name = "Partway";
+  }
+}
+
+/** Where something is: a section, and the path as that section stores it —
+ *  "" the section's own top. */
+type Place = { space: string; path: string };
+
+/** What `POST /api/web/move` answers: the files it moved, and, of a folder
+ *  it is moving between sections in parts, how many it has yet to. */
+type MovedAnswer = { files: number; remaining?: number };
 
 /** A stored copy, as far as a save needs to know it. */
 type Copy = { fid: string; rev: number; hash: string };
@@ -303,8 +331,7 @@ export class Saving {
           // status says it is offline, and the save waits.
           const offline = e instanceof Unreachable;
           const limited = e instanceof Refused && e.dailyLimit;
-          const why = e instanceof Error ? e.message : String(e);
-          doc.error = offline ? null : `${basename(path)} isn’t saved yet. ${why.replace(/[.]?$/, ".")}`;
+          doc.error = offline ? null : `${basename(path)} isn’t saved yet. ${whyOf(e)}`;
           doc.stuck = e instanceof Refused && e.status < 500 && e.status !== 429 && !limited;
           doc.retryAt = Date.now() + (offline ? RETRY_MS : limited ? RETRY_LIMITED_MS : RETRY_REFUSED_MS);
         },
@@ -484,13 +511,13 @@ export class Saving {
     }
   }
 
-  /** Send what waits for a document — for every document, with no path —
-   *  and wait for it to land, the text the app still holds included: for
-   *  what needs the workspace to have it first. Rejects when something
-   *  could not be sent. */
+  /** Send what waits for a document, or for every document under a folder —
+   *  for every document, with no path — and wait for it to land, the text
+   *  the app still holds included: for what needs the workspace to have it
+   *  first. Rejects when something could not be sent. */
   async flush(path?: string): Promise<void> {
     await this.handOver();
-    await this.land((waiting) => path === undefined || waiting === path);
+    await this.land((waiting) => path === undefined || waiting === path || waiting.startsWith(`${path}/`));
   }
 
   /** Let go of everything that waits, drafts and all: the sign-in has
@@ -671,7 +698,7 @@ export class Saving {
 
   /** Where a path is, for a change to it; rejects for a place the browser
    *  version does not change: a section itself, or outside every section. */
-  private placed(path: string): { space: string; path: string } {
+  private placed(path: string): Place {
     const place = this.ws.place(path);
     if (!place || place.path === "") throw new Error(IN_THE_APP);
     return place;
@@ -693,19 +720,52 @@ export class Saving {
 
   async move(from: string, to: string, kind: EntryKind): Promise<LeftBehind[]> {
     const a = this.placed(from);
-    const b = this.placed(to);
+    // Straight under Restricted is where the restricted folders are: a
+    // folder put there becomes one, of its own name, with nobody else in it
+    // yet — what the engine makes of a folder it finds there on a Mac
+    // (`reconcile_spaces`, engine/src/cloud/engine.rs).
+    const slot = this.ws.restrictedSlot(to);
+    if (slot) {
+      if (kind !== "dir") throw new Error("Only a folder goes straight under Restricted, where it becomes a restricted folder.");
+      if (slot.taken) throw new Error(`${slot.name} is already there.`);
+      await this.restrict(slot.name, [], from, to);
+      return [];
+    }
+    await this.carry(from, a, to, this.placed(to), kind);
+    return [];
+  }
+
+  /** Move what is at `from` (`a`) to `to` (`b`), once anything waiting for
+   *  it has gone; what is held follows it. A folder that is more than the
+   *  worker carries between sections in one request is asked for until none
+   *  of it is left (`remaining`, cloud-worker/src/changes.ts), and rejects
+   *  with `Partway` when it stops after some of it went. */
+  private async carry(from: string, a: Place, to: string, b: Place, kind: EntryKind): Promise<void> {
     const under = (path: string) => path === from || (kind === "dir" && path.startsWith(`${from}/`));
     if (kind === "dir" && !this.ws.holdsFiles(from)) {
       this.ws.movedFolder(from, to);
-      return [];
+      return;
     }
     await this.land(under);
-    await ask("POST", "/api/web/move", { body: { from: a, to: b, kind: kind === "dir" ? "folder" : "document" } });
+    const body = { from: a, to: b, kind: kind === "dir" ? "folder" : "document" };
+    let moved = 0;
+    for (let left = 1; left > 0; ) {
+      let part: MovedAnswer;
+      try {
+        part = await askJson<MovedAnswer>("POST", "/api/web/move", { body });
+      } catch (e) {
+        if (moved === 0) throw e;
+        await this.ws.reread([a.space, b.space]).catch(() => {});
+        throw new Partway(moved, left, whyOf(e));
+      }
+      moved += part.files;
+      left = part.remaining ?? 0;
+    }
     // What is held follows the document: a text read before the move is
     // the same text after it.
-    const moved = kind === "dir" ? [...this.held.keys()].filter(under) : [from, metaFileOf(from)];
+    const held = kind === "dir" ? [...this.held.keys()].filter(under) : [from, metaFileOf(from)];
     const there = (file: string) => (kind === "dir" ? `${to}${file.slice(from.length)}` : file === from ? to : metaFileOf(to));
-    for (const file of moved) {
+    for (const file of held) {
       const h = this.held.get(file);
       this.held.delete(file);
       if (h) this.held.set(there(file), h);
@@ -713,7 +773,43 @@ export class Saving {
     if (kind === "dir") this.ws.movedFolder(from, to);
     else if (MD_EXT_RE.test(from)) this.held.delete(htmlSiblingOf(from));
     await this.ws.reread([a.space, b.space]);
-    return [];
+  }
+
+  /**
+   * Make a restricted folder holding this person and `members`. With `from`,
+   * a folder that is there becomes it: what was in it is moved to the top
+   * of the new folder. `at`: where the folder is shown, for one made by
+   * putting a folder there.
+   *
+   * The folder is made first and filled after, so a move that fails leaves
+   * something behind, and the sentence says what: nothing (the empty folder
+   * is taken back), or how many files reached it and where the rest still
+   * are — open to whoever could open them before.
+   */
+  async restrict(name: string, members: string[], from: string | null, at?: string): Promise<CloudSpace> {
+    const a = from === null ? null : this.placed(from);
+    if (from !== null && (this.ws.stored(from) || !this.ws.exists(from))) {
+      throw new Error("That is not a folder of this workspace that can be restricted.");
+    }
+    const made = await this.ws.makeSpace(name, members, at);
+    if (from === null || a === null) return made;
+    try {
+      await this.carry(from, a, `${this.ws.root}/${made.path}`, { space: made.id, path: "" }, "dir");
+    } catch (e) {
+      if (e instanceof Partway) {
+        throw new Error(
+          `“${made.name}” was made, but only ${e.moved} of ${e.moved + e.left} files reached it: ${e.why} The rest are still in “${basename(from)}”, open to whoever could open them before. Move them into “${made.name}” to finish.`,
+        );
+      }
+      // Nothing went into it: it is taken back, so asking again does not
+      // make a second one beside it.
+      const takenBack = await this.ws.deleteSpace(made.id, true).then(
+        () => true,
+        () => false,
+      );
+      throw takenBack ? e : new Error(`“${made.name}” was made, but nothing could be moved into it: ${whyOf(e)}`);
+    }
+    return made;
   }
 
   async copy(from: string, to: string, kind: EntryKind): Promise<LeftBehind[]> {

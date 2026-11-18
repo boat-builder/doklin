@@ -17,6 +17,11 @@
 //! cloud-worker/src/layout.ts — the app hashes the canonical form when it
 //! mints an invite and the worker hashes the canonical form when it redeems
 //! one, so the two must agree character for character. **Change both.**
+//!
+//! A browser makes the same codes with no engine behind it
+//! (src/web/codes.ts): the alphabet, the prefixes, the two lines and the
+//! lifetimes here are written there again, and the tests below read that
+//! file. **Change both.**
 
 use serde::Serialize;
 
@@ -58,6 +63,12 @@ const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 pub fn random_code() -> String {
     let mut buf = [0u8; 13];
     let _ = getrandom::getrandom(&mut buf);
+    code_of(&buf)
+}
+
+/// The twenty characters thirteen bytes spell: five bits each, from the
+/// first (`codeOf`, src/web/codes.ts — change both).
+fn code_of(buf: &[u8; 13]) -> String {
     (0..CODE_LEN)
         .map(|i| {
             let bit = i * 5;
@@ -223,4 +234,44 @@ pub fn parse_pasted(text: &str) -> Pasted {
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bytes whose five-bit groups count from 0 to 19, and the code they
+    /// spell. verify-harness/webcodes.test.mjs holds the browser to the same
+    /// pair.
+    const COUNTING: [u8; 13] = [0x00, 0x44, 0x32, 0x14, 0xC7, 0x42, 0x54, 0xB6, 0x35, 0xCF, 0x84, 0x65, 0x30];
+
+    #[test]
+    fn thirteen_bytes_spell_twenty_characters_five_bits_each() {
+        assert_eq!(code_of(&COUNTING), "0123456789ABCDEFGHJK");
+        assert_eq!(code_of(&[0xFF; 13]), "ZZZZZZZZZZZZZZZZZZZZ");
+        assert_eq!(normalize_code(&format_code(&code_of(&COUNTING))).as_deref(), Some("0123456789ABCDEFGHJK"));
+    }
+
+    /// A browser makes these codes too: what it was written with is what is
+    /// declared above, and the two lines are the two this writes.
+    #[test]
+    fn a_browser_makes_codes_as_this_does() {
+        let web = include_str!("../../../src/web/codes.ts");
+        let says = |line: String| assert!(web.contains(&line), "src/web/codes.ts has no `{}`: change both", line);
+        says(format!("const ALPHABET = \"{}\";", std::str::from_utf8(ALPHABET).unwrap()));
+        says(format!("const CODE_LEN = {};", CODE_LEN));
+        says(format!("const GROUP = {};", GROUP));
+        says(format!("const PREFIX = \"{}\";", PREFIX));
+        says(format!("const AGENT_PREFIX = \"{}\";", AGENT_PREFIX));
+        says(format!("const KEYWORD = \"{}\";", KEYWORD));
+        says(format!("const DEFAULT_DAYS = {};", DEFAULT_DAYS));
+        says(format!("const MAX_DAYS = {};", MAX_DAYS));
+        says(format!("const DEVICE_CODE_MINUTES = {};", DEVICE_CODE_MINUTES));
+        says(format!("const AGENT_CODE_MINUTES = {};", AGENT_CODE_MINUTES));
+        // The lines, as a template string writes what `blob` and
+        // `agent_login_line` format.
+        let as_template = |line: String| format!("`{}`", line);
+        says(as_template(blob("${endpoint}", "${code}").replace(KEYWORD, "${KEYWORD}")));
+        says(as_template(agent_login_line("${endpoint}", "${code}")));
+    }
 }

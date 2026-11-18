@@ -277,7 +277,7 @@ await poll(async () => (await tid("question-prompt").count()) === 0);
 step(
   "a folder dropped on Restricted: asked first, in words — and Cancel moves nothing",
   restrictAsk.includes("Restrict “Projects”?") &&
-    restrictAsk.includes("removed from everyone else’s Mac") &&
+    restrictAsk.includes("removed from everyone else’s devices") &&
     (await moves()).length === 0 &&
     (await row("/docs/Projects").count()) === 1,
   restrictAsk.replace(/\n/g, " "),

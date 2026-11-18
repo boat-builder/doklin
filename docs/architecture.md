@@ -39,8 +39,8 @@
   and rejects with `SaveConflict` otherwise; the sidecar is last writer wins.
   A `Rev` is opaque outside the backend that made it.
 - What a platform may not have is an optional group on `Backend` (`setup`,
-  `sync`, `domain`, `access`, `session`, `versions`, `shows`, `leaving`,
-  `windows`, `untitled`, `localFiles`, `pdf`, `updater`), never a flag and
+  `sync`, `domain`, `access`, `spaces`, `session`, `versions`, `shows`,
+  `leaving`, `windows`, `untitled`, `localFiles`, `pdf`, `updater`), never a flag and
   never a check of which platform this is. The group is asked for where the
   feature comes into view; what is behind that takes the group, or a handler,
   as a prop, and a missing one is a button, a menu row or a shortcut that is
@@ -48,9 +48,14 @@
 - `cloud` holds only what every backend answers of a workspace it shows:
   its status, what changed, who edits what, a page's link, publishing. A
   command that takes a copy of the workspace on the device (`setup`,
-  `sync`), the domain's upkeep (`domain`) or who may open what (`access`)
+  `sync`), the domain's upkeep (`domain`), who may open the workspace
+  (`access`: people, devices, agents) or its restricted folders (`spaces`)
   goes in that group, never in `cloud` with a refusal behind it. An event a
-  backend never raises is in a group it has not got.
+  backend never raises is in a group it has not got. A restricted folder's
+  screens list people too, so they are offered only where both `spaces` and
+  `access` are answered. A folder put straight under `Restricted` becomes a
+  restricted folder of its name on every backend that has `spaces`: the
+  engine finds it there on a Mac, and `Documents.move` makes it in a browser.
 - Where platforms differ in kind and not in ability, the backend says so as
   data: `home` (the one workspace it is for, which the app opens at start in
   place of the last one), `htmlFrame` (a page that arbitrary html is shown
@@ -115,9 +120,24 @@ Its sign-in and the worker's routes: [cloud-people-agents.md](cloud-people-agent
   opens here. *Copy link* makes the link the engine makes
   (`engine/src/cloud/link.rs`, whose test holds `address.ts` to it).
 - What a browser has not got is no group at all: `setup`, `sync`, `domain`,
-  `access`, `windows`, `untitled`, `localFiles`, `versions`, `pdf`,
-  `updater`. What it has that a Mac has not is `session`: the sign-out, which
-  sends what waits, ends the sign-in and starts the page again.
+  `windows`, `untitled`, `localFiles`, `versions`, `pdf`, `updater`. What it
+  has that a Mac has not is `session`: the sign-out, which sends what waits,
+  ends the sign-in and starts the page again.
+- `access` in a browser is the routes a Mac's engine calls, asked from the
+  page, with each code made there (`codes.ts` ⇄ `engine/src/cloud/invite.rs`,
+  **change both**) and only its sha256 sent. Who the browser is and who is
+  here was read once, when the page opened: the People view asks again each
+  time it opens (`Workspace.probe`), and so does adding or changing an agent,
+  which is how a new role or a new name reaches the rest of the page.
+- `spaces` in a browser is the worker's routes too, and the picture held is
+  changed as each answers, not at the next poll: a folder made here is held
+  until a poll lists it (`entering`), because a poll asked before it was made
+  says nothing of it, which would read as this person having been taken out.
+  A folder that becomes a restricted one is a move to the new folder's top
+  (`Saving.restrict`): [cloud-people-agents.md](cloud-people-agents.md) *A
+  browser* says what that leaves when it stops part of the way.
+- A folder moved between sections goes 16 files a request (`remaining`,
+  `cloud-worker/src/changes.ts`): `Saving.carry` asks until none is left.
 - Search is the worker's (`GET /api/web/search`): it does not see what this
   page has yet to send, cannot match case, and answers `202` while its
   mirror catches up, which is asked again a few times and then said.

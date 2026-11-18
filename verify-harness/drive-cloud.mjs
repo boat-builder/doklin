@@ -1352,12 +1352,14 @@ const copiedDeviceLine = await poll(async () => {
 const deviceCodeCall = await lastCall("cloud_device_code");
 const openRoot = await page.evaluate(() => window.__cloud.statuses.at(-1).root);
 step(
-  "Devices: Add a device makes a one-time code and shows its line once — the line an invite is, good for an hour, pasted under Join a workspace on the other Mac or iPhone — and the door is gone while it is on screen",
+  "Devices: Add a device makes a one-time code and shows its line once — the line an invite is, good for an hour, pasted under Join a workspace on the other Mac or iPhone, or at /app in a browser — and the door is gone while it is on screen",
   deviceCodeCall.args.root === openRoot &&
     deviceLine === "doklin-invite https://notes.example.com dkln-D3V1C-2QWXM-7NBKD-5HGVZ" &&
     copiedDeviceLine === deviceLine &&
     !deviceLine.includes(TOKEN) &&
-    deviceTerms.includes("choose Join a workspace and paste this line") &&
+    deviceTerms.includes("Paste this line on the other device.") &&
+    deviceTerms.includes("On a Mac or an iPhone, open Doklin and choose Join a workspace.") &&
+    deviceTerms.includes("In a browser, open https://notes.example.com/app.") &&
     deviceTerms.includes("It works once, for 1 h.") &&
     deviceTerms.includes("signed in as you") &&
     (await tid("device-add").count()) === 0,
@@ -1389,8 +1391,8 @@ await poll(async () => (await tid("person-m-new-1").count()) === 0);
 step(
   "People: signing a device out leaves the person, withdrawing a code leaves them too, and removing a person takes their row away — each confirm saying that device's copy is deleted and nothing in the cloud is",
   bobKept &&
-    signOutSays.includes("deletes its copy of Notes") &&
-    removeSays.includes("deletes its copy of Notes") &&
+    signOutSays.includes("deletes what it keeps of Notes") &&
+    removeSays.includes("deletes what it keeps of Notes") &&
     removeSays.includes("Nothing in the cloud is deleted") &&
     bobRevoked.args.tokenId === "t-bob-1" &&
     (await tid("person-m-bob").textContent()).includes("No device signed in") &&
@@ -1735,7 +1737,7 @@ step(
   "Devices (a member): their own devices and nobody's token — Add a device is theirs, this Mac has no Sign out, and signing the phone out names that one sign-in and says its copy goes",
   memberDevices &&
     phoneRevoked.args.tokenId === "t-bob-phone" &&
-    phoneSays.includes("deletes its copy of Notes") &&
+    phoneSays.includes("deletes what it keeps of Notes") &&
     (await tid("device-t-bob-9").count()) === 1,
 );
 await page.screenshot({ path: SHOTS + "cloud-11a-devices-member.png" });

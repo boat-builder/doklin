@@ -3669,7 +3669,7 @@ export default function App() {
   // Asked once before anything moves between folders. Two moves change who
   // can open a thing, and say so first: one that lets more people see it,
   // and a folder put straight under Restricted, which becomes a restricted
-  // folder and leaves everyone else's Mac. Every other move just happens.
+  // folder and leaves everyone else's devices. Every other move just happens.
   const confirmMove = useCallback(
     async (entries: SidebarSelection[], toDir: string): Promise<boolean> => {
       const cloud = cloudForRootRef.current;
@@ -3683,10 +3683,10 @@ export default function App() {
       if (to.kind === "nowhere") {
         // Where no restricted folder can be made, the move is refused in its
         // own words and there is nothing to ask first.
-        if (toRel.toLowerCase() !== "restricted" || !backend.access) return true;
+        if (toRel.toLowerCase() !== "restricted" || !backend.spaces) return true;
         return askUser({
           title: `Restrict ${what}?`,
-          body: `${one ? "It becomes a restricted folder" : "Each becomes a restricted folder"} only you can open until you add people, and is removed from everyone else’s Mac.`,
+          body: `${one ? "It becomes a restricted folder" : "Each becomes a restricted folder"} only you can open until you add people, and is removed from everyone else’s devices.`,
           confirm: "Restrict",
         });
       }
@@ -3707,23 +3707,24 @@ export default function App() {
   );
 
   // Make the restricted folder its dialog asked for, and put in it what the
-  // dialog was opened on: a folder becomes it (the engine moves it, so the
-  // people in it keep their copies in place); a note is moved into it.
+  // dialog was opened on: a folder becomes it (the backend moves it: on a
+  // Mac the engine, so the people in it keep their copies in place); a note
+  // is moved into it.
   // Resolves to a sentence when it could not be done.
   const makeRestricted = useCallback(
     async (source: RestrictedSource, name: string, members: string[]): Promise<string | null> => {
       const cloud = cloudForRootRef.current;
-      const access = backend.access;
-      if (!cloud || !access) return "This workspace isn’t connected.";
+      const spaces = backend.spaces;
+      if (!cloud || !spaces) return "This workspace isn’t connected.";
       try {
         if (source.kind === "folder") {
           // Land what is being typed inside it before the folder moves.
           if (pathRef.current?.startsWith(`${source.path}/`)) await flushPendingAutosave();
           await flushSidecarWrite();
-          const made = await access.spaceCreate(cloud.root, name, members, source.path);
+          const made = await spaces.spaceCreate(cloud.root, name, members, source.path);
           await repointMoved(source.path, `${cloud.root}/${made.path}`, "dir");
         } else {
-          const made = await access.spaceCreate(cloud.root, name, members);
+          const made = await spaces.spaceCreate(cloud.root, name, members);
           if (source.kind === "note") {
             const to = `${cloud.root}/${made.path}/${basename(source.path)}`;
             const failed = await movePath(source.path, to, "file");
@@ -4687,6 +4688,9 @@ export default function App() {
   // with the group they call.
   const versionStore = backend.versions;
   const { setup, sync, domain, access } = backend;
+  // A restricted folder is offered where one can be made and where there is
+  // a list of people to put in it.
+  const restricted = access && backend.spaces ? { access, spaces: backend.spaces } : undefined;
   const onJoinWorkspace = setup ? () => setCloudSetup("redeem") : undefined;
   const onNewNote = backend.untitled ? () => void newUntitled() : undefined;
   const onPickFile = backend.localFiles ? openFilePicker : undefined;
@@ -5435,12 +5439,12 @@ export default function App() {
           onOpenDevices={access && mayOn(cloudForRoot, "devices.own") ? () => setAccessTab("devices") : undefined}
           onOpenAgents={access && mayOn(cloudForRoot, "agents.own") ? () => setAccessTab("agents") : undefined}
           onNewRestricted={
-            access && cloudForRoot
+            restricted && cloudForRoot
               ? (from) => setRestrictedSource(from ? { kind: "folder", path: from } : { kind: "new" })
               : undefined
           }
-          onManageAccess={access ? (space) => setAccessSpaceId(space.id) : undefined}
-          onShareWith={access ? (path) => setRestrictedSource({ kind: "note", path }) : undefined}
+          onManageAccess={restricted ? (space) => setAccessSpaceId(space.id) : undefined}
+          onShareWith={restricted ? (path) => setRestrictedSource({ kind: "note", path }) : undefined}
           onConfirmMove={confirmMove}
           workspaces={myWorkspaces}
           onOpenWorkspace={(root) => void openWorkspace(root)}
@@ -5480,18 +5484,19 @@ export default function App() {
           onClose={() => setAccessTab(null)}
         />
       )}
-      {restrictedSource && cloudForRoot && access && (
+      {restrictedSource && cloudForRoot && restricted && (
         <RestrictedFolder
-          access={access}
+          access={restricted.access}
           cloud={cloudForRoot}
           source={restrictedSource}
           onSubmit={(name, members) => makeRestricted(restrictedSource, name, members)}
           onClose={() => setRestrictedSource(null)}
         />
       )}
-      {accessSpace && cloudForRoot && access && (
+      {accessSpace && cloudForRoot && restricted && (
         <SpaceAccess
-          access={access}
+          access={restricted.access}
+          spaces={restricted.spaces}
           cloud={cloudForRoot}
           space={accessSpace}
           onLeaving={(space) => givenUpRef.current.add(`${cloudForRoot.root}/${space.path}`)}
