@@ -166,6 +166,14 @@ type Props = {
   onOpenLink?: (href: string) => void;
 };
 
+/** The address a note's picture is asked for at. A picture on the web is
+ *  asked for as written. One named by a path is a file beside the note on
+ *  the computer it was written on: pictures do not sync and nothing here
+ *  reads one, so it is asked for nowhere and shows as its alt text. Left to
+ *  the page it would be asked of whatever serves the page, which in a
+ *  browser is the workspace's domain, at a request against its day each. */
+const pictureAddress = (url: string): string => (/^([a-z][a-z0-9+.-]*:|\/\/)/i.test(url) ? url : "data:,");
+
 function dispatchMeta(view: EditorView, meta: SearchMeta) {
   view.dispatch(view.state.tr.setMeta(searchKey, meta));
 }
@@ -361,6 +369,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       featureConfigs: {
         // Syntax colours from the theme's tokens instead of One Dark (codeTheme.ts).
         [Crepe.Feature.CodeMirror]: { theme: codeTheme },
+        [Crepe.Feature.ImageBlock]: { proxyDomURL: pictureAddress },
         placeholder: {
           text: "Type / for commands…",
           mode: "doc",

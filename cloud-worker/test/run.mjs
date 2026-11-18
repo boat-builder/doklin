@@ -2304,6 +2304,53 @@ async function webDirectory(fonts) {
   }
 }
 
+await test(`the browser version: ${bundlePath ? "its page, scripts and frame page from the web directory, each under its own policy" : "nothing at /app from a source compile, and no page of the workspace's either"}`, async () => {
+  if (!webDir) {
+    // No web directory: /app is nobody's. It is a reserved address, so the
+    // worker does not take it for a page's either.
+    assert.equal((await pub("/app")).status, 404);
+    assert.equal((await pub("/app/frame")).status, 404);
+    return;
+  }
+  const page = await pub("/app");
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type"), /text\/html/);
+  assert.equal(page.headers.get("cache-control"), "no-cache", "one Cache-Control rule matches, and it is not kept");
+  const policy = page.headers.get("content-security-policy");
+  assert.ok(!policy.includes(","), "one policy: two rules matching would be two, both enforced");
+  assert.match(policy, /(^|; )script-src 'self'(;|$)/, "script from this domain's files only");
+  assert.match(policy, /(^|; )frame-ancestors 'none'(;|$)/, "framed by nobody");
+  assert.equal(page.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(page.headers.get("x-robots-tag"), "noindex");
+  assert.ok(!/<script(?![^>]* src=)[^>]*>/.test(page.text), "the page carries no script of its own: its policy would refuse one");
+  for (const spelled of ["/app.html", "/app/"]) {
+    const sent = await rawGet(spelled);
+    assert.equal(sent.status, 307, spelled);
+    assert.equal(sent.headers.get("location"), "/app");
+  }
+
+  // Everything the page names is under /app/, and there.
+  const named = [...page.text.matchAll(/(?:src|href)="(\/app\/[^"]+)"/g)].map((m) => m[1]);
+  assert.ok(named.includes("/app/gate.js"), "the gate, by its own name");
+  const entry = named.find((n) => /^\/app\/assets\/.+\.js$/.test(n));
+  assert.ok(entry, "and the app's script, by its content's");
+  for (const file of named) assert.equal((await rawGet(file)).status, 200, file);
+  const script = await rawGet(entry);
+  assert.match(script.headers.get("content-type"), /javascript/);
+  assert.equal(script.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  assert.equal(script.headers.get("content-security-policy"), null, "a policy is a page's");
+  const gate = await pub("/app/gate.js");
+  assert.ok(gate.text === readFileSync(path.join(workerDir, "..", "src", "web", "gate.js"), "utf8"), "the gate as it was written: an old browser has to read it");
+  assert.doesNotThrow(() => new Function(gate.text), "and it is a script by itself");
+
+  // The page an html document is shown in: sandboxed, and nothing of the page's policy.
+  const frame = await pub("/app/frame");
+  assert.equal(frame.status, 200);
+  assert.equal(frame.headers.get("content-security-policy"), "sandbox allow-scripts allow-popups; frame-ancestors 'self'");
+  assert.equal(frame.headers.get("cache-control"), "no-cache");
+  assert.ok(frame.text.includes("frame-html") && frame.text.includes("frame-ready"), "it asks for the markup and becomes it");
+});
+
 await test(`public: the landing page; robots, icons, the OG image, fonts and the mermaid module (${bundlePath ? "from the web directory" : "404s: a source compile has no web directory"}); an empty folder page; anything else a 404 page`, async () => {
   // The map the validation test left names a root page whose blob never
   // arrived: the domain root IS that page, and it is not there yet.
@@ -6317,7 +6364,13 @@ await test("web: publishing from a browser is the same entry in the public map â
   }
   const refused = await putManifest({ ...(await sharedManifest()), seq: (await sharedManifest()).seq + 1, public: { app: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1 } } });
   assert.equal(refused.status, 400, "nor may a Mac's manifest name it");
-  assert.equal((await visit("/app")).status, 404, "nothing is published there, and nothing can be");
+  // Nothing is published there, and nothing can be: beside a web directory
+  // the address is the browser version's own page, and a path under it that
+  // names none of its files is nobody's.
+  const there = await visit("/app");
+  if (webDir) assert.ok(there.status === 200 && there.text.includes('src="/app/gate.js"'), "the browser version's page, not a page of the workspace's");
+  else assert.equal(there.status, 404);
+  assert.equal((await visit("/app/handbook")).status, 404, "nor is a page under it");
 
   // The home page: one of the shared workspace's pages, or none.
   assert.equal((await home("handbook")).status, 200);

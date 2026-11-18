@@ -20,8 +20,15 @@ export default [
       // arrays are an established pattern here — suppress intentional ones
       // with a documented eslint-disable-next-line, as existing code does.
       "react-hooks/exhaustive-deps": "warn",
-      // The frontend never fetches: the cloud engine in Rust is the only code
-      // that holds a token or talks to a domain.
+    },
+  },
+  // The frontend never fetches. On a Mac the cloud engine in Rust is the only
+  // code that holds a token or talks to a domain; in a browser the one module
+  // that does is src/web/http.ts, which holds no token at all.
+  {
+    files: ["src/**/*.ts", "src/**/*.tsx"],
+    ignores: ["src/web/http.ts"],
+    rules: {
       "no-restricted-globals": [
         "error",
         { name: "fetch", message: "The frontend never fetches: ask src/backend.ts for it." },

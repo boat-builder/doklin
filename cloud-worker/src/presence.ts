@@ -43,29 +43,10 @@
 import type { Auth } from "./auth";
 import type { Env } from "./env";
 import { MAX_PRESENCE_TTL_MS, PRESENCE_TTL_MS } from "./layout";
-import { limitsFrom, limitsReads, type Limits } from "./limits";
+import { limitsFrom, limitsReads } from "./limits";
 import { withDb } from "./schema";
-import { spacesStatement, toSpace, type Space, type SpaceRow } from "./spaces";
-
-/** One device, as the poll reports it. `name` is the Mac's; `memberId` is
- *  whose it is, and the app puts a person's name to it. `path` is what they
- *  have open, in `space` when that is not the shared workspace — both absent
- *  when it is in a space the caller is not in. */
-export type PresenceEntry = { memberId: string; name: string; path?: string; space?: string; ts: number };
-export type PresenceMap = Record<string, PresenceEntry>;
-
-/** One held document. `path` is the lease's key — relative to its space and
- *  lowercased, so two spellings of one file on a case-insensitive disk are
- *  one lock. `space` is set when it is not the shared workspace. `name` is
- *  the holder's Mac. */
-export type LeaseEntry = {
-  path: string;
-  space?: string;
-  deviceId: string;
-  memberId: string;
-  name: string;
-  until: number;
-};
+import { spacesStatement, toSpace, type SpaceRow } from "./spaces";
+import type { LeaseEntry, Limits, PresenceMap, Space } from "./wire";
 
 /** What the poll answers beside the etag. When the database cannot say, the
  *  poll answers `presence: {}`, `leases: null`, `spaces: null` and the Free

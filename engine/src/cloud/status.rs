@@ -57,6 +57,9 @@ pub enum Phase {
     Error,
 }
 
+/// The browser version has no engine and makes this itself, from the
+/// manifests and the poll (`status`, src/web/workspace.ts): what a field
+/// means here it means there. Change both.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudStatus {

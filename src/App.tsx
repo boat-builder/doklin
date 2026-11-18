@@ -68,6 +68,15 @@ import {
 import FindBar from "./FindBar";
 import WorkspaceSearch from "./WorkspaceSearch";
 import MermaidModal from "./MermaidModal";
+import {
+  THEMES,
+  THEME_STORAGE_KEY,
+  applyTheme,
+  darkSchemeQuery,
+  readStoredTheme,
+  type ResolvedTheme,
+  type Theme,
+} from "./theme";
 import { useUpdateCheck, RELEASES_PAGE, type UpdateController } from "./updater";
 import HtmlView, { type HtmlViewHandle } from "./HtmlView";
 import { mergeHtmlThreads, type HtmlThread } from "./htmlComments";
@@ -318,9 +327,6 @@ function readStoredSplitRatio(): number {
 const suggestedFileName = (title: string) =>
   title.replace(/[/\\:]/g, "-").trim() || "Untitled";
 
-type Theme = "system" | "light" | "paper" | "dark";
-const THEMES: Theme[] = ["system", "light", "paper", "dark"];
-const THEME_STORAGE_KEY = "doklin:theme";
 const COMMENTS_VISIBLE_STORAGE_KEY = "doklin:comments-visible";
 const SIDEBAR_OPEN_STORAGE_KEY = "doklin:sidebar-open";
 const SESSION_STORAGE_KEY = "doklin:session";
@@ -425,40 +431,6 @@ const THEME_LABEL: Record<Theme, string> = {
   paper: "Paper",
   dark: "Dark",
 };
-
-function readStoredTheme(): Theme {
-  try {
-    const v = localStorage.getItem(THEME_STORAGE_KEY);
-    if (v && (THEMES as string[]).includes(v)) return v as Theme;
-  } catch {
-    // localStorage may be unavailable; fall through
-  }
-  return "system";
-}
-
-// The theme that actually paints: "system" resolves here, once, against the
-// OS appearance. <html data-theme> only ever carries a resolved name, so
-// tokens.css writes each palette exactly once — no prefers-color-scheme
-// copies to drift — and an OS flip is the same attribute change as a menu
-// pick (mermaid.ts re-renders diagrams off that attribute). The stored
-// choice rides along on data-theme-pref for anything that needs it.
-type ResolvedTheme = Exclude<Theme, "system">;
-const darkSchemeQuery =
-  typeof window !== "undefined" && window.matchMedia
-    ? window.matchMedia("(prefers-color-scheme: dark)")
-    : null;
-
-function resolveTheme(t: Theme): ResolvedTheme {
-  if (t !== "system") return t;
-  return darkSchemeQuery?.matches ? "dark" : "light";
-}
-
-function applyTheme(t: Theme) {
-  const root = document.documentElement;
-  const resolved = resolveTheme(t);
-  if (root.dataset.theme !== resolved) root.dataset.theme = resolved;
-  root.dataset.themePref = t;
-}
 
 // Paint the stored theme before the first render, not after it.
 if (typeof document !== "undefined") {
@@ -1145,10 +1117,11 @@ export default function App() {
       // ignore
     }
     // "System" follows a live OS appearance change.
-    if (theme !== "system" || !darkSchemeQuery) return;
+    const query = darkSchemeQuery;
+    if (theme !== "system" || !query) return;
     const onScheme = () => applyTheme("system");
-    darkSchemeQuery.addEventListener("change", onScheme);
-    return () => darkSchemeQuery.removeEventListener("change", onScheme);
+    query.addEventListener("change", onScheme);
+    return () => query.removeEventListener("change", onScheme);
   }, [theme]);
 
   // The markdown editor reads the factor straight off <html> (App.css); the
@@ -2077,10 +2050,11 @@ export default function App() {
     setSidebarSelection(sels);
   }, []);
 
-  // Opens from outside the app (`doklin open`, Finder) that the backend placed
-  // in this window: a file as its tab, a folder of this workspace
-  // shown in the sidebar. Taken once the window is ready and again on every
-  // ping (src-tauri/src/external_open.rs).
+  // Opens from outside the app (`doklin open`, Finder, a link in a browser's
+  // address) that the backend placed in this window: a file as its tab, a
+  // folder of this workspace shown in the sidebar. Taken once the window is
+  // ready and again each time something arrives. One that cannot be shown is
+  // said in the backend's own sentence.
   const [revealRequest, setRevealRequest] = useState<{ path: string; seq: number } | null>(null);
   const openTabRef = useRef(openTab);
   useEffect(() => {
@@ -2089,10 +2063,13 @@ export default function App() {
   useEffect(() => {
     if (!ready) return;
     let live = true;
-    const windows = backend.windows;
-    if (!windows) return;
+    const outside = backend.shows;
+    if (!outside) return;
     const take = async () => {
-      const shows = await windows.takeShows().catch(() => []);
+      const shows = await outside.take().catch((e) => {
+        pushToast("warn", errText(e));
+        return [];
+      });
       for (const show of shows) {
         if (!live) return;
         if (show.kind === "folder") {
@@ -2106,12 +2083,12 @@ export default function App() {
       }
     };
     void take();
-    const un = windows.onShows(() => void take());
+    const un = outside.onArrive(() => void take());
     return () => {
       live = false;
       un();
     };
-  }, [ready, selectSidebarEntries]);
+  }, [ready, selectSidebarEntries, pushToast]);
 
   const setWorkspace = useCallback((root: string) => {
     sessionWorkspaceRoot = root;
@@ -3900,14 +3877,15 @@ export default function App() {
       }
 
       // Which workspace are we opening? A CLI / Finder folder launch
-      // (pendingFolder) targets that folder; otherwise reopen the last-active
+      // (pendingFolder) targets that folder; a backend that is for one
+      // workspace opens that one; otherwise reopen the last-active
       // workspace. Tabs are keyed by workspace, so we restore ONLY the target
       // directory's own tabs — a different directory's tabs never leak in.
       // (Files never arrive as a pending folder: an externally opened file
       // always gets its own spawned window, so it can't attach to this session.)
       const pendingFolder = (await backend.windows?.pendingFolder()) ?? null;
       const all = readAllSessions();
-      const targetRoot = pendingFolder ?? all.lastRoot;
+      const targetRoot = pendingFolder ?? backend.home ?? all.lastRoot;
       // Adopt the target root into the module mirror BEFORE any
       // writeStoredSession below, so re-persisting keys tabs under the right
       // folder rather than wiping the map.

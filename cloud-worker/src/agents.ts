@@ -30,8 +30,7 @@
 
 import { randomHex, sha256Hex } from "./crypto";
 import type { Env } from "./env";
-import { validName } from "./layout";
-import { canonicalCode } from "./members";
+import { canonicalCode, validName } from "./layout";
 import { withDb } from "./schema";
 
 /** What an agent may do. `read` is not optional — an agent that cannot read
@@ -76,8 +75,8 @@ export type AgentIdentity = {
 /** Whether agent `a` is the caller's (their member id bound as ?1). */
 const MINE_SQL = "a.member_id = ?1";
 
-/** `a-` an agent, `c-` a login code, `t-` one machine's token. */
-export const AGENT_ID_RE = /^a-[a-f0-9]{8}$/;
+/** `a-` an agent (`AGENT_ID_RE`, layout.ts), `c-` a login code, `t-` one
+ *  machine's token. */
 export const AGENT_TOKEN_ID_RE = /^t-[a-f0-9]{8}$/;
 
 /** What an agent's bearer starts with, so the gate knows which table to ask

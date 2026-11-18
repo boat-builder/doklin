@@ -1674,7 +1674,8 @@ impl<R: Remote> Engine<R> {
     /// How long until the next poll, by attention: quickest while a window
     /// of the workspace is focused and in use, a minute while it is in the
     /// background or idle, five once nobody has touched it for half an hour.
-    /// Never quicker than a minute in slow mode.
+    /// Never quicker than a minute in slow mode. A browser paces itself by
+    /// the same numbers (`gap`, src/web/workspace.ts): change both.
     pub(crate) fn poll_gap(&self) -> Duration {
         let idle = self.active_at.elapsed();
         let gap = if idle >= AWAY_AFTER {

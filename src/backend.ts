@@ -405,7 +405,17 @@ export type WindowInit = {
 
 /** Something an open from outside the app asked this window to show
  *  (`Show` in src-tauri/src/external_open.rs — change both). */
-export type WindowShow = { path: string; kind: "file" | "folder" };
+export type Show = { path: string; kind: "file" | "folder" };
+
+/** Opens from outside the app that land in this window: a link followed, a
+ *  document handed over by whatever opens those here. */
+export interface Shows {
+  /** What has been asked for since this was last asked. Rejects, with the
+   *  reason as a sentence, when what was asked for cannot be shown. */
+  take(): Promise<Show[]>;
+  /** There is something to take. */
+  onArrive(cb: () => void): Unsubscribe;
+}
 
 /** What a window says it is showing, so another open of the same thing
  *  finds it and a quit can bring it back. */
@@ -421,10 +431,6 @@ export interface Windows {
   init(): Promise<WindowInit>;
   /** The folder a launch from outside asked the main window for. Answers once. */
   pendingFolder(): Promise<string | null>;
-  /** What opens from outside the app have asked this window to show since it last asked. */
-  takeShows(): Promise<WindowShow[]>;
-  /** There is something to take. */
-  onShows(cb: () => void): Unsubscribe;
   report(content: WindowContent): void;
   /** Show a file or a folder in a window of its own: the one already
    *  showing it, or a new one. */
@@ -509,7 +515,18 @@ export interface Backend {
   /** What the window, or the browser's tab, is called. */
   setTitle(title: string): void;
 
+  /** The one workspace this backend is for, by its root, where there is only
+   *  one: the app opens it at start and offers no other. */
+  readonly home?: string;
+  /** A page of the platform's own that arbitrary html is shown in, where the
+   *  app's page may not be handed markup that runs script: framed, it asks
+   *  for the markup (`{ doklin: "frame-ready" }`) and is posted it
+   *  (`{ doklin: "frame-html", html }`). Absent: the frame is given the
+   *  markup itself. */
+  readonly htmlFrame?: string;
+
   readonly versions?: Versions;
+  readonly shows?: Shows;
   readonly windows?: Windows;
   readonly untitled?: UntitledNotes;
   readonly localFiles?: LocalFiles;

@@ -24,7 +24,8 @@
 //! for an older app to refuse a link.
 //!
 //! The page's address, the scheme and the key names are also in
-//! site/public/open.html, the scheme in src-tauri/Info.plist and
+//! site/public/open.html, the key names in src/web/address.ts (a link in
+//! the browser version's address), the scheme in src-tauri/Info.plist and
 //! ios/Info.plist, and the address in ios/Doklin.entitlements: **change
 //! all of them together.**
 

@@ -147,7 +147,7 @@ import { claimAddresses, releaseAddresses, takenError } from "./addresses";
 import { agentLogin, handleAgent, handleAgentAdmin } from "./agentApi";
 import { NO_SESSION_COOKIE, SIGNED_OUT, authenticate, keyHashOf, sessionCookie, sessionOf, type Auth } from "./auth";
 import { randomHex } from "./crypto";
-import { readManifestTotals, readWorkspace, type WorkspaceRecord } from "./bucket";
+import { readManifestTotals, readWorkspace } from "./bucket";
 import type { Env } from "./env";
 import { listEveryPage, takeDownPage } from "./everyPage";
 import { json, readJsonObject } from "./http";
@@ -158,10 +158,12 @@ import {
   MANIFEST_KEY,
   MAX_FILE_BYTES,
   MAX_MANIFEST_BYTES,
+  MEMBER_ID_RE,
   SLUG_RE,
   SPACE_ID_RE,
   WORKSPACE_KEY,
   blobKey,
+  normalizeCode,
   validFolderName,
   validName,
   validPath,
@@ -172,7 +174,6 @@ import {
   HASH_RE,
   MAX_DEVICE_CODE_TTL_MS,
   MAX_INVITE_TTL_MS,
-  MEMBER_ID_RE,
   claimSuperadmin,
   deleteInvite,
   endSession,
@@ -182,7 +183,6 @@ import {
   listDirectory,
   listInvites,
   listMembers,
-  normalizeCode,
   normalizeEmail,
   putInvite,
   redeemInvite,
@@ -209,6 +209,7 @@ import {
   spaceOf,
 } from "./spaces";
 import { WORKER_VERSION } from "./version";
+import type { MetaAnswer, PollAnswer, Who, WorkspaceRecord } from "./wire";
 import { browserMay, handleWeb, signIn } from "./web";
 import { handleVersions } from "./versions";
 
@@ -348,11 +349,16 @@ export async function handleApi(
     // A browser is handed its cookie again: its lifetime starts over each
     // time the app starts, so one in use never runs out.
     const again = auth.browser ? sessionOf(request) : null;
-    return json(
-      { version: WORKER_VERSION, workspace, d1, you: whoIs(auth), superadmin, people: people ?? [], limits },
-      200,
-      again ? { "set-cookie": sessionCookie(again) } : {},
-    );
+    const answer: MetaAnswer = {
+      version: WORKER_VERSION,
+      workspace,
+      d1,
+      you: whoIs(auth),
+      superadmin,
+      people: people ?? [],
+      limits,
+    };
+    return json(answer, 200, again ? { "set-cookie": sessionCookie(again) } : {});
   }
 
   // Which Cloudflare plan the account is on — the superadmin's to say, since
@@ -484,7 +490,7 @@ async function recoverWithKey(request: Request, env: Env, keyHash: string): Prom
  * `tokenId` is which row of the devices list this credential is, so the app
  * never offers to sign out the Mac it is running on.
  */
-function whoIs(auth: Auth): Record<string, unknown> {
+function whoIs(auth: Auth): Who {
   return {
     role: auth.role,
     can: allowed(auth.role),
@@ -1029,14 +1035,16 @@ async function poll(request: Request, env: Env, auth: Auth): Promise<Response> {
             ttl: beatTtl(body.ttl),
           };
   }
-  const answer = (etag: string, here: Here | null): Response =>
-    json({
+  const answer = (etag: string, here: Here | null): Response => {
+    const said: PollAnswer = {
       manifestEtag: etag,
       presence: here?.presence ?? {},
       leases: here?.leases ?? null,
       spaces: here?.spaces ?? null,
       limits: here?.limits ?? UNKNOWN_LIMITS,
-    });
+    };
+    return json(said);
+  };
   const deviceId = auth.deviceId;
   if (beat && deviceId) {
     // In order, for a beat: a domain that holds no workspace answers 404 and

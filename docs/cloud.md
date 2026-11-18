@@ -122,7 +122,7 @@ synced manifest, rendered by the worker from the synced files.
 - Tombstones expire after 30 days: `TOMBSTONE_TTL_MS` in `engine.rs` ⇄ `commit.ts`. **Change both.** A move keeps `mtime` in both (`staged.moves` ⇄ `Tx.move`).
 - No device deletes a stored copy (`blobs/<fid>/<hash>`): the worker's daily sweep does (`cloud-worker/src/sweep.ts`, a cron trigger), taking every copy its section's manifest doesn't name once it is a day old (`SWEEP_MIN_AGE_MS`). A push uploads before its manifest write, so `UPLOADED_TTL_MS` (12 h) stays inside that day — **change both**. A re-upload of a stored copy's own bytes stores it again, so a file back to an old version restarts that copy's day. Trap: a copy named in the second between a sweep's listing and its delete is still lost; a download of it 404s until the file's next edit.
 - `426` on PUT → `worker-outdated`: sync pauses, probing `/api/meta` each poll until a newer worker answers.
-- `by` is a member id (`ENTITY_ID_RE`, `members.ts`) or an agent id (`AGENT_ID_RE`, `agents.ts`). An unknown id refetches the directory at most every 5 min (`DIRECTORY_MIN_GAP`); an id it cannot name shows as it stands.
+- `by` is a member id (`MEMBER_ID_RE`) or an agent id (`AGENT_ID_RE`), both `layout.ts`. An unknown id refetches the directory at most every 5 min (`DIRECTORY_MIN_GAP`); an id it cannot name shows as it stands.
 
 ## Links (`link.rs`, `mod.rs`)
 

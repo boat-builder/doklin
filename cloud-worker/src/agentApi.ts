@@ -54,7 +54,6 @@ import { deleteDoc, getDoc, getFind, getSearch, getTree, postMove, putDoc } from
 import { deletePage, getPages, putPage } from "./agentPages";
 import { Places } from "./agentPlace";
 import {
-  AGENT_ID_RE,
   AGENT_TOKEN_ID_RE,
   MAX_AGENT_CODE_TTL_MS,
   agentOwner,
@@ -76,7 +75,7 @@ import { Refusal } from "./commit";
 import { sha256Hex } from "./crypto";
 import type { Env } from "./env";
 import { json, readJsonObject } from "./http";
-import { validName } from "./layout";
+import { AGENT_ID_RE, validName } from "./layout";
 import { readLimits } from "./limits";
 import { HASH_RE } from "./members";
 import { can } from "./roles";

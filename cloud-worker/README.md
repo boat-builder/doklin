@@ -334,7 +334,18 @@ the worker (free, uncounted; headers from its `_headers`, `cloud-worker/web/_hea
 /__web/fonts/<file>      the app's bundled fonts, a week
 /og.png · /favicon.ico · /apple-touch-icon.png   a week
 /robots.txt
+/app                     the browser version's page (`app.html`, served without its extension:
+                         Cloudflare's default `html_handling`); `no-cache`; its own policy:
+                         `script-src 'self'`, `connect-src 'self'`, `frame-ancestors 'none'`
+/app/assets/<name>-<hash>  its scripts, styles and fonts; immutable
+/app/gate.js             what the page runs first, as written (`src/web/gate.js`)
+/app/frame               the page an html document is shown in (`app/frame.html`); `no-cache`;
+                         `sandbox allow-scripts allow-popups; frame-ancestors 'self'`
 ```
+
+**No path may match two rules that set the same header**: Cloudflare joins
+them with a comma, and two policies joined are two policies, both enforced.
+`/app`, `/app/frame` and `/app/assets/*` are three rules that never meet.
 
 One of those paths that reaches the worker names nothing: a 404, no bucket read.
 
@@ -466,7 +477,8 @@ Teardown: app wipe, then `wrangler delete`, `wrangler d1 delete`, `wrangler r2 b
 ```sh
 pnpm typecheck:worker
 pnpm test:worker       # node cloud-worker/test/run.mjs [--bundle <file>]; fake R2, D1 on node:sqlite
-pnpm bundle:worker     # node scripts/bundle-worker.mjs [--no-mermaid] → cloud-worker/dist/ (worker + doklin-cloud-web/)
+pnpm bundle:worker     # node scripts/bundle-worker.mjs [--no-mermaid] [--no-app] → cloud-worker/dist/ (worker + doklin-cloud-web/)
 node verify-harness/serve-worker.mjs   # bundle over test/seed.mjs on :8787
 node verify-harness/drive-cli.mjs      # built cli/ against the worker
+node verify-harness/drive-web.mjs      # the browser version, built, in real browsers over https
 ```

@@ -18,6 +18,21 @@
 //   - a stored copy is kept by the browser and not asked for twice, and
 //     after signing out it is asked of the worker again, and refused.
 //
+// And the browser version itself, as the web directory serves it at /app
+// (app.html, src/web/) — the page a release ships, not a development build:
+//
+//   - the page's files and the policy each is served under;
+//   - a link in the address survives the sign-in screen and opens its page;
+//   - the sign-in screen says what is wrong with what was pasted, and loads
+//     none of the editor until somebody is signed in;
+//   - the tree is the workspace's documents, a note and an html document
+//     open and read, comments come from the sidecar, a diagram draws, and
+//     nothing a note carries runs as script;
+//   - what somebody else changes arrives by itself;
+//   - the page refuses to be framed, a phone and an old browser get a
+//     sentence and none of the app, and a browser signed out from elsewhere
+//     is back at the sign-in screen.
+//
 // A real domain is https, and a Secure cookie needs it (WebKit keeps none
 // over http, localhost included), so the worker is driven through a TLS
 // front this file runs, with a certificate it makes for the run (`openssl`).
@@ -75,6 +90,8 @@ process.on("exit", cleanUp);
 const WORKER_PORT = await freePort();
 console.log(`starting the harness worker on http://localhost:${WORKER_PORT}…`);
 await new Promise((resolve, reject) => {
+  // --no-mermaid leaves out the public pages' diagram module, which nothing
+  // here loads: the app draws diagrams with its own.
   const child = spawn(process.execPath, [join(ROOT, "verify-harness/serve-worker.mjs"), "--no-mermaid"], {
     env: { ...process.env, PORT: String(WORKER_PORT) },
     stdio: ["ignore", "pipe", "pipe"],
@@ -172,6 +189,8 @@ async function deviceCode() {
 }
 /** A page of the domain to stand on. */
 const HOME = `${ORIGIN}/robots.txt`;
+/** The workspace's root as the app names it: the seed's workspace is "Notes". */
+const ROOT_NAME = "/Notes";
 
 /* ---------- One engine ---------- */
 
@@ -338,6 +357,257 @@ async function drive(name) {
   return true;
 }
 
+/* ---------- The page under /app ---------- */
+
+/** The page's files, and what each is served under. */
+async function driveFiles() {
+  const say = (what, ok, detail) => step(`the page's files: ${what}`, ok, detail);
+  const get = (path) => fetch(`${PLAIN}${path}`, { redirect: "manual" });
+  const page = await get("/app");
+  const html = await page.text();
+  const policy = Object.fromEntries(
+    (page.headers.get("content-security-policy") ?? "").split(";").map((d) => d.trim().split(/\s+/)).map(([name, ...rest]) => [name, rest.join(" ")]),
+  );
+  say("/app is the page, asked for again on every visit", page.status === 200 && /text\/html/.test(page.headers.get("content-type") ?? "") && page.headers.get("cache-control") === "no-cache");
+  say(
+    "script runs from the domain's own files and nowhere else, and the page talks to the domain alone",
+    policy["default-src"] === "'none'" && policy["script-src"] === "'self'" && policy["connect-src"] === "'self'" && policy["base-uri"] === "'none'" && policy["form-action"] === "'none'",
+    JSON.stringify(policy),
+  );
+  say("nothing may frame it", policy["frame-ancestors"] === "'none'" && page.headers.get("x-frame-options") === "DENY");
+  const entry = /<script type="module"[^>]* src="(\/app\/assets\/[^"]+)"/.exec(html)?.[1];
+  const script = entry ? await get(entry) : null;
+  say("its scripts are named by their content and kept for good", script?.status === 200 && script.headers.get("cache-control") === "public, max-age=31536000, immutable", entry ?? "no script in the page");
+  say("no script is written into the page itself", !/<script(?![^>]* src=)[^>]*>/.test(html));
+  const frame = await get("/app/frame");
+  say(
+    "the page an html document is shown in is sandboxed, and only this domain's pages frame it",
+    frame.status === 200 && (frame.headers.get("content-security-policy") ?? "").startsWith("sandbox allow-scripts allow-popups;") && /frame-ancestors 'self'/.test(frame.headers.get("content-security-policy") ?? ""),
+    frame.headers.get("content-security-policy") ?? "no policy",
+  );
+  const spelled = await get("/app.html");
+  say("the page has one address", spelled.status === 307 && spelled.headers.get("location") === "/app", `${spelled.status} ${spelled.headers.get("location")}`);
+}
+
+/** A second browser of the owner's, signed in: somebody else, for the app to hear of. */
+async function elsewhere(browser) {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+  await page.goto(HOME);
+  const ask = (path, init = {}) =>
+    page.evaluate(
+      async ([path, init]) => {
+        const res = await fetch(path, { ...init, headers: { "content-type": "application/json", "x-doklin-device": "d-drive-other" } });
+        return { status: res.status, json: await res.json().catch(() => null) };
+      },
+      [path, init],
+    );
+  const signed = await ask("/api/web/session", { method: "POST", body: JSON.stringify({ code: await deviceCode(), deviceId: "d-drive-other", deviceName: "Somebody else" }) });
+  if (signed.status !== 201) throw new Error(`the second browser could not sign in: ${signed.status}`);
+  return { ask, close: () => context.close() };
+}
+
+async function driveApp(name) {
+  const say = (what, ok, detail) => step(`${name}, the app: ${what}`, ok, detail);
+  const browser = await ENGINES[name].launch();
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
+  const page = await context.newPage();
+  /** What the page's policy refused, and what the page threw. */
+  const trouble = [];
+  let stage = "starting";
+  page.on("console", (m) => {
+    if (process.env.DEBUG_DRIVE) console.log(`  [${stage}] console.${m.type()}: ${m.text().slice(0, 200)}`);
+    if (/Content Security Policy|Content-Security-Policy|Refused to/i.test(m.text())) trouble.push(`${stage}: ${m.text().slice(0, 200)}`);
+  });
+  page.on("pageerror", (e) => trouble.push(`${stage}: ${String(e).slice(0, 200)}`));
+  if (process.env.DEBUG_DRIVE) {
+    page.on("response", (r) => r.status() >= 400 && console.log(`  [${stage}] ${r.status()} ${r.request().method()} ${r.url()}`));
+  }
+  const assetsAsked = (from) => answered.slice(from).filter((a) => a.path.startsWith("/app/assets/") && a.path.endsWith(".js")).length;
+  const row = (path) => page.locator(`[title="${ROOT_NAME}/${path}"]`).last();
+  const editorText = () => page.evaluate(() => document.querySelector(".ProseMirror")?.innerText ?? "");
+  const invite = () => page.locator('[data-testid="web-invite"]');
+  const error = () => page.locator('[data-testid="web-error"]').innerText({ timeout: 10_000 }).catch(() => "");
+  const paste = async (text) => {
+    await invite().fill(text);
+    await page.click('[data-testid="web-sign-in"]');
+  };
+
+  const manifest = await (await owner("/api/manifest")).json();
+  const fidOf = (path) => Object.entries(manifest.files).find(([, f]) => f.path === path)?.[0];
+  const { id: wsId } = (await (await owner("/api/meta")).json()).workspace;
+
+  /* 1 — signed out, on a link */
+  stage = "signed out, on a link";
+  let from = answered.length;
+  await page.goto(`${ORIGIN}/app#w=${wsId}&f=${fidOf("Ideas.md")}`);
+  await invite().waitFor({ timeout: 30_000 });
+  const beforeSignIn = assetsAsked(from);
+  say("signed out, the page is the sign-in screen", (await page.locator("h1.web-title").innerText()).startsWith("Sign in to localhost"));
+
+  await paste("hello there");
+  say("something that holds no code is said to hold none", /no invite code/.test(await error()), await error());
+  await paste("doklin-invite https://notes.elsewhere.example dkln-AAAAA-AAAAA-AAAAA-AAAAA");
+  say("an invite for another domain says where to take it", /is for notes\.elsewhere\.example\. Open https:\/\/notes\.elsewhere\.example\/app/.test(await error()), await error());
+  await paste("dkln-AAAAA-AAAAA-AAAAA-AAAAA");
+  say("a code nobody made is refused in a sentence", /isn't valid/.test(await error()), await error());
+  say("and none of that signed anybody in", !(await context.cookies(ORIGIN)).some((c) => c.name === "__Host-doklin"));
+
+  /* 2 — signing in */
+  stage = "signing in";
+  await paste(`doklin-invite ${ORIGIN} ${await deviceCode()}`);
+  await row("Home.md").waitFor({ timeout: 60_000 });
+  say("the line somebody was sent signs the browser in, and the app opens on the workspace", true);
+  say("the editor is not asked for until somebody is signed in", beforeSignIn > 0 && assetsAsked(from) > beforeSignIn, `${beforeSignIn} script(s) for the sign-in screen, ${assetsAsked(from)} once signed in`);
+  say("script cannot read the sign-in", (await page.evaluate(() => document.cookie)) === "");
+  const mine = await page.evaluate(() => localStorage.getItem("doklin:web:device"));
+  const listed = (await (await owner("/api/auth/devices")).json()).devices.find((d) => d.deviceId === mine);
+  say("the browser is one of the person's devices, by a name a person can read", / on (a Mac|Windows|Linux)$/.test(listed?.deviceName ?? "") || ["Chrome", "Firefox", "Safari", "Edge"].includes(listed?.deviceName), listed?.deviceName ?? "not listed");
+
+  /* 3 — the link that was in the address */
+  stage = "the link that was in the address";
+  const opened = await page
+    .waitForFunction(() => /A teleporter/.test(document.querySelector(".ProseMirror")?.innerText ?? ""), null, { timeout: 30_000 })
+    .then(() => true, () => false);
+  say("the page the link named opens once signed in", opened, (await editorText()).replace(/\s+/g, " ").slice(0, 60));
+  say("and the link is gone from the address", page.url() === `${ORIGIN}/app`, page.url());
+
+  /* 4 — the tree */
+  stage = "the tree";
+  const titles = await page.evaluate(() => [...document.querySelectorAll("[title]")].map((el) => el.getAttribute("title")));
+  const has = (path) => titles.includes(`${ROOT_NAME}/${path}`);
+  say("the tree is the workspace's documents and folders", has("Home.md") && has("Scratch.md") && has("Projects") && has("Diagram.md"));
+  await row("Projects").click();
+  await row("Projects/plan.md").waitFor({ timeout: 10_000 });
+  const inFolder = await page.evaluate(() => [...document.querySelectorAll("[title]")].map((el) => el.getAttribute("title")));
+  say(
+    "a note's html rendition and its sidecar are not rows of their own",
+    inFolder.includes(`${ROOT_NAME}/Projects/plan.md`) && !inFolder.includes(`${ROOT_NAME}/Projects/plan.html`) && !inFolder.some((t) => t?.endsWith(".meta.jsonl")),
+  );
+  say("the person's own section is there", (await page.getByText("Private", { exact: true }).count()) > 0);
+
+  /* 5 — reading */
+  stage = "reading";
+  from = answered.length;
+  await row("Home.md").click();
+  await page.waitForFunction(() => /Welcome\./.test(document.querySelector(".ProseMirror")?.innerText ?? ""), null, { timeout: 30_000 });
+  say("a note opens and reads", true);
+  await page.waitForTimeout(800);
+  const strays = answered.slice(from).filter((a) => !a.path.startsWith("/api/") && !a.path.startsWith("/app"));
+  say("a picture the note names by a path is asked of nobody", strays.length === 0, strays.map((a) => a.path).join(", "));
+
+  await row("Projects/plan.md").click();
+  await page.waitForFunction(() => /Ship it by June/.test(document.querySelector(".ProseMirror")?.innerText ?? ""), null, { timeout: 30_000 });
+  await page.locator('.view-toggle [role="tab"]', { hasText: "HTML" }).click();
+  const shown = page.frameLocator("iframe.html-preview");
+  const rendered = await shown.locator("#rendered").innerText({ timeout: 20_000 }).catch((e) => `nothing: ${String(e).split("\n")[0]}`);
+  say("an html document is shown, in the page that is served for it", rendered === "Rendered by hand." && (await page.getAttribute("iframe.html-preview", "src")) === "/app/frame", rendered);
+  say("its own script runs there", (await shown.locator("body").getAttribute("data-ran").catch(() => null)) === "yes");
+  // The probe is this drive's own: a browser that refuses it may say so as
+  // an error on the page, which is the answer wanted and not the app's trouble.
+  const untroubled = trouble.length;
+  const inside = await shown.locator("body").evaluate(async () => ({
+    origin: self.origin,
+    api: await fetch("/api/meta", { credentials: "include" }).then((r) => r.status, () => "blocked"),
+  }));
+  await page.waitForTimeout(300);
+  trouble.length = untroubled;
+  say("under an origin that is nobody's, with no sign-in to send", inside.origin === "null" && inside.api !== 200, JSON.stringify(inside));
+
+  await row("Comments.md").click();
+  await page.getByText("Say it plainer.").first().waitFor({ timeout: 30_000 });
+  say("a note's comments come with it, from its sidecar", true);
+
+  await row("Diagram.md").click();
+  await page.locator("svg[aria-roledescription]").first().waitFor({ timeout: 60_000 });
+  await page.waitForTimeout(500);
+  say("a diagram draws under the page's policy", true);
+  say("and nothing a note carries runs as script", (await page.evaluate(() => document.documentElement.dataset.ran ?? null)) === null);
+
+  /* 6 — what somebody else changes */
+  stage = "what somebody else changes";
+  const other = await elsewhere(browser);
+  const fresh = await other.ask(`/api/web/doc?path=${encodeURIComponent(`Fresh from ${name}.md`)}`, { method: "PUT", body: JSON.stringify({ md: { text: "# Fresh\n", ifRev: null } }) });
+  await row("Scratch.md").click();
+  // By its heading: the engines share one worker, and the one driven before
+  // this left the note rewritten.
+  await page.waitForFunction(() => /^\s*Scratch/.test(document.querySelector(".ProseMirror")?.innerText ?? ""), null, { timeout: 30_000 });
+  const scratch = (await other.ask("/api/manifest")).json.files[fidOf("Scratch.md")];
+  const rewritten = await other.ask("/api/web/doc?path=Scratch.md", { method: "PUT", body: JSON.stringify({ md: { text: `# Scratch\n\nRewritten elsewhere, seen from ${name}.\n`, ifRev: scratch.rev } }) });
+  const arrived = await row(`Fresh from ${name}.md`).waitFor({ timeout: 80_000 }).then(() => true, () => false);
+  say("a document somebody else makes appears in the tree by itself", fresh.status === 200 && arrived, String(fresh.status));
+  const reread = await page
+    .waitForFunction((who) => (document.querySelector(".ProseMirror")?.innerText ?? "").includes(`seen from ${who}`), name, { timeout: 80_000 })
+    .then(() => true, () => false);
+  say("and the open one is read again when somebody else writes it", rewritten.status === 200 && reread, String(rewritten.status));
+  await other.close();
+
+  /* 7 — a link while the app is up, and one that opens nothing */
+  stage = "a link while the app is up, and one that opens nothing";
+  await page.evaluate((hash) => (location.hash = hash), `w=${wsId}&f=${fidOf("Projects/status.md")}`);
+  await page.waitForFunction(() => /Where things stand/.test(document.querySelector(".ProseMirror")?.innerText ?? ""), null, { timeout: 30_000 });
+  say("a link followed while the app is open opens its page", page.url() === `${ORIGIN}/app`, page.url());
+  await page.evaluate((hash) => (location.hash = hash), `w=${wsId}&f=f-000000000000`);
+  const gone = await page.getByText(/isn't one you can open in Notes/).first().waitFor({ timeout: 15_000 }).then(() => true, () => false);
+  say("a link to a page that is not there says so, the same for deleted and not yours", gone);
+
+  /* 8 — coming back */
+  stage = "coming back";
+  await page.reload();
+  await page.waitForFunction(() => /Where things stand/.test(document.querySelector(".ProseMirror")?.innerText ?? ""), null, { timeout: 60_000 });
+  say("a reload is still signed in, on the page that was open", (await invite().count()) === 0);
+  say("the page's policy refused nothing, and the page threw nothing", trouble.length === 0, trouble.slice(0, 3).join(" | "));
+
+  /* 9 — framed by somebody else */
+  stage = "framed by somebody else";
+  const beside = await context.newPage();
+  await beside.goto(`${OTHER}/`);
+  await beside.evaluate((url) => new Promise((done) => {
+    const frame = document.createElement("iframe");
+    frame.onload = frame.onerror = () => done();
+    frame.src = url;
+    document.body.append(frame);
+    setTimeout(done, 3000);
+  }), `${ORIGIN}/app`);
+  await beside.waitForTimeout(1500);
+  const framed = beside.frames().find((f) => f !== beside.mainFrame());
+  const inFrame = framed ? await framed.locator("#root").count().catch(() => 0) : 0;
+  say("another origin cannot frame the page", inFrame === 0, framed ? framed.url() : "no frame");
+  await beside.close();
+
+  /* 10 — signed out from somewhere else */
+  stage = "signed out from somewhere else";
+  const signedOut = await owner(`/api/auth/devices/${listed?.id}`, { method: "DELETE" });
+  const back = await invite().waitFor({ timeout: 80_000 }).then(() => true, () => false);
+  say("signed out from Devices, the browser is back at the sign-in screen", signedOut.status === 204 && back, String(signedOut.status));
+  say("and holds no sign-in", !(await context.cookies(ORIGIN)).some((c) => c.name === "__Host-doklin"));
+  await context.close();
+
+  /* 11 — who is not shown the app */
+  stage = "who is not shown the app";
+  const stopped = async (what, options, prepare, gate) => {
+    const ctx = await browser.newContext({ ignoreHTTPSErrors: true, ...options });
+    if (prepare) await ctx.addInitScript(prepare);
+    const visitor = await ctx.newPage();
+    const start = answered.length;
+    await visitor.goto(`${ORIGIN}/app`);
+    await visitor.waitForTimeout(1500);
+    const told = await visitor.locator(gate).isVisible();
+    const signIn = await visitor.locator('[data-testid="web-invite"]').count();
+    say(`${what} is told why in a sentence, with no sign-in and none of the app`, told && signIn === 0 && assetsAsked(start) <= 1, `${assetsAsked(start)} script(s) asked for`);
+    await ctx.close();
+  };
+  await stopped(
+    "a phone",
+    { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", viewport: { width: 390, height: 844 }, hasTouch: true },
+    null,
+    "#gate-handheld",
+  );
+  await stopped("a browser too old for the editor", {}, () => delete URL.canParse, "#gate-old");
+
+  await browser.close();
+}
+
 /* ---------- What a browser keeps, and stops keeping ---------- */
 
 /** Over plain http, where Chromium caches as it does on a real domain (and
@@ -386,9 +656,12 @@ async function driveCache() {
 }
 
 let driven = 0;
+await driveFiles();
 for (const name of wanted) {
   if (!ENGINES[name]) throw new Error(`no such engine: ${name} (chromium, firefox, webkit)`);
-  if (await drive(name)) driven += 1;
+  if (!(await drive(name))) continue;
+  driven += 1;
+  await driveApp(name);
 }
 if (wanted.includes("chromium")) await driveCache();
 

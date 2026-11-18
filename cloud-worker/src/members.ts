@@ -32,6 +32,7 @@ import type { Env } from "./env";
 import { MAX_EMAIL_LEN, MAX_NAME_LEN, validName } from "./layout";
 import type { PersonRole } from "./roles";
 import { withDb } from "./schema";
+import type { DirectoryEntry } from "./wire";
 
 export type Member = {
   id: string;
@@ -112,50 +113,12 @@ export function normalizeEmail(raw: unknown): string | null {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
 }
 
-// Crockford's base32: no I, no L, no O, no U — so a code cannot spell a word
-// and cannot be mistyped into a different valid one. I and L read back as 1,
-// O as 0, which is the whole reason he dropped them.
-const CROCKFORD = /^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{20}$/;
-
-/**
- * A code as it is hashed: the twenty Crockford characters, uppercase, no
- * prefix and no dashes. `dkln-K7QM2-9XVR4-8TBHN-3WGYD` and
- * `dkln k7qm2 9xvr4 8tbhn 3wgyd` and the bare twenty all canonicalize to the
- * same string, so a code that survived an autocorrect, a line wrap or a
- * spreadsheet still redeems. Null when it is not a code.
- *
- * `prefix` is the four letters the code announces itself with, uppercase:
- * `DKLN` for an invite, `DKLA` for an agent's login code (agents.ts). A code
- * wearing the other kind's prefix is not a code here — the two are stored in
- * different tables, and saying so at the door beats a lookup that misses.
- *
- * This is a wire contract, not a convenience: the app hashes the canonical
- * form when it mints a code, and the worker hashes the canonical form when it
- * redeems one. The two have to agree character for character.
- */
-export function canonicalCode(raw: unknown, prefix: string): string | null {
-  if (typeof raw !== "string") return null;
-  const bare = raw.trim().toUpperCase().replace(/[^0-9A-Z]/g, "");
-  // The prefix only comes off a string long enough to have carried one. (A
-  // bare code can never begin with either prefix — L is not in the alphabet
-  // — but the length guard says so without depending on that.)
-  const body = bare.length === 24 && bare.startsWith(prefix) ? bare.slice(4) : bare;
-  const canonical = body.replace(/[IL]/g, "1").replace(/O/g, "0");
-  return CROCKFORD.test(canonical) ? canonical : null;
-}
-
-/** An invite code as it is hashed (see `canonicalCode`). */
-export const normalizeCode = (raw: unknown): string | null => canonicalCode(raw, "DKLN");
-
 /** A sha256 hex digest, as the two hashed columns store one. */
 export const HASH_RE = /^[a-f0-9]{64}$/;
 
-/** The ids this module mints: `m-` a member, `t-` a token, `i-` an invite.
- *  Short on purpose — a member id is what the manifest, presence and leases
- *  carry, and an email must never enter any of them. */
+/** The ids this module mints: `m-` a member (`MEMBER_ID_RE`, layout.ts),
+ *  `t-` a token, `i-` an invite. */
 export const ENTITY_ID_RE = /^[mti]-[a-f0-9]{8}$/;
-/** A member's id alone — what a space lists its people by. */
-export const MEMBER_ID_RE = /^m-[a-f0-9]{8}$/;
 
 type MemberRow = {
   id: string;
@@ -260,9 +223,6 @@ export async function listMembers(env: Env): Promise<MemberWithDevices[] | null>
     return results.map((r) => ({ ...toMember(r), devices: Number(r.devices) }));
   });
 }
-
-/** One row of the directory: a person, or an agent with whose it is. */
-export type DirectoryEntry = { id: string; name: string; person?: string };
 
 /**
  * Everyone's id and display name, and nothing else — what a `by` in the

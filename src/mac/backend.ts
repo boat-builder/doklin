@@ -36,8 +36,9 @@ import {
   type UntitledNotes,
   type Updater,
   type WatchedDocument,
+  type Show,
+  type Shows,
   type WindowInit,
-  type WindowShow,
   type Windows,
 } from "../backend";
 import type { CloudRemovedEvent, CloudStatus } from "../cloud";
@@ -384,14 +385,19 @@ const versions: Versions = {
   export: (root, dest) => invoke("versions_export", { root, dest }),
 };
 
+/* ---------- Opens from outside (src-tauri/src/external_open.rs) ---------- */
+
+const shows: Shows = {
+  take: () => invoke<Show[]>("take_window_shows"),
+  // `SHOWS_EVENT` in external_open.rs — change both.
+  onArrive: (cb) => on("window-shows", cb),
+};
+
 /* ---------- Windows ---------- */
 
 const windows: Windows = {
   init: () => invoke<WindowInit>("take_window_init"),
   pendingFolder: () => invoke<string | null>("take_pending_folder"),
-  takeShows: () => invoke<WindowShow[]>("take_window_shows"),
-  // `SHOWS_EVENT` in src-tauri/src/external_open.rs — change both.
-  onShows: (cb) => on("window-shows", cb),
   report: (content) => void invoke("register_window_content", content),
   openInNew: (target) =>
     invoke("open_in_window", {
@@ -509,6 +515,7 @@ export const macBackend: Backend = {
   authorName: () => invoke<string>("device_name"),
   setTitle: (title) => void getCurrentWindow().setTitle(title),
   versions,
+  shows,
   windows,
   untitled,
   localFiles,

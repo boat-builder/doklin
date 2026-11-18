@@ -153,7 +153,8 @@ impl PublicEntry {
 }
 
 /// `GET /api/poll`, or the `POST` that carries a beat: whether the manifest
-/// moved, who else is here, and which documents they hold.
+/// moved, who else is here, and which documents they hold (`PollAnswer` and
+/// what it is made of, `cloud-worker/src/wire.ts` — change both).
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PollResponse {
     #[serde(rename = "manifestEtag")]

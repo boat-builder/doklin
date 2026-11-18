@@ -24,3 +24,39 @@
   Cache-Control: public, max-age=604800, immutable
 /og.png
   Cache-Control: public, max-age=604800, immutable
+
+# ---------- The browser version of the app (app.html, src/web/) ----------
+# Every address of it is under /app, where no public page can be
+# (RESERVED_SLUGS, cloud-worker/src/layout.ts).
+
+# The page. Asked for again on every visit, so an updated worker's page is
+# the one that loads. Its policy is the opposite of a public page's
+# (src/public.ts): script runs here, so it may come from this domain's own
+# files and nowhere else — none written into the page, none made from text —
+# and the page talks to this domain alone. Styles stay open: the editor
+# writes style elements and attributes as it runs. Pictures a note shows
+# from the web load as they do in the Mac app. The one frame is the page an
+# html document is shown in, below. And nothing may frame the page itself:
+# a public page of this domain may frame anything it likes.
+/app
+  Cache-Control: no-cache
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src * data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  X-Robots-Tag: noindex
+
+# The page an html document is shown in (src/web/frame.html). A document's
+# own script must run, which the page above allows nowhere, so this one has
+# a policy of its own: sandboxed, as a published html document is
+# (src/pages.ts) — whatever is written into it runs under an origin that is
+# nobody's, is sent no sign-in and can reach nothing of the app. Only this
+# domain's pages may frame it.
+/app/frame
+  Cache-Control: no-cache
+  Content-Security-Policy: sandbox allow-scripts allow-popups; frame-ancestors 'self'
+  X-Robots-Tag: noindex
+
+# Named by their content: a new build is a new name.
+/app/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+  X-Robots-Tag: noindex

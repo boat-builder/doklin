@@ -4,14 +4,7 @@
 
 import type { Env } from "./env";
 import { MANIFEST_KEY, MAX_NAME_LEN, WORKSPACE_KEY } from "./layout";
-
-/** workspace.json — the binding. Exists iff the domain holds a workspace. */
-export type WorkspaceRecord = {
-  id: string;
-  name: string;
-  createdAt: string;
-  createdBy: { deviceId: string | null; deviceName: string };
-};
+import type { WorkspaceRecord } from "./wire";
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);

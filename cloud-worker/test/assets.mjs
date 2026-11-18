@@ -2,7 +2,9 @@
 // whose path names a file in the web directory (doklin-cloud-web/, written by
 // scripts/bundle-worker.mjs) is answered from it without running the worker,
 // with the headers its `_headers` file gives; anything else goes to the
-// worker. test/run.mjs --bundle and verify-harness/serve-worker.mjs put it in
+// worker. An html file is served without its extension, as Cloudflare serves
+// one by default (`html_handling = "auto-trailing-slash"`): `app.html` at
+// /app, and /app.html and /app/ sent there. test/run.mjs --bundle and verify-harness/serve-worker.mjs put it in
 // front of a bundle, so they see what a visitor of a deployed domain sees.
 //
 // `_headers`, as Cloudflare reads it: a line that is not indented is a path
@@ -16,7 +18,12 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 const TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".woff": "font/woff",
+  ".ttf": "font/ttf",
+  ".svg": "image/svg+xml",
   ".woff2": "font/woff2",
   ".png": "image/png",
   ".ico": "image/x-icon",
@@ -77,10 +84,19 @@ export function serveAsset(webDir, request) {
   } catch {
     return null;
   }
-  const rel = pathname.slice(1);
+  // An html file's one address is its path without the extension.
+  const isFile = (rel) => existsSync(path.join(webDir, rel)) && statSync(path.join(webDir, rel)).isFile();
+  const bare = pathname.endsWith(".html") ? pathname.slice(0, -".html".length) : pathname.endsWith("/") ? pathname.slice(0, -1) : null;
+  if (bare !== null && bare !== "" && !bare.split("/").includes("..") && isFile(`${bare.slice(1)}.html`)) {
+    return new Response(null, { status: 307, headers: { location: bare } });
+  }
+  let rel = pathname.slice(1);
   if (rel === "" || rel.split("/").some((seg) => seg === "" || seg === "." || seg === "..") || UNSERVED.has(rel)) return null;
+  if (!isFile(rel)) {
+    if (!isFile(`${rel}.html`)) return null;
+    rel = `${rel}.html`;
+  }
   const file = path.join(webDir, rel);
-  if (!existsSync(file) || !statSync(file).isFile()) return null;
 
   const bytes = readFileSync(file);
   const headers = new Headers({

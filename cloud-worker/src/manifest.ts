@@ -5,9 +5,12 @@
 // (`syncs`, layout.ts) are the worker's. The check is what stops a broken
 // device from publishing garbage: it never has to trust the client, and it
 // never has to be clever.
+//
+// Nothing of the runtime is imported here, so the browser version (src/web/)
+// reads a manifest with these types.
 
-import { AGENT_ID_RE } from "./agents";
 import {
+  AGENT_ID_RE,
   BLOB_HASH_RE,
   ID_RE,
   MAX_DESC_LEN,
@@ -17,6 +20,7 @@ import {
   MAX_PUBLIC_ENTRIES,
   MAX_TITLE_LEN,
   MAX_TOMBSTONES,
+  MEMBER_ID_RE,
   RESERVED_SLUGS,
   SLUG_RE,
   SPACE_ID_RE,
@@ -25,7 +29,6 @@ import {
   syncs,
   validPath,
 } from "./layout";
-import { MEMBER_ID_RE } from "./members";
 import { MANIFEST_VERSION } from "./version";
 
 export type ManifestFile = {

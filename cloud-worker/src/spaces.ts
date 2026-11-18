@@ -20,21 +20,7 @@ import type { Env } from "./env";
 import { MANIFEST_KEY, spacePrefix } from "./layout";
 import { emptyManifest } from "./manifest";
 import { withDb } from "./schema";
-
-export type SpaceKind = "restricted" | "private";
-
-export type Space = {
-  id: string;
-  kind: SpaceKind;
-  name: string;
-  /** Who made it — what tells two folders of one name apart. */
-  by: string;
-  createdAt: number;
-  /** Its manifest's etag as of the worker's last write there (`noteEtag`). */
-  etag: string;
-  /** Everyone in it, by member id. */
-  members: string[];
-};
+import type { Space } from "./wire";
 
 /** What a person's own section is called. */
 const PRIVATE_NAME = "Private";

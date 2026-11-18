@@ -19,7 +19,9 @@ use super::config::{read_marker, sanitize_folder_name, MARKER_DIR};
 use super::manifest::{cap_utf16, MAX_NAME_LEN};
 use super::scan::{read_json, write_json};
 
-/// A person's own section, at the top of the workspace.
+/// A person's own section, at the top of the workspace. The browser version
+/// places a section's documents under the same two names, and names a
+/// restricted folder as `candidates` does (src/web/workspace.ts): change both.
 pub const PRIVATE_DIR: &str = "Private";
 /// What holds the restricted folders, at the top of the workspace.
 pub const RESTRICTED_DIR: &str = "Restricted";

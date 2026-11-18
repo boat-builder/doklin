@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <meta name="referrer" content="no-referrer" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <title>Doklin</title>
+    <style>
+      /* What the gate shows instead of the app (src/web/gate.js). The app's
+         own styles come with the app, which these visitors never load. */
+      .gate {
+        max-width: 520px;
+        margin: 18vh auto 0;
+        padding: 0 24px;
+        font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #1f1e1d;
+      }
+      .gate h1 {
+        margin: 0 0 12px;
+        font-size: 24px;
+        font-weight: 600;
+        line-height: 1.25;
+      }
+      .gate p {
+        margin: 0 0 12px;
+        color: #52514e;
+      }
+      .gate a {
+        color: #256abf;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <div class="gate" id="gate-handheld" hidden>
+      <h1>Doklin in a browser is for a computer.</h1>
+      <p>
+        On an iPhone or an iPad, Doklin is an app.
+        <a href="mailto:hello@boatbuilder.dev?subject=Doklin%20iPhone%20beta">Email the team</a> to get it, or ask
+        whoever runs this workspace.
+      </p>
+      <p>Otherwise, open this page on a computer.</p>
+    </div>
+    <div class="gate" id="gate-old" hidden>
+      <h1>This browser is too old for Doklin.</h1>
+      <p>Open this page in a current Chrome, Edge or Firefox, or in Safari 17 or later.</p>
+    </div>
+    <!-- Run first, and as written: not one of the app's bundles (vite-ignore). -->
+    <script src="/app/gate.js" vite-ignore></script>
+    <script type="module" src="/src/web/main.ts"></script>
+  </body>
+</html>

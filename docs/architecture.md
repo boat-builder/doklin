@@ -6,6 +6,8 @@
   wraps Milkdown Crepe; `src/tabs.ts` the tab descriptors.
 - `src/backend.ts` — what the UI asks of the platform it runs on;
   `src/mac/backend.ts` — the Mac's answer, through Tauri (*The backend*).
+- `src/web/` + `app.html` — the browser's answer, through the workspace's
+  worker (*The browser version*).
 - `src-tauri/src/lib.rs` — Tauri commands (`read_file`, `write_file`,
   `list_md_tree`, `create_file`/`create_dir`, `move_path`, `copy_path`,
   `trash_file`/`restore_trashed`, `open_external`, the clipboard and window
@@ -24,8 +26,8 @@
 ## The backend
 
 - The UI calls `backend` (`src/backend.ts`) and nothing beneath it. Only
-  `src/mac/` imports `@tauri-apps/*`, and nothing under `src/` calls `fetch`:
-  eslint fails both.
+  `src/mac/` imports `@tauri-apps/*`, and nothing under `src/` calls `fetch`
+  but `src/web/http.ts`: eslint fails both.
 - A Rust command or event is named in one place, `src/mac/backend.ts`. A new
   one is a method on the interface first, then its line there.
 - A document is one thing: `open`, `save`, `move`, `copy` and `remove` take the
@@ -37,19 +39,64 @@
   and rejects with `SaveConflict` otherwise; the sidecar is last writer wins.
   A `Rev` is opaque outside the backend that made it.
 - What a platform may not have is an optional group on `Backend` (`versions`,
-  `windows`, `untitled`, `localFiles`, `pdf`, `updater`), never a flag and
-  never a check of which platform this is. The group is asked for where the
+  `shows`, `windows`, `untitled`, `localFiles`, `pdf`, `updater`), never a
+  flag and never a check of which platform this is. The group is asked for where the
   feature comes into view; what is behind that takes the group, or a handler,
   as a prop, and a missing one is a button, a menu row or a shortcut that is
   not there.
-- Nothing calls `backend` at import time: an entry (`src/main.tsx`, a harness
-  page) calls `installBackend` and then renders.
+- Where platforms differ in kind and not in ability, the backend says so as
+  data: `home` (the one workspace it is for, which the app opens at start in
+  place of the last one) and `htmlFrame` (a page that arbitrary html is
+  shown in, in place of a frame handed the markup).
+- Nothing calls `backend` at import time: an entry (`src/main.tsx`,
+  `src/web/start.tsx`, a harness page) calls `installBackend` and then
+  renders.
 - `watch` is given the whole set of documents on screen each time it changes,
   and again after a document's first sidecar write: the Mac watches files, and
   a file that was not there was not being watched.
-- `verify-harness/seam.tsx` is a second backend (in memory, no optional
-  group) that `drive-seam.mjs` runs the real `App` on. Nothing typechecks the
-  harness: a required member added to `Backend` is added there too.
+- `verify-harness/seam.tsx` is a backend of the harness's own (in memory, no
+  optional group) that `drive-seam.mjs` runs the real `App` on. Nothing
+  typechecks the harness: a required member added to `Backend` is added there
+  too.
+
+## The browser version (`src/web/`, `app.html`)
+
+Its sign-in and the worker's routes: [cloud-people-agents.md](cloud-people-agents.md)
+*A browser*.
+
+- It is built into the worker's web directory (`buildApp`,
+  `scripts/bundle-worker.mjs`, with the Mac frontend's own `vite.config.ts`)
+  and ships with the worker: `app.html` at `/app`, its bundles under
+  `/app/assets/`. Every address in it is absolute and under `/app`.
+- **The page's policy is `script-src 'self'`** (`cloud-worker/web/_headers`),
+  so: `app.html` carries no script of its own; nothing in the bundle may
+  make script from text; and **a frame given markup (`srcdoc`, `blob:`)
+  is held to the page's policy**, which is why an html document is shown in
+  `/app/frame` (`Backend.htmlFrame`, `src/web/frame.html`), a page served
+  with its own sandbox policy that asks the app for the markup.
+- `src/web/gate.js` runs first, as written: plain ES5, never bundled. It
+  stops a phone, a tablet and a browser too old for the editor, and
+  `main.ts` then imports nothing. `main.ts` stays that small; `start.tsx`
+  imports `App` only once somebody is signed in.
+- `src/web/http.ts` is the only code that fetches. It holds no credential
+  (the sign-in is a cookie it cannot read), asks this origin only, and counts
+  every request per UTC day as the engine does (`x-doklin-used`).
+- `workspace.ts` holds every section's manifest and derives from them what
+  the engine tells the UI on a Mac: one `CloudStatus`, the tree, what changed
+  elsewhere. A path is the workspace's name as a root, then where the Mac
+  app would put the same file (`Private/…`, `Restricted/<name>/…`). It asks
+  the worker by attention with the engine's numbers (`poll_gap`): change
+  both.
+- It reads the worker's answers with the worker's own types:
+  `cloud-worker/src/wire.ts`, `manifest.ts`, `layout.ts`, `roles.ts`.
+  **Those files import nothing of the worker's runtime; keep them so.** The
+  app's typecheck has no Workers types, so one that came to import `env.ts`
+  fails it.
+- A link is `/app#w=&s=&f=`, taken out of the address by the `shows` group
+  and resolved in the manifests held (`address.ts`).
+- What a browser has not got is no group at all: `windows`, `untitled`,
+  `localFiles`, `versions`, `pdf`, `updater`.
+- `verify-harness/drive-web.mjs` drives the built page, not a dev server.
 
 ## Saving
 
@@ -94,8 +141,9 @@
   file of no workspace is focused where it is already a tab, else gets its
   own window — never attached to a workspace it is not in.
 - What a window must show is queued per label and drained by the window
-  (`take_window_shows`) once ready and on each `window-shows` ping, never
-  emitted as data: a window still restoring or just spawned has no listener.
+  (`take_window_shows`, the `shows` group) once ready and on each
+  `window-shows` ping, never emitted as data: a window still restoring or
+  just spawned has no listener.
   Before the main window takes its folder, the first folder asked for becomes
   its own (`PendingOpen`); a window the session restores is reused.
 - `<app_data_dir>/session.json` holds every window's folder, tabs, active tab
@@ -121,6 +169,11 @@
 
 ## Editor traps
 
+- A picture a note names by a path is asked for nowhere (`pictureAddress`,
+  `Editor.tsx`): pictures do not sync and nothing reads one. Left to the page,
+  the path would be asked of whatever serves the page, which in a browser is
+  the workspace's worker, at a request against its day each. A picture on the
+  web is asked for as written.
 - Links (`src/linkOpen.ts`): a followed click always `preventDefault`s — a
   navigation would replace the app. `http(s)`/`mailto:` go to `open_external`;
   path-shaped hrefs resolve through `src/docLinks.ts` into a tab; other schemes
