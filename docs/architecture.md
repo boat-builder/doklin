@@ -91,8 +91,10 @@ Its sign-in and the worker's routes: [cloud-people-agents.md](cloud-people-agent
   with its own sandbox policy that asks the app for the markup.
 - `src/web/gate.js` runs first, as written: plain ES5, never bundled. It
   stops a phone, a tablet and a browser too old for the editor, and
-  `main.ts` then imports nothing. `main.ts` stays that small; `start.tsx`
-  imports `App` only once somebody is signed in.
+  `main.ts` then imports nothing. What it calls a phone or a tablet is said
+  again by the page links go through (`site/public/open.html`): **change
+  both**. `main.ts` stays that small; `start.tsx` imports `App` only once
+  somebody is signed in.
 - `src/web/http.ts` is the only code that fetches. It holds no credential
   (the sign-in is a cookie it cannot read), asks this origin only, and counts
   every request per UTC day as the engine does (`x-doklin-used`).

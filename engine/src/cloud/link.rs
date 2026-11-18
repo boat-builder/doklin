@@ -8,9 +8,10 @@
 //! - **Everything is after the `#`.** A browser never sends that part to a
 //!   server, so doklin.cc, its logs and a chat app's preview bot never learn
 //!   which workspace or which page a link is. doklin.cc only hands the link
-//!   to the app: an iPhone opens it straight from Apple's association file,
-//!   anything else through the page at that address, which passes it on as
-//!   `doklin://open#…` (site/public/open.html and
+//!   on: an iPhone opens it straight from Apple's association file, anything
+//!   else through the page at that address, which passes it to the app as
+//!   `doklin://open#…` or, on a computer, to the browser version on the
+//!   link's own domain, `https://<d>/app#…` (site/public/open.html and
 //!   site/public/.well-known/apple-app-site-association).
 //! - **Ids, never a path or a title.** A rename or a move inside its section
 //!   keeps the link working, and a link spells out no folder's name.
@@ -106,7 +107,9 @@ impl PageLink {
     }
 }
 
-/// A host, with a port when it has one: what cloud.json calls a domain.
+/// A host, with a port when it has one: what cloud.json calls a domain. The
+/// link page sends a browser to nothing else (`isDomain`,
+/// site/public/open.html): change both.
 fn is_domain(s: &str) -> bool {
     let (host, port) = match s.rsplit_once(':') {
         Some((host, port)) => (host, Some(port)),
@@ -203,6 +206,7 @@ mod tests {
     fn everything_that_says_where_a_link_goes_says_it_as_this_does() {
         let page = include_str!("../../../site/public/open.html");
         assert!(page.contains(&format!("\"{}://open\"", SCHEME)), "open.html hands a link on as {}://open", SCHEME);
+        assert!(page.contains("\"/app#\""), "open.html sends a browser to the domain's /app");
         let browser = include_str!("../../../src/web/address.ts");
         assert!(browser.contains(&format!("const PAGE = \"{}\";", PAGE)), "the browser version makes a link at {}", PAGE);
         for key in ["\"d\"", "\"w\"", "\"f\""] {
@@ -240,6 +244,22 @@ mod tests {
         let paths: Vec<&str> = details["components"].as_array().unwrap().iter().filter_map(|c| c["/"].as_str()).collect();
         assert!(paths.contains(&PATH), "the association file sends {} to the app: {:?}", PATH, paths);
         assert_eq!(PAGE, format!("https://{}{}", HOST, PATH));
+    }
+
+    /// The page links go through offers the browser version to the devices
+    /// the browser version itself lets in: one question, asked in two files.
+    #[test]
+    fn the_link_page_calls_a_phone_what_the_browser_version_does() {
+        fn said(source: &str, statement: &str) -> String {
+            let from = source.find(statement).unwrap_or_else(|| panic!("no `{}`", statement));
+            let to = from + source[from..].find(';').unwrap();
+            source[from..to].split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        let page = include_str!("../../../site/public/open.html");
+        let gate = include_str!("../../../src/web/gate.js");
+        for statement in ["var short =", "var handheld ="] {
+            assert_eq!(said(page, statement), said(gate, statement), "open.html and gate.js: change both");
+        }
     }
 
     #[test]

@@ -20,6 +20,7 @@ pnpm typecheck:worker && pnpm test:worker      # the cloud worker
 node verify-harness/drive-ios.mjs             # the iOS app's core against a harness worker
 node verify-harness/drive-ios.mjs --app       # the iOS app in a simulator (a Mac with Xcode)
 node verify-harness/drive-web.mjs             # the browser version, built, against a harness worker
+node verify-harness/drive-open.mjs            # doklin.cc's link page (site/public/open.html)
 ```
 
 `swift test --package-path ios/DoklinKit` links the engine: `scripts/ios-engine.sh
