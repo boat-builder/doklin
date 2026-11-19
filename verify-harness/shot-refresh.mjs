@@ -83,9 +83,10 @@ for (const c of cases) {
 }
 
 // ---------- Settings → Appearance ----------
-// The theme is the only choice: the swatches paint from their own theme's
-// tokens, a pick applies live with the menu still open and survives a
-// relaunch, and the document's faces and measure are fixed.
+// The theme tiles, then Full width: the swatches paint from their own
+// theme's tokens, a pick applies live with the menu still open and survives
+// a relaunch, the document's faces are fixed, and Full width lifts the
+// column's cap (live, across a relaunch, and back).
 {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 820 }, deviceScaleFactor: 2 });
   const page = await ctx.newPage();
@@ -131,15 +132,27 @@ for (const c of cases) {
   await page.click('[data-testid="settings-theme-dark"]');
   await page.waitForTimeout(250);
   await page.screenshot({ path: `${OUT}refresh-appearance-dark.png` });
+  await page.click('[data-testid="settings-full-width"]');
+  await page.waitForTimeout(250);
+  const wide = {
+    open: await page.locator(".settings-popover").count(),
+    checked: await page.getAttribute('[data-testid="settings-full-width"]', "aria-checked"),
+    measure: (await docLook()).measure,
+    pane: await page.evaluate(() => Math.round(document.querySelector(".editor-wrap").clientWidth)),
+  };
   // A relaunch.
   await page.reload();
   await page.waitForSelector(".editor-wrap .ProseMirror h1", { timeout: 15000 });
   const after = { theme: await page.evaluate(() => document.documentElement.dataset.theme), ...(await docLook()) };
+  await page.click(".settings-fab");
+  await page.click('[data-testid="settings-full-width"]');
+  await page.waitForTimeout(250);
+  const narrowAgain = (await docLook()).measure;
   const checks = {
     serifHeadingsSansText: /Inter/.test(before.text) && /Literata/.test(before.head),
     columnIs672: before.measure === 672 + 128,
-    themeTilesOnly:
-      appearance.items.length === 1 &&
+    themeTilesThenFullWidth:
+      appearance.items.join() === "settings-tiles,settings-option" &&
       appearance.tiles.join() === "settings-theme-system,settings-theme-light,settings-theme-paper,settings-theme-dark",
     swatchesOwnTokens:
       swatches.light === "rgb(249, 249, 247)" && swatches.paper === "rgb(243, 241, 236)" && swatches.dark === "rgb(11, 11, 11)",
@@ -147,14 +160,17 @@ for (const c of cases) {
     menuStaysOpen: live.open === 1,
     appliesLive: live.theme === "paper" && live.checked.join() === "settings-theme-paper",
     survivesReload: after.theme === "dark",
-    facesFixed: after.text === before.text && after.head === before.head && after.measure === before.measure,
+    facesFixed: after.text === before.text && after.head === before.head,
+    fullWidthSpansPane: wide.open === 1 && wide.checked === "true" && wide.measure === wide.pane,
+    fullWidthSurvivesReload: after.measure === wide.measure,
+    fullWidthOffIs672: narrowAgain === 672 + 128,
   };
   const bad = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k);
   if (bad.length || errors.length) failed = true;
   console.log(
     "appearance".padEnd(13),
     bad.length ? `FAIL ${bad.join(",")}` : "ok",
-    JSON.stringify({ before, appearance, swatches, live, after }),
+    JSON.stringify({ before, appearance, swatches, live, wide, after, narrowAgain }),
     errors.length ? `ERRORS ${errors}` : "",
   );
   await ctx.close();

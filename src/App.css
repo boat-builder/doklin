@@ -750,7 +750,8 @@ body,
    The canvas padding stays fixed: zoom is about type size, not margins.
 
    The measure is --doc-measure (a 672px column × zoom) plus the fixed side
-   padding. */
+   padding. Full width (Settings → Appearance, data-full-width on <html>)
+   lifts the cap: the note spans its pane, the side padding stays. */
 .editor-wrap .milkdown .ProseMirror {
   max-width: calc(var(--doc-measure) * var(--doc-zoom, 1) + 128px);
   margin: 0 auto;
@@ -760,6 +761,10 @@ body,
   font-size: calc(var(--doc-size) * var(--doc-zoom, 1));
   line-height: var(--doc-leading);
   color: var(--text-1);
+}
+
+:root[data-full-width] .editor-wrap .milkdown .ProseMirror {
+  max-width: none;
 }
 
 @media (max-width: 720px) {
@@ -1608,9 +1613,11 @@ body,
 }
 
 /* A drawing fills the column: its 760-wide frame scales to fit, as the
-   viewer scales its 760 frame to the 672 column. */
+   viewer scales its 760 frame to the 672 column. In full width it keeps
+   the reading column's size, centred, rather than growing with the pane. */
 .milkdown .milkdown-code-block .preview .dk-drawing > svg {
   width: 100%;
+  max-width: calc(var(--doc-measure) * var(--doc-zoom, 1));
   height: auto;
 }
 
@@ -4068,12 +4075,16 @@ body.tree-dragging.tree-drag-invalid * {
    padding of .editor-wrap .milkdown .ProseMirror — the document font is set
    here only so `ch` measures the same), so it reads as the head of the note. */
 .doc-frontmatter {
-  max-width: calc(var(--doc-measure) + 128px);
+  max-width: calc(var(--doc-measure) * var(--doc-zoom, 1) + 128px);
   margin: 0 auto;
   padding: 20px 64px 0;
   box-sizing: border-box;
   font-family: var(--font-text);
   font-size: calc(var(--doc-size) * var(--doc-zoom, 1));
+}
+
+:root[data-full-width] .doc-frontmatter {
+  max-width: none;
 }
 
 .doc-frontmatter pre {

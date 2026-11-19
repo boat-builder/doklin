@@ -53,10 +53,10 @@
   --fs-lg: 14px;
 
   /* The document, as the Claude Docs viewer sets it: sans text under
-     regular-weight serif headings, in a fixed 672px column. These are not
-     reader choices; only the theme is. The body size is the 100% rung and
-     --doc-zoom multiplies it. Heading sizes are fixed px, multiplied by
-     zoom too. */
+     regular-weight serif headings, in a 672px column (Full width, App.css,
+     lifts that cap). The faces are not reader choices. The body size is
+     the 100% rung and --doc-zoom multiplies it. Heading sizes are fixed px,
+     multiplied by zoom too. */
   --font-text: var(--font-sans);
   --font-heading: var(--font-serif);
   --doc-size: 16px;
