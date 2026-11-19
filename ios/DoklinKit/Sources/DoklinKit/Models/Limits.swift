@@ -89,9 +89,9 @@ public enum LimitWords {
     }
 
     /// The question about many new documents: "212 new documents appeared
-    /// in Projects/foo. Sync them?". `folders` is the event's (at most a
+    /// in Library/Projects. Sync them?". `folders` is the event's (at most a
     /// few, most first), empty when it has not been heard.
-    public static func adds(_ n: Int, in folders: [AddedFolder], workspace: String, locale: Locale = .current) -> String {
+    public static func adds(_ n: Int, in folders: [AddedFolder], locale: Locale = .current) -> String {
         let what = n == 1 ? "1 new document" : "\(count(n, locale: locale)) new documents"
         let ask = n == 1 ? "Sync it?" : "Sync them?"
         guard let first = folders.first else { return "\(what) appeared. \(ask)" }
@@ -101,7 +101,7 @@ public enum LimitWords {
         } else if folders.count > 1 {
             place = "\(folders.count) folders"
         } else {
-            place = first.path.isEmpty ? workspace : first.path
+            place = first.path
         }
         return "\(what) appeared in \(place). \(ask)"
     }

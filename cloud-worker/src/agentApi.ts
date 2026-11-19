@@ -2,9 +2,9 @@
 // An agent is a bot with no copy of the folder: it works with a
 // workspace through these routes and through nothing else. What it may do
 // here is what its person ticked for it, and where is what that person can
-// see: every path is in the shared workspace, in their `Private/`, or in a
-// `Restricted/<folder>/` they are in (agentPlace.ts), and a route is answered
-// in the section its path names.
+// see: every path starts with its section — `Library/`, their `Private/`, or
+// a `Restricted/<folder>/` they are in (agentPlace.ts) — and a route is
+// answered in the section its path names. A path with no section is refused.
 //
 //   POST   /api/agent/login       NO BEARER — {code, host?} → 201 {token, agent, workspace,
 //                                 version, limits}; 401 when the code is unknown, used or
@@ -178,8 +178,8 @@ export async function handleAgent(
       agent: { id: who.id, name: who.name },
       person,
       scopes: who.scopes,
-      // Where it can work besides the shared workspace, as folders.
-      sections: (sections ?? []).filter((s) => s.mount !== "").map((s) => s.mount),
+      // Where it can work, as folders: Library first.
+      sections: (sections ?? []).map((s) => s.mount),
       ...rest,
       limits,
     });

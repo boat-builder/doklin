@@ -143,12 +143,13 @@ final class CommentsUITests: UITestCase {
         record("a folder's page")
         app.buttons["Done"].tap()
 
-        // The plan becomes the domain's home page, and back.
-        marked("page-menu-plan").tap()
+        // The plan becomes the domain's home page, and back. Its row is
+        // further down the list than the screen reaches.
+        reveal(marked("page-menu-plan"), "the plan's menu").tap()
         expect(app.buttons["Use as home page"], "Use as home page").tap()
-        marked("page-menu-plan").tap()
+        reveal(marked("page-menu-plan"), "the plan's menu, again").tap()
         expect(app.buttons["Unset as home page"], "the plan as the home page").tap()
-        marked("page-menu-home").tap()
+        reveal(marked("page-menu-home"), "Home's menu").tap()
         expect(app.buttons["Use as home page"], "Home no longer the home page").tap()
         // Read off the list, not a menu left open over the screen.
         expect(marked("page-home").staticTexts["Home page"], "Home the home page again")

@@ -116,7 +116,7 @@ pub enum PublicKind {
 /// One public page. A file entry references the file id — a rename carries
 /// the page for free — and snapshots the path, so a file deleted and
 /// recreated at the same path can be re-bound; a folder entry is keyed by
-/// path (`""` is the workspace root) and exposes every note under it.
+/// path (`""` is the section's whole folder) and exposes every note under it.
 /// `root` on at most one entry makes it the page at `/`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PublicEntry {
@@ -290,7 +290,7 @@ impl Beat {
 
 /* ---------- Grammars ---------- */
 
-/// A path relative to the workspace root as the worker accepts it: forward
+/// A path relative to its section as the worker accepts it: forward
 /// slashes, no traversal, bounded depth and length (layout.ts `validPath`).
 pub fn valid_rel_path(p: &str) -> bool {
     if p.is_empty() || p.len() > MAX_PATH_LEN || p.contains('\0') || p.contains('\\') {

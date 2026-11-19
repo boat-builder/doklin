@@ -1,9 +1,16 @@
 //! Where a workspace's sections are on disk.
 //!
-//! The shared workspace is the folder itself. A person's Private is
-//! `Private/` at its top, and each restricted folder they are in is a folder
-//! under `Restricted/`. Both names are reserved: nothing under them is ever
-//! part of the shared workspace.
+//! A connected workspace's folder holds its sections side by side: the
+//! shared section is `Library/`, a person's Private is `Private/`, and each
+//! restricted folder they are in is a folder under `Restricted/`. Anything
+//! else at the top is in no section: it stays on this device and syncs
+//! nowhere. Inside Library, the three names are reserved at its own top:
+//! the shared section holds nothing under `Library`, `Private` or
+//! `Restricted`. A device that still mounts the shared section at the
+//! workspace's root would put a shared `Private/x.md` in its own Private —
+//! and a build from before the Library layout that is run on a moved folder
+//! reads every shared file as moved under `Library/`, which the worker then
+//! refuses instead of telling every device.
 //!
 //! A folder says it is a space by the marker inside it,
 //! `<folder>/.doklin/space.json`. The marker is the only record of which
@@ -19,34 +26,50 @@ use super::config::{read_marker, sanitize_folder_name, MARKER_DIR};
 use super::manifest::{cap_utf16, MAX_NAME_LEN};
 use super::scan::{read_json, write_json};
 
+/// The shared section, at the top of the workspace (`LIBRARY_FOLDER`,
+/// cloud-worker/src/layout.ts; `LIBRARY_DIR`, src/cloud.ts;
+/// `TreeModel.libraryFolder`, the iPhone's Tree.swift: change all four).
+pub const LIBRARY_DIR: &str = "Library";
 /// A person's own section, at the top of the workspace. The browser version
-/// places a section's documents under the same two names, and names a
+/// places a section's documents under the same names, and names a
 /// restricted folder as `candidates` does (src/web/workspace.ts): change both.
 pub const PRIVATE_DIR: &str = "Private";
 /// What holds the restricted folders, at the top of the workspace.
 pub const RESTRICTED_DIR: &str = "Restricted";
-/// The names the shared workspace never holds anything under, whatever their
-/// case (`RESERVED_FOLDERS`, cloud-worker/src/layout.ts: change both).
-pub const RESERVED_DIRS: [&str; 2] = [PRIVATE_DIR, RESTRICTED_DIR];
-/// The shared workspace's id among an engine's units, and what a tombstone's
+/// The names a section's folder has at the top of the workspace, and so the
+/// names the shared section never holds anything under at its own top,
+/// whatever their case (`RESERVED_FOLDERS`, cloud-worker/src/layout.ts:
+/// change both).
+pub const RESERVED_DIRS: [&str; 3] = [LIBRARY_DIR, PRIVATE_DIR, RESTRICTED_DIR];
+/// The shared section's id among an engine's units, and what a tombstone's
 /// `to` says of a file that moved to it.
 pub const SHARED: &str = "";
 
 const SPACE_MARKER_FILE: &str = "space.json";
 
-/// The reserved name a workspace-relative path is under, if it is under one.
+/// The section's name a path starts with, if it starts with one: the
+/// reserved name a path inside the shared section is under, or what an
+/// entry at the top of the workspace is.
 pub fn reserved_top(rel: &str) -> Option<&'static str> {
     let top = rel.split('/').next().unwrap_or_default();
     RESERVED_DIRS.into_iter().find(|name| name.eq_ignore_ascii_case(top))
 }
 
-/// What a walk of the shared part of `root` leaves out: the reserved folders
-/// when `root` is a connected workspace — it carries the cloud marker — and
+/// Whether `dir` is the Library of a workspace that has moved into the
+/// Library layout (super::layout).
+pub fn is_library(dir: &Path) -> bool {
+    dir.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(LIBRARY_DIR))
+        && dir.parent().and_then(read_marker).is_some_and(|m| m.moved())
+}
+
+/// What a version store's walk of `root` leaves out: the reserved folders
+/// when `root` is a workspace's Library, or a connected folder that has not
+/// moved into the Library layout yet (it carries the cloud marker), and
 /// nothing when it is an ordinary folder, where the two names mean nothing.
-/// The version store asks this too, so a snapshot of the workspace never
-/// holds what is in a section of its own.
+/// So a snapshot of the shared section never holds what is in a section of
+/// its own.
 pub fn shared_skip(root: &Path) -> &'static [&'static str] {
-    if read_marker(root).is_some() {
+    if is_library(root) || read_marker(root).is_some() {
         &RESERVED_DIRS
     } else {
         &[]

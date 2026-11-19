@@ -305,7 +305,7 @@ public struct DiffLine: Identifiable, Equatable, Sendable {
 /// does not — or a note or page, whose files (its markdown, its html, its
 /// comments) went together and come back together.
 public struct DeletedDocument: Identifiable, Hashable, Sendable {
-    /// The version store that holds it, absolute: the workspace's, or a section's.
+    /// The version store that holds it, absolute: its section's.
     public let store: String
     /// The file it opens as: a note's markdown, else its page.
     public let primary: DeletedFile

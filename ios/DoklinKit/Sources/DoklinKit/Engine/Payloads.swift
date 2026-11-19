@@ -145,7 +145,7 @@ public enum PublicKind: String, Decodable, Sendable {
 public struct PublicPage: Decodable, Equatable, Sendable, Identifiable {
     public let slug: String
     public let kind: PublicKind
-    /// Workspace-relative; `""` is the workspace itself, for a folder page.
+    /// Workspace-relative; `Library` is the whole of it, for a folder page.
     public let path: String
     public let title: String?
     public let desc: String?
@@ -314,7 +314,7 @@ public struct RecentFile: Decodable, Hashable, Sendable {
     /// 1: made and never changed — or moved in from another section, which
     /// is a new file there. 0: not synced yet.
     public let rev: Int
-    /// The space it is in; null for the shared workspace.
+    /// The space it is in; null for Library.
     public let section: String?
 
     public init(path: String, fileId: String?, hash: String?, mtime: Int, by: String, rev: Int, section: String?) {
@@ -414,7 +414,7 @@ public struct EveryPage: Decodable, Equatable, Sendable, Identifiable {
     public let title: String
     public let by: String
     public let at: Int
-    /// In the shared workspace, rather than a section.
+    /// In Library, rather than another section.
     public let shared: Bool
 
     public var id: String { slug }
@@ -453,7 +453,7 @@ public struct CloudPendingAdds: Decodable, Equatable, Sendable {
 }
 
 public struct AddedFolder: Decodable, Equatable, Sendable {
-    /// Workspace-relative; `""` is the workspace itself.
+    /// Workspace-relative: `Library` for those directly in it.
     public let path: String
     public let count: Int
 }
@@ -490,7 +490,7 @@ public enum VersionsPhase: String, Decodable, Sendable {
     case error
 }
 
-/// One version store: the workspace's, or a section's.
+/// One version store: a section's — Library, Private, a restricted folder.
 public struct VersionsStatus: Decodable, Equatable, Sendable, Identifiable {
     public let root: String
     public let key: String

@@ -41,22 +41,6 @@ final class PeopleUITests: UITestCase {
         }
     }
 
-    /// Scroll a list until something further down it is on screen, clear
-    /// of the tab bar and the bar over it along the bottom edge.
-    @discardableResult
-    private func reveal(_ element: XCUIElement, _ what: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
-        for _ in 0..<8 where !reachable(element) {
-            app.swipeUp()
-        }
-        return expect(element, what, timeout: 5, file: file, line: line)
-    }
-
-    private func reachable(_ element: XCUIElement) -> Bool {
-        guard element.exists, element.isHittable else { return false }
-        let bar = app.tabBars.firstMatch
-        return !bar.exists || !bar.isHittable || element.frame.maxY < bar.frame.minY - 64
-    }
-
     /// Tick a switch in a form: its knob, not its words.
     private func tick(_ toggle: XCUIElement) {
         let knob = toggle.switches.firstMatch
@@ -157,7 +141,8 @@ final class PeopleUITests: UITestCase {
         expect(marked("here-alone"), "only this iPhone here")
         try ask("editing?path=Projects/plan.md")
         // It is here once a poll has said so: pulling the list down asks now.
-        let editing = text(containing: "editing Projects/plan.md")
+        // This iPhone names the plan by its path here, Library's name first.
+        let editing = text(containing: "editing Library/Projects/plan.md")
         for _ in 0..<6 where !editing.waitForExistence(timeout: 10) {
             app.collectionViews.firstMatch.swipeDown()
         }

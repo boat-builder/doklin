@@ -47,7 +47,9 @@
 //   - closing with unsaved text asks first, and what was typed is sent as
 //     the page goes; what could not be sent is sent the next time the
 //     workspace is opened in that browser;
-//   - two tabs ask the worker as one.
+//   - two tabs ask the worker as one;
+//   - a browser that kept a draft, its tabs and its tree from before the
+//     Library layout has them moved into Library once, and the draft is sent.
 //
 // And people, devices and agents (the `access` group, src/web/backend.ts),
 // where a code is made on the page (src/web/codes.ts):
@@ -264,6 +266,10 @@ async function deviceCode() {
 const HOME = `${ORIGIN}/robots.txt`;
 /** The workspace's root as the app names it: the seed's workspace is "Notes". */
 const ROOT_NAME = "/Notes";
+/** Where the shared section's documents are in the tree: its own folder
+ *  (`LIBRARY_FOLDER`, cloud-worker/src/layout.ts). What the worker stores
+ *  and is sent is relative to the section, without it. */
+const LIBRARY = `${ROOT_NAME}/Library`;
 
 /* ---------- One engine ---------- */
 
@@ -502,7 +508,7 @@ async function driveApp(name) {
     page.on("response", (r) => r.status() >= 400 && console.log(`  [${stage}] ${r.status()} ${r.request().method()} ${r.url()}`));
   }
   const assetsAsked = (from) => answered.slice(from).filter((a) => a.path.startsWith("/app/assets/") && a.path.endsWith(".js")).length;
-  const row = (path) => page.locator(`[title="${ROOT_NAME}/${path}"]`).last();
+  const row = (path) => page.locator(`[title="${LIBRARY}/${path}"]`).last();
   const editorText = () => page.evaluate(() => document.querySelector(".ProseMirror")?.innerText ?? "");
   const invite = () => page.locator('[data-testid="web-invite"]');
   const error = () => page.locator('[data-testid="web-error"]').innerText({ timeout: 10_000 }).catch(() => "");
@@ -553,14 +559,20 @@ async function driveApp(name) {
   /* 4 — the tree */
   stage = "the tree";
   const titles = await page.evaluate(() => [...document.querySelectorAll("[title]")].map((el) => el.getAttribute("title")));
-  const has = (path) => titles.includes(`${ROOT_NAME}/${path}`);
+  const has = (path) => titles.includes(`${LIBRARY}/${path}`);
   say("the tree is the workspace's documents and folders", has("Home.md") && has("Scratch.md") && has("Projects") && has("Diagram.md"));
+  const headings = (await page.locator(".sidebar-section-label").allInnerTexts()).map((t) => t.trim());
+  say(
+    "the shared ones are under Library, the tree's first heading, and none is at the workspace's top",
+    headings[0] === "Library" && !headings.includes("Workspace") && (await page.locator('[data-testid="section-library"]').count()) === 1 && !titles.includes(`${ROOT_NAME}/Home.md`),
+    headings.join(" · "),
+  );
   await row("Projects").click();
   await row("Projects/plan.md").waitFor({ timeout: 10_000 });
   const inFolder = await page.evaluate(() => [...document.querySelectorAll("[title]")].map((el) => el.getAttribute("title")));
   say(
     "a note's html rendition and its sidecar are not rows of their own",
-    inFolder.includes(`${ROOT_NAME}/Projects/plan.md`) && !inFolder.includes(`${ROOT_NAME}/Projects/plan.html`) && !inFolder.some((t) => t?.endsWith(".meta.jsonl")),
+    inFolder.includes(`${LIBRARY}/Projects/plan.md`) && !inFolder.includes(`${LIBRARY}/Projects/plan.html`) && !inFolder.some((t) => t?.endsWith(".meta.jsonl")),
   );
   say("the person's own section is there", (await page.getByText("Private", { exact: true }).count()) > 0);
 
@@ -733,7 +745,7 @@ async function driveWriting(name) {
   const put = (path, body) => other.ask(`/api/web/doc?path=${encodeURIComponent(path)}`, { method: "PUT", body: JSON.stringify(body) });
   await put(DRAFT, { md: { text: "# Draft\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n", ifRev: null } });
 
-  const row = (path, on = page) => on.locator(`[data-tree-path="${ROOT_NAME}/${path}"]`);
+  const row = (path, on = page) => on.locator(`[data-tree-path="${LIBRARY}/${path}"]`);
   const para = (text) => page.locator(".ProseMirror p", { hasText: text }).first();
   const editorHas = (text, on = page, ms = 30_000) =>
     on.waitForFunction((t) => (document.querySelector(".ProseMirror")?.innerText ?? "").includes(t), text, { timeout: ms }).then(() => true, () => false);
@@ -975,6 +987,55 @@ async function driveWriting(name) {
   say("and both are told what the one that asks was told", (await row(news).count()) === 1 && (await row(news, beside).count()) === 1);
   await beside.close();
 
+  /* 11 — a browser from before the Library layout */
+  stage = "a browser from before the Library layout";
+  // What a browser kept while the shared section was the tree's top: a draft
+  // of a tab that is gone, the tab itself and the open folder — every one of
+  // them under the path a shared document had then, `/Notes/<path>`.
+  const BEFORE = `${DIR}/Before Library.md`;
+  await put(BEFORE, { md: { text: "# Before Library\n\nWritten before.\n", ifRev: null } });
+  const was = await storedAt(BEFORE);
+  const { you, workspace } = await (await owner("/api/meta")).json();
+  const unsent = `${was.text}\nTyped before Library, never sent.\n`;
+  const earlier = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
+  const old = await earlier.newPage();
+  watch(old);
+  await old.goto(HOME);
+  const stored = {
+    [`doklin:web:draft:${workspace.id}:${you.memberId}:gonetab1:${ROOT_NAME}/${BEFORE}`]: JSON.stringify({ text: unsent, over: { fid: was.fid, rev: was.rev, hash: was.hash } }),
+    "doklin:session": JSON.stringify({ version: 2, lastRoot: ROOT_NAME, sessions: { [ROOT_NAME]: { tabs: [{ id: "t-before", kind: "file", path: `${ROOT_NAME}/${BEFORE}` }], activeId: "t-before" } } }),
+    "doklin:sidebar-tree": JSON.stringify({ [ROOT_NAME]: { open: [DIR, "Private"], folded: ["workspace"] } }),
+  };
+  await old.evaluate((all) => Object.entries(all).forEach(([key, value]) => localStorage.setItem(key, value)), stored);
+  await old.goto(`${ORIGIN}/app`);
+  await old.locator('[data-testid="web-invite"]').fill(`doklin-invite ${ORIGIN} ${await deviceCode()}`);
+  await old.click('[data-testid="web-sign-in"]');
+  const reopened = await editorHas("Typed before Library, never sent.", old, 60_000);
+  const landed = await until(async () => (await storedAt(BEFORE)).text === unsent, 20_000);
+  say("a draft kept from before is on the page, in the tab that was open, and sent", reopened && landed, landed ? "" : (await storedAt(BEFORE)).text.replace(/\s+/g, " "));
+  const after = await old.evaluate(() => ({
+    drafts: Object.keys(localStorage).filter((k) => k.startsWith("doklin:web:draft:")),
+    session: JSON.parse(localStorage.getItem("doklin:session") ?? "{}"),
+    tree: JSON.parse(localStorage.getItem("doklin:sidebar-tree") ?? "{}"),
+    done: localStorage.getItem("doklin:web:library-layout"),
+  }));
+  const tabs = after.session.sessions?.[ROOT_NAME]?.tabs ?? [];
+  const tree = after.tree[ROOT_NAME] ?? {};
+  say(
+    "the tabs and the tree kept from before are under Library, the shared section's fold among them, and that is done once",
+    tabs.some((t) => t.path === `${LIBRARY}/${BEFORE}`) &&
+      !tabs.some((t) => t.path === `${ROOT_NAME}/${BEFORE}`) &&
+      tree.open?.includes(`Library/${DIR}`) &&
+      tree.open?.includes("Private") &&
+      !tree.open?.includes(DIR) &&
+      tree.folded?.includes("library") &&
+      !tree.folded?.includes("workspace") &&
+      after.done === "1" &&
+      !after.drafts.some((k) => k.endsWith(`:${ROOT_NAME}/${BEFORE}`)),
+    JSON.stringify({ tabs: tabs.map((t) => t.path), tree, done: after.done }),
+  );
+  await earlier.close();
+
   say("the page's policy refused nothing, and the page threw nothing", trouble.length === 0, trouble.slice(0, 3).join(" | "));
   await other.close();
   await browser.close();
@@ -1026,7 +1087,7 @@ async function driveRest(name) {
   const linkTo = (fid) => `https://doklin.cc/open#d=${encodeURIComponent(new URL(ORIGIN).host)}&w=${meta.workspace.id}&f=${fid}`;
   await put(LINKS, `# Links\n\n[to alpha](${linkTo(alpha.fid)})\n\n[to nothing](${linkTo("f-0000000000000000")})\n`);
 
-  const row = (path) => page.locator(`[data-tree-path="${ROOT_NAME}/${path}"]`);
+  const row = (path) => page.locator(`[data-tree-path="${LIBRARY}/${path}"]`);
   const editorHas = (text, ms = 30_000) =>
     page.waitForFunction((t) => (document.querySelector(".ProseMirror")?.innerText ?? "").includes(t), text, { timeout: ms }).then(() => true, () => false);
   const menu = () => page.locator(".sidebar-menu-item");
@@ -1292,7 +1353,7 @@ function signedIn(browser, trouble) {
         await page.goto(`${ORIGIN}/app`);
         await at("web-invite").fill(line);
         await at("web-sign-in").click();
-        return page.locator(`[data-tree-path="${ROOT_NAME}/Home.md"]`).waitFor({ timeout: 60_000 }).then(() => true, () => false);
+        return page.locator(`[data-tree-path="${LIBRARY}/Home.md"]`).waitFor({ timeout: 60_000 }).then(() => true, () => false);
       },
       /** The workspace menu's People…, Devices… or Agents…, opened afresh:
        *  the view reads its lists when it opens. */
@@ -1523,7 +1584,7 @@ async function driveFolders(name) {
   /** The page loaded again: what a poll would bring, without waiting for one. */
   const again = async (who) => {
     await who.page.reload();
-    await row(who, "Home.md").waitFor({ timeout: 60_000 });
+    await row(who, "Library/Home.md").waitFor({ timeout: 60_000 });
   };
   const dialogText = async (who, id) => (await who.at(id).innerText({ timeout: 15_000 })).replace(/\s+/g, " ").trim();
   const moves = (from) => answered.slice(from).filter((a) => a.method === "POST" && a.path === "/api/web/move");
@@ -1605,14 +1666,14 @@ async function driveFolders(name) {
   );
 
   /* 3 — Restrict access… on a folder larger than one request moves */
-  await row(boss, BOARD).click();
-  await row(boss, `${BOARD}/n00.md`).click();
+  await row(boss, `Library/${BOARD}`).click();
+  await row(boss, `Library/${BOARD}/n00.md`).click();
   const editorHas = (who, text, ms = 30_000) =>
     who.page.waitForFunction((t) => (document.querySelector(".ProseMirror")?.innerText ?? "").includes(t), text, { timeout: ms }).then(() => true, () => false);
   await editorHas(boss, "Note 00");
-  const offered = await labels(boss, BOARD);
+  const offered = await labels(boss, `Library/${BOARD}`);
   from = answered.length;
-  await pick(boss, BOARD, "Restrict access…");
+  await pick(boss, `Library/${BOARD}`, "Restrict access…");
   await boss.at("restricted-people").waitFor({ timeout: 15_000 });
   const restrictHint = await dialogText(boss, "restricted-folder");
   const prefilled = await boss.at("restricted-name").inputValue();
@@ -1636,7 +1697,7 @@ async function driveFolders(name) {
       inBoard.includes("n00.md") &&
       inBoard.includes("Sub/Deep.md") &&
       leftBehind.length === 0 &&
-      (await row(boss, BOARD).count()) === 0,
+      (await row(boss, `Library/${BOARD}`).count()) === 0,
     `${boardMoves.length} move(s): ${boardMoves.map((m) => m.status).join(", ")}; ${inBoard.length} file(s) in it, ${leftBehind.length} left behind`,
   );
   if ((await row(boss, `Restricted/${BOARD}/n00.md`).count()) === 0) await row(boss, `Restricted/${BOARD}`).click();
@@ -1675,8 +1736,8 @@ async function driveFolders(name) {
   );
 
   /* 5 — a folder dropped on Restricted becomes one, after a question */
-  await row(boss, DROP).scrollIntoViewIfNeeded();
-  const a = await row(boss, DROP).boundingBox();
+  await row(boss, `Library/${DROP}`).scrollIntoViewIfNeeded();
+  const a = await row(boss, `Library/${DROP}`).boundingBox();
   const b = await boss.at("section-restricted").locator(".sidebar-section-label").boundingBox();
   await boss.page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
   await boss.page.mouse.down();
@@ -1695,7 +1756,7 @@ async function driveFolders(name) {
       dropped &&
       drop?.members.length === 1 &&
       (await filesOf(drop.id)).sort().join() === "one.md,two.md" &&
-      (await gone(boss, DROP)),
+      (await gone(boss, `Library/${DROP}`)),
     question || `no question: dragged from ${JSON.stringify(a)} to ${JSON.stringify(b)}`,
   );
 
@@ -1703,7 +1764,7 @@ async function driveFolders(name) {
   const REASON = "the bucket is not answering — try again in a moment";
   let asks = 0;
   refusing = (req) => (req.method === "POST" && req.url === "/api/web/move" && (asks += 1) === 2 ? { status: 503, error: REASON } : null);
-  await pick(boss, HALF, "Restrict access…");
+  await pick(boss, `Library/${HALF}`, "Restrict access…");
   await boss.at("restricted-people").waitFor({ timeout: 15_000 });
   await boss.at("restricted-create").click();
   const partway = await boss.page.locator('[data-testid="restricted-folder"] .modal-error').innerText({ timeout: 60_000 }).catch(() => "");
@@ -1719,7 +1780,7 @@ async function driveFolders(name) {
       (await filesOf(half.id)).length === 16 &&
       stillShared.length === 5 &&
       (await there(boss, `Restricted/${HALF}`)) &&
-      (await row(boss, HALF).count()) === 1,
+      (await row(boss, `Library/${HALF}`).count()) === 1,
     partway,
   );
   await boss.page.locator('[data-testid="restricted-folder"] .modal-close').click();
@@ -1727,7 +1788,7 @@ async function driveFolders(name) {
   /* 7 — and one that moves nothing leaves no folder behind */
   from = answered.length;
   refusing = (req) => (req.method === "POST" && req.url === "/api/web/move" ? { status: 503, error: REASON } : null);
-  await pick(boss, NONE, "Restrict access…");
+  await pick(boss, `Library/${NONE}`, "Restrict access…");
   await boss.at("restricted-people").waitFor({ timeout: 15_000 });
   await boss.at("restricted-create").click();
   const nothing = await boss.page.locator('[data-testid="restricted-folder"] .modal-error').innerText({ timeout: 60_000 }).catch(() => "");

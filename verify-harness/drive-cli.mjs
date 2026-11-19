@@ -28,6 +28,10 @@
 // Each "machine" below is a scratch HOME and XDG_CONFIG_HOME, so the
 // credentials file a login leaves is the scratch one and never the real one.
 //
+// Every path an agent types starts with its section: the seed's Home.md is
+// Library/Home to the CLI, while a Mac's own sync calls (`macWrites`) name it
+// as the shared manifest stores it, Home.md.
+//
 // Two things are not the real worker, and say so where they are made: the
 // "Mac" (the superadmin's device token on the sync API, as an engine would
 // use it) and
@@ -384,7 +388,7 @@ await check("help: the overview lists every command; each topic and each command
     "the overview says only documents sync": /Doklin syncs markdown and html documents; any other file in\nthe folder stays on the device it is on\./.test(overview.out),
   };
   for (const name of COMMANDS) facts[`the overview lists ${name}`] = new RegExp(`^  ${name}\\b`, "m").test(overview.out);
-  for (const [topic, headline] of [["documents", "DOCUMENTS"], ["comments", "COMMENTS"], ["publishing", "PUBLISHING"], ["drawings", "DRAWINGS"], ["agent", "FOR AN AGENT"]]) {
+  for (const [topic, headline] of [["documents", "DOCUMENTS"], ["comments", "COMMENTS"], ["publishing", "PUBLISHING"], ["sections", "SECTIONS"], ["drawings", "DRAWINGS"], ["agent", "FOR AN AGENT"]]) {
     const r = await doklin(nobody, ["help", topic]);
     facts[`help ${topic}`] = r.code === 0 && r.out.startsWith(headline) && overview.out.includes(`doklin help ${topic}`);
   }
@@ -399,7 +403,18 @@ await check("help: the overview lists every command; each topic and each command
   const documents = (await doklin(nobody, ["help", "documents"])).out;
   facts["help documents says only documents sync"] =
     documents.includes("Doklin syncs markdown and html documents, nothing else.") && !/plain file|a picture|a PDF|CSV/.test(documents);
-  facts["no help mentions a plain file"] = !/plain file/.test(overview.out + documents + (await doklin(nobody, ["help", "agent"])).out);
+  const agent = (await doklin(nobody, ["help", "agent"])).out;
+  facts["no help mentions a plain file"] = !/plain file/.test(overview.out + documents + agent);
+  facts["the overview says every path starts with its section"] =
+    /Every path starts with the\nsection it is in, and a path with no section is refused:\n  Library\/… +everyone in the workspace sees it\n  Private\/… +only your person sees it\n  Restricted\/<folder>\/… +only the people in that folder\n/.test(overview.out);
+  facts["the agent's brief says where new work goes, in the app's words"] = agent
+    .replace(/\s+/g, " ")
+    .includes(
+      "You see what the person who gave you this sees. Every path starts with its section: Library/ is what everyone sees, Private/ only them, Restricted/<folder>/ that folder's people. Put anything new under Private/ unless they tell you where it goes",
+    );
+  facts["no example path lacks its section"] = !/doklin (read|write|rm|comments?|reply|publish|unpublish|mv) (?!Library\/|Private\/|Restricted\/|rm\b|<)/.test(
+    [documents, agent, ...(await Promise.all(["comments", "publishing", "sections"].map(async (t) => (await doklin(nobody, ["help", t])).out)))].join("\n"),
+  );
   facts["an unknown topic is exit 2"] = refused(await doklin(nobody, ["help", "nonsense"]), 2, /no help on "nonsense"/);
   return facts;
 });
@@ -409,7 +424,7 @@ await check("every word after `doklin` is a command, on every system: alone it i
   const alone = await doklin(nobody, []);
   return {
     "`doklin` alone prints the overview": alone.code === 0 && alone.out === overview,
-    "an unknown word is exit 2": refused(await doklin(nobody, ["raed", "Projects/plan"]), 2, /"raed" is not a doklin command — run `doklin help`/),
+    "an unknown word is exit 2": refused(await doklin(nobody, ["raed", "Library/Projects/plan"]), 2, /"raed" is not a doklin command — run `doklin help`/),
     "so is a path": refused(await doklin(nobody, ["notes.md"]), 2, /"notes\.md" is not a doklin command/),
     "and an option no command has": refused(await doklin(nobody, ["--nope"]), 2, /there is no --nope option/),
   };
@@ -486,10 +501,10 @@ await check("not logged in: every command that needs the workspace exits 6 and s
   const from = calls.length;
   const facts = {};
   const all = [
-    ["whoami"], ["ls"], ["info", "Home"], ["read", "Home"], ["search", "x"], ["comments", "Home"], ["published"],
-    ["write", "Home"], ["edit", "Home", "--find", "a", "--replace", "b"], ["mv", "Home", "Away"], ["rm", "Home"],
-    ["comment", "Home", "--on", "a", "-m", "b"], ["reply", "Home", "t", "-m", "b"], ["comment", "rm", "Home", "t"],
-    ["publish", "Home"], ["unpublish", "Home"], ["logout"],
+    ["whoami"], ["ls"], ["info", "Library/Home"], ["read", "Library/Home"], ["search", "x"], ["comments", "Library/Home"], ["published"],
+    ["write", "Library/Home"], ["edit", "Library/Home", "--find", "a", "--replace", "b"], ["mv", "Library/Home", "Library/Away"], ["rm", "Library/Home"],
+    ["comment", "Library/Home", "--on", "a", "-m", "b"], ["reply", "Library/Home", "t", "-m", "b"], ["comment", "rm", "Library/Home", "t"],
+    ["publish", "Library/Home"], ["unpublish", "Library/Home"], ["logout"],
   ];
   for (const args of all) facts[args.join(" ")] = refused(await doklin(nobody, args, { input: "text" }), 6, /not logged in/);
   const named = await doklin(nobody, ["ls", "-w", "nowhere.example.com"]);
@@ -628,7 +643,7 @@ await check("the reviewer and the writer log in on machines of their own", async
 /* 3 — reading: whoami, ls, info, read                                    */
 /* ====================================================================== */
 
-await check("whoami: the workspace, the agent, what it may do and the worker's version — piped and with --json alike", async () => {
+await check("whoami: the workspace, the agent, what it may do, the sections it sees and the worker's version — piped and with --json alike", async () => {
   const piped = await doklin(editorBox, ["whoami"]);
   const flagged = await doklin(editorBox, ["whoami", "--json"]);
   const me = piped.json;
@@ -637,6 +652,8 @@ await check("whoami: the workspace, the agent, what it may do and the worker's v
     "exit 0": piped.code === 0 && flagged.code === 0,
     who: same(me.agent, { id: editor.id, name: "Editor bot" }) && me.workspace.name === "Notes",
     "what it may do": same(me.scopes, ALL_SCOPES) && same(readerMe.scopes, ["read"]) && readerMe.agent.name === "Reader bot",
+    // Sherin's Private is a section of hers, so her agents see it too.
+    "the sections it sees, Library first": same(me.sections, ["Library", "Private"]) && same(readerMe.sections, me.sections),
     "the worker": Number.isInteger(me.version),
     "the domain's limits come with it": Number.isInteger(me.limits?.cliDaily) && me.limits.plan === "free",
     "the fleet's sum is a number": Number.isInteger(me.limits?.fleetToday),
@@ -645,49 +662,53 @@ await check("whoami: the workspace, the agent, what it may do and the worker's v
   };
 });
 
-await check("ls: folders, and documents with their versions — no address, never a sidecar, never a plain file", async () => {
-  const root = (await doklin(editorBox, ["ls"])).json;
-  const projects = (await doklin(editorBox, ["ls", "Projects"])).json;
-  const slashed = (await doklin(editorBox, ["ls", "/Projects/"])).json;
+await check("ls: the sections at the top; in a folder, its folders, and documents with their versions — no address, never a sidecar, never a plain file", async () => {
+  const top = (await doklin(editorBox, ["ls"])).json;
+  const root = (await doklin(editorBox, ["ls", "Library"])).json;
+  const projects = (await doklin(editorBox, ["ls", "Library/Projects"])).json;
+  const slashed = (await doklin(editorBox, ["ls", "/Library/Projects/"])).json;
+  const lower = (await doklin(editorBox, ["ls", "library/Projects"])).json;
   const deep = (await doklin(editorBox, ["ls", "--deep"])).json;
-  const deepProjects = (await doklin(editorBox, ["ls", "Projects", "--deep", "--json"])).json;
+  const deepProjects = (await doklin(editorBox, ["ls", "Library/Projects", "--deep", "--json"])).json;
   const doc = (list, path) => list.documents.find((d) => d.path === path);
-  const home = doc(root, "Home");
-  const plan = doc(projects, "Projects/plan");
+  const home = doc(root, "Library/Home");
+  const plan = doc(projects, "Library/Projects/plan");
   return {
     // Sherin's Private is a section of hers, so her agents see it too.
-    "the root's folders": same(root.folders, ["Private", "Projects"]) && root.dir === "",
-    "the root's documents": same(root.documents.map((d) => d.path), ["Comments", "Diagram", "Home", "Ideas", "Scratch", "Sizes"]),
+    "the top is the sections, and no document": same(top, { dir: "", folders: ["Library", "Private"], documents: [] }),
+    "Library's folders": same(root.folders, ["Library/Projects"]) && root.dir === "Library",
+    "Library's documents": same(root.documents.map((d) => d.path), ["Library/Comments", "Library/Diagram", "Library/Home", "Library/Ideas", "Library/Scratch", "Library/Sizes"]),
     "a listing is folders and documents, nothing else": same(Object.keys(root).sort(), ["dir", "documents", "folders"]),
     "a row says no address, public or link: info does": same(Object.keys(home).sort(), ["md", "path"]) && same(Object.keys(plan).sort(), ["html", "md", "path"]),
     "a version's facts": home.md.file === "Home.md" && home.md.rev === 1 && home.md.size === Buffer.byteLength(SEED_FILES["Home.md"]) && home.html === undefined,
-    "Projects' folders": same(projects.folders, ["Projects/Roadmap"]) && projects.dir === "Projects",
+    "Projects' folders": same(projects.folders, ["Library/Projects/Roadmap"]) && projects.dir === "Library/Projects",
     "plan has both versions, in step": plan.md.file === "plan.md" && plan.html.file === "plan.html" && plan.htmlBehind === undefined,
-    "status has only markdown": doc(projects, "Projects/status").md.rev === 1 && doc(projects, "Projects/status").html === undefined,
+    "status has only markdown": doc(projects, "Library/Projects/status").md.rev === 1 && doc(projects, "Library/Projects/status").html === undefined,
     "slashes around a folder are forgiven": same(slashed, projects),
-    "--deep is folders and documents too": same(Object.keys(deepProjects).sort(), ["dir", "documents", "folders"]) && deepProjects.documents.some((d) => d.path === "Projects/Roadmap/Paint it"),
-    "--deep lists nested documents and folders": deep.documents.some((d) => d.path === "Projects/Roadmap/Launch") && deep.folders.includes("Projects/Roadmap"),
+    "a section's name in any case": same(lower.documents, projects.documents),
+    "--deep is folders and documents too": same(Object.keys(deepProjects).sort(), ["dir", "documents", "folders"]) && deepProjects.documents.some((d) => d.path === "Library/Projects/Roadmap/Paint it"),
+    "--deep at the top lists every section's documents and folders": deep.documents.some((d) => d.path === "Library/Projects/Roadmap/Launch") && deep.folders.includes("Library/Projects/Roadmap") && deep.folders.includes("Private"),
     "no sidecar anywhere": !JSON.stringify(deep).includes(".meta.jsonl"),
   };
 });
 
 await check("ls: a folder that is not there is exit 3; a hidden or an ignored one is bad usage", async () => ({
-  missing: refused(await doklin(editorBox, ["ls", "Nope"]), 3, /no folder "Nope"/),
-  hidden: refused(await doklin(editorBox, ["ls", ".git"]), 2, /hidden/),
-  ignored: refused(await doklin(editorBox, ["ls", "node_modules"]), 2, /does not sync/),
+  missing: refused(await doklin(editorBox, ["ls", "Library/Nope"]), 3, /no folder "Library\/Nope"/),
+  hidden: refused(await doklin(editorBox, ["ls", "Library/.git"]), 2, /hidden/),
+  ignored: refused(await doklin(editorBox, ["ls", "Library/node_modules"]), 2, /does not sync/),
 }));
 
 await check("info: a document's versions, comment threads, link and public addresses — by its name or either file's; a plain file is refused", async () => {
-  const plan = (await doklin(editorBox, ["info", "Projects/plan"])).json;
-  const byHtml = (await doklin(editorBox, ["info", "Projects/plan.html"])).json;
-  const byMd = (await doklin(editorBox, ["info", "Projects/plan.md", "--json"])).json;
-  const comments = (await doklin(editorBox, ["info", "Comments"])).json;
-  const home = (await doklin(editorBox, ["info", "Home"])).json;
-  const scratch = (await doklin(editorBox, ["info", "Scratch"])).json;
+  const plan = (await doklin(editorBox, ["info", "Library/Projects/plan"])).json;
+  const byHtml = (await doklin(editorBox, ["info", "Library/Projects/plan.html"])).json;
+  const byMd = (await doklin(editorBox, ["info", "Library/Projects/plan.md", "--json"])).json;
+  const comments = (await doklin(editorBox, ["info", "Library/Comments"])).json;
+  const home = (await doklin(editorBox, ["info", "Library/Home"])).json;
+  const scratch = (await doklin(editorBox, ["info", "Library/Scratch"])).json;
   const ws = (await (await owner("/api/meta")).json()).workspace.id;
-  const words = (await doklin(editorBox, ["info", "Scratch"], { tty: true })).out;
+  const words = (await doklin(editorBox, ["info", "Library/Scratch"], { tty: true })).out;
   return {
-    "a document": plan.kind === "document" && plan.path === "Projects/plan" && plan.md.rev === 1 && plan.html.rev === 1 && plan.comments === 0,
+    "a document": plan.kind === "document" && plan.path === "Library/Projects/plan" && plan.md.rev === 1 && plan.html.rev === 1 && plan.comments === 0,
     "each version's size": plan.md.size === Buffer.byteLength(SEED_FILES["Projects/plan.md"]) && plan.html.size === Buffer.byteLength(SEED_FILES["Projects/plan.html"]),
     "its addresses: its own page, and inside the published folder": same(plan.public, [`${WORKER}/plan`, `${WORKER}/projects/plan`]),
     "Home is public at / and /home": same(home.public, [`${WORKER}/`, `${WORKER}/home`]),
@@ -697,28 +718,28 @@ await check("info: a document's versions, comment threads, link and public addre
     "a person reads it beside the addresses": /\n  link {6}https:\/\/doklin\.cc\/open#\S+\n  public {4}no\n/.test(words),
     "the same document by either file's name": same(byHtml, plan) && same(byMd, plan),
     "its comment threads are counted": comments.comments === 1,
-    "a plain file is bad usage that names what syncs": refused(await doklin(editorBox, ["info", "Projects/assets/pic.png"]), 2, /^Doklin syncs markdown and html documents only — "pic\.png" is neither/),
-    "what is not there is exit 3": refused(await doklin(editorBox, ["info", "Nope"]), 3, /there is no document at "Nope"/),
+    "a plain file is bad usage that names what syncs": refused(await doklin(editorBox, ["info", "Library/Projects/assets/pic.png"]), 2, /^Doklin syncs markdown and html documents only — "pic\.png" is neither/),
+    "what is not there is exit 3": refused(await doklin(editorBox, ["info", "Library/Nope"]), 3, /there is no document at "Library\/Nope"/),
   };
 });
 
 await check("read: the text on stdout and what is known about it on stderr; --md, --html or an extension picks the version; --clean drops comment markers; -o writes a file", async () => {
-  const md = await doklin(editorBox, ["read", "Projects/plan"]);
-  const html = await doklin(editorBox, ["read", "Projects/plan", "--html"]);
-  const byName = await doklin(editorBox, ["read", "Projects/plan.html"]);
-  const explicit = await doklin(editorBox, ["read", "Projects/plan", "--md", "--json"]);
-  const spaced = await doklin(editorBox, ["read", "Projects/Roadmap/Ship the boat"]);
-  const marked = await doklin(editorBox, ["read", "Comments"]);
-  const clean = await doklin(editorBox, ["read", "Comments", "--clean"]);
+  const md = await doklin(editorBox, ["read", "Library/Projects/plan"]);
+  const html = await doklin(editorBox, ["read", "Library/Projects/plan", "--html"]);
+  const byName = await doklin(editorBox, ["read", "Library/Projects/plan.html"]);
+  const explicit = await doklin(editorBox, ["read", "Library/Projects/plan", "--md", "--json"]);
+  const spaced = await doklin(editorBox, ["read", "Library/Projects/Roadmap/Ship the boat"]);
+  const marked = await doklin(editorBox, ["read", "Library/Comments"]);
+  const clean = await doklin(editorBox, ["read", "Library/Comments", "--clean"]);
   const copy = join(SCRATCH, "plan-copy.md");
-  const toFile = await doklin(editorBox, ["read", "Projects/plan", "-o", copy]);
+  const toFile = await doklin(editorBox, ["read", "Library/Projects/plan", "-o", copy]);
   return {
     "markdown by default, byte for byte": md.code === 0 && md.out === SEED_FILES["Projects/plan.md"],
-    "what it is, on stderr": same(md.meta, { kind: "document", path: "Projects/plan", file: "Projects/plan.md", rev: 1, version: "md" }),
-    "--html": html.out === SEED_FILES["Projects/plan.html"] && same(html.meta, { kind: "document", path: "Projects/plan", file: "Projects/plan.html", rev: 1, version: "html" }),
+    "what it is, on stderr": same(md.meta, { kind: "document", path: "Library/Projects/plan", file: "Library/Projects/plan.md", rev: 1, version: "md" }),
+    "--html": html.out === SEED_FILES["Projects/plan.html"] && same(html.meta, { kind: "document", path: "Library/Projects/plan", file: "Library/Projects/plan.html", rev: 1, version: "html" }),
     "the .html name picks the html": byName.out === html.out && byName.meta.version === "html",
     "--md": explicit.out === md.out && same(explicit.meta, md.meta),
-    "a name with spaces — its frontmatter is its text like the rest": spaced.out === SEED_FILES["Projects/Roadmap/Ship the boat.md"] && same(spaced.meta, { kind: "document", path: "Projects/Roadmap/Ship the boat", file: "Projects/Roadmap/Ship the boat.md", rev: 1, version: "md" }),
+    "a name with spaces — its frontmatter is its text like the rest": spaced.out === SEED_FILES["Projects/Roadmap/Ship the boat.md"] && same(spaced.meta, { kind: "document", path: "Library/Projects/Roadmap/Ship the boat", file: "Library/Projects/Roadmap/Ship the boat.md", rev: 1, version: "md" }),
     "comment markers are kept": marked.out === SEED_FILES["Comments.md"] && marked.out.includes("{=="),
     "--clean drops them and keeps the words": clean.code === 0 && !/\{==|==\}|\{>>|<<\}/.test(clean.out) && clean.out.includes("a highlighted phrase"),
     "-o writes the file and prints nothing": toFile.code === 0 && toFile.out === "" && readFileSync(copy, "utf8") === SEED_FILES["Projects/plan.md"] && toFile.meta.rev === 1,
@@ -741,10 +762,10 @@ await check("a link to a page, as the app copies it, is taken wherever a documen
       ? ["open hands a link to the app as it is registered for it", opened.code === 0 && same(JSON.parse(opened.out).links, [forApp])]
       : ["off a Mac, open refuses a link as it refuses a path: there is no app here", refused(opened, 1, /open hands files to the Doklin app, which runs only on a Mac/)];
   return {
-    "read takes it: the text, and the path it led to": read.code === 0 && read.out === SEED_FILES["Projects/plan.md"] && read.meta.path === "Projects/plan",
+    "read takes it: the text, and the path it led to, in its section": read.code === 0 && read.out === SEED_FILES["Projects/plan.md"] && read.meta.path === "Library/Projects/plan",
     "one question first, then the read": same(steps, ["GET find → 200", "GET doc → 200"]),
-    "info takes it in a mail's angle brackets, by its html file too": info.code === 0 && info.json.path === "Projects/plan",
-    "and comments": comments.code === 0 && comments.json.path === "Comments",
+    "info takes it in a mail's angle brackets, by its html file too": info.code === 0 && info.json.path === "Library/Projects/plan",
+    "and comments": comments.code === 0 && comments.json.path === "Library/Comments",
     "a page that is not there is exit 3": refused(await doklin(editorBox, ["read", link("Nope.md")]), 3, /no page at that link/),
     "a link from before the domain was set up again is the same": refused(await doklin(editorBox, ["read", wiped]), 3, /no page at that link/),
     "a link to a workspace this machine is not logged in to says which": refused(await doklin(editorBox, ["read", link("Projects/plan.md", "elsewhere.example.com")]), 6, /not logged in to elsewhere\.example\.com/),
@@ -754,14 +775,34 @@ await check("a link to a page, as the app copies it, is taken wherever a documen
 });
 
 await check("read: what is not there is exit 3 and says which half is missing; a sidecar, a plain file and a hidden path are bad usage", async () => {
-  const noHtml = await doklin(editorBox, ["read", "Home", "--html"]);
+  const noHtml = await doklin(editorBox, ["read", "Library/Home", "--html"]);
   return {
-    "no such document": refused(await doklin(editorBox, ["read", "Nope"]), 3, /there is no document at "Nope"/),
-    "no html version": refused(noHtml, 3, /Home has no html version/) && noHtml.problem.code === "no_html",
-    "a sidecar is not a document": refused(await doklin(editorBox, ["read", "Sizes.meta.jsonl"]), 2, /comments commands/),
-    "nor is a plain file": refused(await doklin(editorBox, ["read", "Projects/Roadmap/notes.txt"]), 2, /Doklin syncs markdown and html documents only — "notes\.txt" is neither/),
+    "no such document": refused(await doklin(editorBox, ["read", "Library/Nope"]), 3, /there is no document at "Library\/Nope"/),
+    "no html version": refused(noHtml, 3, /Library\/Home has no html version/) && noHtml.problem.code === "no_html",
+    "a sidecar is not a document": refused(await doklin(editorBox, ["read", "Library/Sizes.meta.jsonl"]), 2, /comments commands/),
+    "nor is a plain file": refused(await doklin(editorBox, ["read", "Library/Projects/Roadmap/notes.txt"]), 2, /Doklin syncs markdown and html documents only — "notes\.txt" is neither/),
     "a hidden path": refused(await doklin(editorBox, ["read", ".env"]), 2, /hidden/),
   };
+});
+
+await check("a path with no section is refused by every command that names one — exit 2, with the sentence that says which to use — and nothing changes", async () => {
+  const said = /^Projects\/plan is in no section\. Say which: Library\/Projects\/plan \(everyone\), Private\/Projects\/plan \(only your person\) or Restricted\/<folder>\/Projects\/plan\.$/;
+  const facts = {};
+  for (const args of [
+    ["read", "Projects/plan"], ["info", "Projects/plan"], ["comments", "Projects/plan"],
+    ["write", "Projects/plan", "--force"], ["edit", "Projects/plan", "--find", "June", "--replace", "July"],
+    ["comment", "Projects/plan", "--on", "June", "-m", "When?"], ["rm", "Projects/plan"],
+    ["mv", "Projects/plan", "Library/Projects/plan-2"], ["mv", "Library/Projects/plan", "Projects/plan"],
+    ["publish", "Projects/plan"], ["unpublish", "Projects/plan"],
+  ]) {
+    facts[args.join(" ")] = refused(await doklin(editorBox, args, { input: "# Lost\n" }), 2, said);
+  }
+  facts["ls of a folder with no section"] = refused(await doklin(editorBox, ["ls", "Projects"]), 2, /^Projects is in no section\. Say which: Library\/Projects \(everyone\)/);
+  facts["search --in one"] = refused(await doklin(editorBox, ["search", "plan", "--in", "Projects"]), 2, /^Projects is in no section\./);
+  const plan = await doklin(editorBox, ["read", "Library/Projects/plan"]);
+  facts["the document is as it was"] = plan.out === SEED_FILES["Projects/plan.md"] && plan.meta.rev === 1;
+  facts["nothing was made where the paths pointed"] = (await doklin(editorBox, ["info", "Library/Projects/plan-2"])).code === 3;
+  return facts;
 });
 
 /* ====================================================================== */
@@ -775,19 +816,19 @@ const ALPHA_HTML =
 await check("write: creates a document from what is piped in; replacing needs the revision that was read, or --force; the same text again writes nothing; --dry-run only says", async () => {
   const from = calls.length;
   const first = "# Alpha\n\nfirst draft\n";
-  const created = await doklin(editorBox, ["write", "Drive/alpha"], { input: first });
-  const bare = await doklin(editorBox, ["write", "Drive/alpha"], { input: "lost\n" });
-  const second = await doklin(editorBox, ["write", "Drive/alpha", "--if-rev", "1"], { input: "# Alpha\n\nsecond draft\n" });
-  const stale = await doklin(editorBox, ["write", "Drive/alpha", "--if-rev", "1"], { input: "lost\n" });
-  const both = await doklin(editorBox, ["write", "Drive/alpha", "--if-rev", "2", "--force"], { input: "lost\n" });
-  const forced = await doklin(editorBox, ["write", "Drive/alpha", "--force", "--json"], { input: "# Alpha\n\nthird draft\n" });
-  const unchanged = await doklin(editorBox, ["write", "Drive/alpha", "--force"], { input: "# Alpha\n\nthird draft\n" });
-  const dry = await doklin(editorBox, ["write", "Drive/alpha", "--if-rev=3", "--dry-run"], { input: "never\n" });
-  const now = await doklin(editorBox, ["read", "Drive/alpha"]);
-  const last = await doklin(editorBox, ["write", "Drive/alpha", "--if-rev", "3"], { input: ALPHA });
-  const info = (await doklin(editorBox, ["info", "Drive/alpha"])).json;
+  const created = await doklin(editorBox, ["write", "Library/Drive/alpha"], { input: first });
+  const bare = await doklin(editorBox, ["write", "Library/Drive/alpha"], { input: "lost\n" });
+  const second = await doklin(editorBox, ["write", "Library/Drive/alpha", "--if-rev", "1"], { input: "# Alpha\n\nsecond draft\n" });
+  const stale = await doklin(editorBox, ["write", "Library/Drive/alpha", "--if-rev", "1"], { input: "lost\n" });
+  const both = await doklin(editorBox, ["write", "Library/Drive/alpha", "--if-rev", "2", "--force"], { input: "lost\n" });
+  const forced = await doklin(editorBox, ["write", "Library/Drive/alpha", "--force", "--json"], { input: "# Alpha\n\nthird draft\n" });
+  const unchanged = await doklin(editorBox, ["write", "Library/Drive/alpha", "--force"], { input: "# Alpha\n\nthird draft\n" });
+  const dry = await doklin(editorBox, ["write", "Library/Drive/alpha", "--if-rev=3", "--dry-run"], { input: "never\n" });
+  const now = await doklin(editorBox, ["read", "Library/Drive/alpha"]);
+  const last = await doklin(editorBox, ["write", "Library/Drive/alpha", "--if-rev", "3"], { input: ALPHA });
+  const info = (await doklin(editorBox, ["info", "Library/Drive/alpha"])).json;
   return {
-    created: created.code === 0 && same(created.json, { kind: "document", path: "Drive/alpha", version: "md", file: "alpha.md", rev: 1, size: Buffer.byteLength(first), created: true }),
+    created: created.code === 0 && same(created.json, { kind: "document", path: "Library/Drive/alpha", version: "md", file: "alpha.md", rev: 1, size: Buffer.byteLength(first), created: true }),
     "creating answered 201": asked(from)[0] === "PUT doc → 201",
     "replacing with no revision is a conflict that names it": refused(bare, 5, /--if-rev 1/) && bare.problem.code === "needs_rev" && bare.problem.rev === 1,
     "--if-rev with the revision read": second.code === 0 && second.json.rev === 2 && second.json.created === false,
@@ -804,14 +845,14 @@ await check("write: creates a document from what is piped in; replacing needs th
 
 await check("write --from: a file's bytes become a document; a plain file — a CSV, a picture — is refused, and nothing is written", async () => {
   const beta = "# Beta\n\nA second document, from a file.\n";
-  const made = await doklin(editorBox, ["write", "Drive/beta", "--from", scratchFile("beta.md", beta)]);
+  const made = await doklin(editorBox, ["write", "Library/Drive/beta", "--from", scratchFile("beta.md", beta)]);
   const from = calls.length;
-  const csv = await doklin(editorBox, ["write", "Drive/data.csv", "--from", scratchFile("data.csv", "name,knots\nAda,7\n")]);
-  const picture = await doklin(editorBox, ["write", "Drive/pic.png", "--force"], { input: PIXEL_PNG });
+  const csv = await doklin(editorBox, ["write", "Library/Drive/data.csv", "--from", scratchFile("data.csv", "name,knots\nAda,7\n")]);
+  const picture = await doklin(editorBox, ["write", "Library/Drive/pic.png", "--force"], { input: PIXEL_PNG });
   const wire = asked(from);
   const listed = JSON.stringify((await doklin(editorBox, ["ls", "--deep"])).json);
   return {
-    "a document from a file": made.code === 0 && made.json.created === true && (await doklin(editorBox, ["read", "Drive/beta"])).out === beta,
+    "a document from a file": made.code === 0 && made.json.created === true && (await doklin(editorBox, ["read", "Library/Drive/beta"])).out === beta,
     "a CSV is bad usage that names what syncs": refused(csv, 2, /^Doklin syncs markdown and html documents only — "data\.csv" is neither\. Name a document/),
     "so is a picture, --force or not": refused(picture, 2, /Doklin syncs markdown and html documents only — "pic\.png" is neither/),
     "the domain refused each": same(wire, ["PUT doc → 400", "PUT doc → 400"]),
@@ -820,27 +861,27 @@ await check("write --from: a file's bytes become a document; a plain file — a 
 });
 
 await check("write --html: a document gains its html version; an html-only document is first-class — and the one thing refused is writing to it without saying which version", async () => {
-  const html = await doklin(editorBox, ["write", "Drive/alpha", "--html"], { input: ALPHA_HTML });
-  const row = (await doklin(editorBox, ["ls", "Drive"])).json.documents.find((d) => d.path === "Drive/alpha");
-  const readHtml = await doklin(editorBox, ["read", "Drive/alpha", "--html"]);
+  const html = await doklin(editorBox, ["write", "Library/Drive/alpha", "--html"], { input: ALPHA_HTML });
+  const row = (await doklin(editorBox, ["ls", "Library/Drive"])).json.documents.find((d) => d.path === "Library/Drive/alpha");
+  const readHtml = await doklin(editorBox, ["read", "Library/Drive/alpha", "--html"]);
 
   const POSTER = "<!doctype html><html><body><h1>Regatta poster</h1><p>Saturday at noon.</p></body></html>";
-  const only = await doklin(editorBox, ["write", "Drive/poster.html"], { input: POSTER });
-  const guess = await doklin(editorBox, ["write", "Drive/poster", "--force"], { input: "# Poster\n" });
-  const read = await doklin(editorBox, ["read", "Drive/poster"]);
-  const readMd = await doklin(editorBox, ["read", "Drive/poster", "--md"]);
-  const info = (await doklin(editorBox, ["info", "Drive/poster"])).json;
-  const replaced = await doklin(editorBox, ["write", "Drive/poster", "--html", "--if-rev", "1"], { input: POSTER.replace("noon", "one") });
+  const only = await doklin(editorBox, ["write", "Library/Drive/poster.html"], { input: POSTER });
+  const guess = await doklin(editorBox, ["write", "Library/Drive/poster", "--force"], { input: "# Poster\n" });
+  const read = await doklin(editorBox, ["read", "Library/Drive/poster"]);
+  const readMd = await doklin(editorBox, ["read", "Library/Drive/poster", "--md"]);
+  const info = (await doklin(editorBox, ["info", "Library/Drive/poster"])).json;
+  const replaced = await doklin(editorBox, ["write", "Library/Drive/poster", "--html", "--if-rev", "1"], { input: POSTER.replace("noon", "one") });
 
-  const page = await doklin(editorBox, ["write", "Drive/page", "--html"], { input: "<h1>Page</h1><p>Made first as html.</p>" });
-  const addMd = await doklin(editorBox, ["write", "Drive/page", "--md"], { input: "# Page\n\nIts markdown came second.\n" });
-  const both = (await doklin(editorBox, ["info", "Drive/page"])).json;
-  const nowMd = await doklin(editorBox, ["read", "Drive/page"]);
+  const page = await doklin(editorBox, ["write", "Library/Drive/page", "--html"], { input: "<h1>Page</h1><p>Made first as html.</p>" });
+  const addMd = await doklin(editorBox, ["write", "Library/Drive/page", "--md"], { input: "# Page\n\nIts markdown came second.\n" });
+  const both = (await doklin(editorBox, ["info", "Library/Drive/page"])).json;
+  const nowMd = await doklin(editorBox, ["read", "Library/Drive/page"]);
   return {
-    "the html version is created beside the markdown": html.code === 0 && same(html.json, { kind: "document", path: "Drive/alpha", version: "html", file: "alpha.html", rev: 1, size: Buffer.byteLength(ALPHA_HTML), created: true }),
+    "the html version is created beside the markdown": html.code === 0 && same(html.json, { kind: "document", path: "Library/Drive/alpha", version: "html", file: "alpha.html", rev: 1, size: Buffer.byteLength(ALPHA_HTML), created: true }),
     "ls shows both versions": row.md.rev === 4 && row.html.rev === 1 && row.htmlBehind === undefined,
     "it reads back": readHtml.out === ALPHA_HTML && readHtml.meta.version === "html",
-    "an html-only document is created by its .html name": only.code === 0 && only.json.version === "html" && only.json.created === true && only.json.path === "Drive/poster",
+    "an html-only document is created by its .html name": only.code === 0 && only.json.version === "html" && only.json.created === true && only.json.path === "Library/Drive/poster",
     "writing to it with no flag is refused, even forced": refused(guess, 2, /only an html version — say --html to replace it, or --md to add/) && guess.problem.code === "html_only",
     "reading it with no flag gives the html": read.out === POSTER && read.meta.version === "html",
     "--md says there is none": refused(readMd, 3, /only an html version/) && readMd.problem.code === "no_md",
@@ -852,36 +893,36 @@ await check("write --html: a document gains its html version; an html-only docum
 });
 
 await check("write: what the workspace cannot hold is refused — not text, a hidden or ignored path, a sidecar, a name taken in another case, a comment marker nobody started", async () => {
-  const notText = await doklin(editorBox, ["write", "Drive/garbled"], { input: Buffer.from([0x23, 0x20, 0xff, 0xfe, 0x0a]) });
-  const invented = await doklin(editorBox, ["write", "Drive/alpha", "--force"], { input: "# Alpha\n\nA {==made-up==}{>>#zzzzzz<<} marker.\n" });
+  const notText = await doklin(editorBox, ["write", "Library/Drive/garbled"], { input: Buffer.from([0x23, 0x20, 0xff, 0xfe, 0x0a]) });
+  const invented = await doklin(editorBox, ["write", "Library/Drive/alpha", "--force"], { input: "# Alpha\n\nA {==made-up==}{>>#zzzzzz<<} marker.\n" });
   const facts = {
     "markdown that is not UTF-8": refused(notText, 2, /not UTF-8/),
-    "a hidden path": refused(await doklin(editorBox, ["write", ".secret/plan"], { input: "x" }), 2, /hidden/),
-    "an ignored folder": refused(await doklin(editorBox, ["write", "node_modules/plan"], { input: "x" }), 2, /does not sync/),
-    "a sidecar": refused(await doklin(editorBox, ["write", "Drive/alpha.meta.jsonl", "--force"], { input: "x" }), 2, /comments commands/),
+    "a hidden path": refused(await doklin(editorBox, ["write", "Library/.secret/plan"], { input: "x" }), 2, /hidden/),
+    "an ignored folder": refused(await doklin(editorBox, ["write", "Library/node_modules/plan"], { input: "x" }), 2, /does not sync/),
+    "a sidecar": refused(await doklin(editorBox, ["write", "Library/Drive/alpha.meta.jsonl", "--force"], { input: "x" }), 2, /comments commands/),
     "a path that climbs out": refused(await doklin(editorBox, ["write", "../outside"], { input: "x" }), 2, /not a path in a workspace/),
-    "a name taken in another case is that document, not a second one": refused(await doklin(editorBox, ["write", "DRIVE/Alpha"], { input: "x" }), 5, /Drive\/alpha already exists/),
+    "a name taken in another case is that document, not a second one": refused(await doklin(editorBox, ["write", "Library/DRIVE/Alpha"], { input: "x" }), 5, /Library\/Drive\/alpha already exists/),
     "a marker no thread has": refused(invented, 2, /add a comment marker \(#zzzzzz\) — start a thread with `doklin comment`/) && invented.problem.code === "comments" && same(invented.problem.added, ["zzzzzz"]),
   };
-  const alpha = await doklin(editorBox, ["read", "Drive/alpha"]);
+  const alpha = await doklin(editorBox, ["read", "Library/Drive/alpha"]);
   facts["none of it touched the document"] = alpha.out === ALPHA && alpha.meta.rev === 4;
-  const byOtherCase = await doklin(editorBox, ["read", "drive/ALPHA.md"]);
-  facts["…and reads as it, under the name it has"] = byOtherCase.out === ALPHA && byOtherCase.meta.path === "Drive/alpha";
+  const byOtherCase = await doklin(editorBox, ["read", "library/drive/ALPHA.md"]);
+  facts["…and reads as it, under the name it has"] = byOtherCase.out === ALPHA && byOtherCase.meta.path === "Library/Drive/alpha";
   facts["none of it made a file"] = !/garbled|outside|secret|node_modules/.test(JSON.stringify((await doklin(editorBox, ["ls", "--deep"])).json));
   return facts;
 });
 
 await check("write: a name with spaces and letters beyond ASCII goes there and comes back the same", async () => {
-  const name = "Drive/Café notes ☕";
+  const name = "Library/Drive/Café notes ☕";
   const made = await doklin(editorBox, ["write", name], { input: "# Café\n\nÀ bientôt.\n" });
   const read = await doklin(editorBox, ["read", name]);
-  const listed = (await doklin(editorBox, ["ls", "Drive"])).json.documents.map((d) => d.path);
+  const listed = (await doklin(editorBox, ["ls", "Library/Drive"])).json.documents.map((d) => d.path);
   // `--` ends the options, for a name that begins with a dash.
-  const dashed = await doklin(editorBox, ["write", "--", "Drive/-dashed"], { input: "- a list\n" });
-  const dashedBack = await doklin(editorBox, ["read", "--clean", "--", "Drive/-dashed"]);
-  const dashedGone = await doklin(editorBox, ["rm", "--", "Drive/-dashed"]);
+  const dashed = await doklin(editorBox, ["write", "--", "Library/Drive/-dashed"], { input: "- a list\n" });
+  const dashedBack = await doklin(editorBox, ["read", "--clean", "--", "Library/Drive/-dashed"]);
+  const dashedGone = await doklin(editorBox, ["rm", "--", "Library/Drive/-dashed"]);
   return {
-    "a name that begins with a dash, after --": dashed.code === 0 && dashed.json.path === "Drive/-dashed" && dashedBack.out === "- a list\n" && dashedGone.code === 0,
+    "a name that begins with a dash, after --": dashed.code === 0 && dashed.json.path === "Library/Drive/-dashed" && dashedBack.out === "- a list\n" && dashedGone.code === 0,
     created: made.code === 0 && made.json.path === name && made.json.file === "Café notes ☕.md",
     "read back": read.out === "# Café\n\nÀ bientôt.\n" && read.meta.path === name && read.meta.file === `${name}.md`,
     listed: listed.includes(name),
@@ -889,11 +930,11 @@ await check("write: a name with spaces and letters beyond ASCII goes there and c
 });
 
 await check("a change made on a Mac between the read and the write: the write is refused (exit 5) with the revision the document is at, and nothing is lost", async () => {
-  const before = await doklin(editorBox, ["read", "Scratch"]);
+  const before = await doklin(editorBox, ["read", "Library/Scratch"]);
   await macWrites({ "Scratch.md": "# Scratch\n\nTyped on the Mac.\n" });
-  const lost = await doklin(editorBox, ["write", "Scratch", "--if-rev", String(before.meta.rev)], { input: "# Scratch\n\nFrom the bot.\n" });
-  const after = await doklin(editorBox, ["read", "Scratch"]);
-  const redo = await doklin(editorBox, ["write", "Scratch", "--if-rev", String(after.meta.rev)], { input: `${after.out}\nAnd from the bot.\n` });
+  const lost = await doklin(editorBox, ["write", "Library/Scratch", "--if-rev", String(before.meta.rev)], { input: "# Scratch\n\nFrom the bot.\n" });
+  const after = await doklin(editorBox, ["read", "Library/Scratch"]);
+  const redo = await doklin(editorBox, ["write", "Library/Scratch", "--if-rev", String(after.meta.rev)], { input: `${after.out}\nAnd from the bot.\n` });
 
   // The same inside one `edit`: the Mac's change lands after the CLI has read
   // the document and before its write arrives.
@@ -901,8 +942,8 @@ await check("a change made on a Mac between the read and the write: the write is
     match: (req) => req.method === "PUT" && req.url.startsWith("/api/agent/doc"),
     run: () => macWrites({ "Scratch.md": "# Scratch\n\nTyped on the Mac again.\n" }),
   };
-  const raced = await doklin(editorBox, ["edit", "Scratch", "--find", "Typed on the Mac", "--replace", "Typed by the bot"]);
-  const settled = await doklin(editorBox, ["read", "Scratch"]);
+  const raced = await doklin(editorBox, ["edit", "Library/Scratch", "--find", "Typed on the Mac", "--replace", "Typed by the bot"]);
+  const settled = await doklin(editorBox, ["read", "Library/Scratch"]);
   return {
     "the write is a conflict": refused(lost, 5, /changed after you read it/) && lost.problem.rev === before.meta.rev + 1,
     "the Mac's text is what is there": after.out === "# Scratch\n\nTyped on the Mac.\n" && after.meta.rev === before.meta.rev + 1,
@@ -914,43 +955,43 @@ await check("a change made on a Mac between the read and the write: the write is
 
 await check("edit: changes part of a document with the revision it read; --find must occur once unless --all; nothing found is exit 3; --dry-run only says", async () => {
   let from = calls.length;
-  const once = await doklin(editorBox, ["edit", "Drive/alpha", "--find", "blue", "--replace", "green"]);
+  const once = await doklin(editorBox, ["edit", "Library/Drive/alpha", "--find", "blue", "--replace", "green"]);
   const put = calls.slice(from).find((c) => c.method === "PUT");
   const wire = asked(from);
 
   from = calls.length;
-  const none = await doklin(editorBox, ["edit", "Drive/alpha", "--find", "no such words", "--replace", "x"]);
-  const many = await doklin(editorBox, ["edit", "Drive/alpha", "--find", "The boat", "--replace", "A boat"]);
+  const none = await doklin(editorBox, ["edit", "Library/Drive/alpha", "--find", "no such words", "--replace", "x"]);
+  const many = await doklin(editorBox, ["edit", "Library/Drive/alpha", "--find", "The boat", "--replace", "A boat"]);
   const refusedWire = asked(from);
 
-  const all = await doklin(editorBox, ["edit", "Drive/alpha", "--find", "is ", "--replace=was ", "--all", "--json"]);
-  const cut = await doklin(editorBox, ["edit", "Drive/alpha", "--find", " The boat was fast.", "--replace", ""]);
-  const dry = await doklin(editorBox, ["edit", "Drive/alpha", "--find", "green", "--replace", "red", "--dry-run"]);
-  const now = await doklin(editorBox, ["read", "Drive/alpha"]);
-  const html = await doklin(editorBox, ["edit", "Drive/alpha", "--html", "--find", "Alpha page", "--replace", "Alpha, the page"]);
-  const onlyHtml = await doklin(editorBox, ["edit", "Drive/poster", "--find", "Saturday", "--replace", "Sunday"]);
+  const all = await doklin(editorBox, ["edit", "Library/Drive/alpha", "--find", "is ", "--replace=was ", "--all", "--json"]);
+  const cut = await doklin(editorBox, ["edit", "Library/Drive/alpha", "--find", " The boat was fast.", "--replace", ""]);
+  const dry = await doklin(editorBox, ["edit", "Library/Drive/alpha", "--find", "green", "--replace", "red", "--dry-run"]);
+  const now = await doklin(editorBox, ["read", "Library/Drive/alpha"]);
+  const html = await doklin(editorBox, ["edit", "Library/Drive/alpha", "--html", "--find", "Alpha page", "--replace", "Alpha, the page"]);
+  const onlyHtml = await doklin(editorBox, ["edit", "Library/Drive/poster", "--find", "Saturday", "--replace", "Sunday"]);
   return {
     "one place changed": once.code === 0 && once.json.rev === 5 && once.json.version === "md",
     "a read, then a write that names the revision read": same(wire, ["GET doc → 200", "PUT doc → 200"]) && put.headers["if-rev"] === "4",
-    "nothing found is exit 3": refused(none, 3, /does not occur in the markdown version of Drive\/alpha/),
+    "nothing found is exit 3": refused(none, 3, /does not occur in the markdown version of Library\/Drive\/alpha/),
     "found more than once is a conflict that counts them": refused(many, 5, /occurs 3 times/),
     "neither wrote anything": same(refusedWire, ["GET doc → 200", "GET doc → 200"]),
     "--all changes every one": all.code === 0 && all.json.rev === 6,
     "--replace may be empty": cut.code === 0 && cut.json.rev === 7,
     "--dry-run says what would happen": dry.code === 0 && dry.json.written === false && dry.json.rev === 8,
     "the text after all that": now.out === "# Alpha\n\nThe boat ships in June if the paint dries.\n\nThe boat was green.\n" && now.meta.rev === 7,
-    "--html edits the html version": html.code === 0 && html.json.version === "html" && html.json.rev === 2 && (await doklin(editorBox, ["read", "Drive/alpha", "--html"])).out.includes("<h1>Alpha, the page</h1>"),
-    "an html-only document is edited as html": onlyHtml.code === 0 && onlyHtml.json.version === "html" && (await doklin(editorBox, ["read", "Drive/poster"])).out.includes("Sunday at one"),
+    "--html edits the html version": html.code === 0 && html.json.version === "html" && html.json.rev === 2 && (await doklin(editorBox, ["read", "Library/Drive/alpha", "--html"])).out.includes("<h1>Alpha, the page</h1>"),
+    "an html-only document is edited as html": onlyHtml.code === 0 && onlyHtml.json.version === "html" && (await doklin(editorBox, ["read", "Library/Drive/poster"])).out.includes("Sunday at one"),
   };
 });
 
 await check("html is behind: changing the markdown of a document that has an html version says so — in the answer, in ls, in info, when reading — until the html is written again", async () => {
-  const edit = await doklin(editorBox, ["edit", "Projects/plan", "--find", "June", "--replace", "July"]);
-  const row = (await doklin(editorBox, ["ls", "Projects"])).json.documents.find((d) => d.path === "Projects/plan");
-  const info = (await doklin(editorBox, ["info", "Projects/plan"])).json;
-  const read = await doklin(editorBox, ["read", "Projects/plan"]);
-  const rewritten = await doklin(editorBox, ["write", "Projects/plan", "--html", "--if-rev", "1"], { input: SEED_FILES["Projects/plan.html"].replace("Rendered by hand", "Rendered again") });
-  const after = (await doklin(editorBox, ["info", "Projects/plan"])).json;
+  const edit = await doklin(editorBox, ["edit", "Library/Projects/plan", "--find", "June", "--replace", "July"]);
+  const row = (await doklin(editorBox, ["ls", "Library/Projects"])).json.documents.find((d) => d.path === "Library/Projects/plan");
+  const info = (await doklin(editorBox, ["info", "Library/Projects/plan"])).json;
+  const read = await doklin(editorBox, ["read", "Library/Projects/plan"]);
+  const rewritten = await doklin(editorBox, ["write", "Library/Projects/plan", "--html", "--if-rev", "1"], { input: SEED_FILES["Projects/plan.html"].replace("Rendered by hand", "Rendered again") });
+  const after = (await doklin(editorBox, ["info", "Library/Projects/plan"])).json;
   return {
     "the edit's answer": edit.code === 0 && edit.json.rev === 2 && edit.json.htmlBehind === true,
     ls: row.htmlBehind === true,
@@ -965,34 +1006,34 @@ await check("html is behind: changing the markdown of a document that has an htm
 /* 5 — comments                                                           */
 /* ====================================================================== */
 
-/** The first thread on Drive/alpha's markdown, and the one on its html. */
+/** The first thread on Library/Drive/alpha's markdown, and the one on its html. */
 let thread;
 let htmlThread;
 
 await check("comment: starts a thread on words of the markdown — the text gains a marker there, and the words said are the agent's; comments lists it; reply answers it", async () => {
   const from = calls.length;
-  const started = await doklin(editorBox, ["comment", "Drive/alpha", "--on", "ships in June", "-m", "Is that still true?"]);
+  const started = await doklin(editorBox, ["comment", "Library/Drive/alpha", "--on", "ships in June", "-m", "Is that still true?"]);
   thread = started.json.thread;
-  const text = await doklin(editorBox, ["read", "Drive/alpha"]);
-  const clean = await doklin(editorBox, ["read", "Drive/alpha", "--clean"]);
-  const listed = (await doklin(editorBox, ["comments", "Drive/alpha"])).json;
-  const answered = await doklin(reviewerBox, ["reply", "Drive/alpha", thread, "--message", "Yes."]);
-  const after = (await doklin(reviewerBox, ["comments", "Drive/alpha.md", "--json"])).json;
-  const info = (await doklin(editorBox, ["info", "Drive/alpha"])).json;
+  const text = await doklin(editorBox, ["read", "Library/Drive/alpha"]);
+  const clean = await doklin(editorBox, ["read", "Library/Drive/alpha", "--clean"]);
+  const listed = (await doklin(editorBox, ["comments", "Library/Drive/alpha"])).json;
+  const answered = await doklin(reviewerBox, ["reply", "Library/Drive/alpha", thread, "--message", "Yes."]);
+  const after = (await doklin(reviewerBox, ["comments", "Library/Drive/alpha.md", "--json"])).json;
+  const info = (await doklin(editorBox, ["info", "Library/Drive/alpha"])).json;
   const t = listed.threads[0];
   return {
-    "the answer": started.code === 0 && typeof thread === "string" && thread.length > 0 && same(started.json, { path: "Drive/alpha", thread, version: "md", on: "ships in June", line: 3 }),
+    "the answer": started.code === 0 && typeof thread === "string" && thread.length > 0 && same(started.json, { path: "Library/Drive/alpha", thread, version: "md", on: "ships in June", line: 3 }),
     "starting one answered 201": asked(from)[0] === "POST comments → 201",
     "the marker is in the text, around those words": text.out === `# Alpha\n\nThe boat {==ships in June==}{>>#${thread}<<} if the paint dries.\n\nThe boat was green.\n`,
     "the markdown moved on a revision": text.meta.rev === 8,
     "--clean reads it without the marker": clean.out === "# Alpha\n\nThe boat ships in June if the paint dries.\n\nThe boat was green.\n",
-    "comments lists it": listed.path === "Drive/alpha" && listed.threads.length === 1 && t.id === thread && t.version === "md" && t.on === "ships in June" && t.line === 3 && t.orphaned === undefined,
+    "comments lists it": listed.path === "Library/Drive/alpha" && listed.threads.length === 1 && t.id === thread && t.version === "md" && t.on === "ships in June" && t.line === 3 && t.orphaned === undefined,
     "said by the agent, just now": t.comments.length === 1 && t.comments[0].author === "Editor bot" && t.comments[0].body === "Is that still true?" && Math.abs(Date.now() - t.comments[0].at) < 60_000,
-    "reply answers it": answered.code === 0 && same(answered.json, { path: "Drive/alpha", thread, version: "md", comments: 2 }),
+    "reply answers it": answered.code === 0 && same(answered.json, { path: "Library/Drive/alpha", thread, version: "md", comments: 2 }),
     "…under the name of who replied": same(after.threads[0].comments.map((c) => [c.author, c.body]), [["Editor bot", "Is that still true?"], ["Reviewer bot", "Yes."]]),
-    "a reply does not touch the text": (await doklin(editorBox, ["read", "Drive/alpha"])).meta.rev === 8,
+    "a reply does not touch the text": (await doklin(editorBox, ["read", "Library/Drive/alpha"])).meta.rev === 8,
     "info counts the thread": info.comments === 1,
-    "the sidecar never shows": !JSON.stringify((await doklin(editorBox, ["ls", "Drive"])).json).includes("meta.jsonl"),
+    "the sidecar never shows": !JSON.stringify((await doklin(editorBox, ["ls", "Library/Drive"])).json).includes("meta.jsonl"),
   };
 });
 
@@ -1003,47 +1044,47 @@ await check("comments: a thread somebody started in the app reads back — its w
     "Review.md": "# Review\n\nThe keel is {==too shallow==}{>>#k3m9x2<<} for this hull.\n",
     "Review.meta.jsonl": '{"doklin":"meta","v":1}\n{"t":"mthread","id":"k3m9x2","comments":[{"author":"Ada","at":1757000000000,"body":"By how much?"}]}\n',
   });
-  const seeded = (await doklin(readerBox, ["comments", "Review"])).json;
-  const answered = await doklin(reviewerBox, ["reply", "Review", "k3m9x2", "-m", "Two inches."]);
-  const after = (await doklin(readerBox, ["comments", "Review"])).json.threads[0].comments;
+  const seeded = (await doklin(readerBox, ["comments", "Library/Review"])).json;
+  const answered = await doklin(reviewerBox, ["reply", "Library/Review", "k3m9x2", "-m", "Two inches."]);
+  const after = (await doklin(readerBox, ["comments", "Library/Review"])).json.threads[0].comments;
   return {
     "the app's thread": same(seeded, {
-      path: "Review",
+      path: "Library/Review",
       threads: [{ id: "k3m9x2", version: "md", on: "too shallow", line: 3, comments: [{ author: "Ada", at: 1757000000000, body: "By how much?" }] }],
     }),
     "an agent answers it": answered.code === 0 && answered.json.comments === 2 && same(after.map((c) => c.author), ["Ada", "Reviewer bot"]),
-    "the text keeps its marker": (await doklin(readerBox, ["read", "Review"])).out.includes("{==too shallow==}{>>#k3m9x2<<}"),
+    "the text keeps its marker": (await doklin(readerBox, ["read", "Library/Review"])).out.includes("{==too shallow==}{>>#k3m9x2<<}"),
   };
 });
 
 await check("comment: words that occur more than once, or only inside another comment, are a conflict (exit 5) that says where; words that are not there are exit 3; --dry-run starts nothing", async () => {
-  const twice = await doklin(editorBox, ["comment", "Drive/alpha", "--on", "The boat", "-m", "Which boat?"]);
-  const absent = await doklin(editorBox, ["comment", "Drive/alpha", "--on", "no such words", "-m", "?"]);
-  const inside = await doklin(editorBox, ["comment", "Drive/alpha", "--on", "ships in June", "-m", "Again?"]);
-  const dry = await doklin(editorBox, ["comment", "Drive/alpha", "--on", "paint dries", "-m", "Will it?", "--dry-run"]);
-  const count = (await doklin(editorBox, ["comments", "Drive/alpha"])).json.threads.length;
+  const twice = await doklin(editorBox, ["comment", "Library/Drive/alpha", "--on", "The boat", "-m", "Which boat?"]);
+  const absent = await doklin(editorBox, ["comment", "Library/Drive/alpha", "--on", "no such words", "-m", "?"]);
+  const inside = await doklin(editorBox, ["comment", "Library/Drive/alpha", "--on", "ships in June", "-m", "Again?"]);
+  const dry = await doklin(editorBox, ["comment", "Library/Drive/alpha", "--on", "paint dries", "-m", "Will it?", "--dry-run"]);
+  const count = (await doklin(editorBox, ["comments", "Library/Drive/alpha"])).json.threads.length;
   return {
     "twice: every place is listed": refused(twice, 5, /occurs 2 times/) && twice.problem.code === "anchor" && same(twice.problem.occurrences.map((o) => o.line), [3, 5]),
     "not at all is not found": refused(absent, 3, /does not occur/) && absent.problem.code === "anchor",
     "only inside another comment": refused(inside, 5, /only occurs inside/) && inside.problem.code === "anchor",
     "--dry-run says where it would go": dry.code === 0 && dry.json.written === false && dry.json.on === "paint dries" && dry.json.line === 3,
-    "…and starts nothing": count === 1 && (await doklin(editorBox, ["read", "Drive/alpha"])).meta.rev === 8,
+    "…and starts nothing": count === 1 && (await doklin(editorBox, ["read", "Library/Drive/alpha"])).meta.rev === 8,
   };
 });
 
 await check("comment --html: a thread on an element of the html version, named by its opening words; the threads of both versions are one list", async () => {
-  const started = await doklin(editorBox, ["comment", "Drive/alpha", "--html", "--on", "One item", "-m", "Which one?"]);
+  const started = await doklin(editorBox, ["comment", "Library/Drive/alpha", "--html", "--on", "One item", "-m", "Which one?"]);
   htmlThread = started.json.thread;
-  const two = await doklin(editorBox, ["comment", "Drive/alpha", "--html", "--on", "One", "-m", "?"]);
-  const none = await doklin(editorBox, ["comment", "Drive/alpha", "--html", "--on", "Nothing begins so", "-m", "?"]);
-  const listed = (await doklin(editorBox, ["comments", "Drive/alpha"])).json.threads;
-  const poster = await doklin(reviewerBox, ["comment", "Drive/poster", "--on", "Regatta", "-m", "Lovely."]);
-  const noHtml = await doklin(editorBox, ["comment", "Drive/beta", "--html", "--on", "Beta", "-m", "?"]);
-  const noMd = await doklin(editorBox, ["comment", "Drive/poster", "--md", "--on", "Regatta", "-m", "?"]);
+  const two = await doklin(editorBox, ["comment", "Library/Drive/alpha", "--html", "--on", "One", "-m", "?"]);
+  const none = await doklin(editorBox, ["comment", "Library/Drive/alpha", "--html", "--on", "Nothing begins so", "-m", "?"]);
+  const listed = (await doklin(editorBox, ["comments", "Library/Drive/alpha"])).json.threads;
+  const poster = await doklin(reviewerBox, ["comment", "Library/Drive/poster", "--on", "Regatta", "-m", "Lovely."]);
+  const noHtml = await doklin(editorBox, ["comment", "Library/Drive/beta", "--html", "--on", "Beta", "-m", "?"]);
+  const noMd = await doklin(editorBox, ["comment", "Library/Drive/poster", "--md", "--on", "Regatta", "-m", "?"]);
   const h = listed.find((t) => t.id === htmlThread);
   return {
-    "the answer names the element": started.code === 0 && same(started.json, { path: "Drive/alpha", thread: htmlThread, version: "html", on: "One item", tag: "li" }),
-    "the page itself is untouched": (await doklin(editorBox, ["read", "Drive/alpha", "--html"])).meta.rev === 2,
+    "the answer names the element": started.code === 0 && same(started.json, { path: "Library/Drive/alpha", thread: htmlThread, version: "html", on: "One item", tag: "li" }),
+    "the page itself is untouched": (await doklin(editorBox, ["read", "Library/Drive/alpha", "--html"])).meta.rev === 2,
     "two elements that begin so is a conflict, with the candidates": refused(two, 5, /2 elements/) && two.problem.code === "anchor" && same(two.problem.candidates, [{ tag: "li", text: "One item" }, { tag: "li", text: "One more item" }]),
     "none that begins so is not found": refused(none, 3, /nothing on the html page/),
     "both versions' threads are one list": same(listed.map((t) => t.version).sort(), ["html", "md"]) && h.tag === "li" && h.on === "One item" && h.comments[0].author === "Editor bot" && h.orphaned === undefined,
@@ -1054,30 +1095,30 @@ await check("comment --html: a thread on an element of the html version, named b
 });
 
 await check("a write keeps every comment where it was: keeping a marker keeps its thread in place; dropping one or changing its words is refused, --force or not; comment rm removes a thread and unwraps its words", async () => {
-  const kept = await doklin(editorBox, ["edit", "Drive/alpha", "--find", "green", "--replace", "teal"]);
-  const inPlace = (await doklin(editorBox, ["comments", "Drive/alpha"])).json.threads.find((t) => t.id === thread);
+  const kept = await doklin(editorBox, ["edit", "Library/Drive/alpha", "--find", "green", "--replace", "teal"]);
+  const inPlace = (await doklin(editorBox, ["comments", "Library/Drive/alpha"])).json.threads.find((t) => t.id === thread);
   const MARKED = `# Alpha\n\nThe boat {==ships in June==}{>>#${thread}<<} if the paint dries.\n\nThe boat was teal.\n`;
-  const dropped = await doklin(editorBox, ["edit", "Drive/alpha", "--find", `{==ships in June==}{>>#${thread}<<}`, "--replace", "leaves in July"]);
-  const reworded = await doklin(editorBox, ["edit", "Drive/alpha", "--find", "ships in June", "--replace", "leaves in July"]);
-  const forced = await doklin(editorBox, ["write", "Drive/alpha", "--force"], { input: MARKED.replace(`{==ships in June==}{>>#${thread}<<}`, "leaves in July") });
-  const untouched = await doklin(editorBox, ["read", "Drive/alpha"]);
-  const stillThere = (await doklin(editorBox, ["comments", "Drive/alpha"])).json.threads.find((t) => t.id === thread);
-  const removedFirst = await doklin(editorBox, ["comment", "rm", "Drive/alpha", thread]);
-  const rewritten = await doklin(editorBox, ["edit", "Drive/alpha", "--find", "ships in June", "--replace", "leaves in July"]);
+  const dropped = await doklin(editorBox, ["edit", "Library/Drive/alpha", "--find", `{==ships in June==}{>>#${thread}<<}`, "--replace", "leaves in July"]);
+  const reworded = await doklin(editorBox, ["edit", "Library/Drive/alpha", "--find", "ships in June", "--replace", "leaves in July"]);
+  const forced = await doklin(editorBox, ["write", "Library/Drive/alpha", "--force"], { input: MARKED.replace(`{==ships in June==}{>>#${thread}<<}`, "leaves in July") });
+  const untouched = await doklin(editorBox, ["read", "Library/Drive/alpha"]);
+  const stillThere = (await doklin(editorBox, ["comments", "Library/Drive/alpha"])).json.threads.find((t) => t.id === thread);
+  const removedFirst = await doklin(editorBox, ["comment", "rm", "Library/Drive/alpha", thread]);
+  const rewritten = await doklin(editorBox, ["edit", "Library/Drive/alpha", "--find", "ships in June", "--replace", "leaves in July"]);
 
-  const second = await doklin(editorBox, ["comment", "Drive/alpha", "--on", "paint dries", "-m", "Will it?"]);
-  const marked = await doklin(editorBox, ["read", "Drive/alpha"]);
-  const dry = await doklin(editorBox, ["comment", "rm", "Drive/alpha", second.json.thread, "--dry-run"]);
-  const removed = await doklin(editorBox, ["comment", "rm", "Drive/alpha", second.json.thread, "--json"]);
-  const plain = await doklin(editorBox, ["read", "Drive/alpha"]);
-  const left = (await doklin(editorBox, ["comments", "Drive/alpha"])).json.threads;
+  const second = await doklin(editorBox, ["comment", "Library/Drive/alpha", "--on", "paint dries", "-m", "Will it?"]);
+  const marked = await doklin(editorBox, ["read", "Library/Drive/alpha"]);
+  const dry = await doklin(editorBox, ["comment", "rm", "Library/Drive/alpha", second.json.thread, "--dry-run"]);
+  const removed = await doklin(editorBox, ["comment", "rm", "Library/Drive/alpha", second.json.thread, "--json"]);
+  const plain = await doklin(editorBox, ["read", "Library/Drive/alpha"]);
+  const left = (await doklin(editorBox, ["comments", "Library/Drive/alpha"])).json.threads;
   return {
     "a write that keeps the marker keeps the thread in place": kept.code === 0 && inPlace.on === "ships in June" && inPlace.orphaned === undefined,
-    "a write that drops it is refused, and says how to remove the thread": refused(dropped, 2, new RegExp(`remove the marker of comment #${thread} \\(on "ships in June"\\).*\`doklin comment rm Drive/alpha ${thread}\``)) && dropped.problem.code === "comments" && same(dropped.problem.threads, [thread]),
+    "a write that drops it is refused, and says how to remove the thread": refused(dropped, 2, new RegExp(`remove the marker of comment #${thread} \\(on "ships in June"\\).*\`doklin comment rm Library/Drive/alpha ${thread}\``)) && dropped.problem.code === "comments" && same(dropped.problem.threads, [thread]),
     "so is one that changes its words": refused(reworded, 2, new RegExp(`change the words of comment #${thread}`)) && same(reworded.problem.threads, [thread]),
     "--force does not get past it": refused(forced, 2, /remove the marker of comment/),
     "the text and the thread are as they were": untouched.out === MARKED && stillThere.orphaned === undefined && stillThere.comments.length === 2,
-    "comment rm first, and then the words are the agent's to change": removedFirst.code === 0 && same(removedFirst.json, { path: "Drive/alpha", thread, version: "md", removed: true }) && rewritten.code === 0,
+    "comment rm first, and then the words are the agent's to change": removedFirst.code === 0 && same(removedFirst.json, { path: "Library/Drive/alpha", thread, version: "md", removed: true }) && rewritten.code === 0,
     "a second thread marks its words": marked.out.includes(`the {==paint dries==}{>>#${second.json.thread}<<}.`),
     "comment rm --dry-run removes nothing": dry.code === 0 && dry.json.removed === false,
     "comment rm unwraps the words": removed.code === 0 && removed.json.removed === true && plain.out === "# Alpha\n\nThe boat leaves in July if the paint dries.\n\nThe boat was teal.\n",
@@ -1086,70 +1127,74 @@ await check("a write keeps every comment where it was: keeping a marker keeps it
 });
 
 await check("comments: a thread or a document that is not there is exit 3; a plain file is no document to comment on", async () => ({
-  "reply to no thread": refused(await doklin(editorBox, ["reply", "Drive/alpha", "nosuch", "-m", "x"]), 3, /no thread #nosuch/),
-  "comment rm of no thread": refused(await doklin(editorBox, ["comment", "rm", "Drive/alpha", "nosuch"]), 3, /no thread #nosuch/),
-  "comments on no document": refused(await doklin(editorBox, ["comments", "Nope"]), 3, /no document at "Nope"/),
-  "comment on no document": refused(await doklin(editorBox, ["comment", "Nope", "--on", "a", "-m", "b"]), 3, /no document at "Nope"/),
-  "a plain file": refused(await doklin(editorBox, ["comments", "Drive/data.csv"]), 2, /Doklin syncs markdown and html documents only — "data\.csv" is neither/),
-  "nor is one to start a thread on": refused(await doklin(editorBox, ["comment", "Drive/data.csv", "--on", "Ada", "-m", "Who?"]), 2, /Doklin syncs markdown and html documents only/),
+  "reply to no thread": refused(await doklin(editorBox, ["reply", "Library/Drive/alpha", "nosuch", "-m", "x"]), 3, /no thread #nosuch/),
+  "comment rm of no thread": refused(await doklin(editorBox, ["comment", "rm", "Library/Drive/alpha", "nosuch"]), 3, /no thread #nosuch/),
+  "comments on no document": refused(await doklin(editorBox, ["comments", "Library/Nope"]), 3, /no document at "Library\/Nope"/),
+  "comment on no document": refused(await doklin(editorBox, ["comment", "Library/Nope", "--on", "a", "-m", "b"]), 3, /no document at "Library\/Nope"/),
+  "a plain file": refused(await doklin(editorBox, ["comments", "Library/Drive/data.csv"]), 2, /Doklin syncs markdown and html documents only — "data\.csv" is neither/),
+  "nor is one to start a thread on": refused(await doklin(editorBox, ["comment", "Library/Drive/data.csv", "--on", "Ada", "-m", "Who?"]), 2, /Doklin syncs markdown and html documents only/),
 }));
 
 /* ====================================================================== */
 /* 6 — publishing                                                         */
 /* ====================================================================== */
 
-/** Drive/alpha's page: {slug, url}. */
+/** Library/Drive/alpha's page: {slug, url}. */
 let alphaPage;
 const published = async (box = editorBox) => (await doklin(box, ["published"])).json.pages;
 
 await check("publish: a document gets an address that answers at once; publishing again changes nothing; --slug, --title and --desc; published lists it with who published it", async () => {
   const from = calls.length;
-  const first = await doklin(editorBox, ["publish", "Drive/alpha"]);
+  const first = await doklin(editorBox, ["publish", "Library/Drive/alpha"]);
   alphaPage = { slug: first.json.slug, url: first.json.url };
   const page = await fetch(alphaPage.url);
-  const again = await doklin(editorBox, ["publish", "Drive/alpha.md", "--json"]);
-  const named = await doklin(editorBox, ["publish", "Drive/beta", "--slug", "beta-page", "--title", "Beta, in public", "--desc", "What beta is about"]);
+  const again = await doklin(editorBox, ["publish", "Library/Drive/alpha.md", "--json"]);
+  const named = await doklin(editorBox, ["publish", "Library/Drive/beta", "--slug", "beta-page", "--title", "Beta, in public", "--desc", "What beta is about"]);
   const betaPage = await fetch(`${WORKER}/beta-page`);
   const pages = await published();
   const bySlug = (slug) => pages.find((p) => p.slug === slug) ?? {};
   const mine = bySlug(alphaPage.slug);
-  const addresses = (await doklin(editorBox, ["info", "Drive/alpha"])).json.public;
+  const addresses = (await doklin(editorBox, ["info", "Library/Drive/alpha"])).json.public;
   return {
-    "the answer": first.code === 0 && /^[a-z2-9]{8}$/.test(alphaPage.slug) && same(first.json, { slug: alphaPage.slug, url: `${WORKER}/${alphaPage.slug}`, kind: "document", path: "Drive/alpha", documents: ["Drive/alpha"], created: true }),
+    "the answer": first.code === 0 && /^[a-z2-9]{8}$/.test(alphaPage.slug) && same(first.json, { slug: alphaPage.slug, url: `${WORKER}/${alphaPage.slug}`, kind: "document", path: "Library/Drive/alpha", documents: ["Library/Drive/alpha"], created: true }),
     "publishing answered 201": asked(from)[0] === "PUT pages → 201",
     "the address answers": page.status === 200,
     "again is the same page, and nothing is written": again.code === 0 && again.json.slug === alphaPage.slug && again.json.created === false && again.json.written === false,
     "--slug chooses the address": named.code === 0 && named.json.slug === "beta-page" && named.json.url === `${WORKER}/beta-page` && betaPage.status === 200,
     "--title is the page's title": (await betaPage.text()).includes("Beta, in public"),
-    "published lists it, with who and when": mine.kind === "document" && mine.path === "Drive/alpha" && mine.url === alphaPage.url && mine.by === editor.id && mine.byName === "Editor bot" && Math.abs(Date.now() - mine.at) < 60_000,
+    "published lists it, with who and when": mine.kind === "document" && mine.path === "Library/Drive/alpha" && mine.url === alphaPage.url && mine.by === editor.id && mine.byName === "Editor bot" && Math.abs(Date.now() - mine.at) < 60_000,
     "…and its title and description": bySlug("beta-page").title === "Beta, in public" && bySlug("beta-page").desc === "What beta is about",
-    "the pages that were there": bySlug("home").home === true && bySlug("ghost").missing === true && bySlug("projects").kind === "folder" && bySlug("projects").path === "Projects",
+    "the pages that were there": bySlug("home").home === true && bySlug("ghost").missing === true && bySlug("projects").kind === "folder" && bySlug("projects").path === "Library/Projects",
     "info shows the address": same(addresses, [alphaPage.url]),
   };
 });
 
 await check("publish: an address already taken is a conflict (exit 5); one that is no address is bad usage; nothing to publish is exit 3; a folder is looked at with --dry-run, then published", async () => {
-  const taken = await doklin(editorBox, ["publish", "Drive/page", "--slug", "plan"]);
-  const bad = await doklin(editorBox, ["publish", "Drive/page", "--slug", "No Such Address!"]);
-  const missing = await doklin(editorBox, ["publish", "Nope"]);
-  const dry = await doklin(editorBox, ["publish", "Drive/", "--dry-run", "--slug", "drive"]);
+  const taken = await doklin(editorBox, ["publish", "Library/Drive/page", "--slug", "plan"]);
+  const bad = await doklin(editorBox, ["publish", "Library/Drive/page", "--slug", "No Such Address!"]);
+  const missing = await doklin(editorBox, ["publish", "Library/Nope"]);
+  const dry = await doklin(editorBox, ["publish", "Library/Drive/", "--dry-run", "--slug", "drive"]);
   const before = (await published()).some((p) => p.slug === "drive");
-  const real = await doklin(editorBox, ["publish", "Drive/", "--slug", "drive"]);
+  const real = await doklin(editorBox, ["publish", "Library/Drive/", "--slug", "drive"]);
   const after = (await published()).find((p) => p.slug === "drive") ?? {};
-  const addresses = (await doklin(editorBox, ["info", "Drive/alpha"])).json.public;
+  const addresses = (await doklin(editorBox, ["info", "Library/Drive/alpha"])).json.public;
+  const whole = await doklin(editorBox, ["publish", "Library/", "--dry-run"]);
+  const wholeWords = (await doklin(editorBox, ["publish", "Library/", "--dry-run"], { tty: true })).out;
   // Every document in the folder, the html-only one among them.
-  const inFolder = ["Drive/Café notes ☕", "Drive/alpha", "Drive/beta", "Drive/page", "Drive/poster"];
+  const inFolder = ["Library/Drive/Café notes ☕", "Library/Drive/alpha", "Library/Drive/beta", "Library/Drive/page", "Library/Drive/poster"];
   return {
     "an address that is taken": refused(taken, 5, /"plan" is already the address of/) && taken.problem.code === "slug_taken",
     "something that is no address": refused(bad, 2, /an address is 3 to 64 characters/),
-    "nothing there to publish": refused(missing, 3, /nothing at "Nope" to publish/),
-    "--dry-run lists every document that would become public": dry.code === 0 && dry.json.kind === "folder" && dry.json.path === "Drive" && dry.json.written === false && same([...dry.json.documents].sort(), inFolder),
+    "nothing there to publish": refused(missing, 3, /nothing at "Library\/Nope" to publish/),
+    "--dry-run lists every document that would become public": dry.code === 0 && dry.json.kind === "folder" && dry.json.path === "Library/Drive" && dry.json.written === false && same([...dry.json.documents].sort(), inFolder),
     "…and publishes nothing": before === false,
     "the folder is published": real.code === 0 && real.json.created === true && real.json.url === `${WORKER}/drive` && same([...real.json.documents].sort(), inFolder),
-    "published lists the folder": after.kind === "folder" && after.path === "Drive" && after.byName === "Editor bot",
+    "published lists the folder": after.kind === "folder" && after.path === "Library/Drive" && after.byName === "Editor bot",
     // In the order of their addresses, and the page's own is a random one.
     "a document in it has two addresses now": same([...addresses].sort(), [alphaPage.url, `${WORKER}/drive/alpha`].sort()),
     "the address inside the folder answers": (await fetch(`${WORKER}/drive/beta`)).status === 200,
+    "Library/ is every document everyone sees, and nothing of Private's": whole.code === 0 && whole.json.kind === "folder" && whole.json.path === "Library" && whole.json.written === false && whole.json.documents.includes("Library/Home") && inFolder.every((d) => whole.json.documents.includes(d)) && whole.json.documents.every((d) => d.startsWith("Library/")),
+    "…and a person reads it as the folder it is": /Would publish the folder Library at http:\S+ — \d+ documents would be public:\n  Library\/Comments\n/.test(wholeWords),
   };
 });
 
@@ -1158,46 +1203,46 @@ await check("publish: an address already taken is a conflict (exit 5); one that 
 /* ====================================================================== */
 
 await check("mv: a document moves whole — both versions and its comments — whatever extension is typed, and its page follows; into a folder; a rename; a folder; --dry-run only says", async () => {
-  const dry = await doklin(editorBox, ["mv", "Drive/alpha", "Drive/Archive/alpha2", "--dry-run"]);
-  const stillThere = (await doklin(editorBox, ["info", "Drive/alpha"])).code === 0;
-  const moved = await doklin(editorBox, ["mv", "Drive/alpha.md", "Drive/Archive/alpha2"]);
-  const info = (await doklin(editorBox, ["info", "Drive/Archive/alpha2"])).json;
-  const threads = (await doklin(editorBox, ["comments", "Drive/Archive/alpha2"])).json.threads;
-  const gone = await doklin(editorBox, ["read", "Drive/alpha"]);
+  const dry = await doklin(editorBox, ["mv", "Library/Drive/alpha", "Library/Drive/Archive/alpha2", "--dry-run"]);
+  const stillThere = (await doklin(editorBox, ["info", "Library/Drive/alpha"])).code === 0;
+  const moved = await doklin(editorBox, ["mv", "Library/Drive/alpha.md", "Library/Drive/Archive/alpha2"]);
+  const info = (await doklin(editorBox, ["info", "Library/Drive/Archive/alpha2"])).json;
+  const threads = (await doklin(editorBox, ["comments", "Library/Drive/Archive/alpha2"])).json.threads;
+  const gone = await doklin(editorBox, ["read", "Library/Drive/alpha"]);
   const page = await fetch(alphaPage.url);
   const listed = (await published()).find((p) => p.slug === alphaPage.slug) ?? {};
-  const into = await doklin(editorBox, ["mv", "Drive/beta", "Drive/Archive/"]);
-  const renamed = await doklin(editorBox, ["mv", "Drive/Archive/beta", "Drive/Archive/gamma", "--json"]);
-  const folder = await doklin(editorBox, ["mv", "Drive/Archive", "Drive/Old"]);
-  const old = (await doklin(editorBox, ["ls", "Drive/Old"])).json;
-  const text = await doklin(editorBox, ["read", "Drive/Old/alpha2"]);
+  const into = await doklin(editorBox, ["mv", "Library/Drive/beta", "Library/Drive/Archive/"]);
+  const renamed = await doklin(editorBox, ["mv", "Library/Drive/Archive/beta", "Library/Drive/Archive/gamma", "--json"]);
+  const folder = await doklin(editorBox, ["mv", "Library/Drive/Archive", "Library/Drive/Old"]);
+  const old = (await doklin(editorBox, ["ls", "Library/Drive/Old"])).json;
+  const text = await doklin(editorBox, ["read", "Library/Drive/Old/alpha2"]);
   return {
-    "--dry-run says what would move": dry.code === 0 && same(dry.json, { kind: "document", from: "Drive/alpha", to: "Drive/Archive/alpha2", files: 3, moved: false }) && stillThere,
-    "the document moved: markdown, html and comments": moved.code === 0 && same(moved.json, { kind: "document", from: "Drive/alpha", to: "Drive/Archive/alpha2", files: 3 }),
+    "--dry-run says what would move": dry.code === 0 && same(dry.json, { kind: "document", from: "Library/Drive/alpha", to: "Library/Drive/Archive/alpha2", files: 3, moved: false }) && stillThere,
+    "the document moved: markdown, html and comments": moved.code === 0 && same(moved.json, { kind: "document", from: "Library/Drive/alpha", to: "Library/Drive/Archive/alpha2", files: 3 }),
     "both versions are there": info.md.file === "alpha2.md" && info.html.file === "alpha2.html" && info.comments === 1,
     "so are its comments": same(threads.map((t) => t.id), [htmlThread]),
     "nothing is left where it was": refused(gone, 3),
-    "its page follows it": page.status === 200 && listed.path === "Drive/Archive/alpha2",
-    "a destination ending in / means into it": into.code === 0 && same(into.json, { kind: "document", from: "Drive/beta", to: "Drive/Archive/beta", files: 1 }),
-    "a rename": renamed.code === 0 && same(renamed.json, { kind: "document", from: "Drive/Archive/beta", to: "Drive/Archive/gamma", files: 1 }),
-    "a folder, with everything in it": folder.code === 0 && same(folder.json, { kind: "folder", from: "Drive/Archive", to: "Drive/Old", files: 4 }),
-    "what the folder holds now": same(old.documents.map((d) => d.path), ["Drive/Old/alpha2", "Drive/Old/gamma"]) && same(old.folders, []),
+    "its page follows it": page.status === 200 && listed.path === "Library/Drive/Archive/alpha2",
+    "a destination ending in / means into it": into.code === 0 && same(into.json, { kind: "document", from: "Library/Drive/beta", to: "Library/Drive/Archive/beta", files: 1 }),
+    "a rename": renamed.code === 0 && same(renamed.json, { kind: "document", from: "Library/Drive/Archive/beta", to: "Library/Drive/Archive/gamma", files: 1 }),
+    "a folder, with everything in it": folder.code === 0 && same(folder.json, { kind: "folder", from: "Library/Drive/Archive", to: "Library/Drive/Old", files: 4 }),
+    "what the folder holds now": same(old.documents.map((d) => d.path), ["Library/Drive/Old/alpha2", "Library/Drive/Old/gamma"]) && same(old.folders, []),
     "a move is not an edit: the text is the same": text.out === "# Alpha\n\nThe boat leaves in July if the paint dries.\n\nThe boat was teal.\n",
-    "a renamed document's page follows it too": (await published()).find((p) => p.slug === "beta-page")?.path === "Drive/Old/gamma" && (await fetch(`${WORKER}/beta-page`)).status === 200,
+    "a renamed document's page follows it too": (await published()).find((p) => p.slug === "beta-page")?.path === "Library/Drive/Old/gamma" && (await fetch(`${WORKER}/beta-page`)).status === 200,
   };
 });
 
-await check("mv: into another section, a document gets a new link — the answer says links from before stop opening it, and info gives the new one; inside a section its link stays", async () => {
-  const made = await doklin(editorBox, ["write", "Drive/linked"], { input: "# Linked\n" });
-  const before = (await doklin(editorBox, ["info", "Drive/linked"])).json.link;
-  const dry = await doklin(editorBox, ["mv", "Drive/linked", "Private/", "--dry-run"]);
-  const words = (await doklin(editorBox, ["mv", "Drive/linked", "Private/"], { tty: true })).out;
+await check("mv: into another section, a document gets a new link — the answer says links from before stop opening it, and info gives the new one; inside a section its link stays; a section as the destination means into it", async () => {
+  const made = await doklin(editorBox, ["write", "Library/Drive/linked"], { input: "# Linked\n" });
+  const before = (await doklin(editorBox, ["info", "Library/Drive/linked"])).json.link;
+  const dry = await doklin(editorBox, ["mv", "Library/Drive/linked", "Private/", "--dry-run"]);
+  const words = (await doklin(editorBox, ["mv", "Library/Drive/linked", "Private/"], { tty: true })).out;
   const stale = await doklin(editorBox, ["read", before]);
   const after = (await doklin(editorBox, ["info", "Private/linked"])).json.link;
   const opened = await doklin(editorBox, ["read", after]);
   const renamed = await doklin(editorBox, ["mv", "Private/linked", "Private/kept"]);
   const kept = (await doklin(editorBox, ["info", "Private/kept"])).json.link;
-  const back = await doklin(editorBox, ["mv", "Private/kept", "Drive/"]);
+  const back = await doklin(editorBox, ["mv", "Private/kept", "Library/"]);
   return {
     "written, with a link": made.code === 0 && typeof before === "string",
     "a dry run says it would": dry.code === 0 && dry.json.newLinks === true && dry.json.moved === false,
@@ -1205,56 +1250,57 @@ await check("mv: into another section, a document gets a new link — the answer
     "a link from before opens nothing": refused(stale, 3, /no page at that link/),
     "info gives the new one, in Private's section": after !== before && /&s=p-[0-9a-f]+&/.test(after) && opened.code === 0 && opened.out === "# Linked\n" && opened.meta.path === "Private/linked",
     "a move inside the section keeps it, and says nothing of links": renamed.code === 0 && renamed.json.newLinks === undefined && kept === after,
-    "out again is a new link too": back.code === 0 && back.json.newLinks === true,
+    "out again, into Library itself, is a new link too": back.code === 0 && back.json.to === "Library/kept" && back.json.newLinks === true,
   };
 });
 
 await check("mv: onto something that is there is a conflict (exit 5); nothing to move is exit 3; a folder into itself, a plain file, or anything to a hidden place, is bad usage", async () => ({
-  "onto a document": refused(await doklin(editorBox, ["mv", "Drive/Old/gamma", "Drive/Old/alpha2"]), 5, /already/),
-  "a plain file is no document to move": refused(await doklin(editorBox, ["mv", "Drive/data.csv", "Drive/Old"]), 2, /Doklin syncs markdown and html documents only — "data\.csv" is neither/),
-  "nothing there": refused(await doklin(editorBox, ["mv", "Nope", "Somewhere"]), 3, /nothing at "Nope"/),
-  "a folder into itself": refused(await doklin(editorBox, ["mv", "Drive/Old", "Drive/Old/Inner"]), 2, /inside itself/),
-  "to a hidden place": refused(await doklin(editorBox, ["mv", "Drive/Old/gamma", ".hidden/gamma"]), 2, /hidden/),
-  "nothing moved": same((await doklin(editorBox, ["ls", "Drive/Old"])).json.documents.map((d) => d.path), ["Drive/Old/alpha2", "Drive/Old/gamma"]),
+  "onto a document": refused(await doklin(editorBox, ["mv", "Library/Drive/Old/gamma", "Library/Drive/Old/alpha2"]), 5, /already/),
+  "a plain file is no document to move": refused(await doklin(editorBox, ["mv", "Library/Drive/data.csv", "Library/Drive/Old"]), 2, /Doklin syncs markdown and html documents only — "data\.csv" is neither/),
+  "nothing there": refused(await doklin(editorBox, ["mv", "Library/Nope", "Library/Somewhere"]), 3, /nothing at "Library\/Nope"/),
+  "a section itself": refused(await doklin(editorBox, ["mv", "Library", "Private/Library"]), 2, /^Library is a section of this workspace, not a folder to move/),
+  "a folder into itself": refused(await doklin(editorBox, ["mv", "Library/Drive/Old", "Library/Drive/Old/Inner"]), 2, /inside itself/),
+  "to a hidden place": refused(await doklin(editorBox, ["mv", "Library/Drive/Old/gamma", "Library/.hidden/gamma"]), 2, /hidden/),
+  "nothing moved": same((await doklin(editorBox, ["ls", "Library/Drive/Old"])).json.documents.map((d) => d.path), ["Library/Drive/Old/alpha2", "Library/Drive/Old/gamma"]),
 }));
 
 await check("rm: one version with --html or --md, never the last; the whole document with its comments; --dry-run only says; a page outlives its document; a plain file is refused", async () => {
-  const dry = await doklin(editorBox, ["rm", "Drive/Old/alpha2", "--html", "--dry-run"]);
-  const html = await doklin(editorBox, ["rm", "Drive/Old/alpha2", "--html"]);
-  const info = (await doklin(editorBox, ["info", "Drive/Old/alpha2"])).json;
-  const last = await doklin(editorBox, ["rm", "Drive/Old/alpha2", "--md"]);
-  const noHtml = await doklin(editorBox, ["rm", "Drive/Old/alpha2", "--html"]);
-  const dryWhole = await doklin(editorBox, ["rm", "Drive/Old/alpha2", "--dry-run"]);
-  const stillThere = (await doklin(editorBox, ["info", "Drive/Old/alpha2"])).code === 0;
-  const whole = await doklin(editorBox, ["rm", "Drive/Old/alpha2.md"]);
-  const gone = await doklin(editorBox, ["read", "Drive/Old/alpha2"]);
+  const dry = await doklin(editorBox, ["rm", "Library/Drive/Old/alpha2", "--html", "--dry-run"]);
+  const html = await doklin(editorBox, ["rm", "Library/Drive/Old/alpha2", "--html"]);
+  const info = (await doklin(editorBox, ["info", "Library/Drive/Old/alpha2"])).json;
+  const last = await doklin(editorBox, ["rm", "Library/Drive/Old/alpha2", "--md"]);
+  const noHtml = await doklin(editorBox, ["rm", "Library/Drive/Old/alpha2", "--html"]);
+  const dryWhole = await doklin(editorBox, ["rm", "Library/Drive/Old/alpha2", "--dry-run"]);
+  const stillThere = (await doklin(editorBox, ["info", "Library/Drive/Old/alpha2"])).code === 0;
+  const whole = await doklin(editorBox, ["rm", "Library/Drive/Old/alpha2.md"]);
+  const gone = await doklin(editorBox, ["read", "Library/Drive/Old/alpha2"]);
   const page = await fetch(alphaPage.url);
   const listed = (await published()).find((p) => p.slug === alphaPage.slug) ?? {};
   return {
-    "--dry-run says what would go": dry.code === 0 && same(dry.json, { kind: "document", path: "Drive/Old/alpha2", versions: ["html"], threadsRemoved: 1, removed: false }),
-    "--html removes the html, and the threads that were on it": html.code === 0 && same(html.json, { kind: "document", path: "Drive/Old/alpha2", versions: ["html"], threadsRemoved: 1 }),
+    "--dry-run says what would go": dry.code === 0 && same(dry.json, { kind: "document", path: "Library/Drive/Old/alpha2", versions: ["html"], threadsRemoved: 1, removed: false }),
+    "--html removes the html, and the threads that were on it": html.code === 0 && same(html.json, { kind: "document", path: "Library/Drive/Old/alpha2", versions: ["html"], threadsRemoved: 1 }),
     "the document keeps its markdown": info.md.file === "alpha2.md" && info.html === undefined && info.comments === 0,
     "the last version cannot go that way": refused(last, 5, /only version/) && last.problem.code === "last_version",
     "a version that is not there is exit 3": refused(noHtml, 3, /no html version/),
     "rm --dry-run of the document": dryWhole.code === 0 && dryWhole.json.removed === false && stillThere,
-    "the whole document, by either name": whole.code === 0 && same(whole.json, { kind: "document", path: "Drive/Old/alpha2", versions: ["md"], stillPublic: [alphaPage.url] }),
+    "the whole document, by either name": whole.code === 0 && same(whole.json, { kind: "document", path: "Library/Drive/Old/alpha2", versions: ["md"], stillPublic: [alphaPage.url] }),
     "it is gone": refused(gone, 3),
-    "its page answers 404 and is listed as missing": page.status === 404 && listed.missing === true && listed.path === "Drive/Old/alpha2",
-    "a plain file is bad usage": refused(await doklin(editorBox, ["rm", "Drive/Old/data.csv", "--json"]), 2, /Doklin syncs markdown and html documents only — "data\.csv" is neither/),
-    "what is not there is exit 3": refused(await doklin(editorBox, ["rm", "Nope"]), 3, /there is no document at "Nope"/),
+    "its page answers 404 and is listed as missing": page.status === 404 && listed.missing === true && listed.path === "Library/Drive/Old/alpha2",
+    "a plain file is bad usage": refused(await doklin(editorBox, ["rm", "Library/Drive/Old/data.csv", "--json"]), 2, /Doklin syncs markdown and html documents only — "data\.csv" is neither/),
+    "what is not there is exit 3": refused(await doklin(editorBox, ["rm", "Library/Nope"]), 3, /there is no document at "Library\/Nope"/),
   };
 });
 
 await check("unpublish: by the document, by the folder, by the address, and by the name of a document that is gone; what is not published is exit 3; --dry-run only says", async () => {
-  const dry = await doklin(editorBox, ["unpublish", "Drive/Old/gamma", "--dry-run"]);
+  const dry = await doklin(editorBox, ["unpublish", "Library/Drive/Old/gamma", "--dry-run"]);
   const stillUp = (await fetch(`${WORKER}/beta-page`)).status;
-  const byDocument = await doklin(editorBox, ["unpublish", "Drive/Old/gamma.md"]);
+  const byDocument = await doklin(editorBox, ["unpublish", "Library/Drive/Old/gamma.md"]);
   const down = (await fetch(`${WORKER}/beta-page`)).status;
-  const dead = await doklin(editorBox, ["unpublish", "Drive/Old/alpha2"]);
-  const byFolder = await doklin(editorBox, ["unpublish", "Drive/", "--json"]);
-  await doklin(editorBox, ["publish", "Drive/page", "--slug", "page-two"]);
+  const dead = await doklin(editorBox, ["unpublish", "Library/Drive/Old/alpha2"]);
+  const byFolder = await doklin(editorBox, ["unpublish", "Library/Drive/", "--json"]);
+  await doklin(editorBox, ["publish", "Library/Drive/page", "--slug", "page-two"]);
   const byAddress = await doklin(editorBox, ["unpublish", "page-two", "--slug"]);
-  await doklin(editorBox, ["publish", "Drive/page", "--slug", "page-three"]);
+  await doklin(editorBox, ["publish", "Library/Drive/page", "--slug", "page-three"]);
   const byWord = await doklin(editorBox, ["unpublish", "page-three"]);
   const slugs = (await published()).map((p) => p.slug);
   return {
@@ -1266,7 +1312,7 @@ await check("unpublish: by the document, by the folder, by the address, and by t
     "by the address alone": byWord.code === 0 && byWord.json.stopped[0].slug === "page-three",
     "none of them is listed any more": !slugs.some((s) => ["beta-page", "drive", "page-two", "page-three", alphaPage.slug].includes(s)),
     "the pages that were there still are": ["home", "plan", "projects", "ghost"].every((s) => slugs.includes(s)),
-    "a document that is not published is exit 3": refused(await doklin(editorBox, ["unpublish", "Scratch"]), 3, /"Scratch" is not published/),
+    "a document that is not published is exit 3": refused(await doklin(editorBox, ["unpublish", "Library/Scratch"]), 3, /"Library\/Scratch" is not published/),
     "an address nothing is published at is exit 3": refused(await doklin(editorBox, ["unpublish", "nothing-here", "--slug"]), 3, /nothing is published at "nothing-here"/),
   };
 });
@@ -1289,14 +1335,14 @@ await check("search: the first search waits while the domain reads the workspace
     "…and asked nothing else": wire.every((w) => w.startsWith("GET search")),
     "the whole answer, once": first.code === 0 && first.out.trim().split("\n").length === 1 && first.err === "",
     "documents, a total, and that there are more": j.query === "zebrafish" && j.total === 60 && j.results.length === 20 && j.truncated === true,
-    "each with its lines": same(j.results[0], { path: "Herd/doc-01", version: "md", matches: [{ line: 3, text: "A zebrafish swims here." }] }),
+    "each with its lines": same(j.results[0], { path: "Library/Herd/doc-01", version: "md", matches: [{ line: 3, text: "A zebrafish swims here." }] }),
   };
 });
 
 await check("search: whatever its case; a phrase, quoted or not; --in a folder; --limit; what was said in a comment; an html-only document; what a Mac just changed; nothing found is still exit 0; a name", async () => {
-  await doklin(editorBox, ["write", "Drive/zebra-note"], { input: `${Array.from({ length: 7 }, (_, i) => `Line ${i + 1}: the Zebrafish again.`).join("\n")}\n` });
-  const inDrive = (await doklin(editorBox, ["search", "ZEBRAFISH", "--in", "Drive"])).json;
-  const inHerd = (await doklin(readerBox, ["search", "zebrafish", "--in", "Herd", "--limit", "30"])).json;
+  await doklin(editorBox, ["write", "Library/Drive/zebra-note"], { input: `${Array.from({ length: 7 }, (_, i) => `Line ${i + 1}: the Zebrafish again.`).join("\n")}\n` });
+  const inDrive = (await doklin(editorBox, ["search", "ZEBRAFISH", "--in", "Library/Drive"])).json;
+  const inHerd = (await doklin(readerBox, ["search", "zebrafish", "--in", "Library/Herd", "--limit", "30"])).json;
   const capped = (await doklin(editorBox, ["search", "zebrafish", "--limit=100"])).json;
   const phrase = (await doklin(editorBox, ["search", "or", "a", "jetpack"])).json;
   const quoted = (await doklin(editorBox, ["search", "Or a jetpack", "--json"])).json;
@@ -1306,20 +1352,20 @@ await check("search: whatever its case; a phrase, quoted or not; --in a folder; 
   const fromMac = (await doklin(editorBox, ["search", "halyard"])).json;
   const nothing = await doklin(editorBox, ["search", "qqzzxxqq"]);
   const byName = (await doklin(editorBox, ["search", "Zebra-Note"])).json;
-  await doklin(editorBox, ["rm", "Drive/zebra-note"]);
-  const afterRm = (await doklin(editorBox, ["search", "zebrafish", "--in", "Drive"])).json;
-  const poster = htmlOnly.results.find((r) => r.path === "Drive/poster") ?? { matches: [{}] };
+  await doklin(editorBox, ["rm", "Library/Drive/zebra-note"]);
+  const afterRm = (await doklin(editorBox, ["search", "zebrafish", "--in", "Library/Drive"])).json;
+  const poster = htmlOnly.results.find((r) => r.path === "Library/Drive/poster") ?? { matches: [{}] };
   return {
-    "case does not matter; --in keeps to a folder": inDrive.total === 1 && inDrive.dir === "Drive" && inDrive.results[0].path === "Drive/zebra-note",
+    "case does not matter; --in keeps to a folder": inDrive.total === 1 && inDrive.dir === "Library/Drive" && inDrive.results[0].path === "Library/Drive/zebra-note",
     "five lines are shown and the rest counted": inDrive.results[0].matches.length === 5 && inDrive.results[0].moreLines === 2 && same(inDrive.results[0].matches[0], { line: 1, text: "Line 1: the Zebrafish again." }),
     "--limit shows that many": inHerd.total === 60 && inHerd.results.length === 30 && inHerd.truncated === true,
     "--limit is capped at 30": capped.total === 61 && capped.results.length === 30,
-    "words not in quotes are a phrase": same(phrase.results, [{ path: "Ideas", version: "md", matches: [{ line: 3, text: "A teleporter, or a jetpack." }] }]) && same(quoted.results, phrase.results),
-    "what was said in a comment": comment.total === 1 && comment.results[0].path === "Review" && comment.results[0].inComments === true && same(comment.results[0].matches, []),
+    "words not in quotes are a phrase": same(phrase.results, [{ path: "Library/Ideas", version: "md", matches: [{ line: 3, text: "A teleporter, or a jetpack." }] }]) && same(quoted.results, phrase.results),
+    "what was said in a comment": comment.total === 1 && comment.results[0].path === "Library/Review" && comment.results[0].inComments === true && same(comment.results[0].matches, []),
     "an html-only document, by the text of its page": poster.version === "html" && poster.matches[0].text === "Regatta poster" && poster.matches[0].line === undefined,
-    "what a Mac just changed": fromMac.total === 1 && same(fromMac.results[0], { path: "Scratch", version: "md", matches: [{ line: 3, text: "The halyard needs splicing." }] }),
+    "what a Mac just changed": fromMac.total === 1 && same(fromMac.results[0], { path: "Library/Scratch", version: "md", matches: [{ line: 3, text: "The halyard needs splicing." }] }),
     "nothing found is an answer, not a refusal": nothing.code === 0 && nothing.json.total === 0 && same(nothing.json.results, []),
-    "a document by its name": same(byName.results, [{ path: "Drive/zebra-note", version: "md", matches: [], inName: true }]),
+    "a document by its name": same(byName.results, [{ path: "Library/Drive/zebra-note", version: "md", matches: [], inName: true }]),
     "a removed document is not found": afterRm.total === 0,
   };
 });
@@ -1330,16 +1376,16 @@ await check("search: whatever its case; a phrase, quoted or not; --in a folder; 
 
 await check("permissions: an agent that may only read reads everything and changes nothing — each refusal is exit 4 and names the permission it lacks", async () => {
   const facts = {};
-  for (const args of [["whoami"], ["ls"], ["info", "Home"], ["read", "Home"], ["comments", "Review"], ["published"], ["search", "halyard"]]) {
+  for (const args of [["whoami"], ["ls"], ["info", "Library/Home"], ["read", "Library/Home"], ["comments", "Library/Review"], ["published"], ["search", "halyard"]]) {
     facts[`may ${args.join(" ")}`] = (await doklin(readerBox, args)).code === 0;
   }
   const denied = {
     edit: [
-      ["write", "Drive/denied"], ["write", "Home", "--force"], ["write", "Drive/denied", "--dry-run"],
-      ["edit", "Home", "--find", "Welcome", "--replace", "Hello"], ["mv", "Home", "Away"], ["rm", "Home"], ["rm", "Home", "--dry-run"],
+      ["write", "Library/Drive/denied"], ["write", "Library/Home", "--force"], ["write", "Library/Drive/denied", "--dry-run"],
+      ["edit", "Library/Home", "--find", "Welcome", "--replace", "Hello"], ["mv", "Library/Home", "Library/Away"], ["rm", "Library/Home"], ["rm", "Library/Home", "--dry-run"],
     ],
-    comment: [["comment", "Home", "--on", "Welcome", "-m", "hi"], ["reply", "Review", "k3m9x2", "-m", "hi"], ["comment", "rm", "Review", "k3m9x2"]],
-    publish: [["publish", "Scratch"], ["publish", "Scratch", "--dry-run"], ["unpublish", "Home"]],
+    comment: [["comment", "Library/Home", "--on", "Welcome", "-m", "hi"], ["reply", "Library/Review", "k3m9x2", "-m", "hi"], ["comment", "rm", "Library/Review", "k3m9x2"]],
+    publish: [["publish", "Library/Scratch"], ["publish", "Library/Scratch", "--dry-run"], ["unpublish", "Library/Home"]],
   };
   for (const [need, list] of Object.entries(denied)) {
     for (const args of list) {
@@ -1347,24 +1393,24 @@ await check("permissions: an agent that may only read reads everything and chang
       facts[`may not ${args.join(" ")}`] = refused(r, 4, /this agent may not/) && r.problem.need === need && same(r.problem.scopes, ["read"]);
     }
   }
-  facts["nothing changed"] = (await doklin(readerBox, ["read", "Home"])).out === SEED_FILES["Home.md"] && (await doklin(readerBox, ["info", "Drive/denied"])).code === 3;
+  facts["nothing changed"] = (await doklin(readerBox, ["read", "Library/Home"])).out === SEED_FILES["Home.md"] && (await doklin(readerBox, ["info", "Library/Drive/denied"])).code === 3;
   return facts;
 });
 
 await check("permissions: comment without edit is a reviewer; edit without publish cannot make anything public", async () => {
-  const said = await doklin(reviewerBox, ["comment", "Scratch", "--on", "halyard", "-m", "Which one?"]);
+  const said = await doklin(reviewerBox, ["comment", "Library/Scratch", "--on", "halyard", "-m", "Which one?"]);
   const reviewerMay = (need, r) => refused(r, 4, /this agent may not/) && r.problem.need === need;
-  const wrote = await doklin(writerBox, ["write", "Drive/by-writer"], { input: "# Mine\n" });
+  const wrote = await doklin(writerBox, ["write", "Library/Drive/by-writer"], { input: "# Mine\n" });
   return {
     "a reviewer may comment": said.code === 0 && said.json.version === "md",
-    "…and may not write": reviewerMay("edit", await doklin(reviewerBox, ["write", "Scratch", "--force"], { input: "x" })),
-    "…or move": reviewerMay("edit", await doklin(reviewerBox, ["mv", "Scratch", "Scratched"])),
-    "…or remove": reviewerMay("edit", await doklin(reviewerBox, ["rm", "Scratch"])),
-    "…or publish": reviewerMay("publish", await doklin(reviewerBox, ["publish", "Scratch"])),
+    "…and may not write": reviewerMay("edit", await doklin(reviewerBox, ["write", "Library/Scratch", "--force"], { input: "x" })),
+    "…or move": reviewerMay("edit", await doklin(reviewerBox, ["mv", "Library/Scratch", "Library/Scratched"])),
+    "…or remove": reviewerMay("edit", await doklin(reviewerBox, ["rm", "Library/Scratch"])),
+    "…or publish": reviewerMay("publish", await doklin(reviewerBox, ["publish", "Library/Scratch"])),
     "a writer may write": wrote.code === 0 && wrote.json.created === true,
-    "…and may not comment": reviewerMay("comment", await doklin(writerBox, ["comment", "Drive/by-writer", "--on", "Mine", "-m", "hm"])),
-    "…or publish": reviewerMay("publish", await doklin(writerBox, ["publish", "Drive/by-writer"])),
-    "…or stop publishing": reviewerMay("publish", await doklin(writerBox, ["unpublish", "Home"])),
+    "…and may not comment": reviewerMay("comment", await doklin(writerBox, ["comment", "Library/Drive/by-writer", "--on", "Mine", "-m", "hm"])),
+    "…or publish": reviewerMay("publish", await doklin(writerBox, ["publish", "Library/Drive/by-writer"])),
+    "…or stop publishing": reviewerMay("publish", await doklin(writerBox, ["unpublish", "Library/Home"])),
     "…but sees what is public": (await doklin(writerBox, ["published"])).code === 0,
   };
 });
@@ -1375,14 +1421,14 @@ await check("permissions: comment without edit is a reviewer; edit without publi
 
 await check("what the owner takes away is gone on the next request: a permission (exit 4), one machine's login (exit 6), the agent itself (exit 6)", async () => {
   const narrow = await owner(`/api/auth/agents/${writer.id}`, { method: "POST", json: { scopes: ["read"] } });
-  const narrowed = await doklin(writerBox, ["write", "Drive/by-writer", "--force"], { input: "again\n" });
+  const narrowed = await doklin(writerBox, ["write", "Library/Drive/by-writer", "--force"], { input: "again\n" });
   const me = (await doklin(writerBox, ["whoami"])).json;
 
   const reviewerMachine = (await listed(reviewer)).machines[0];
   const revoke = await owner(`/api/auth/agents/${reviewer.id}/tokens/${reviewerMachine.id}`, { method: "DELETE" });
   const loggedOut = await doklin(reviewerBox, ["whoami"]);
-  const loggedOutRead = await doklin(reviewerBox, ["read", "Home"]);
-  const loggedOutWrite = await doklin(reviewerBox, ["comment", "Scratch", "--on", "splicing", "-m", "?"]);
+  const loggedOutRead = await doklin(reviewerBox, ["read", "Library/Home"]);
+  const loggedOutWrite = await doklin(reviewerBox, ["comment", "Library/Scratch", "--on", "splicing", "-m", "?"]);
 
   const remove = await owner(`/api/auth/agents/${writer.id}`, { method: "DELETE" });
   const removed = await doklin(writerBox, ["ls"]);
@@ -1396,7 +1442,7 @@ await check("what the owner takes away is gone on the next request: a permission
 
 await check("a machine that was logged out by the owner logs in again with a new code", async () => {
   const r = await doklin(reviewerBox, ["login", BASE, await newCode(reviewer)]);
-  const said = await doklin(reviewerBox, ["comment", "Scratch", "--on", "splicing", "-m", "With what?"]);
+  const said = await doklin(reviewerBox, ["comment", "Library/Scratch", "--on", "splicing", "-m", "With what?"]);
   return {
     "login": r.code === 0 && credsOf(reviewerBox).workspaces.length === 1,
     "and works": said.code === 0,
@@ -1426,8 +1472,8 @@ await check("-w: a machine logged in to two domains must say which; -w picks one
   const a = await doklin(multi, ["whoami", "-w", DOMAIN]);
   const b = await doklin(multi, ["whoami", "--workspace", `${DIRECT}/`]);
   const c = await doklin(multi, ["whoami", `--workspace=${DOMAIN.toUpperCase()}`]);
-  const wrote = await doklin(multi, ["write", "Drive/by-third", "-w", DIRECT_DOMAIN], { input: "# Third\n" });
-  const denied = await doklin(multi, ["write", "Drive/by-second", "-w", DOMAIN], { input: "# Second\n" });
+  const wrote = await doklin(multi, ["write", "Library/Drive/by-third", "-w", DIRECT_DOMAIN], { input: "# Third\n" });
+  const denied = await doklin(multi, ["write", "Library/Drive/by-second", "-w", DOMAIN], { input: "# Second\n" });
   const elsewhere = await doklin(multi, ["whoami", "-w", "elsewhere.example.com"]);
   const which = await doklin(multi, ["logout"]);
   const out = await doklin(multi, ["logout", "-w", DOMAIN]);
@@ -1468,42 +1514,43 @@ if (!canTty) {
   await check("on a terminal: sentences, not JSON — login, whoami, ls, info, read, each change and its dry run, comments, published, search; --json is still JSON", async () => {
     const login = await t(["login", BASE, terminal.code]);
     const whoami = await t(["whoami"]);
-    const ls = await t(["ls", "Projects"]);
-    const info = await t(["info", "Projects/plan"]);
-    const read = await t(["read", "Scratch", "--clean"]);
-    const write = await t(["write", "Drive/typed", "--from", scratchFile("typed.md", "# Typed\n\nBy hand.\n")]);
-    const dryWrite = await t(["write", "Drive/typed", "--force", "--dry-run", "--from", scratchFile("typed-again.md", "# Typed\n\nAgain.\n")]);
-    const edit = await t(["edit", "Drive/typed", "--find", "By hand", "--replace", "By machine"]);
-    const comment = await t(["comment", "Drive/typed", "--on", "By machine", "-m", "Really?"]);
-    const comments = await t(["comments", "Drive/typed"]);
-    const mv = await t(["mv", "Drive/typed", "Drive/typed-2", "--dry-run"]);
-    const publish = await t(["publish", "Drive/", "--dry-run"]);
+    const ls = await t(["ls", "Library/Projects"]);
+    const info = await t(["info", "Library/Projects/plan"]);
+    const read = await t(["read", "Library/Scratch", "--clean"]);
+    const write = await t(["write", "Library/Drive/typed", "--from", scratchFile("typed.md", "# Typed\n\nBy hand.\n")]);
+    const dryWrite = await t(["write", "Library/Drive/typed", "--force", "--dry-run", "--from", scratchFile("typed-again.md", "# Typed\n\nAgain.\n")]);
+    const edit = await t(["edit", "Library/Drive/typed", "--find", "By hand", "--replace", "By machine"]);
+    const comment = await t(["comment", "Library/Drive/typed", "--on", "By machine", "-m", "Really?"]);
+    const comments = await t(["comments", "Library/Drive/typed"]);
+    const mv = await t(["mv", "Library/Drive/typed", "Library/Drive/typed-2", "--dry-run"]);
+    const publish = await t(["publish", "Library/Drive/", "--dry-run"]);
     const pages = await t(["published"]);
     const search = await t(["search", "by machine"]);
-    const rmDry = await t(["rm", "Drive/typed", "--dry-run"]);
-    const rm = await t(["rm", "Drive/typed"]);
+    const rmDry = await t(["rm", "Library/Drive/typed", "--dry-run"]);
+    const rm = await t(["rm", "Library/Drive/typed"]);
     const json = await t(["whoami", "--json"]);
     return {
-      login: login.code === 0 && login.out.includes(`Logged in to Notes (${DOMAIN}) as Terminal bot. It may read, comment, edit and publish.`) && login.out.includes("doklin help agent") && !login.out.includes("dka_"),
+      login: login.code === 0 && login.out.includes(`Logged in to Notes (${DOMAIN}) as Terminal bot. It may read, comment, edit and publish.`) && login.out.includes("doklin help agent") && !login.out.includes("dka_") &&
+        login.out.includes("Every path starts with its section: Library/, Private/ or Restricted/<folder>/.\nPut new work under Private/ unless you are told where it goes."),
       whoami:
         whoami.out.includes(`Terminal bot, Sherin's agent on Notes (${DOMAIN})`) &&
         whoami.out.includes("It may read, comment, edit and publish.") &&
-        whoami.out.includes("It sees the shared workspace, and Private/.") &&
+        whoami.out.includes("It sees Library/ and Private/.") &&
         /Worker version \d+\./.test(whoami.out),
-      ls: ls.out.includes("Projects/Roadmap/\n") && ls.out.includes("Projects/plan  [md · html]\n") && ls.out.includes("Projects/status  [md]") && !ls.out.includes("http"),
-      info: info.out.includes("Projects/plan — a document") && /markdown\s+plan\.md  revision 2 · \d+ B · changed .* by Editor bot/.test(info.out) && /comments\s+none/.test(info.out) && /link\s+https:\/\/doklin\.cc\/open#/.test(info.out) && /public\s+http/.test(info.out),
-      read: read.out.includes("The halyard needs splicing.") && /Scratch · markdown · revision \d+/.test(read.out),
-      write: write.code === 0 && write.out.includes("Created the markdown version of Drive/typed — revision 1."),
-      "write --dry-run": dryWrite.out.includes("Would replace the markdown version of Drive/typed, making it revision 2."),
-      edit: edit.out.includes("Changed 1 place in the markdown version of Drive/typed — revision 2."),
-      comment: /Started thread #\S+ on "By machine", line 3 in Drive\/typed\./.test(comment.out),
+      ls: ls.out.includes("Library/Projects/Roadmap/\n") && ls.out.includes("Library/Projects/plan  [md · html]\n") && ls.out.includes("Library/Projects/status  [md]") && !ls.out.includes("http"),
+      info: info.out.includes("Library/Projects/plan — a document") && /markdown\s+plan\.md  revision 2 · \d+ B · changed .* by Editor bot/.test(info.out) && /comments\s+none/.test(info.out) && /link\s+https:\/\/doklin\.cc\/open#/.test(info.out) && /public\s+http/.test(info.out),
+      read: read.out.includes("The halyard needs splicing.") && /Library\/Scratch · markdown · revision \d+/.test(read.out),
+      write: write.code === 0 && write.out.includes("Created the markdown version of Library/Drive/typed — revision 1."),
+      "write --dry-run": dryWrite.out.includes("Would replace the markdown version of Library/Drive/typed, making it revision 2."),
+      edit: edit.out.includes("Changed 1 place in the markdown version of Library/Drive/typed — revision 2."),
+      comment: /Started thread #\S+ on "By machine", line 3 in Library\/Drive\/typed\./.test(comment.out),
       comments: /#\S+  markdown, line 3 — on "By machine"/.test(comments.out) && /Terminal bot · \d{4}-\d\d-\d\d \d\d:\d\d UTC: Really\?/.test(comments.out),
-      "mv --dry-run": mv.out.includes("Would move the document Drive/typed to Drive/typed-2 (2 files)."),
-      "publish --dry-run": /Would publish the folder Drive at http:\S+ — \d+ documents would be public:/.test(publish.out) && publish.out.includes("\n  Drive/typed\n"),
-      published: /\/home  Home  \(the home page; published by /.test(pages.out) && pages.out.includes("its document is gone, so it answers 404"),
-      search: search.out.includes("Drive/typed\n  3: By machine.") && search.out.includes("1 document."),
-      "rm --dry-run": rmDry.out.includes("Would remove the document Drive/typed (markdown), and its comments.") && !rmDry.out.includes("Trash"),
-      rm: rm.out.includes("Removed the document Drive/typed (markdown), and its comments.") && rm.out.includes("keeps a copy in its Trash"),
+      "mv --dry-run": mv.out.includes("Would move the document Library/Drive/typed to Library/Drive/typed-2 (2 files)."),
+      "publish --dry-run": /Would publish the folder Library\/Drive at http:\S+ — \d+ documents would be public:/.test(publish.out) && publish.out.includes("\n  Library/Drive/typed\n"),
+      published: /\/home  Library\/Home  \(the home page; published by /.test(pages.out) && pages.out.includes("its document is gone, so it answers 404"),
+      search: search.out.includes("Library/Drive/typed\n  3: By machine.") && search.out.includes("1 document."),
+      "rm --dry-run": rmDry.out.includes("Would remove the document Library/Drive/typed (markdown), and its comments.") && !rmDry.out.includes("Trash"),
+      rm: rm.out.includes("Removed the document Library/Drive/typed (markdown), and its comments.") && rm.out.includes("keeps a copy in its Trash"),
       "--json on a terminal is JSON": json.code === 0 && JSON.parse(json.out.slice(json.out.indexOf("{"))).agent.name === "Terminal bot",
     };
   });
@@ -1519,26 +1566,26 @@ if (!canTty) {
       },
       { mtime: Date.now() - 60_000 },
     );
-    const inStep = await t(["ls"]);
-    const reply = await t(["reply", "Pair", "m4st01", "-m", "Forty feet."]);
-    const onHtml = await t(["comment", "Pair", "--html", "--on", "The mast", "-m", "Shorter?"]);
-    const unchanged = await t(["write", "Pair", "--html", "--force", "--from", scratchFile("pair.html", PAIR_HTML)]);
-    const dropping = await t(["edit", "Pair", "--find", "{==too tall==}{>>#m4st01<<}", "--replace", "just right"]);
-    const edit = await t(["edit", "Pair", "--find", "The mast is", "--replace", "The mast was"]);
+    const inStep = await t(["ls", "Library"]);
+    const reply = await t(["reply", "Library/Pair", "m4st01", "-m", "Forty feet."]);
+    const onHtml = await t(["comment", "Library/Pair", "--html", "--on", "The mast", "-m", "Shorter?"]);
+    const unchanged = await t(["write", "Library/Pair", "--html", "--force", "--from", scratchFile("pair.html", PAIR_HTML)]);
+    const dropping = await t(["edit", "Library/Pair", "--find", "{==too tall==}{>>#m4st01<<}", "--replace", "just right"]);
+    const edit = await t(["edit", "Library/Pair", "--find", "The mast is", "--replace", "The mast was"]);
     // A person rewrites the sentence on their Mac: the thread loses its words, which is theirs to do.
     await macWrites({ "Pair.md": "# Pair\n\nThe mast is just right.\n" });
-    const behind = await t(["ls"]);
-    const info = await t(["info", "Pair"]);
-    const read = await t(["read", "Pair"]);
-    const comments = await t(["comments", "Pair"]);
-    const rmThread = await t(["comment", "rm", "Pair", "m4st01"]);
-    const publish = await t(["publish", "Pair", "--slug", "pair-page"]);
-    const again = await t(["publish", "Pair"]);
-    const mv = await t(["mv", "Pair", "Drive/Pair"]);
-    const rmHtml = await t(["rm", "Drive/Pair", "--html"]);
-    const rm = await t(["rm", "Drive/Pair"]);
+    const behind = await t(["ls", "Library"]);
+    const info = await t(["info", "Library/Pair"]);
+    const read = await t(["read", "Library/Pair"]);
+    const comments = await t(["comments", "Library/Pair"]);
+    const rmThread = await t(["comment", "rm", "Library/Pair", "m4st01"]);
+    const publish = await t(["publish", "Library/Pair", "--slug", "pair-page"]);
+    const again = await t(["publish", "Library/Pair"]);
+    const mv = await t(["mv", "Library/Pair", "Library/Drive/Pair"]);
+    const rmHtml = await t(["rm", "Library/Drive/Pair", "--html"]);
+    const rm = await t(["rm", "Library/Drive/Pair"]);
     const unpublish = await t(["unpublish", "pair-page", "--slug"]);
-    const file = await t(["info", "Projects/assets/pic.png"]);
+    const file = await t(["info", "Library/Projects/assets/pic.png"]);
     const nothing = await t(["search", "qqzzxxqq"]);
     // Forty-five more documents from a Mac: the next search has reading to do first.
     const flock = {};
@@ -1547,41 +1594,44 @@ if (!canTty) {
     const waited = await t(["search", "zebrafish"]);
     const byName = await t(["search", "bird-07"]);
     return {
-      "ls, in step": /^Pair  \[md · html\]$/m.test(inStep.out),
-      reply: reply.out.includes("Answered thread #m4st01 in Pair — it has 2 comments now."),
-      "a thread on html": /Started thread #\S+ on the <p> that begins "The mast is too tall\." in Pair\./.test(onHtml.out),
-      "the same text again": unchanged.out.includes("The html version of Pair already says exactly that — nothing was written."),
-      "a write that would drop a comment": dropping.code === 2 && dropping.out.includes('doklin: this write would remove the marker of comment #m4st01 (on "too tall")') && dropping.out.includes("`doklin comment rm Pair m4st01`"),
-      "an edit that leaves the html behind": edit.out.includes("Changed 1 place in the markdown version of Pair — revision 2.") && edit.out.includes("Its html version is now behind"),
-      "ls, behind": /^Pair  \[md · html, html is behind\]$/m.test(behind.out),
+      "ls, in step": /^Library\/Pair  \[md · html\]$/m.test(inStep.out),
+      reply: reply.out.includes("Answered thread #m4st01 in Library/Pair — it has 2 comments now."),
+      "a thread on html": /Started thread #\S+ on the <p> that begins "The mast is too tall\." in Library\/Pair\./.test(onHtml.out),
+      "the same text again": unchanged.out.includes("The html version of Library/Pair already says exactly that — nothing was written."),
+      "a write that would drop a comment": dropping.code === 2 && dropping.out.includes('doklin: this write would remove the marker of comment #m4st01 (on "too tall")') && dropping.out.includes("`doklin comment rm Library/Pair m4st01`"),
+      "an edit that leaves the html behind": edit.out.includes("Changed 1 place in the markdown version of Library/Pair — revision 2.") && edit.out.includes("Its html version is now behind"),
+      "ls, behind": /^Library\/Pair  \[md · html, html is behind\]$/m.test(behind.out),
       "info, behind": info.out.includes("(made from an older text than the markdown)") && /comments\s+2 threads/.test(info.out) && /public\s+no/.test(info.out),
-      "read, behind": read.out.includes("The mast is just right.") && read.out.includes("Pair · markdown · revision 3 · its html version is behind this text"),
+      "read, behind": read.out.includes("The mast is just right.") && read.out.includes("Library/Pair · markdown · revision 3 · its html version is behind this text"),
       "comments, with an orphan": comments.out.includes("#m4st01  markdown   (orphaned: the text it was on is gone)") && /#\S+  html, <p> — on "The mast is too tall\."/.test(comments.out) && comments.out.includes("Ada · 2025-09-04 15:33 UTC: How tall?"),
-      "a thread removed": rmThread.out.includes("Removed thread #m4st01 from Pair."),
-      publish: publish.out.includes(`Published Pair at ${WORKER}/pair-page`),
-      "publish again": again.out.includes(`Pair is published at ${WORKER}/pair-page`),
-      mv: mv.out.includes("Moved the document Pair to Drive/Pair (3 files)."),
-      "rm --html": rmHtml.out.includes("Removed the html version of Drive/Pair.") && rmHtml.out.includes("1 comment thread on that version went with it."),
+      "a thread removed": rmThread.out.includes("Removed thread #m4st01 from Library/Pair."),
+      publish: publish.out.includes(`Published Library/Pair at ${WORKER}/pair-page`),
+      "publish again": again.out.includes(`Library/Pair is published at ${WORKER}/pair-page`),
+      mv: mv.out.includes("Moved the document Library/Pair to Library/Drive/Pair (3 files)."),
+      "rm --html": rmHtml.out.includes("Removed the html version of Library/Drive/Pair.") && rmHtml.out.includes("1 comment thread on that version went with it."),
       "rm, of something published": rm.out.includes(`It stays published at ${WORKER}/pair-page — the page answers 404 until the document is back. Stop with \`doklin unpublish\`.`),
       unpublish: unpublish.out.includes(`Stopped publishing ${WORKER}/pair-page.`),
       "a plain file, refused in a sentence": file.code === 2 && file.out.includes('doklin: Doklin syncs markdown and html documents only — "pic.png" is neither. Name a document: plan, plan.md or plan.html.'),
       "nothing found": nothing.code === 0 && nothing.out.includes('Nothing has "qqzzxxqq" in its name or its text.'),
       "a search that waits says why, then answers": waited.out.includes("Reading the workspace into its search index") && waited.out.includes("60 documents match; these are the first 20 — narrow it with --in <folder>, or raise --limit."),
-      "found by its name": byName.out.includes("Flock/bird-07 — in its name\n1 document."),
+      "found by its name": byName.out.includes("Library/Flock/bird-07 — in its name\n1 document."),
     };
   });
 
   await check("on a terminal: a refusal is `doklin: ` and a sentence, with the same exit code — and the places a comment's words occur are listed under it; write waits for nothing", async () => {
-    await doklin(ttyBox, ["write", "Drive/echo"], { input: "An echo here.\n\nAn echo there.\n" });
-    const missing = await t(["read", "Nope"]);
+    await doklin(ttyBox, ["write", "Library/Drive/echo"], { input: "An echo here.\n\nAn echo there.\n" });
+    const missing = await t(["read", "Library/Nope"]);
+    const noSection = await t(["read", "Projects/plan"]);
     const usage = await t(["read"]);
-    const noPipe = await t(["write", "Drive/typed"]);
-    const conflict = await t(["write", "Drive/echo", "--from", scratchFile("echo.md", "x\n")]);
-    const ambiguous = await t(["comment", "Drive/echo", "--on", "An echo", "-m", "Which?"]);
+    const noPipe = await t(["write", "Library/Drive/typed"]);
+    const conflict = await t(["write", "Library/Drive/echo", "--from", scratchFile("echo.md", "x\n")]);
+    const ambiguous = await t(["comment", "Library/Drive/echo", "--on", "An echo", "-m", "Which?"]);
     const logout = await t(["logout"]);
     const after = await t(["whoami"]);
     return {
-      "not found": missing.code === 3 && missing.out.includes('doklin: there is no document at "Nope"') && !missing.out.includes('{"'),
+      "not found": missing.code === 3 && missing.out.includes('doklin: there is no document at "Library/Nope"') && !missing.out.includes('{"'),
+      "a path with no section, refused in a sentence that says which to use":
+        noSection.code === 2 && noSection.out.includes("doklin: Projects/plan is in no section. Say which: Library/Projects/plan (everyone), Private/Projects/plan (only your person) or Restricted/<folder>/Projects/plan."),
       "bad usage": usage.code === 2 && usage.out.includes("doklin: say which document — doklin read <doc>"),
       "write with nothing piped in is refused, not waited for": noPipe.code === 2 && noPipe.out.includes("doklin: pipe the new content in, or name a file with --from <file>"),
       "a conflict says how to go on": conflict.code === 5 && conflict.out.includes("--if-rev 1"),
@@ -1683,7 +1733,7 @@ await check("a worker that is behind: a route it does not know, or a method, is 
   const search = await doklin(behindBox, ["search", "x"]);
   const searchAsked = behind.asked.slice(from);
   const ls = await doklin(behindBox, ["ls"]);
-  const read = await doklin(behindBox, ["read", "Home"]);
+  const read = await doklin(behindBox, ["read", "Library/Home"]);
   return {
     "login and whoami work": login.code === 0 && whoami.code === 0 && whoami.json.agent.name === "Old bot",
     "a route the worker does not know is exit 7, and says whose worker": refused(search, 7, new RegExp(`the worker on localhost:${behindPort} is too old for this command`)),

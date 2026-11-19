@@ -455,7 +455,7 @@ export async function moveAcross(
     const carried = await change(dest, async (tx) => {
       const map = (tx.m.public ??= {});
       for (const [slug, entry] of pages) {
-        // The home page is chosen from the shared workspace.
+        // The home page is chosen from Library.
         const { root: _root, ...kept } = entry;
         const common = dest.space === "" ? entry : kept;
         if (entry.kind === "file") {

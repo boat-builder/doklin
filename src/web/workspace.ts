@@ -15,11 +15,15 @@
 //
 // Paths. The UI names a document by an absolute path, as on a disk. Here
 // that is the workspace's name as a root, then the path the Mac app would
-// give the same file under its folder: a section's files are under `Private`
-// or `Restricted/<name>` (`PRIVATE_DIR`, `RESTRICTED_DIR`,
-// engine/src/cloud/space.rs — change both), the shared workspace's at the top.
+// give the same file under its folder: every section's files are under its
+// own folder there — `Library` (`LIBRARY_FOLDER`, layout.ts), `Private` or
+// `Restricted/<name>` (`PRIVATE_DIR`, `RESTRICTED_DIR`,
+// engine/src/cloud/space.rs — change both). A path under none of them is in
+// no section, and neither is one under `Library/Private` or
+// `Library/Restricted`: the shared manifest holds nothing there. What is sent
+// to the worker is the section's id and the path inside the section.
 
-import { reservedTop, syncs, validPath } from "../../cloud-worker/src/layout";
+import { LIBRARY_FOLDER, reservedTop, syncs, validPath } from "../../cloud-worker/src/layout";
 import type { Manifest, ManifestFile } from "../../cloud-worker/src/manifest";
 import type { Limits, MetaAnswer, PollAnswer, Space } from "../../cloud-worker/src/wire";
 import type { DocumentChange, TreeNode, WatchedDocument } from "../backend";
@@ -74,7 +78,7 @@ type Section = {
   /** The space's id; "" is the shared workspace. */
   id: string;
   space: Space | null;
-  /** Where its files are in the tree: "" for the shared workspace. */
+  /** Where its files are in the tree: `Library`, `Private`, `Restricted/<name>`. */
   mount: string;
   etag: string;
   manifest: Manifest;
@@ -259,12 +263,12 @@ export class Workspace {
    *  section stores it; null for a path in no section. */
   private placeOf(rel: string): { section: Section; path: string } | null {
     for (const section of this.sections.values()) {
-      if (section.mount === "") continue;
-      if (rel === section.mount) return { section, path: "" };
-      if (rel.startsWith(`${section.mount}/`)) return { section, path: rel.slice(section.mount.length + 1) };
+      const path = rel === section.mount ? "" : rel.startsWith(`${section.mount}/`) ? rel.slice(section.mount.length + 1) : null;
+      if (path === null) continue;
+      // Nothing in the shared section is under another section's own name.
+      return section.id === "" && reservedTop(path) ? null : { section, path };
     }
-    const shared = this.sections.get("");
-    return shared && !reservedTop(rel) ? { section: shared, path: rel } : null;
+    return null;
   }
 
   /** The stored file at an absolute path, with its section. */
@@ -687,7 +691,7 @@ export class Workspace {
       const section: Section = {
         id: r.id,
         space: r.space,
-        mount: r.space ? this.mountOf(r.space) : "",
+        mount: r.space ? this.mountOf(r.space) : LIBRARY_FOLDER,
         etag: r.etag,
         manifest,
         files: r.fresh ? indexOf(r.fresh, r.id === "") : (r.held as Section).files,

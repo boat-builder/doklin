@@ -238,8 +238,8 @@ pub(crate) struct UnitConfig {
     pub name: String,
     /// The folder it keeps in step.
     pub root: PathBuf,
-    /// That folder inside the workspace: empty for the shared workspace,
-    /// else `Private` or `Restricted/<folder>`.
+    /// That folder inside the workspace: `Library`, `Private` or
+    /// `Restricted/<folder>`, as the disk spells it.
     pub prefix: String,
     /// `state.json` + `base/`.
     pub state_dir: PathBuf,
@@ -326,8 +326,8 @@ impl<R: Remote> Unit<R> {
         self.id == SHARED
     }
 
-    /// What this unit's walk leaves out: for the shared workspace, the two
-    /// folders that are other sections'.
+    /// What this unit's walk leaves out: for the shared section, the two
+    /// names it keeps at its own top (`RESERVED_DIRS`).
     fn skip(&self) -> &'static [&'static str] {
         if self.is_shared() {
             &RESERVED_DIRS
@@ -346,18 +346,22 @@ impl<R: Remote> Unit<R> {
     }
 
     /// A workspace-relative path as this unit spells it, when it is this
-    /// unit's: `Some("")` is the unit's own folder.
+    /// unit's: `Some("")` is the unit's own folder. Inside the shared
+    /// section, `Private` and `Restricted` at its top are nobody's.
     pub(crate) fn in_unit(&self, ws_rel: &str) -> Option<String> {
-        if self.is_shared() {
-            return reserved_top(ws_rel).is_none().then(|| ws_rel.to_string());
-        }
-        // The folder's own name compares the way the disk does.
+        // The folder's own name compares the way the disk does. An empty
+        // prefix is a unit at the workspace's root: what the tests stand a
+        // device still in the layout from before Library in with.
         let head = ws_rel.get(..self.prefix.len()).filter(|head| head.eq_ignore_ascii_case(&self.prefix))?;
-        let rest = &ws_rel[head.len()..];
-        if rest.is_empty() {
-            return Some(String::new());
+        let rest = match &ws_rel[head.len()..] {
+            rest if head.is_empty() => rest,
+            "" => "",
+            rest => rest.strip_prefix('/')?,
+        };
+        if self.is_shared() && reserved_top(rest).is_some() {
+            return None;
         }
-        rest.strip_prefix('/').map(String::from)
+        Some(rest.to_string())
     }
 
     pub(crate) fn base_path(&self, file_id: &str) -> PathBuf {
@@ -1685,7 +1689,7 @@ impl<R: Remote> Unit<R> {
                     None => e.kind == PublicKind::File && e.path == rel,
                 };
                 if !same {
-                    return Err(format!("\"{}\" is already the address of {}", s, describe(e)));
+                    return Err(format!("\"{}\" is already the address of {}", s, describe(e, &self.ws_rel(&e.path))));
                 }
             }
             if elsewhere.contains(&s) {
@@ -1807,11 +1811,12 @@ fn merged_entry(p: &PendingPublic, file: Option<String>, prev: Option<PublicEntr
     }
 }
 
-fn describe(e: &PublicEntry) -> String {
+/// What a page is of, named by its workspace-relative path: a section's
+/// whole folder by the section's name.
+fn describe(e: &PublicEntry, ws_path: &str) -> String {
     match e.kind {
-        PublicKind::File => e.path.clone(),
-        PublicKind::Dir if e.path.is_empty() => "the workspace".to_string(),
-        PublicKind::Dir => format!("the folder {}", e.path),
+        PublicKind::Dir if !e.path.is_empty() => format!("the folder {}", ws_path),
+        _ => ws_path.to_string(),
     }
 }
 

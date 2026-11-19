@@ -102,7 +102,7 @@ const optionalText = (v: unknown, max: number): boolean =>
 const isAuthor = (v: unknown): boolean => typeof v === "string" && (MEMBER_ID_RE.test(v) || AGENT_ID_RE.test(v));
 
 /** What a shared manifest naming a file under a reserved folder is told. */
-export const RESERVED_SENTENCE = "Private and Restricted are kept for a person's own and restricted folders";
+export const RESERVED_SENTENCE = "Library, Private and Restricted are the names of a workspace's sections: no shared folder is called one";
 
 /** What a manifest naming a file outside `syncs` is told. */
 const unsynced = (path: string): string => `${UNSYNCED_SENTENCE} — "${path}" is neither`;
@@ -189,7 +189,7 @@ function validatePublic(map: unknown, space: boolean): string | null {
     if (e.root !== undefined && typeof e.root !== "boolean") return `invalid root for ${slug}`;
     if (e.root === true) roots += 1;
   }
-  if (roots > 0 && space) return "the home page is chosen from the shared workspace";
+  if (roots > 0 && space) return "The home page is chosen from Library.";
   if (roots > 1) return "more than one root page";
   return null;
 }

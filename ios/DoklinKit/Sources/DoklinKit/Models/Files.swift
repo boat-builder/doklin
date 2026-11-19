@@ -241,6 +241,14 @@ public struct WorkspaceFiles: Sendable {
         return nil
     }
 
+    /// Why a folder in `dir` cannot be called `name`, or nil when it can: at
+    /// the top of Library a section's own name is in no section, so nothing
+    /// under it would sync.
+    static func folderNameProblem(_ name: String, in dir: String) -> String? {
+        guard dir.lowercased() == TreeModel.libraryFolder.lowercased(), TreeModel.isSectionName(name) else { return nil }
+        return "A folder in Library can't be called Library, Private or Restricted."
+    }
+
     /// Whether any file of a document called `stem` is already in `dir`.
     private func stemTaken(_ stem: String, in dir: String) -> Bool {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: absolute(dir))) ?? []
@@ -264,7 +272,9 @@ public struct WorkspaceFiles: Sendable {
 
     public func createFolder(in dir: String, named name: String) throws -> String {
         if let problem = Self.nameProblem(name) { throw DoklinError(problem) }
-        let path = join(dir, name.trimmingCharacters(in: .whitespacesAndNewlines))
+        let named = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let problem = Self.folderNameProblem(named, in: dir) { throw DoklinError(problem) }
+        let path = join(dir, named)
         if exists(path) { throw DoklinError("A file or folder named “\(DocLinks.name(of: path))” already exists.") }
         do {
             try FileManager.default.createDirectory(at: url(path), withIntermediateDirectories: true)
@@ -325,7 +335,9 @@ public struct WorkspaceFiles: Sendable {
         if case .document = entry, FileKind.of(newName) == .markdown || FileKind.of(newName) == .html {
             newName = DocLinks.stem(of: newName)
         }
-        let pairs = moves(entry, to: DocLinks.directory(of: entry.path), named: newName)
+        let dir = DocLinks.directory(of: entry.path)
+        if case .folder = entry, let problem = Self.folderNameProblem(newName, in: dir) { throw DoklinError(problem) }
+        let pairs = moves(entry, to: dir, named: newName)
         return (pairs[0].1, try relocate(pairs))
     }
 
@@ -334,6 +346,7 @@ public struct WorkspaceFiles: Sendable {
         if case .folder(let own) = entry, dir == own || dir.hasPrefix(own + "/") {
             throw DoklinError("A folder can't go inside itself.")
         }
+        if case .folder = entry, let problem = Self.folderNameProblem(entry.name, in: dir) { throw DoklinError(problem) }
         let name: String
         if case .document(let row) = entry { name = DocLinks.stem(of: DocLinks.name(of: row.path)) } else { name = entry.name }
         let pairs = moves(entry, to: dir, named: name)
@@ -371,12 +384,12 @@ public struct WorkspaceFiles: Sendable {
 
     /* ---------- Search ---------- */
 
-    /// Every document called something holding `query`, or whose text holds
-    /// it, ignoring case — the ones named for it first: each line it is on,
-    /// trimmed. A note is read for its text; a page is found by its name
-    /// alone (the Mac's `search_workspace` and the worker's search match the
-    /// same name). Not other files.
-    public func search(_ query: String, limit: Int = 2000) -> [SearchResult] {
+    /// Every document under `folders` called something holding `query`, or
+    /// whose text holds it, ignoring case — the ones named for it first:
+    /// each line it is on, trimmed. A note is read for its text; a page is
+    /// found by its name alone (the Mac's `search_workspace` and the worker's
+    /// search match the same name). Not other files.
+    public func search(_ query: String, in folders: [String], limit: Int = 2000) -> [SearchResult] {
         let wanted = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !wanted.isEmpty else { return [] }
         var named: [SearchResult] = []
@@ -392,7 +405,7 @@ public struct WorkspaceFiles: Sendable {
                 }
             }
         }
-        walk("", depth: 0)
+        for folder in folders { walk(folder, depth: 0) }
         for row in documents.prefix(limit) {
             var hits: [SearchHit] = []
             if !row.isHTML, let text = try? text(row.path) {

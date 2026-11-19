@@ -241,10 +241,14 @@ final class SearchModelTests: XCTestCase {
 
 @MainActor
 final class TreeTests: XCTestCase {
-    /// A workspace's folder with sections, and a way to clean it up.
+    /// A workspace's folder in its sections, with a stray at the top and its
+    /// marker, and a way to clean it up.
     private func workspace() throws -> (URL, UserDefaults) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("doklin-tree-\(UUID().uuidString)")
-        for path in ["Product/Plans/beta.md", "Product/roadmap.md", "Team/handbook.md", "welcome.md", "Restricted/Finance/budget.md", "Private/diary.md"] {
+        for path in [
+            "Library/Product/Plans/beta.md", "Library/Product/roadmap.md", "Library/Team/handbook.md", "Library/welcome.md",
+            "Restricted/Finance/budget.md", "Private/diary.md", "Scratch/loose.md", ".doklin/cloud.json",
+        ] {
             let url = root.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("# x\n".utf8).write(to: url)
@@ -258,24 +262,41 @@ final class TreeTests: XCTestCase {
         let workspace = Workspaces(remembered: defaults).workspace(root.path)
         let tree = TreeModel(workspace: workspace, defaults: defaults)
         tree.load()
-        XCTAssertEqual(tree.groups.map(\.section), [.workspace, .restricted, .personal])
-        XCTAssertEqual(tree.groups[0].rows.map(\.entry.path), ["Product", "Team", "welcome.md"])
+        // The sections as the Mac's sidebar heads them, each its folder's
+        // insides; what is in none after them.
+        XCTAssertEqual(tree.groups.map(\.section), [.library, .restricted, .personal, .nowhere])
+        XCTAssertEqual(tree.groups.map(\.folder), ["Library", "Restricted", "Private", ""])
+        XCTAssertEqual(tree.groups[0].rows.map(\.entry.path), ["Library/Product", "Library/Team", "Library/welcome.md"])
         XCTAssertEqual(tree.groups[1].rows.map(\.entry.path), ["Restricted/Finance"])
         XCTAssertEqual(tree.groups[2].rows.map(\.entry.path), ["Private/diary.md"])
+        XCTAssertEqual(tree.groups[3].rows.map(\.entry.path), ["Scratch"])
 
-        tree.toggle("Product")
-        XCTAssertEqual(tree.groups[0].rows.map(\.entry.path), ["Product", "Product/Plans", "Product/roadmap.md", "Team", "welcome.md"])
+        tree.toggle("Library/Product")
+        XCTAssertEqual(tree.groups[0].rows.map(\.entry.path), [
+            "Library/Product", "Library/Product/Plans", "Library/Product/roadmap.md", "Library/Team", "Library/welcome.md",
+        ])
         XCTAssertEqual(tree.groups[0].rows.map(\.depth), [0, 1, 1, 0, 0])
         XCTAssertTrue(tree.groups[0].rows[0].open)
 
         let again = TreeModel(workspace: workspace, defaults: defaults)
         again.load()
-        XCTAssertTrue(again.isOpen("product"), "what was open is kept")
-        again.toggle("Product")
+        XCTAssertTrue(again.isOpen("library/product"), "what was open is kept")
+        again.toggle("Library/Product")
         XCTAssertEqual(again.groups[0].rows.count, 3)
 
-        again.reveal("Product/Plans/beta.md")
-        XCTAssertTrue(again.groups[0].rows.contains { $0.entry.path == "Product/Plans/beta.md" })
+        again.reveal("Library/Product/Plans/beta.md")
+        XCTAssertTrue(again.groups[0].rows.contains { $0.entry.path == "Library/Product/Plans/beta.md" })
+    }
+
+    func testLibraryIsThereEvenWhenItsFolderIsNotAndStraysOnlyWhenThereAreAny() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("doklin-tree-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Private"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "tree-\(UUID().uuidString)"))
+        let tree = TreeModel(workspace: Workspaces(remembered: defaults).workspace(root.path), defaults: defaults)
+        tree.load()
+        XCTAssertEqual(tree.groups.map(\.section), [.library, .personal])
+        XCTAssertEqual(tree.groups[0].rows, [])
     }
 
     func testTheFilterNarrowsTheTreeToNamesAndTheirFolders() async throws {
@@ -283,12 +304,60 @@ final class TreeTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let tree = TreeModel(workspace: Workspaces(remembered: defaults).workspace(root.path), defaults: defaults)
         tree.filter = "BETA"
-        XCTAssertEqual(tree.groups.map(\.section), [.workspace])
-        XCTAssertEqual(tree.groups[0].rows.map(\.entry.path), ["Product", "Product/Plans", "Product/Plans/beta.md"])
-        XCTAssertFalse(tree.isOpen("Product"), "a filter opens nothing for good")
+        XCTAssertEqual(tree.groups.map(\.section), [.library])
+        XCTAssertEqual(tree.groups[0].rows.map(\.entry.path), ["Library/Product", "Library/Product/Plans", "Library/Product/Plans/beta.md"])
+        XCTAssertFalse(tree.isOpen("Library/Product"), "a filter opens nothing for good")
         tree.filter = "budget"
         XCTAssertEqual(tree.groups.map(\.section), [.restricted])
+        tree.filter = "loose"
+        XCTAssertEqual(tree.groups.map(\.section), [.nowhere])
+        XCTAssertEqual(tree.groups[0].rows.map(\.entry.path), ["Scratch", "Scratch/loose.md"])
         tree.filter = ""
-        XCTAssertEqual(tree.groups.count, 3)
+        XCTAssertEqual(tree.groups.count, 4)
+    }
+}
+
+/// The one-time move of what this iPhone keeps by path, once a workspace's
+/// folder has moved into the Library layout.
+@MainActor
+final class LibraryMoveTests: XCTestCase {
+    func testAKeptPathMovesIntoLibraryUnlessItNamesASection() {
+        XCTAssertEqual(Sections.moved("Projects/plan.md"), "Library/Projects/plan.md")
+        XCTAssertEqual(Sections.moved("plan.md"), "Library/plan.md")
+        XCTAssertEqual(Sections.moved("Library/plan.md"), "Library/plan.md")
+        XCTAssertEqual(Sections.moved("library"), "library")
+        XCTAssertEqual(Sections.moved("private/diary.md"), "private/diary.md")
+        XCTAssertEqual(Sections.moved("RESTRICTED/Finance"), "RESTRICTED/Finance")
+        XCTAssertEqual(Sections.moved(".git/config"), ".git/config")
+        XCTAssertEqual(Sections.moved("Privateer/x.md"), "Library/Privateer/x.md")
+        XCTAssertEqual(Sections.moved(""), "")
+    }
+
+    func testWhatWasOpenAndWhatWasReadMoveOnceTheMarkerSaysSo() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("doklin-move-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        try fm.createDirectory(at: root.appendingPathComponent(".doklin"), withIntermediateDirectories: true)
+        let marker = root.appendingPathComponent(".doklin/cloud.json")
+        try Data(#"{"domain":"d","wsId":"w-1"}"#.utf8).write(to: marker)
+        XCTAssertFalse(Workspaces.inLibraryLayout(root.path), "a marker with no layout is the layout from before")
+        try Data(#"{"domain":"d","wsId":"w-1","layout":"moving"}"#.utf8).write(to: marker)
+        XCTAssertFalse(Workspaces.inLibraryLayout(root.path), "a move that has not finished")
+        try Data(#"{"domain":"d","wsId":"w-1","layout":"library"}"#.utf8).write(to: marker)
+        XCTAssertTrue(Workspaces.inLibraryLayout(root.path))
+        XCTAssertFalse(Workspaces.inLibraryLayout(root.appendingPathComponent("elsewhere").path))
+
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "move-\(UUID().uuidString)"))
+        defaults.set(["product", "product/plans", "private/ideas"], forKey: "tree-open-w-1")
+        let seen = SeenStore(file: nil, now: 1)
+        seen.saw("w-1", [("f-1", "aaaa"), (SeenStore.key(fileId: nil, path: "Notes/new.md"), "bbbb"), (SeenStore.key(fileId: nil, path: "Private/mine.md"), "cccc")])
+
+        TreeModel.moveIntoLibrary("w-1", in: defaults)
+        seen.moveIntoLibrary("w-1")
+        XCTAssertEqual(defaults.stringArray(forKey: "tree-open-w-1"), ["library/product", "library/product/plans", "private/ideas"])
+        XCTAssertEqual(seen.hash("w-1", "f-1"), "aaaa", "what is kept by file id stays")
+        XCTAssertEqual(seen.hash("w-1", "path:library/notes/new.md"), "bbbb")
+        XCTAssertNil(seen.hash("w-1", "path:notes/new.md"))
+        XCTAssertEqual(seen.hash("w-1", "path:private/mine.md"), "cccc")
     }
 }

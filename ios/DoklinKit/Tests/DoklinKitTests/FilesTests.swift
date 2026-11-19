@@ -118,6 +118,22 @@ final class FilesTests: XCTestCase {
         XCTAssertTrue(files.exists("Old/b.md"))
     }
 
+    func testNoFolderAtTheTopOfLibraryHasASectionsName() throws {
+        try put("Library/Notes/a.md")
+        try put("Archive/Private/b.md")
+        for name in ["Library", "private", "Restricted"] {
+            XCTAssertThrowsError(try files.createFolder(in: "Library", named: name)) { error in
+                XCTAssertEqual(error.localizedDescription, "A folder in Library can't be called Library, Private or Restricted.")
+            }
+            XCTAssertThrowsError(try files.rename(.folder("Library/Notes"), to: name))
+        }
+        XCTAssertThrowsError(try files.move(.folder("Archive/Private"), into: "Library"))
+        XCTAssertFalse(files.exists("Library/Private"))
+        // Deeper, or in another section, the names mean nothing.
+        XCTAssertEqual(try files.createFolder(in: "Library/Notes", named: "Private"), "Library/Notes/Private")
+        XCTAssertEqual(try files.createFolder(in: "Private", named: "Library"), "Private/Library")
+    }
+
     func testRemovingADocumentTakesWhatIsItsAlong() throws {
         try put("plan.md")
         try put("plan.html")
@@ -128,31 +144,35 @@ final class FilesTests: XCTestCase {
         XCTAssertEqual(try files.list("").map(\.path), ["other.md"])
     }
 
-    func testSearchFindsLinesOfNotesOnly() throws {
-        try put("a.md", "# A\n\nThe boat is blue.\r\nAnother line.\n")
-        try put("b.html", "<p>the boat</p>")
-        try put("Deep/c.md", "nothing here\nBOATS galore\n")
-        let found = files.search("boat")
-        XCTAssertEqual(found.map(\.path), ["a.md", "Deep/c.md"])
+    func testSearchFindsLinesOfNotesOnlyInTheSections() throws {
+        try put("Library/a.md", "# A\n\nThe boat is blue.\r\nAnother line.\n")
+        try put("Library/b.html", "<p>the boat</p>")
+        try put("Library/Deep/c.md", "nothing here\nBOATS galore\n")
+        try put("Private/d.md", "My boat.\n")
+        try put("stray.md", "A boat in no section.\n")
+        try put("Loose/e.md", "Another boat in no section.\n")
+        XCTAssertEqual(files.sectionFolders(), ["Library", "Private"])
+        let found = files.search("boat", in: files.sectionFolders())
+        XCTAssertEqual(found.map(\.path), ["Library/a.md", "Library/Deep/c.md", "Private/d.md"])
         XCTAssertEqual(found[0].hits, [SearchHit(line: 2, preview: "The boat is blue.")])
         XCTAssertEqual(found[1].hits.map(\.line), [1])
-        XCTAssertTrue(files.search("   ").isEmpty)
+        XCTAssertTrue(files.search("   ", in: files.sectionFolders()).isEmpty)
     }
 
     func testSearchFindsADocumentByItsNameFirst() throws {
-        try put("aaa.md", "# First\n\nAn otter swam by.\n")
-        try put("otter.md", "# River\n\nNotes from the bank.\n")
-        try put("sea-otter-facts.md", "# Facts\n\nThe otter holds hands.\n")
-        try put("Otter Poster.html", "<p>Come and see.</p>")
-        try put("twin.md", "# Left\n")
-        try put("twin.html", "<p>An otter.</p>")
-        try put("Otter/zoo.md", "# Animals\n")
-        let found = files.search("OTTER")
+        try put("Library/aaa.md", "# First\n\nAn otter swam by.\n")
+        try put("Library/otter.md", "# River\n\nNotes from the bank.\n")
+        try put("Library/sea-otter-facts.md", "# Facts\n\nThe otter holds hands.\n")
+        try put("Library/Otter Poster.html", "<p>Come and see.</p>")
+        try put("Library/twin.md", "# Left\n")
+        try put("Library/twin.html", "<p>An otter.</p>")
+        try put("Library/Otter/zoo.md", "# Animals\n")
+        let found = files.search("OTTER", in: ["Library"])
         // Named ones first, a page by its name alone; not a folder's name.
-        XCTAssertEqual(found.map(\.path), ["Otter Poster.html", "otter.md", "sea-otter-facts.md", "aaa.md"])
+        XCTAssertEqual(found.map(\.path), ["Library/Otter Poster.html", "Library/otter.md", "Library/sea-otter-facts.md", "Library/aaa.md"])
         XCTAssertEqual(found.map { $0.hits.map(\.line) }, [[], [], [2], [2]])
-        XCTAssertEqual(files.search("twin").map(\.path), ["twin.md"], "the page beside a note is that note")
-        XCTAssertTrue(files.search(".md").isEmpty, "the extension is not part of the name")
+        XCTAssertEqual(files.search("twin", in: ["Library"]).map(\.path), ["Library/twin.md"], "the page beside a note is that note")
+        XCTAssertTrue(files.search(".md", in: ["Library"]).isEmpty, "the extension is not part of the name")
     }
 
     func testANotesCommentFileIsBesideItUnderItsStem() {
@@ -184,11 +204,21 @@ final class AudienceTests: XCTestCase {
          {"id":"s-f","kind":"restricted","name":"Finance","path":"Restricted/Finance","by":"Ada","members":["m-1","m-2"]}]
         """
         let s = try status(spaces: spaces)
-        XCTAssertEqual(Audience.of("Projects/plan.md", in: s), .everyone)
+        XCTAssertEqual(Audience.of("Library/Projects/plan.md", in: s), .everyone)
+        XCTAssertEqual(Audience.of("library", in: s), .everyone)
         XCTAssertEqual(Audience.of("private/diary.md", in: s), .onlyYou)
         XCTAssertEqual(Audience.of("Restricted/Finance/q3.md", in: s), .folder("Finance"))
         XCTAssertEqual(Audience.of("Restricted", in: s), .folders)
         XCTAssertEqual(Audience.of("Restricted/Loose", in: s), .nowhere)
+        // In no section: the top of the workspace, anything else there, and
+        // what Library never holds at its own top.
+        XCTAssertEqual(Audience.of("", in: s), .nowhere)
+        XCTAssertEqual(Audience.of("Projects/plan.md", in: s), .nowhere)
+        XCTAssertEqual(Audience.of("Library/Private/x.md", in: s), .nowhere)
+        XCTAssertEqual(Audience.of("Library/restricted", in: s), .nowhere)
+        XCTAssertEqual(Audience.of("Library/Library/x.md", in: s), .nowhere)
+        XCTAssertEqual(Audience.of("Library/Library.md", in: s), .everyone)
+        XCTAssertEqual(Audience.of("Library/Privateer/x.md", in: s), .everyone)
         XCTAssertEqual(Audience.of("anything", in: nil), .everyone)
     }
 

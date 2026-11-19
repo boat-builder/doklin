@@ -17,16 +17,17 @@ final class PublishingTests: XCTestCase {
     }
 
     private let pages = """
-    [{"slug":"plan","kind":"file","path":"Projects/plan.md","title":null,"desc":null,"by":"Ada","at":1000,"alive":true,"root":false},
-     {"slug":"projects","kind":"dir","path":"Projects","title":"Our projects","desc":null,"by":"Bo","at":1000,"alive":true,"root":false},
-     {"slug":"all","kind":"dir","path":"","title":null,"desc":null,"by":"","at":1000,"alive":true,"root":true},
-     {"slug":"gone","kind":"file","path":"Old.md","title":null,"desc":null,"by":"Ada","at":1000,"alive":false,"root":false}]
+    [{"slug":"plan","kind":"file","path":"Library/Projects/plan.md","title":null,"desc":null,"by":"Ada","at":1000,"alive":true,"root":false},
+     {"slug":"projects","kind":"dir","path":"Library/Projects","title":"Our projects","desc":null,"by":"Bo","at":1000,"alive":true,"root":false},
+     {"slug":"all","kind":"dir","path":"Library","title":null,"desc":null,"by":"","at":1000,"alive":true,"root":true},
+     {"slug":"mine","kind":"dir","path":"Private","title":null,"desc":null,"by":"Ada","at":1000,"alive":true,"root":false},
+     {"slug":"gone","kind":"file","path":"Library/Old.md","title":null,"desc":null,"by":"Ada","at":1000,"alive":false,"root":false}]
     """
 
     func testWhereAPageStands() throws {
         let idle = try status(pages: pages)
-        let plan = Publishing.page(for: "Projects/plan.md", kind: .file, in: idle)
-        let gone = Publishing.page(for: "Old.md", kind: .file, in: idle)
+        let plan = Publishing.page(for: "Library/Projects/plan.md", kind: .file, in: idle)
+        let gone = Publishing.page(for: "Library/Old.md", kind: .file, in: idle)
         XCTAssertEqual(Publishing.state(of: nil, in: idle, pending: false), .unpublished)
         XCTAssertEqual(Publishing.state(of: plan, in: idle, pending: false), .live)
         XCTAssertEqual(Publishing.state(of: plan, in: idle, pending: true), .updating)
@@ -49,33 +50,35 @@ final class PublishingTests: XCTestCase {
 
     func testAddresses() throws {
         let s = try status(pages: pages)
-        let projects = try XCTUnwrap(Publishing.page(for: "Projects", kind: .dir, in: s))
+        let projects = try XCTUnwrap(Publishing.page(for: "Library/Projects", kind: .dir, in: s))
         XCTAssertEqual(Publishing.url(of: projects, in: s), "https://notes.example.com/projects")
         XCTAssertEqual(
-            Publishing.url(of: "Projects/Roadmap/Ship the boat.MD", inside: projects, in: s),
+            Publishing.url(of: "Library/Projects/Roadmap/Ship the boat.MD", inside: projects, in: s),
             "https://notes.example.com/projects/Roadmap/Ship%20the%20boat"
         )
         // A note is public on its own page first, then inside each folder, the closest first.
-        XCTAssertEqual(Publishing.places(of: "Projects/plan.md", in: s).map(\.url), [
+        XCTAssertEqual(Publishing.places(of: "Library/Projects/plan.md", in: s).map(\.url), [
             "https://notes.example.com/plan",
             "https://notes.example.com/projects/plan",
             "https://notes.example.com/all/Projects/plan",
         ])
-        XCTAssertEqual(Publishing.places(of: "Projects/plan.md", in: s).map(\.nested), [false, true, true])
+        XCTAssertEqual(Publishing.places(of: "Library/Projects/plan.md", in: s).map(\.nested), [false, true, true])
+        // The whole of Library holds nothing of Private's.
+        XCTAssertEqual(Publishing.places(of: "Private/diary.md", in: s).map(\.url), ["https://notes.example.com/mine/diary"])
     }
 
     func testHowAPageIsSaid() throws {
         let s = try status(pages: pages)
-        let plan = try XCTUnwrap(Publishing.page(for: "Projects/plan.md", kind: .file, in: s))
-        let projects = try XCTUnwrap(Publishing.page(for: "Projects", kind: .dir, in: s))
-        let all = try XCTUnwrap(Publishing.page(for: "", kind: .dir, in: s))
-        XCTAssertEqual(Publishing.name(of: plan, workspace: "Notes"), "plan")
-        XCTAssertEqual(Publishing.name(of: projects, workspace: "Notes"), "Our projects")
-        XCTAssertEqual(Publishing.name(of: all, workspace: "Notes"), "Notes")
+        let plan = try XCTUnwrap(Publishing.page(for: "Library/Projects/plan.md", kind: .file, in: s))
+        let projects = try XCTUnwrap(Publishing.page(for: "Library/Projects", kind: .dir, in: s))
+        let all = try XCTUnwrap(Publishing.page(for: "Library", kind: .dir, in: s))
+        XCTAssertEqual(Publishing.name(of: plan), "plan")
+        XCTAssertEqual(Publishing.name(of: projects), "Our projects")
+        XCTAssertEqual(Publishing.name(of: all), "Library")
         XCTAssertEqual(Publishing.byline(of: plan, in: s, now: 61_000), "Published 1 min ago by you")
         XCTAssertEqual(Publishing.byline(of: projects, in: s, now: 61_000), "Published by Bo · 1 min ago")
-        XCTAssertEqual(Publishing.detail(of: plan, now: 61_000), "Projects/plan.md · /plan · Ada · 1 min ago")
-        XCTAssertEqual(Publishing.detail(of: all, now: 61_000), "the whole workspace · /all · someone · 1 min ago")
+        XCTAssertEqual(Publishing.detail(of: plan, now: 61_000), "Library/Projects/plan.md · /plan · Ada · 1 min ago")
+        XCTAssertEqual(Publishing.detail(of: all, now: 61_000), "Library · /all · someone · 1 min ago")
         XCTAssertEqual(Publishing.slug(typed: "  My-Page \n"), "my-page")
         XCTAssertNil(Publishing.slug(typed: "   "))
     }

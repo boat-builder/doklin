@@ -79,18 +79,19 @@ final class LimitsTests: XCTestCase {
     }
 
     func testTheQuestionAboutManyNewDocuments() {
-        let one = [AddedFolder(path: "Projects/foo", count: 212)]
-        XCTAssertEqual(LimitWords.adds(212, in: one, workspace: "Notes", locale: english), "212 new documents appeared in Projects/foo. Sync them?")
+        let one = [AddedFolder(path: "Library/Projects/foo", count: 212)]
+        XCTAssertEqual(LimitWords.adds(212, in: one, locale: english), "212 new documents appeared in Library/Projects/foo. Sync them?")
         XCTAssertEqual(
-            LimitWords.adds(212, in: [AddedFolder(path: "", count: 212)], workspace: "Notes", locale: english),
-            "212 new documents appeared in Notes. Sync them?"
+            LimitWords.adds(212, in: [AddedFolder(path: "Library", count: 212)], locale: english),
+            "212 new documents appeared in Library. Sync them?",
+            "those directly in Library"
         )
-        let three = [AddedFolder(path: "a", count: 200), AddedFolder(path: "b", count: 10), AddedFolder(path: "c", count: 2)]
-        XCTAssertEqual(LimitWords.adds(212, in: three, workspace: "Notes", locale: english), "212 new documents appeared in 3 folders. Sync them?")
+        let three = [AddedFolder(path: "Library/a", count: 200), AddedFolder(path: "Library/b", count: 10), AddedFolder(path: "Private/c", count: 2)]
+        XCTAssertEqual(LimitWords.adds(212, in: three, locale: english), "212 new documents appeared in 3 folders. Sync them?")
         // The event lists only the first few: more went elsewhere.
-        XCTAssertEqual(LimitWords.adds(400, in: three, workspace: "Notes", locale: english), "400 new documents appeared in more than 3 folders. Sync them?")
-        XCTAssertEqual(LimitWords.adds(212, in: [], workspace: "Notes", locale: english), "212 new documents appeared. Sync them?")
-        XCTAssertEqual(LimitWords.adds(1, in: [AddedFolder(path: "x", count: 1)], workspace: "Notes"), "1 new document appeared in x. Sync it?")
+        XCTAssertEqual(LimitWords.adds(400, in: three, locale: english), "400 new documents appeared in more than 3 folders. Sync them?")
+        XCTAssertEqual(LimitWords.adds(212, in: [], locale: english), "212 new documents appeared. Sync them?")
+        XCTAssertEqual(LimitWords.adds(1, in: [AddedFolder(path: "Library/x", count: 1)]), "1 new document appeared in Library/x. Sync it?")
         XCTAssertEqual(LimitWords.syncThem(212), "Sync them")
         XCTAssertEqual(LimitWords.syncThem(1), "Sync it")
     }
@@ -100,7 +101,7 @@ final class LimitsTests: XCTestCase {
     }
 
     func testWhereAPageStandsWhileTheLimitsHold() throws {
-        let page = PublicPage(slug: "plan", kind: .file, path: "plan.md", title: nil, desc: nil, by: "Ada", at: 1, alive: true, root: false)
+        let page = PublicPage(slug: "plan", kind: .file, path: "Library/plan.md", title: nil, desc: nil, by: "Ada", at: 1, alive: true, root: false)
         // New documents held for a yes hold nothing else: edits go out.
         let asking = try status(phase: "pending-adds", pendingAdds: 212, usage: usage())
         XCTAssertEqual(Publishing.state(of: page, in: asking, pending: true), .updating)

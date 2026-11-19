@@ -402,8 +402,9 @@ eq(
 // What a person hands an agent of theirs — the one thing the Agents tab's
 // login card copies. Held to being short, and to carrying exactly what a bot
 // that has never heard of Doklin needs: what it is, the two commands, what
-// the address in the second one is, and where its work goes when nobody says
-// — the agent sees all its person sees, so that is an instruction.
+// the address in the second one is, that every path starts with its section,
+// and where its work goes when nobody says — the agent sees all its person
+// sees, so that is an instruction.
 {
   const LINE = "doklin login https://notes.example.com dkla-7QK2M-9XVR4-8TBHN-3WGYD";
   const p = buildAgentLoginPrompt({
@@ -426,9 +427,15 @@ eq(
   eq((p.match(/dkla-/g) ?? []).length, 1, "the code appears once");
   eq((p.match(/https?:\/\//g) ?? []).length, 2, "two addresses: the installer and the workspace");
   ok(p.includes("You see what the person who gave you this sees."), "says whose eyes it has");
-  ok(p.includes("Put anything new under `Private/`, which only they see, unless they tell you where it goes."), "…and that new work is private unless told otherwise");
+  ok(
+    p.includes(
+      "Every path starts with its section: `Library/` is what everyone sees, `Private/` only them, `Restricted/<folder>/` that folder's people.",
+    ),
+    "…that every path starts with its section, and what each one is",
+  );
+  ok(p.includes("Put anything new under `Private/` unless they tell you where it goes."), "…and that new work is private unless told otherwise");
   eq(lines.filter((l) => l.trim()).length, 6, "short: four paragraphs and two commands");
-  ok(p.length < 850, "…and under 850 characters");
+  ok(p.length < 950, "…and under 950 characters");
   ok(!/wrangler|Cloudflare|token/i.test(p), "nothing about how the domain is run");
   const help = fs.readFileSync(path.join(repoRoot, "cli", "src", "help.rs"), "utf8");
   ok(/"agent" \| "agents" => AGENT/.test(help), "the briefing it points at exists");

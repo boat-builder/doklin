@@ -6,8 +6,9 @@ A local snapshot store per open folder, mirrored to the bucket when connected. C
 
 - Only `retain::sweep` deletes from a local store, by the ladder; besides it, only `stores::forget` (whole store, user-asked, refused while its folder is open) and `cloud-cache/` pruning. File deletes, restores, disconnect and wipe never do. Bucket `versions/`: only the cloud sweep and a wipe.
 - Stores live in `<app_data>/versions/`, never in a workspace.
-- In a connected workspace (the folder carries the cloud marker) `Private/` and `Restricted/` are never in the workspace's store (`space::shared_skip`). Each section's folder has a store and a versioner of its own (`cloud::section_roots`), mirrored to that space's own `versions/`. Otherwise a Private's content would reach the store everyone reads.
-- A space's folder that leaves this Mac takes its store with it (`forget_root`).
+- In a connected workspace each section's folder — `Library/`, `Private/`, each restricted folder — has a store and a versioner of its own (`cloud::section_roots`), mirrored to its section's own `versions/` (Library's to the bucket's root `versions/`). The workspace's root has none (`cloud::keeps_own_versions`), so a stray at the root has no history. Library's walk leaves out `Private/` and `Restricted/` at its own top (`space::shared_skip`). Otherwise a Private's content would reach the store everyone reads.
+- A folder not moved into the Library layout yet (marker without `layout`) keeps its old store at its root, holding the shared section alone (`shared_skip`). The move renames that store to Library's key and sets its index's `root` (`cloud::layout`, step 6): every snapshot path, local and mirrored, is already relative to the shared section. While the move runs nothing versions the root.
+- A space's folder that leaves this Mac takes its store with it (`forget_root`), and a workspace's copy taken off a device takes Library's (`delete_copy`).
 - The versioner is independent of the cloud engine: own watcher plus `edits::touched`, own `scan_local`, path-keyed snapshots (no sync file ids); works with no cloud.
 - Write order: blobs → snapshot → index (`write_atomic`). Sweep order: index → snapshots → blobs. A crash leaves orphans, never a row missing bytes.
 - A restore is one Rust command (`versions_restore_file`, `versions_restore_snapshot`): capture `pre-restore`, write through the app's write path, capture `restore` with `restoredFrom`. Never a capture plus `write_file` from the frontend: the cadence can land between them. Undo is another restore (of `preRestoreHash`, or `preRestoreTs` + same paths). History never branches.
@@ -47,7 +48,7 @@ A local snapshot store per open folder, mirrored to the bucket when connected. C
 - `h` = full sha256 (sync `hash16` is its first 16 chars). `s`/`m` are the stat cache.
 - `horizonDays` has three states: absent = settings default, `null` = forever, a number = days (`Option<Option<u32>>`, `chosen_horizon`).
 - Reasons live in `store.rs`, `src/versions.ts` (`versionReasonWord`), the worker's `REASONS` and the iPhone's `HistoryWords.reason`; change all four (the worker 400s an unknown one).
-- `scripts/versions.sh` duplicates the key derivation. A moved folder starts a new store.
+- `scripts/versions.sh` duplicates the key derivation. A moved folder starts a new store — except the move into Library, which re-keys it.
 - Under `Setup::anchor` (iOS, where the app's folder gets a new path on an update) the key and the index's `root` are relative to it (`engine/src/paths.rs`), so a store survives the move.
 
 ## Cloud store

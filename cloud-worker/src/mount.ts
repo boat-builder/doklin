@@ -1,15 +1,17 @@
 // A space's manifest under the names its person uses.
 //
-// A space stores its paths relative to itself: a note in somebody's Private
-// is `notes/plan.md` in that space's manifest. On that person's disk, and in
-// every path an agent of theirs types, it is `Private/notes/plan.md`. The
-// document API works on the second form throughout — its lookups, its
-// refusals and its answers all carry the path as typed — so a space's
-// manifest is handed to it mounted: every path under the folder the space is
-// at. A change made to the mounted copy is taken back to the stored form
-// before it is checked and written (commit.ts).
+// A section stores its paths relative to itself: a note in somebody's
+// Private is `notes/plan.md` in that space's manifest, and a shared note
+// `notes/plan.md` in the shared manifest. On that person's disk, and in every
+// path an agent of theirs types, they are `Private/notes/plan.md` and
+// `Library/notes/plan.md`. The document API works on the second form
+// throughout — its lookups, its refusals and its answers all carry the path
+// as typed — so a section's manifest is handed to it mounted: every path
+// under the folder the section is at. A change made to the mounted copy is
+// taken back to the stored form before it is checked and written (commit.ts).
 //
-// The shared workspace is mounted at "", and is its own stored form.
+// A browser names a section's paths as the section stores them, and mounts
+// every one at "" (webCall.ts): "" is the stored form itself.
 
 import type { Manifest, ManifestFile, PublicEntry, Tombstone } from "./manifest";
 

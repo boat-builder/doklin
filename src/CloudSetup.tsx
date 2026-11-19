@@ -105,6 +105,7 @@ export default function CloudSetup({
   sync,
   mode,
   root,
+  moveIntoLibrary,
   onClose,
   onConnected,
   onOpen,
@@ -115,6 +116,10 @@ export default function CloudSetup({
   mode: CloudSetupMode;
   /** The open workspace folder, if any: what "connect" uploads, what "resume" adopts. */
   root: string | null;
+  /** Connect and resume move the folder's files into `Library/` (the
+   *  engine's move): `move` is the step that does, and the app's paths under
+   *  `root` follow them. */
+  moveIntoLibrary: (root: string, move: () => Promise<unknown>) => Promise<void>;
   onClose: () => void;
   /** The workspace is syncing at `root` — the folder that was open, or the one a download created. */
   onConnected: (root: string, how: CloudSetupOutcome) => void;
@@ -417,7 +422,7 @@ export default function CloudSetup({
     if (!root || !probed) return;
     void run("connect", async () => {
       const got = await signIn(probed.endpoint);
-      await setup.connect(root, got.endpoint, got.token, cleanName);
+      await moveIntoLibrary(root, () => setup.connect(root, got.endpoint, got.token, cleanName));
       return root;
     });
   };
@@ -425,7 +430,7 @@ export default function CloudSetup({
     if (!root || !probed) return;
     void run("resume", async () => {
       const got = await signIn(probed.endpoint);
-      await setup.resume(root, got.endpoint, got.token);
+      await moveIntoLibrary(root, () => setup.resume(root, got.endpoint, got.token));
       return root;
     });
   };
@@ -786,8 +791,9 @@ export default function CloudSetup({
                   superadmin: the one person who updates its worker, erases it, and lets somebody
                   who lost every device back in — whoever controls the Cloudflare account it is
                   on. A workspace lives at a domain — a subdomain of one you already use with
-                  Cloudflare, or a free address Cloudflare hands out — and this folder becomes
-                  what is in it.
+                  Cloudflare, or a free address Cloudflare hands out. Connecting moves this
+                  folder’s files into a Library folder inside it — what everyone you invite
+                  shares — and leaves hidden ones where they are.
                 </div>
                 <div className="modal-field">
                   <div className="modal-field-label">Workspace name</div>

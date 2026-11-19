@@ -80,9 +80,10 @@ pub(crate) fn core(app: &AppHandle) -> Result<Arc<Core>, String> {
 }
 
 /// Called once from tauri's setup: make the engine, and start the cloud half
-/// — one sync engine per connected workspace, from cloud.json.
-pub(crate) fn init(app: &AppHandle) {
-    let Ok(data_dir) = app.path().app_data_dir() else { return };
+/// — one sync engine per connected workspace, from cloud.json. Answers the
+/// workspaces that moved into the Library layout just now (`cloud::init`).
+pub(crate) fn init(app: &AppHandle) -> Vec<String> {
+    let Ok(data_dir) = app.path().app_data_dir() else { return Vec::new() };
     let home = app.path().home_dir().ok();
     let core = Core::new(Setup {
         data_dir,
@@ -97,7 +98,7 @@ pub(crate) fn init(app: &AppHandle) {
         host: Arc::new(MacHost(app.clone())),
     });
     app.manage(core.clone());
-    doklin_engine::cloud::init(&core);
+    doklin_engine::cloud::init(&core)
 }
 
 /// The versions half, after `init`: one versioner per open folder.

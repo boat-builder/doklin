@@ -36,7 +36,7 @@ struct FolderView: View {
         .listStyle(.insetGrouped)
         .overlay { emptiness }
         .navigationTitle(model.title)
-        .navigationBarTitleDisplayMode(model.dir.isEmpty ? .large : .inline)
+        .navigationBarTitleDisplayMode(model.isLibrary ? .large : .inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if mayChange, model.canHoldNotes {
@@ -51,7 +51,7 @@ struct FolderView: View {
                         } label: {
                             Label("New folder", systemImage: "folder.badge.plus")
                         }
-                        if model.dir.isEmpty, workspace.mayRestrict {
+                        if model.isLibrary, workspace.mayRestrict {
                             Button {
                                 acting.restricting = .new
                             } label: {
@@ -190,7 +190,10 @@ struct EntryIcon: View {
             case .onlyYou: return path.contains("/") ? nil : Text("Only you")
             case .folder(let name): return path.split(separator: "/").count == 2 ? Text("Only the people of \(name)") : nil
             case .folders: return Text("Folders with their own people")
-            case .nowhere: return Text("In no restricted folder, so it stays on this iPhone")
+            case .nowhere:
+                return Sections.holds(TreeModel.restrictedFolder, path)
+                    ? Text("In no restricted folder, so it stays on this iPhone")
+                    : Text("In no section, so it stays on this iPhone — move it into Library or Private")
             }
         case .document(let row):
             let page = row.html != nil ? Text(" · with a page") : Text("")

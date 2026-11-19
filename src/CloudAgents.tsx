@@ -2,8 +2,8 @@
 // An agent is an identity that is not a person: a bot on another computer
 // that works with this workspace through the `doklin` command line, with no
 // copy of the folder. It belongs to the person who adds it here, and sees
-// what they see — the shared workspace, their Private, the restricted folders
-// they are in. They tick what it may do there, and are handed one short
+// what they see — Library, their Private, the restricted folders they are
+// in. They tick what it may do there, and are handed one short
 // prompt to give it (cloudPrompts.ts): what Doklin is, the command that
 // installs `doklin`, and `doklin login <address> <code>`. That is the whole
 // of setting it up, and there is one button for it. Nothing on the bot's
@@ -54,7 +54,7 @@ const INTRO = (
   <p className="cloud-hint" data-testid="agents-intro">
     Agents are bots. Each works with this workspace from another computer through the{" "}
     <code>doklin</code> command line, with no copy of the folder. An agent you add is yours: it
-    sees what you see — the shared workspace, your Private, the restricted folders you are in —
+    sees what you see — Library, your Private, the restricted folders you are in —
     and reads, writes, comments and publishes there within what you allow.
   </p>
 );

@@ -133,6 +133,8 @@ final class PeopleTests: XCTestCase {
         let prompt = AgentPrompt.login(domain: "notes.example.com", line: "doklin login https://notes.example.com dkla-ABCDE", expiresAt: 1_794_735_000_000)
         XCTAssertTrue(prompt.contains("\n\n\(AgentPrompt.installLine)\ndoklin login https://notes.example.com dkla-ABCDE\n\n"), prompt)
         XCTAssertTrue(prompt.contains("notes.example.com is the workspace's address, and the code after it works once and expires at 2026-11-15 09:30 UTC."), prompt)
+        // The Mac's `buildAgentLoginPrompt` says it word for word (verify-harness/cloudprompts.test.mjs): change both.
+        XCTAssertTrue(prompt.contains("\n\nYou see what the person who gave you this sees. Every path starts with its section: `Library/` is what everyone sees, `Private/` only them, `Restricted/<folder>/` that folder's people. Put anything new under `Private/` unless they tell you where it goes.\n\n"), prompt)
         XCTAssertTrue(prompt.hasSuffix("Then run `doklin help agent` to see what you can do."), prompt)
     }
 
@@ -153,9 +155,11 @@ final class PeopleTests: XCTestCase {
 
     func testAMoveAsksOnlyWhenSomebodyNewWillSeeIt() throws {
         let status = try status()
-        XCTAssertNil(Sections.wider(in: status, from: "Ideas.md", to: "Private"), "from the shared workspace nothing widens")
-        XCTAssertNil(Sections.wider(in: status, from: "Ideas.md", to: "Restricted/Finance"))
-        XCTAssertEqual(Sections.wider(in: status, from: "Private/a.md", to: ""), "Everyone in Acme will be able to see it.")
+        XCTAssertNil(Sections.wider(in: status, from: "Library/Ideas.md", to: "Private"), "from Library nothing widens")
+        XCTAssertNil(Sections.wider(in: status, from: "Library/Ideas.md", to: "Restricted/Finance"))
+        XCTAssertEqual(Sections.wider(in: status, from: "Private/a.md", to: "Library"), "Everyone in Acme will be able to see it.")
+        XCTAssertEqual(Sections.wider(in: status, from: "Ideas.md", to: "Library/Projects"), "Everyone in Acme will be able to see it.", "out of no section")
+        XCTAssertNil(Sections.wider(in: status, from: "Library/Ideas.md", to: "Scratch"), "into no section, nobody gains it")
         XCTAssertEqual(Sections.wider(in: status, from: "Private/a.md", to: "Restricted/Finance/Q1"), "Both people in “Finance” will be able to see it.")
         XCTAssertNil(Sections.wider(in: status, from: "Private/a.md", to: "Restricted/Solo"), "nobody but you gains it")
         XCTAssertNil(Sections.wider(in: status, from: "Restricted/Finance/a.md", to: "Restricted/finance/Q1"), "within one folder")
@@ -168,8 +172,8 @@ final class PeopleTests: XCTestCase {
 
     func testAMovesQuestionNamesWhoWillSeeIt() throws {
         let status = try status()
-        XCTAssertEqual(Sections.moveTitle("plan", to: "", in: status), "Move “plan” to the workspace?")
-        XCTAssertEqual(Sections.moveTitle("plan", to: "Projects/Q1", in: status), "Move “plan” to the workspace?", "a folder everyone has is the workspace")
+        XCTAssertEqual(Sections.moveTitle("plan", to: "Library", in: status), "Move “plan” to Library?")
+        XCTAssertEqual(Sections.moveTitle("plan", to: "Library/Projects/Q1", in: status), "Move “plan” to Library?", "a folder everyone has is Library")
         XCTAssertEqual(Sections.moveTitle("plan", to: "Restricted/Finance/Q1", in: status), "Move “plan” to “Finance”?", "the folder whose people gain it")
     }
 
@@ -212,9 +216,11 @@ final class PeopleTests: XCTestCase {
 
     func testARestrictedFolderIsMadeFromNothingAFolderOrANote() {
         XCTAssertEqual(RestrictedSource.new.title, "New restricted folder")
-        XCTAssertEqual(RestrictedSource.folder("Projects/Roadmap").title, "Restrict access to “Roadmap”")
+        XCTAssertEqual(RestrictedSource.folder("Library/Projects/Roadmap").title, "Restrict access to “Roadmap”")
         XCTAssertEqual(RestrictedSource.note("Private/Pay rise.md").title, "Share “Pay rise”")
-        XCTAssertEqual(RestrictedSource.folder("Projects/Roadmap").prefill, "Roadmap")
+        XCTAssertEqual(RestrictedSource.folder("Library/Projects/Roadmap").prefill, "Roadmap")
+        XCTAssertTrue(RestrictedSource.folder("Library/Projects/Roadmap").hint.hasSuffix("Versions from before stay in Library’s history until they age out."))
+        XCTAssertTrue(RestrictedSource.folder("Private/Ideas").hint.hasSuffix("Versions from before stay in Private’s history until they age out."), "the section it was in keeps them")
         XCTAssertEqual(RestrictedSource.note("Private/Pay rise.md").prefill, "Pay rise")
         XCTAssertEqual(RestrictedSource.note("Private/Pay rise.md").nameLabel, "Folder name")
         XCTAssertEqual(RestrictedSource.new.button, "Create folder")

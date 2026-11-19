@@ -828,15 +828,18 @@ pub fn init(core: &Arc<Core>) {
 /// needed to start or stop a versioner. An untitled note is in no folder, so
 /// it has no history: it is unsaved, and gone when its tab closes.
 fn open_roots(core: &Core) -> BTreeSet<String> {
-    let mut roots = core.host.open_folders();
-    // A connected workspace's Private and restricted folders are sections of
-    // their own: the workspace's store leaves them out (`shared_skip`), and
-    // each keeps its history in a store only its own people's Macs have.
-    let sections: Vec<String> = roots
+    let open = core.host.open_folders();
+    // A connected workspace's sections — Library, Private, its restricted
+    // folders — each keep their history in a store of their own, which only
+    // their own people's devices have; the workspace's root keeps none
+    // (`keeps_own_versions`).
+    let sections: Vec<String> = open
         .iter()
         .flat_map(|root| crate::cloud::section_roots(Path::new(root)))
         .map(|dir| dir.to_string_lossy().to_string())
         .collect();
+    let mut roots: BTreeSet<String> =
+        open.into_iter().filter(|root| crate::cloud::keeps_own_versions(Path::new(root))).collect();
     roots.extend(sections);
     roots
 }
@@ -941,6 +944,32 @@ fn route(core: &Arc<Core>, path: &str) -> Result<(mpsc::UnboundedSender<Versione
             .ok_or_else(|| "this folder doesn't keep versions of that file".to_string())?;
         Ok((handle.tx.clone(), display.clone(), rel))
     })
+}
+
+/// Stop the versioner for `root` and wait until it has: it captures what is
+/// pending first, then writes nothing more. For a folder about to move into
+/// the Library layout (`cloud::layout`), whose store is about to become
+/// Library's; by then `open_roots` no longer names the root, so nothing
+/// starts it again.
+pub(crate) async fn release_root(core: &Core, root: &str) {
+    let stopping = with_inner(core, |inner| {
+        let Some(handle) = inner.versioners.remove(root) else { return Ok(None) };
+        core.version_bus.unregister(&handle.root);
+        if let Ok(mut table) = inner.statuses.lock() {
+            table.remove(root);
+        }
+        emit_statuses(core.events().as_ref(), &inner.statuses);
+        let (flushed, _) = oneshot::channel();
+        let _ = handle.tx.send(VersionerCmd::Flush { reply: flushed });
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let _ = handle.tx.send(VersionerCmd::Abandon { reply: reply_tx });
+        Ok(Some(reply_rx))
+    })
+    .ok()
+    .flatten();
+    if let Some(stopped) = stopping {
+        let _ = tokio::time::timeout(ABANDON_TIMEOUT, stopped).await;
+    }
 }
 
 /// The version store for a folder, opened straight from its path — no

@@ -19,8 +19,9 @@ final class DoklinUITests: UITestCase {
         // Joining: the line from another device, typed as a paste would put it.
         launchAndJoin()
 
-        // The workspace, downloaded: its tree, and no comment file in it.
-        expect(marked("entry-Home"), "the Home note")
+        // The workspace, downloaded: its tree, what everyone has under
+        // Library, and no comment file in it.
+        expect(marked("entry-Home"), "the Home note, under Library")
         record("the workspace")
         XCTAssertFalse(marked("entry-Comments.meta.jsonl").exists, "a comment file is listed")
 
@@ -54,9 +55,11 @@ final class DoklinUITests: UITestCase {
         record("a note, edited")
         back()
 
-        // A new note, a task in it, and the box ticked from the reading view.
+        // A new note, made in Library, a task in it, and the box ticked from
+        // the reading view.
         marked("new").tap()
         expect(app.buttons["New note"], "New note in the menu").tap()
+        expect(text(containing: "Everyone in"), "who will see a note made in Library")
         type("Phone list", into: expect(app.alerts.textFields.firstMatch, "the new note's name field"))
         app.alerts.buttons["Create"].tap()
         expect(app.staticTexts["Phone list"], "the new note's heading")
@@ -74,7 +77,7 @@ final class DoklinUITests: UITestCase {
         expect(app.staticTexts["Phone list"], "the new note's heading after the edit")
         record("a box, ticked")
         back()
-        expect(marked("entry-Phone list"), "the new note in the tree")
+        expect(marked("entry-Phone list"), "the new note in the tree, under Library")
 
         // Home has what was just changed here, by you.
         home()

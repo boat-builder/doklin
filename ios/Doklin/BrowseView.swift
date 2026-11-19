@@ -79,8 +79,8 @@ struct BrowseView: View {
                                 EntryMenu(entry: row.entry, workspace: workspace) { path.append($0) }
                             }
                         }
-                        if group.rows.isEmpty, !tree.isFiltering {
-                            Text(emptyWords(group.section))
+                        if let words = footnote(group) {
+                            Text(words)
                                 .font(.footnote)
                                 .foregroundStyle(Theme.text3)
                         }
@@ -107,12 +107,12 @@ struct BrowseView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
-                            acting.create(.note, in: "")
+                            acting.create(.note, in: TreeModel.libraryFolder)
                         } label: {
                             Label("New note", systemImage: "square.and.pencil")
                         }
                         Button {
-                            acting.create(.folder, in: "")
+                            acting.create(.folder, in: TreeModel.libraryFolder)
                         } label: {
                             Label("New folder", systemImage: "folder.badge.plus")
                         }
@@ -154,8 +154,9 @@ struct BrowseView: View {
     private func header(_ group: TreeGroup) -> some View {
         HStack(spacing: 6) {
             switch group.section {
-            case .workspace:
-                Text("Everyone in \(workspace.name)")
+            case .library:
+                Image(systemName: "books.vertical")
+                Text("Library")
             case .restricted:
                 Image(systemName: "person.2")
                 Text("Restricted")
@@ -172,15 +173,25 @@ struct BrowseView: View {
             case .personal:
                 Image(systemName: "lock")
                 Text("Private")
+            case .nowhere:
+                Image(systemName: "icloud.slash")
+                Text("In no section")
             }
         }
     }
 
-    private func emptyWords(_ section: TreeSection) -> String {
-        switch section {
-        case .workspace: return "No documents yet. Make one with the plus above."
+    /// The line under a group: what an empty section is for, and why what
+    /// is in none stays here.
+    private func footnote(_ group: TreeGroup) -> String? {
+        if group.section == .nowhere {
+            return "These are in no section, so they stay on this iPhone. Move them into Library or Private to sync them."
+        }
+        guard group.rows.isEmpty, !tree.isFiltering else { return nil }
+        switch group.section {
+        case .library: return "No documents yet. Make one with the plus above."
         case .restricted: return "Folders only the people you choose can open."
         case .personal: return "Only you can see what you put here."
+        case .nowhere: return nil
         }
     }
 

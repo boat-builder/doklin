@@ -171,8 +171,8 @@ pub struct VersionsMirror {
 pub struct PublicPage {
     pub slug: String,
     pub kind: PublicKind,
-    /// Workspace-relative, whichever section the page is in; `""` is the
-    /// workspace root for a folder page.
+    /// Workspace-relative, whichever section the page is in: a folder page
+    /// of a section's whole folder is its name, `Library` or `Private`.
     pub path: String,
     pub title: Option<String>,
     pub desc: Option<String>,

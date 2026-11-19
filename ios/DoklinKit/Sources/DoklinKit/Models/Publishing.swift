@@ -58,7 +58,7 @@ public enum Publishing {
     /// then the path inside it without the markdown extension, each part
     /// percent-encoded.
     public static func url(of rel: String, inside folder: PublicPage, in status: CloudStatus) -> String {
-        let inner = folder.path.isEmpty ? rel : String(decoding: Array(rel.utf16).dropFirst(folder.path.utf16.count + 1), as: UTF16.self)
+        let inner = String(decoding: Array(rel.utf16).dropFirst(folder.path.utf16.count + 1), as: UTF16.self)
         let shown = MarkdownExtension.strip(inner)
         let encoded = shown.split(separator: "/", omittingEmptySubsequences: false).map { encodeURIComponent(String($0)) }
         return "\(status.endpoint)/\(folder.slug)/\(encoded.joined(separator: "/"))"
@@ -90,7 +90,7 @@ public enum Publishing {
         var out: [Place] = []
         if let own = page(for: rel, kind: .file, in: status) { out.append(Place(page: own, url: url(of: own, in: status), nested: false)) }
         let folders = status.public
-            .filter { $0.kind == .dir && ($0.path.isEmpty || rel.utf16.starts(with: ($0.path + "/").utf16)) }
+            .filter { $0.kind == .dir && rel.utf16.starts(with: ($0.path + "/").utf16) }
             .sorted { $0.path.utf16.count > $1.path.utf16.count }
         for folder in folders { out.append(Place(page: folder, url: url(of: rel, inside: folder, in: status), nested: true)) }
         return out
@@ -132,10 +132,10 @@ public enum Publishing {
 
 
     /// What a page is called in a list: its title, else its file's or
-    /// folder's name, else the workspace's.
-    public static func name(of page: PublicPage, workspace: String) -> String {
+    /// folder's name — `Library` for the whole of it.
+    public static func name(of page: PublicPage) -> String {
         if let title = page.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty { return title }
-        if page.kind == .dir { return page.path.isEmpty ? workspace : DocLinks.name(of: page.path) }
+        if page.kind == .dir { return DocLinks.name(of: page.path) }
         return DocLinks.stem(of: DocLinks.name(of: page.path))
     }
 
@@ -150,7 +150,7 @@ public enum Publishing {
 
     /// The sub-line of a page in Published pages.
     public static func detail(of page: PublicPage, now: Int) -> String {
-        let parts = [page.path.isEmpty ? "the whole workspace" : page.path, "/\(page.slug)", page.by.isEmpty ? "someone" : page.by]
+        let parts = [page.path, "/\(page.slug)", page.by.isEmpty ? "someone" : page.by]
         return (parts + [Clock.ago(page.at, now: now)]).joined(separator: " · ")
     }
 
@@ -214,7 +214,7 @@ private enum MarkdownExtension {
 /* ---------- Asking the engine ---------- */
 
 extension Workspace {
-    /// Publish a note, a page or a folder (`""` is the whole workspace).
+    /// Publish a note, a page or a folder (`Library` is the whole of it).
     /// `slug` nil keeps its address, or picks a random one for a new page;
     /// a page already public at another address moves to this one. Works
     /// offline: the engine sends it with the next sync. Answers the address's
@@ -248,18 +248,18 @@ extension Workspace {
         return Int(modified.timeIntervalSince1970 * 1000) > (status?.lastSyncMs ?? 0)
     }
 
-    /// How many notes a folder page would show: every note under the folder.
+    /// How many notes a folder page would show: every note under the
+    /// folder that syncs — not what is under Library's own `Private` or
+    /// `Restricted`, which is in no section.
     public func notes(under dir: String) -> Int {
-        var count = 0
-        let walker = FileManager.default.enumerator(at: files.url(dir), includingPropertiesForKeys: [.isRegularFileKey])
-        while let item = walker?.nextObject() as? URL {
-            if isHiddenOrIgnored(item.lastPathComponent) {
-                walker?.skipDescendants()
-                continue
+        let entries = (try? files.list(dir)) ?? []
+        return entries.reduce(0) { count, entry in
+            switch entry {
+            case .folder(let path): return count + (audience(of: path) == .nowhere ? 0 : notes(under: path))
+            case .document(let row): return count + (FileKind.of(row.path) == .markdown ? 1 : 0)
+            case .file: return count
             }
-            if FileKind.of(item.lastPathComponent) == .markdown { count += 1 }
         }
-        return count
     }
 }
 

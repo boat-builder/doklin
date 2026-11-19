@@ -25,7 +25,8 @@ class UITestCase: XCTestCase {
     }
 
     /// Ask the drive for something only the domain's side can do: `line`, or
-    /// `editing?path=<workspace-relative>` — another device editing it now.
+    /// `editing?path=<path in Library, without its name>` — another device
+    /// editing it now.
     /// What the drive could not do fails the journey there, in its words,
     /// rather than later as something else.
     @discardableResult
@@ -78,6 +79,24 @@ class UITestCase: XCTestCase {
 
     func back() {
         app.navigationBars.buttons.element(boundBy: 0).tap()
+    }
+
+    /// Scroll a list until something further down it is on screen, clear
+    /// of the tab bar and the bar over it along the bottom edge. A row
+    /// half under the tab bar counts as hittable, and a tap on it lands on
+    /// the tab bar.
+    @discardableResult
+    func reveal(_ element: XCUIElement, _ what: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        for _ in 0..<8 where !reachable(element) {
+            app.swipeUp()
+        }
+        return expect(element, what, timeout: 5, file: file, line: line)
+    }
+
+    private func reachable(_ element: XCUIElement) -> Bool {
+        guard element.exists, element.isHittable else { return false }
+        let bar = app.tabBars.firstMatch
+        return !bar.exists || !bar.isHittable || element.frame.maxY < bar.frame.minY - 64
     }
 
     /* ---------- Getting around ---------- */
@@ -189,7 +208,8 @@ class UITestCase: XCTestCase {
     /* ---------- Joining and leaving ---------- */
 
     /// Launch, take off any workspace a stopped run left behind, and join
-    /// with this class's line. Ends on Browse, the workspace's tree.
+    /// with this class's line. Ends on Browse, the workspace's tree, where
+    /// what everyone has is under Library.
     func launchAndJoin() {
         app.launch()
         for _ in 0..<3 where marked("workspace-menu").waitForExistence(timeout: 8) {
@@ -201,6 +221,7 @@ class UITestCase: XCTestCase {
         expect(marked("workspace-menu"), "Home, once joined", timeout: 60)
         browse()
         expect(marked("entry-Projects"), "the workspace, downloaded", timeout: 60)
+        expect(app.staticTexts["Library"], "Library's heading over what everyone has")
     }
 
     /// Take the workspace being looked at off this iPhone, from its settings.

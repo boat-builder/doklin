@@ -64,7 +64,7 @@ export type PublicKind = "file" | "dir";
 export type PublicPage = {
   slug: string;
   kind: PublicKind;
-  /** Workspace-relative; "" is the workspace root for a folder page. */
+  /** Workspace-relative: `Library` for the whole shared section. */
   path: string;
   title: string | null;
   desc: string | null;
@@ -180,8 +180,8 @@ export type CloudStatus = {
   /** The documents another Mac holds. Empty when the engine cannot hear the
    *  domain: a lock nobody can confirm is no lock. */
   leases: LeaseHolder[];
-  /** This person's sections besides the shared workspace — their Private and
-   *  the restricted folders they are in — that have a folder on this Mac. */
+  /** This person's sections besides Library — their Private and the
+   *  restricted folders they are in — that have a folder on this Mac. */
   spaces: CloudSpace[];
 };
 
@@ -214,8 +214,10 @@ export type CloudProbe = {
   workspace: CloudWorkspaceRecord | null;
 };
 
-/** The hidden `.doklin/cloud.json` a connected folder carries — secret-free. */
-export type CloudMarker = { domain: string; wsId: string };
+/** The hidden `.doklin/cloud.json` a connected folder carries — secret-free.
+ *  `layout` is `"library"` once the folder holds its sections side by side,
+ *  the shared one in `Library/`; absent before it has moved. */
+export type CloudMarker = { domain: string; wsId: string; layout?: "library" };
 
 /** `cloudHeld`: the copy of a domain's workspace this Mac already has. One
  *  per domain, so a code or a key traded for a second would buy nothing.
@@ -258,7 +260,7 @@ export type CloudRecentFile = {
   by: string;
   /** 1: made and never changed (or moved in from another section). 0: not synced yet. */
   rev: number;
-  /** The space it is in; null for the shared workspace. */
+  /** The space it is in; null for Library. */
   section: string | null;
 };
 
@@ -383,7 +385,8 @@ export type CloudAppliedEvent = { root: string; paths: string[] };
 export type CloudConflictEvent = { root: string; path: string; by: string; conflictPath: string };
 export type CloudPendingDeletesEvent = { root: string; count: number; total: number; paths: string[] };
 /** The many-new-documents valve is holding `count` new documents. `folders`
- *  are workspace-relative ("" is the workspace's top), most first, at most 5. */
+ *  are workspace-relative (`Library` for the files straight in it), most
+ *  first, at most 5. */
 export type CloudPendingAddsEvent = { root: string; count: number; folders: { path: string; count: number }[] };
 /** A page asked for an address another section holds on this domain, and was
  *  not published. `path` is workspace-relative. */
@@ -407,7 +410,7 @@ export type EveryPage = {
   /** Who published it, as a name. */
   by: string;
   at: number;
-  /** In the shared workspace, where everyone here can open its file. */
+  /** In Library, where everyone here can open its file. */
   shared: boolean;
 };
 
@@ -423,18 +426,34 @@ export function cloudForWorkspace(statuses: CloudStatus[], root: string | null):
 
 /** Which part of a workspace a path is in, and so who can open it. */
 export type Place =
-  /** Everyone in the workspace. */
+  /** Everyone in the workspace: Library. */
   | { kind: "shared" }
   /** Only you, on every Mac of yours. */
   | { kind: "private"; space: CloudSpace }
   /** The people in that folder. */
   | { kind: "restricted"; space: CloudSpace }
-  /** Under a reserved name but in no section: straight under `Restricted`,
-   *  or in a folder there that is not a restricted folder yet. It syncs
-   *  nowhere until it is moved. */
+  /** In no section, so it stays on this Mac and syncs nowhere until it is
+   *  moved: the workspace's folder itself and anything else at its top,
+   *  straight under `Restricted` or in a folder there that is not a
+   *  restricted folder yet, and a folder with a section's name at the top of
+   *  Library. */
   | { kind: "nowhere" };
 
-const RESERVED_TOP = new Set(["private", "restricted"]);
+/** The shared section's folder, at the top of a connected workspace beside
+ *  `Private` and `Restricted`. Said in four places: this, `LIBRARY_DIR` in
+ *  engine/src/cloud/space.rs, `LIBRARY_FOLDER` in
+ *  cloud-worker/src/layout.ts, and `TreeModel.libraryFolder` in the
+ *  iPhone's Tree.swift (ios/DoklinKit) — change all four. */
+export const LIBRARY_DIR = "Library";
+
+/** The names a section's folder has at the top of a connected workspace,
+ *  compared without case — and so the names no folder at the top of Library
+ *  has: the shared section holds nothing under them (`RESERVED_DIRS`,
+ *  engine/src/cloud/space.rs). */
+const RESERVED_TOP = new Set([LIBRARY_DIR.toLowerCase(), "private", "restricted"]);
+
+/** Whether `name` is a section's own, whatever its case. */
+export const isSectionName = (name: string): boolean => RESERVED_TOP.has(name.toLowerCase());
 
 /** The section `rel` — workspace-relative — is in. Names are compared
  *  without case, as the disk compares them. */
@@ -446,8 +465,28 @@ export function placeOf(cloud: CloudStatus | null, rel: string): Place {
     return lower === at || lower.startsWith(`${at}/`);
   });
   if (space) return { kind: space.kind, space };
-  return RESERVED_TOP.has(lower.split("/", 1)[0]) ? { kind: "nowhere" } : { kind: "shared" };
+  const [top, inLibrary] = lower.split("/", 2);
+  if (top !== LIBRARY_DIR.toLowerCase()) return { kind: "nowhere" };
+  // Library never holds anything under a section's name at its own top.
+  return inLibrary !== undefined && RESERVED_TOP.has(inLibrary) ? { kind: "nowhere" } : { kind: "shared" };
 }
+
+/** Where a path inside a workspace's folder (`rel`, relative to it) is once
+ *  the folder has moved into the Library layout: a path under a section's
+ *  name or a hidden entry stays where it is, and anything else was the shared
+ *  section's and is in Library now. The rule the engine's move follows
+ *  (`moved_rel`, engine/src/cloud/layout.rs; `Sections.moved` on the
+ *  iPhone: change all three), for the one-time
+ *  stored-data migrations of the paths kept outside it. */
+export function toLibraryLayout(rel: string): string {
+  const top = rel.split("/", 1)[0];
+  if (top === "" || top.startsWith(".") || RESERVED_TOP.has(top.toLowerCase())) return rel;
+  return `${LIBRARY_DIR}/${rel}`;
+}
+
+/** Library's folder in the connected workspace at `root`: where the shared
+ *  section's files and its version history are. */
+export const libraryDirOf = (root: string): string => `${root}/${LIBRARY_DIR}`;
 
 /** Who gains sight of something moved from one section to another —
  *  "Everyone in Acme", "All 3 people in “Finance”" — or null when nobody
@@ -634,18 +673,14 @@ export function usageLine(u: CloudUsage, device: string): string {
 export const planName = (plan: CloudPlan): string => (plan === "paid" ? "Workers Paid" : "Free");
 
 /** The many-new-documents question: "212 new documents appeared in
- *  Projects/foo. Sync them?" — one folder by its path (the workspace's top by
- *  `workspace`, its name), several by how many, and no place at all when only
- *  the count is known (a window that opened after the event). The event
- *  lists at most 5 folders, so counts that fall short mean more. */
-export function addsQuestion(
-  count: number,
-  folders: { path: string; count: number }[] | null,
-  workspace: string,
-): string {
+ *  Library/Projects. Sync them?" — one folder by its path, several by how
+ *  many, and no place at all when only the count is known (a window that
+ *  opened after the event). The event lists at most 5 folders, so counts
+ *  that fall short mean more. */
+export function addsQuestion(count: number, folders: { path: string; count: number }[] | null): string {
   let where = "";
   if (folders && folders.length === 1) {
-    where = ` in ${folders[0].path || workspace}`;
+    where = ` in ${folders[0].path}`;
   } else if (folders && folders.length > 1) {
     const listed = folders.reduce((n, f) => n + f.count, 0);
     where = listed >= count ? ` in ${folders.length} folders` : ` in more than ${folders.length} folders`;
@@ -873,13 +908,12 @@ export const pageUrl = (s: CloudStatus, page: PublicPage): string => `${s.endpoi
  * extension dropped and every segment percent-encoded.
  */
 export function nestedUrl(s: CloudStatus, dir: PublicPage, rel: string): string {
-  const inner = dir.path ? rel.slice(dir.path.length + 1) : rel;
+  const inner = rel.slice(dir.path.length + 1);
   const shown = inner.replace(MD_EXT_RE, "");
   return `${s.endpoint}/${dir.slug}/${shown.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-const covers = (dir: PublicPage, rel: string): boolean =>
-  dir.kind === "dir" && (dir.path === "" || rel.startsWith(`${dir.path}/`));
+const covers = (dir: PublicPage, rel: string): boolean => dir.kind === "dir" && rel.startsWith(`${dir.path}/`);
 
 /** The page published for exactly this path, of this kind, if any. */
 export function pageForPath(s: CloudStatus, rel: string, kind: PublicKind): PublicPage | null {
@@ -918,7 +952,7 @@ export function publishedByPath(s: CloudStatus | null): Map<string, PublicPage> 
 export function livePathsOf(s: CloudStatus | null): Set<string> {
   const out = new Set<string>();
   if (!s) return out;
-  for (const rel of publishedByPath(s).keys()) out.add(rel ? `${s.root}/${rel}` : s.root);
+  for (const rel of publishedByPath(s).keys()) out.add(`${s.root}/${rel}`);
   return out;
 }
 

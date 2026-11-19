@@ -56,7 +56,8 @@ export default function RecentlyDeleted({
 }: {
   /** The version store: what this reads and restores from. */
   store: Versions;
-  /** The workspace whose history this is — the store's display root. */
+  /** The folder whose history this is — the store's root, where a file
+   *  comes back. */
   root: string;
   /** What `versions_deleted` answered. The app owns the list: the sidebar's
    *  row needs the same count, and reading it costs a walk of the retained

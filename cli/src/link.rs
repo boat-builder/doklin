@@ -19,7 +19,7 @@ const FOR_APP: &str = "doklin://open";
 pub struct PageLink {
     pub domain: String,
     pub ws_id: String,
-    /// The space the file is in; empty for the shared workspace.
+    /// The space the file is in; empty for Library, the shared section.
     pub space: String,
     pub file: String,
     /// Everything after the `#`, as it came.
@@ -27,8 +27,8 @@ pub struct PageLink {
 }
 
 impl PageLink {
-    /// The link to a file of a workspace on `domain`, in `space` ("" — the
-    /// shared workspace — has no `s`).
+    /// The link to a file of a workspace on `domain`, in `space` ("" —
+    /// Library, the shared section — has no `s`).
     pub fn new(domain: &str, ws_id: &str, space: &str, file: &str) -> PageLink {
         let domain = domain.to_ascii_lowercase();
         let mut pairs = vec![("d", domain.as_str()), ("w", ws_id)];
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn a_path_or_another_address_is_no_link() {
         for text in [
-            "Projects/plan",
+            "Library/Projects/plan",
             "Restricted/Deals/q3.md",
             "https://doklin.cc/open",
             "https://doklin.cc/#d=notes.example.com&w=w-0a1b2c3d4e5f&f=f-9c8b7a6d5e4f",

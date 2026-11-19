@@ -1,16 +1,20 @@
 // Where an agent's path is.
 //
-// An agent sees what its person sees, under the names on that person's disk:
+// An agent sees what its person sees, under the names on that person's disk,
+// and every path it types starts with the section it is in:
 //
+//   Library/…               the shared section: everyone in the workspace
 //   Private/…               their Private
 //   Restricted/<folder>/…   a restricted folder they are in
-//   anything else           the shared workspace
 //
 // A path is literal. Nothing but its first segments says which section it is
-// in, and no setting changes what a path means. Each section is a tree of
-// its own (spaces.ts), so a call is answered in the one its path names — with
-// that section's part of the bucket, and its manifest mounted at the folder
-// it is at (mount.ts).
+// in, and no setting changes what a path means. A path that starts with none
+// of the three is in no section, and is refused with a sentence that says
+// which to use: nothing reaches everyone by being left unsaid. The workspace
+// itself (`""`) is the three side by side, a place to list and search and
+// nothing else. Each section is a tree of its own (spaces.ts), so a call is
+// answered in the one its path names — with that section's part of the
+// bucket, and its manifest mounted at the folder it is at (mount.ts).
 //
 // Whether the agent's person is in a section is asked on every request, of
 // the rows their own token is asked of: added to a folder, taken out of one,
@@ -27,7 +31,8 @@
 import type { Auth } from "./auth";
 import { Refusal } from "./commit";
 import type { Env } from "./env";
-import { MAX_NAME_LEN } from "./layout";
+import { pathProblem } from "./documents";
+import { LIBRARY_FOLDER, MAX_NAME_LEN } from "./layout";
 import { withDb } from "./schema";
 import { ensurePrivate, sharedEnv, spaceEnv, type Where } from "./spaces";
 
@@ -35,7 +40,7 @@ export const PRIVATE_FOLDER = "Private";
 export const RESTRICTED_FOLDER = "Restricted";
 
 /** A section, and which kind it is. `mount` is the folder it is at, as its
- *  person names paths: "", `Private`, `Restricted/Finance`. */
+ *  person names paths: `Library`, `Private`, `Restricted/Finance`. */
 export type Section = Where & { kind: "shared" | "private" | "restricted" };
 
 /** A name a folder on a Mac can carry (`sanitize_folder_name`,
@@ -78,11 +83,11 @@ export class Places {
     private readonly person: Auth,
   ) {
     const whole = sharedEnv(env);
-    this.shared = { space: "", kind: "shared", mount: "", env: whole };
+    this.shared = { space: "", kind: "shared", mount: LIBRARY_FOLDER, env: whole };
   }
 
-  /** The shared workspace, then Private, then the restricted folders by
-   *  name. Null when the database cannot say. */
+  /** Library, then Private, then the restricted folders by name. Null when
+   *  the database cannot say. */
   all(): Promise<Section[] | null> {
     this.listed ??= this.list();
     return this.listed;
@@ -130,12 +135,19 @@ export class Places {
   }
 
   /**
-   * The section a path is in. A path that is exactly `Restricted` is in
-   * none: "restricted" says so, for the callers that list what is there.
+   * The section a path is in. Two paths are in none, and say which place
+   * they are for the callers that list what is there: "" is the workspace
+   * itself, and exactly `Restricted` the folder that holds the restricted
+   * folders.
    */
-  async at(path: string): Promise<Section | "restricted" | Refusal> {
-    const segs = path.replace(/^\/+|\/+$/g, "").split("/");
+  async at(path: string): Promise<Section | "workspace" | "restricted" | Refusal> {
+    const trimmed = path.replace(/^\/+|\/+$/g, "");
+    if (trimmed === "") return "workspace";
+    const problem = pathProblem(trimmed);
+    if (problem) return new Refusal(400, problem);
+    const segs = trimmed.split("/");
     const top = segs[0].toLowerCase();
+    if (top === LIBRARY_FOLDER.toLowerCase()) return this.shared;
     if (top === PRIVATE_FOLDER.toLowerCase()) {
       // One row read, and none of the folders': the usual case.
       const env = this.shared.env;
@@ -143,7 +155,12 @@ export class Places {
       if (mine === null) return noDatabase();
       return { space: mine.id, kind: "private", mount: PRIVATE_FOLDER, env: spaceEnv(env, mine.id) };
     }
-    if (top !== RESTRICTED_FOLDER.toLowerCase()) return this.shared;
+    if (top !== RESTRICTED_FOLDER.toLowerCase()) {
+      return new Refusal(
+        400,
+        `${trimmed} is in no section. Say which: ${LIBRARY_FOLDER}/${trimmed} (everyone), ${PRIVATE_FOLDER}/${trimmed} (only your person) or ${RESTRICTED_FOLDER}/<folder>/${trimmed}.`,
+      );
+    }
     if (segs.length === 1) return "restricted";
     const all = await this.all();
     if (all === null) return noDatabase();
@@ -157,10 +174,16 @@ export class Places {
     );
   }
 
-  /** The section a document or a file is in — never `Restricted` itself,
-   *  which holds folders and nothing else. */
+  /** The section a document or a file is in — never the workspace itself or
+   *  `Restricted`, which hold sections and nothing else. */
   async of(path: string): Promise<Section | Refusal> {
     const at = await this.at(path);
+    if (at === "workspace") {
+      return new Refusal(
+        400,
+        `name a document or a folder, starting with its section: ${LIBRARY_FOLDER}/… (everyone), ${PRIVATE_FOLDER}/… (only your person) or ${RESTRICTED_FOLDER}/<folder>/…`,
+      );
+    }
     return at === "restricted"
       ? new Refusal(400, `${RESTRICTED_FOLDER} holds restricted folders and nothing else — name something inside one of them`)
       : at;

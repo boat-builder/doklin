@@ -60,7 +60,7 @@ Read a doc only when the change is in its area.
 | `ios/`, `scripts/ios-colors.mjs` | `docs/ios.md` |
 | `.github/workflows/`, updater | `docs/release.md` |
 | Building live sync (deferred, not built): the Durable Object doorbell | `docs/live-sync-plan.md` |
-| Building the Library layout (planned, not built): sections side by side, every path names one | `docs/library-layout-plan.md` |
+| Cutting base.aeoxoxo.ai over to the Library layout (built, not cut over) | `docs/library-layout-plan.md` |
 
 Docs hold rules, shared formats and traps — nothing else. Update one when a
 change alters those; never add history, "as built" notes or test walkthroughs.

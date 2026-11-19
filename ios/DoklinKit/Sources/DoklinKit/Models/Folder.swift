@@ -18,7 +18,7 @@ public enum LoadPhase: Equatable, Sendable {
 @Observable
 public final class FolderModel {
     public let workspace: Workspace
-    /// `""` is the workspace itself.
+    /// `""` is the workspace's own folder, which holds the sections.
     public let dir: String
     public private(set) var entries: [FolderEntry] = []
     public private(set) var phase: LoadPhase = .idle
@@ -88,15 +88,18 @@ public final class FolderModel {
         }
     }
 
-    /// Nothing is made directly in the folder that holds the restricted ones.
-    public var canHoldNotes: Bool { workspace.audience(of: dir) != .folders }
+    /// Nothing is made at the top of the workspace, which holds the
+    /// sections, or directly in the folder that holds the restricted ones.
+    public var canHoldNotes: Bool { !dir.isEmpty && workspace.audience(of: dir) != .folders }
 
-    /// A section's own folder is managed, not renamed, moved or removed.
+    /// This is Library's own folder: the top of what everyone has.
+    public var isLibrary: Bool { dir.lowercased() == TreeModel.libraryFolder.lowercased() }
+
+    /// A section's own folder is managed, not renamed, moved, removed or
+    /// restricted: Library, Private, Restricted, and each restricted folder.
     public func isManaged(_ entry: FolderEntry) -> Bool {
         guard case .folder(let path) = entry, let status = workspace.status else { return false }
-        let lower = path.lowercased()
-        return lower == "private" || lower == "restricted"
-            || status.spaces.contains { $0.path.lowercased() == lower }
+        return TreeModel.isSectionName(path) || status.spaces.contains { $0.path.lowercased() == path.lowercased() }
     }
 
     /// Moving `entry` into `folder` lets more people see it: the sentence

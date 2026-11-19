@@ -2,8 +2,8 @@ import DoklinKit
 import SwiftUI
 import UIKit
 
-/// Every page published from what this person can open — the shared
-/// workspace, their Private, the restricted folders they are in — with each
+/// Every page published from what this person can open — Library, their
+/// Private, the restricted folders they are in — with each
 /// address to copy, share or open, the home page, and the way to stop one.
 /// An owner also sees what was published from sections they are not in,
 /// and can take any of it down.
@@ -63,7 +63,7 @@ struct PublishedPagesView: View {
             PublishView(workspace: workspace, path: page.path, kind: .dir)
         }
         .confirmationDialog(
-            "Stop publishing “\(stopping.map { Publishing.name(of: $0, workspace: workspace.name) } ?? "")”?",
+            "Stop publishing “\(stopping.map { Publishing.name(of: $0) } ?? "")”?",
             isPresented: shown($stopping),
             titleVisibility: .visible
         ) {
@@ -104,7 +104,7 @@ struct PublishedPagesView: View {
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(Publishing.name(of: page, workspace: workspace.name))
+                    Text(Publishing.name(of: page))
                         .foregroundStyle(Theme.text1)
                         .lineLimit(1)
                     if page.root { badge("Home page", Theme.accentWash, Theme.text1) }

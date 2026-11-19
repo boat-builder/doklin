@@ -26,7 +26,7 @@ use super::manifest::*;
 use super::pace::{Cause, Limits, Mode, Plan, Usage};
 use super::remote::*;
 use super::scan::{hash16, now_ms, random_id, scan_local};
-use super::space::{self, RESERVED_DIRS};
+use super::space::{self, LIBRARY_DIR, RESERVED_DIRS};
 use super::status::*;
 use super::versions::{snapshot_id, VersionsEntry, VersionsIndex, CLOUD_GC_GRACE_MS, NO_INDEX};
 use crate::versions::store::{
@@ -1363,6 +1363,9 @@ impl Collected {
 struct Device {
     engine: Engine<FakeRemote>,
     root: tempfile::TempDir,
+    /// The folder is in the Library layout; false for a device standing in
+    /// for one still in the layout from before it (`old_layout`).
+    moved: bool,
     _state: tempfile::TempDir,
     /// `<app_data>` — where this device's version store lives.
     data: tempfile::TempDir,
@@ -1389,8 +1392,30 @@ fn device_as(
     state: tempfile::TempDir,
     token: &str,
 ) -> Device {
+    device_in(name, be, root, state, tempfile::tempdir().unwrap(), token)
+}
+
+/// A device on a folder, sync state and `<app_data>` of its own choosing —
+/// the same three again, for a device the tests restart.
+fn device_in(
+    name: &str,
+    be: &SharedWorker,
+    root: tempfile::TempDir,
+    state: tempfile::TempDir,
+    data: tempfile::TempDir,
+    token: &str,
+) -> Device {
     std::fs::create_dir_all(state.path().join("base")).unwrap();
-    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(LIBRARY_DIR)).unwrap();
+    write_marker(
+        root.path(),
+        &Marker {
+            domain: "notes.example.com".into(),
+            ws_id: "w-test".into(),
+            layout: Some(super::layout::LIBRARY.into()),
+        },
+    )
+    .unwrap();
     let statuses: StatusTable = Arc::new(Mutex::new(BTreeMap::new()));
     let events = Arc::new(Collected::default());
     let engine = Engine::new(
@@ -1405,6 +1430,7 @@ fn device_as(
             device_id: format!("d-{}", name.to_lowercase()),
             device_name: name.to_string(),
             device_kind: "Mac".into(),
+            unmoved: None,
             trash: None,
             on_spaces: None,
         },
@@ -1415,12 +1441,50 @@ fn device_as(
         events.clone(),
         statuses.clone(),
     );
-    Device { engine, root, _state: state, data, statuses, events }
+    Device { engine, root, moved: true, data, _state: state, statuses, events }
+}
+
+/// A device standing in for one whose build predates the Library layout:
+/// its shared unit at the workspace's root, as such a build has it. The
+/// wire is the same, so on one worker it syncs beside a moved device as an
+/// old build would.
+fn old_layout(mut d: Device) -> Device {
+    let root = d.root.path().to_path_buf();
+    let shared = d.engine.shared_mut();
+    shared.root = root.clone();
+    shared.prefix = String::new();
+    let _ = std::fs::remove_dir(root.join(LIBRARY_DIR));
+    d.moved = false;
+    d
 }
 
 impl Device {
+    /// `rel` names a file as these tests always have: a shared one by its
+    /// path in the shared section, any other with its section in front
+    /// (`Private/x.md`). In the folder it is where the move put it
+    /// (`layout::moved_rel`) — or, in the old layout, where it always was.
+    fn ws(&self, rel: &str) -> String {
+        if self.moved {
+            super::layout::moved_rel(rel)
+        } else {
+            rel.to_string()
+        }
+    }
     fn abs(&self, rel: &str) -> PathBuf {
-        self.root.path().join(rel)
+        self.root.path().join(self.ws(rel))
+    }
+    /// The shared section's folder.
+    fn library(&self) -> PathBuf {
+        self.engine.shared().root.clone()
+    }
+    /// Whether this device holds the lease on `rel`.
+    fn holds(&self, rel: &str) -> bool {
+        self.engine.holds_for_test(&self.ws(rel))
+    }
+    /// The app wrote `rel` (the edit bus).
+    fn touch(&mut self, rel: &str) {
+        let rel = self.ws(rel);
+        self.engine.touch_activity(&rel);
     }
     fn write(&self, rel: &str, content: &str) {
         let abs = self.abs(rel);
@@ -1438,8 +1502,9 @@ impl Device {
         std::fs::create_dir_all(to_abs.parent().unwrap()).unwrap();
         std::fs::rename(self.abs(from), to_abs).unwrap();
     }
+    /// The shared section's files, by their paths in it.
     fn files(&self) -> Vec<String> {
-        scan_local(self.root.path(), &RESERVED_DIRS).unwrap().keys().cloned().collect()
+        scan_local(&self.library(), &RESERVED_DIRS).unwrap().keys().cloned().collect()
     }
     /// A full pass — after the probe, until the domain has answered one,
     /// as the engine's task does: nothing is written before it knows whom
@@ -1475,7 +1540,7 @@ impl Device {
     }
     fn publish(&mut self, rel: &str, kind: PublicKind, slug: Option<&str>) -> Result<String, String> {
         self.engine.queue_publish(PublishRequest {
-            rel: rel.into(),
+            rel: self.ws(rel),
             kind,
             slug: slug.map(String::from),
             title: None,
@@ -1484,8 +1549,9 @@ impl Device {
     }
     /* ----- the version store: what the versioner would have written ----- */
 
+    /// The shared section's version store.
     fn store(&self) -> Store {
-        crate::versions::store_for_root(self.data.path(), self.root.path())
+        crate::versions::store_for_root(self.data.path(), &self.library())
     }
 
     /// Write a snapshot into this device's local store the way a capture
@@ -1562,7 +1628,7 @@ impl Device {
 
     fn publish_folder(&mut self, rel: &str, slug: &str, title: &str, desc: &str) -> Result<String, String> {
         self.engine.queue_publish(PublishRequest {
-            rel: rel.into(),
+            rel: self.ws(rel),
             kind: PublicKind::Dir,
             slug: Some(slug.into()),
             title: Some(title.into()),
@@ -1731,9 +1797,9 @@ async fn same_line_conflict_keeps_both_versions() {
     assert_eq!(b.read(&copies[0]).as_deref(), Some("alice's take on the line\n"));
     let conflicts = b.events.of(EV_CONFLICT);
     assert_eq!(conflicts.len(), 1);
-    assert_eq!(conflicts[0]["path"], "doc.md");
+    assert_eq!(conflicts[0]["path"], "Library/doc.md");
     assert_eq!(conflicts[0]["by"], "Ada");
-    assert_eq!(conflicts[0]["conflictPath"], copies[0]);
+    assert_eq!(conflicts[0]["conflictPath"], format!("Library/{}", copies[0]));
 
     a.cycle().await;
     assert_eq!(a.read("doc.md").as_deref(), Some("bob's very different take\n"));
@@ -1941,7 +2007,7 @@ async fn publish_mirrors_to_the_other_device() {
     // Visible at once, before any CAS.
     let page = a.page(&slug).expect("queued page shows in the effective view");
     assert!(page.alive);
-    assert_eq!(page.path, "doc.md");
+    assert_eq!(page.path, "Library/doc.md");
 
     a.cycle().await;
     assert!(a.engine.shared().state.public_ops.is_empty(), "carried op must clear");
@@ -1959,7 +2025,7 @@ async fn publish_mirrors_to_the_other_device() {
     let seen = b.pages();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].slug, slug);
-    assert_eq!(seen[0].path, "doc.md");
+    assert_eq!(seen[0].path, "Library/doc.md");
     assert!(seen[0].alive);
     assert_eq!(seen[0].by, "Ada");
 
@@ -1988,7 +2054,7 @@ async fn page_follows_rename_and_survives_lost_cas() {
         assert_eq!(public["page1"].path, "sub/renamed.md");
     }
     a.cycle().await;
-    assert_eq!(a.page("page1").unwrap().path, "sub/renamed.md");
+    assert_eq!(a.page("page1").unwrap().path, "Library/sub/renamed.md");
 
     // A publish queued behind a lost CAS lands on the retry, on top of
     // whatever the winner wrote.
@@ -2087,7 +2153,7 @@ async fn folder_page_repoints_when_the_folder_moves() {
     assert_eq!(public_of(&be)["roadmap"].path, "Projects/Plans");
     b.cycle().await;
     let page = b.page("roadmap").unwrap();
-    assert_eq!(page.path, "Projects/Plans");
+    assert_eq!(page.path, "Library/Projects/Plans");
     assert!(page.alive);
     assert_eq!(b.read("Projects/Plans/a.md").as_deref(), Some("# a\n"));
 
@@ -2211,7 +2277,7 @@ async fn custom_slug_race_suffixes_the_loser() {
     assert_eq!(public["plan"].path, "a.md");
     assert_eq!(public["plan-2"].path, "b.md");
     assert!(b.engine.shared().state.public_ops.is_empty());
-    assert_eq!(b.page("plan-2").unwrap().path, "b.md", "bob's status tells him his final slug");
+    assert_eq!(b.page("plan-2").unwrap().path, "Library/b.md", "bob's status tells him his final slug");
 
     // A local check catches the taken slug once the device has pulled.
     assert!(a.publish("b.md", PublicKind::File, Some("plan")).is_err());
@@ -2301,14 +2367,14 @@ async fn join_downloads_what_connect_uploaded() {
     let parent = tempfile::tempdir().unwrap();
     let dest = parent.path().join("Notes");
     let b_state = tempfile::tempdir().unwrap();
-    let b_state_data = seed_download(&bob, &dest, b_state.path(), &events).await.unwrap();
+    let b_state_data = seed_download(&bob, &dest, b_state.path(), &events, "b").await.unwrap();
     assert_eq!(b_state_data.files.len(), 2);
     assert_eq!(std::fs::read_to_string(dest.join("notes/hello.md")).unwrap(), "# hello\n");
     assert_eq!(std::fs::read_to_string(dest.join("readme.md")).unwrap(), "root doc\n");
     assert!(!dest.join(".hidden.md").exists());
 
     // A non-empty destination is refused.
-    assert!(seed_download(&bob, &dest, b_state.path(), &events).await.is_err());
+    assert!(seed_download(&bob, &dest, b_state.path(), &events, "b").await.is_err());
 
     // Engines started on the seeded state have nothing to say.
     super::scan::write_json(&b_state.path().join("state.json"), &b_state_data).unwrap();
@@ -2323,7 +2389,7 @@ async fn join_downloads_what_connect_uploaded() {
     // Copy the downloaded files into the device's root, keeping mtimes
     // irrelevant: a snapshot mismatch only costs a hash, never a push.
     for rel in ["notes/hello.md", "readme.md"] {
-        let target = dest_dir.path().join(rel);
+        let target = dest_dir.path().join(LIBRARY_DIR).join(rel);
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::copy(dest.join(rel), target).unwrap();
     }
@@ -2577,7 +2643,7 @@ async fn an_invited_mac_joins_and_syncs_with_its_own_token() {
     let parent = tempfile::tempdir().unwrap();
     let dest = parent.path().join("Notes");
     let b_state = tempfile::tempdir().unwrap();
-    let state = seed_download(&bob, &dest, b_state.path(), &events).await.unwrap();
+    let state = seed_download(&bob, &dest, b_state.path(), &events, "b").await.unwrap();
     assert_eq!(state.files.len(), 1);
     assert_eq!(std::fs::read_to_string(dest.join("readme.md")).unwrap(), "root doc\n");
 
@@ -2894,7 +2960,7 @@ async fn a_signed_out_mac_is_told_its_access_was_removed() {
     assert!(matches!(bob.engine.cycle().await, Err(RemoteError::Removed)));
     assert!(bob.engine.was_removed());
     assert!(!manifest_of(&be).files.values().any(|f| f.path == "late.md"));
-    assert!(bob.root.path().join("readme.md").exists(), "the engine touched nothing on its way out");
+    assert!(bob.root.path().join("Library/readme.md").exists(), "the engine touched nothing on its way out");
     // The person stays: a Mac was signed out, not a colleague removed.
     assert!(owner.list_members().await.unwrap().iter().any(|m| m.email == "bob@example.com"));
     assert!(owner.list_devices().await.unwrap().is_empty());
@@ -3068,7 +3134,7 @@ async fn the_engine_task_ends_itself_when_access_is_removed() {
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
-    assert!(root.join("readme.md").exists(), "joined and in step");
+    assert!(root.join("Library/readme.md").exists(), "joined and in step");
     assert!(!task.is_finished());
 
     // Bob is removed while his Mac sits idle. Nothing is typed, nothing is
@@ -3078,7 +3144,7 @@ async fn the_engine_task_ends_itself_when_access_is_removed() {
     owner.delete_member(&bob_id).await.unwrap();
     tokio::time::sleep(Duration::from_secs(16)).await;
     assert_eq!(task.await.unwrap(), Exit::Removed);
-    assert!(root.join("readme.md").exists());
+    assert!(root.join("Library/readme.md").exists());
     drop(cmd_tx);
 
     // An engine that starts already removed never syncs at all: the first
@@ -3089,7 +3155,7 @@ async fn the_engine_task_ends_itself_when_access_is_removed() {
     let late_root = late.root.path().to_path_buf();
     let Device { engine, root: late_dir, _state: late_state, .. } = late;
     assert_eq!(engine.run(cmd_rx, fs_rx).await, Exit::Removed);
-    assert!(std::fs::read_dir(&late_root).unwrap().next().is_none(), "nothing was downloaded");
+    assert!(std::fs::read_dir(late_root.join(LIBRARY_DIR)).unwrap().next().is_none(), "nothing was downloaded");
     drop((root_dir, _state, late_dir, late_state));
 }
 
@@ -3212,7 +3278,7 @@ fn only_a_folder_that_says_it_is_that_workspace_is_deleted() {
     let marked = |dir: &Path, domain: &str, ws_id: &str| {
         std::fs::create_dir_all(dir.join("notes")).unwrap();
         std::fs::write(dir.join("notes/a.md"), "a\n").unwrap();
-        write_marker(dir, &Marker { domain: domain.into(), ws_id: ws_id.into() }).unwrap();
+        write_marker(dir, &Marker { domain: domain.into(), ws_id: ws_id.into(), layout: None }).unwrap();
     };
     let tmp = tempfile::tempdir().unwrap();
 
@@ -3301,15 +3367,15 @@ async fn touched_path_settles_faster_than_a_watched_one() {
     let has = |name: &str| manifest_of(&be).files.values().any(|f| f.path == name);
 
     // The edit bus: settles in 1.5 s.
-    std::fs::write(root.join("typed.md"), "typed in the app\n").unwrap();
-    cmd_tx.send(EngineCmd::Touched("typed.md".into())).unwrap();
+    std::fs::write(root.join("Library/typed.md"), "typed in the app\n").unwrap();
+    cmd_tx.send(EngineCmd::Touched("Library/typed.md".into())).unwrap();
     tokio::time::sleep(Duration::from_millis(1400)).await;
     assert!(!has("typed.md"), "not before the touch settles");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(has("typed.md"), "pushed 1.5 s after the touch");
 
     // The watcher alone: settles in 5 s.
-    std::fs::write(root.join("external.md"), "written by another program\n").unwrap();
+    std::fs::write(root.join("Library/external.md"), "written by another program\n").unwrap();
     fs_tx.send(()).unwrap();
     tokio::time::sleep(Duration::from_millis(1600)).await;
     assert!(!has("external.md"), "a watched write waits the full settle");
@@ -3347,8 +3413,8 @@ async fn an_engine_whose_watcher_never_started_still_syncs() {
     }
 
     // The edit bus still carries everything the app itself writes.
-    std::fs::write(root.join("typed.md"), "typed in the app\n").unwrap();
-    cmd_tx.send(EngineCmd::Touched("typed.md".into())).unwrap();
+    std::fs::write(root.join("Library/typed.md"), "typed in the app\n").unwrap();
+    cmd_tx.send(EngineCmd::Touched("Library/typed.md".into())).unwrap();
     tokio::time::sleep(Duration::from_millis(1600)).await;
     assert!(
         manifest_of(&be).files.values().any(|f| f.path == "typed.md"),
@@ -3358,8 +3424,8 @@ async fn an_engine_whose_watcher_never_started_still_syncs() {
     // A second one, well past the poll: the engine is still running, not
     // spinning on a channel that answers None forever.
     tokio::time::sleep(POLL_INTERVAL * 2).await;
-    std::fs::write(root.join("later.md"), "and again\n").unwrap();
-    cmd_tx.send(EngineCmd::Touched("later.md".into())).unwrap();
+    std::fs::write(root.join("Library/later.md"), "and again\n").unwrap();
+    cmd_tx.send(EngineCmd::Touched("Library/later.md".into())).unwrap();
     tokio::time::sleep(Duration::from_millis(1600)).await;
     assert!(manifest_of(&be).files.values().any(|f| f.path == "later.md"));
 
@@ -3417,7 +3483,7 @@ async fn a_probe_command_resumes_an_outdated_engine() {
     let root = a.root.path().to_path_buf();
     let statuses = a.statuses.clone();
     let key = root.to_string_lossy().to_string();
-    std::fs::write(root.join("doc.md"), "# doc\n").unwrap();
+    std::fs::write(root.join("Library/doc.md"), "# doc\n").unwrap();
     be.lock().unwrap().reject_schema = true;
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3491,7 +3557,7 @@ async fn presence_reports_the_edited_path_and_the_others() {
     assert_eq!(seen[0].device_id, "d-alice");
     assert_eq!(seen[0].name, "Alice");
     assert_eq!(seen[0].device, "Alice");
-    assert_eq!(seen[0].path.as_deref(), Some("doc.md"));
+    assert_eq!(seen[0].path.as_deref(), Some("Library/doc.md"));
 }
 
 /// Three polls, one beat. The beat has no request of its own: it
@@ -3556,7 +3622,7 @@ async fn the_beat_rides_every_third_poll_and_a_new_path_brings_the_poll_forward(
 async fn an_idle_device_makes_exactly_four_requests_a_minute() {
     let be = fake_worker();
     let a = device("Alice", &be);
-    std::fs::write(a.root.path().join("doc.md"), "# doc\n").unwrap();
+    std::fs::write(a.root.path().join("Library/doc.md"), "# doc\n").unwrap();
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
     let Device { engine, root: root_dir, _state, .. } = a;
@@ -3589,7 +3655,7 @@ async fn an_engine_that_started_offline_learns_who_it_is_when_the_domain_answers
     let be = fake_worker();
     be.lock().unwrap().offline = true;
     let a = device("Alice", &be);
-    std::fs::write(a.root.path().join("doc.md"), "# doc\n").unwrap();
+    std::fs::write(a.root.path().join("Library/doc.md"), "# doc\n").unwrap();
     let (statuses, key) = (a.statuses.clone(), a.root.path().to_string_lossy().to_string());
     let status = move || statuses.lock().unwrap()[&key].clone();
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3633,8 +3699,8 @@ async fn a_mac_being_typed_on_keeps_beating_while_its_cycles_hold_off_the_poll()
     // cycle, so the 15 s poll clock never runs out on its own.
     be.lock().unwrap().polls.clear();
     for i in 0..45 {
-        std::fs::write(root.join("typed.md"), format!("draft {i}\n")).unwrap();
-        cmd_tx.send(EngineCmd::Touched("typed.md".into())).unwrap();
+        std::fs::write(root.join("Library/typed.md"), format!("draft {i}\n")).unwrap();
+        cmd_tx.send(EngineCmd::Touched("Library/typed.md".into())).unwrap();
         tokio::time::sleep(Duration::from_secs(4)).await;
     }
     let beats = be.lock().unwrap().polls.iter().filter(|p| p.is_some()).count();
@@ -3779,16 +3845,16 @@ async fn opening_a_document_claims_it_and_another_mac_sees_it_held() {
 
     open(&mut a, "doc.md");
     a.engine.poll_for_test().await;
-    assert!(a.engine.holds_for_test("doc.md"), "the beat that names it claims it");
+    assert!(a.holds("doc.md"), "the beat that names it claims it");
     assert!(a.status().leases.is_empty(), "your own lease is not a lock on you");
 
     open(&mut b, "DOC.md");
     b.engine.poll_for_test().await;
-    assert!(!b.engine.holds_for_test("doc.md"), "refused: one document is one lock, in any case");
+    assert!(!b.holds("doc.md"), "refused: one document is one lock, in any case");
     assert_eq!(be.lock().unwrap().leases["doc.md"].device_id, "d-alice", "nothing moved");
     let held = b.status().leases;
     assert_eq!(held.len(), 1);
-    assert_eq!(held[0].path, "doc.md");
+    assert_eq!(held[0].path, "library/doc.md");
     assert_eq!(held[0].device_id, "d-alice");
     assert_eq!(held[0].name, "Alice", "Ada's other Mac, by its name");
     assert!(held[0].own);
@@ -3811,12 +3877,12 @@ async fn moving_on_lets_go_and_the_mac_waiting_claims_it_next() {
     a.engine.poll_for_test().await;
     open(&mut b, "doc.md");
     b.engine.poll_for_test().await;
-    assert!(!b.engine.holds_for_test("doc.md"));
+    assert!(!b.holds("doc.md"));
 
     open(&mut a, "other.md");
     a.engine.poll_for_test().await;
-    assert!(!a.engine.holds_for_test("doc.md"), "released by the beat that named something else");
-    assert!(a.engine.holds_for_test("other.md"));
+    assert!(!a.holds("doc.md"), "released by the beat that named something else");
+    assert!(a.holds("other.md"));
 
     be.lock().unwrap().polls.clear();
     b.engine.poll_for_test().await;
@@ -3827,7 +3893,7 @@ async fn moving_on_lets_go_and_the_mac_waiting_claims_it_next() {
         matches!(be.lock().unwrap().polls.last(), Some(Some(Beat::Here { path: Some(p), take: false, .. })) if p == "doc.md"),
         "a free document it has open is owed a claim, and the next poll carries it"
     );
-    assert!(b.engine.holds_for_test("doc.md"));
+    assert!(b.holds("doc.md"));
 
     a.engine.set_activity(None);
     a.engine.poll_for_test().await;
@@ -3845,18 +3911,18 @@ async fn take_over_claims_a_held_document_once_and_the_holder_hears_on_its_next_
     a.engine.poll_for_test().await;
     open(&mut b, "doc.md");
     b.engine.poll_for_test().await;
-    assert!(!b.engine.holds_for_test("doc.md"));
+    assert!(!b.holds("doc.md"));
 
     b.engine.take_over(b.abs("doc.md").to_string_lossy().to_string());
     b.engine.poll_for_test().await;
     assert!(matches!(beats(&be).last(), Some(Beat::Here { take: true, .. })));
-    assert!(b.engine.holds_for_test("doc.md"), "taken");
+    assert!(b.holds("doc.md"), "taken");
     assert!(b.status().leases.is_empty());
 
     a.engine.poll_for_test().await;
     let held = a.status().leases;
     assert_eq!(held.iter().map(|l| l.device_id.as_str()).collect::<Vec<_>>(), ["d-bob"], "Alice hears on her next poll");
-    assert!(!a.engine.holds_for_test("doc.md"));
+    assert!(!a.holds("doc.md"));
 
     // A beat later, both renew what they have: Bob his lease, Alice nothing.
     tokio::time::advance(PRESENCE_BEAT).await;
@@ -3878,22 +3944,22 @@ async fn typing_keeps_a_document_and_walking_away_lets_it_go() {
     let (mut a, _b) = two_with_a_doc(&be).await;
     open(&mut a, "doc.md");
     a.engine.poll_for_test().await;
-    assert!(a.engine.holds_for_test("doc.md"));
+    assert!(a.holds("doc.md"));
 
     for _ in 0..4 {
         tokio::time::advance(ACTIVITY_FRESH - Duration::from_secs(60)).await;
-        a.engine.touch_activity("doc.md");
+        a.touch("doc.md");
         a.engine.poll_for_test().await;
     }
-    assert!(a.engine.holds_for_test("doc.md"), "sixteen minutes of typing, still Alice's");
+    assert!(a.holds("doc.md"), "sixteen minutes of typing, still Alice's");
     assert!(matches!(beats(&be).last(), Some(Beat::Here { path: Some(p), .. }) if p == "doc.md"));
 
     tokio::time::advance(ACTIVITY_FRESH - Duration::from_secs(60)).await;
-    a.engine.touch_activity("doc.meta.jsonl");
-    a.engine.touch_activity("other.md");
+    a.touch("doc.meta.jsonl");
+    a.touch("other.md");
     tokio::time::advance(Duration::from_secs(61)).await;
     a.engine.poll_for_test().await;
-    assert!(!a.engine.holds_for_test("doc.md"), "walked away: let go");
+    assert!(!a.holds("doc.md"), "walked away: let go");
     assert!(be.lock().unwrap().leases.is_empty());
     assert_eq!(be.lock().unwrap().presence["d-alice"].path, None, "and here, idle");
 }
@@ -3969,10 +4035,10 @@ async fn a_lease_names_the_person_and_your_own_other_mac() {
     studio.engine.poll_for_test().await;
 
     let held = studio.status().leases;
-    let on_air = held.iter().find(|l| l.path == "a.md").unwrap();
+    let on_air = held.iter().find(|l| l.path == "library/a.md").unwrap();
     assert!(on_air.own, "Ada's other Mac");
     assert_eq!(on_air.name, "Air");
-    let on_bob = held.iter().find(|l| l.path == "b.md").unwrap();
+    let on_bob = held.iter().find(|l| l.path == "library/b.md").unwrap();
     assert!(!on_bob.own);
     assert_eq!(on_bob.name, "Bob Mbeki");
     assert_eq!(on_bob.device, "Bob");
@@ -3990,7 +4056,7 @@ async fn a_lease_names_the_person_and_your_own_other_mac() {
 async fn an_editing_mac_holding_its_document_still_makes_four_requests_a_minute() {
     let be = fake_worker();
     let a = device("Alice", &be);
-    std::fs::write(a.root.path().join("doc.md"), "# doc\n").unwrap();
+    std::fs::write(a.root.path().join("Library/doc.md"), "# doc\n").unwrap();
     let doc = a.abs("doc.md").to_string_lossy().to_string();
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4203,7 +4269,7 @@ fn cloud_file_and_marker_round_trip() {
 
     let root = tempfile::tempdir().unwrap();
     assert!(read_marker(root.path()).is_none());
-    let marker = Marker { domain: "notes.example.com".into(), ws_id: "w-1".into() };
+    let marker = Marker { domain: "notes.example.com".into(), ws_id: "w-1".into(), layout: None };
     write_marker(root.path(), &marker).unwrap();
     assert_eq!(read_marker(root.path()), Some(marker));
     assert!(root.path().join(".doklin/cloud.json").exists());
@@ -4472,7 +4538,7 @@ async fn cloud_horizon_is_a_cas_on_the_cloud_index() {
     };
     be.lock().unwrap().versions_racer = Some(theirs);
 
-    a.engine.set_cloud_horizon("", Some(30)).await.expect("set the cloud horizon");
+    a.engine.set_cloud_horizon("Library", Some(30)).await.expect("set the cloud horizon");
     let index = cloud_index(&be);
     assert_eq!(index.horizon_days, Some(30), "the loser re-read and landed it anyway");
     assert!(
@@ -4496,7 +4562,7 @@ async fn cloud_horizon_is_a_cas_on_the_cloud_index() {
     );
 
     // Forever is a real answer, not the absence of one.
-    a.engine.set_cloud_horizon("", None).await.expect("back to forever");
+    a.engine.set_cloud_horizon("Library", None).await.expect("back to forever");
     assert_eq!(cloud_index(&be).horizon_days, None);
 }
 
@@ -5018,7 +5084,7 @@ async fn a_document_the_worker_created_arrives_on_every_mac() {
         applies_quietly(d, &be).await;
         assert_eq!(d.read("Projects/plan.md").as_deref(), Some("# Plan\n\nwritten by an agent\n"));
         let applied = d.events.of(EV_APPLIED);
-        assert_eq!(applied.last().unwrap()["paths"], serde_json::json!(["Projects/plan.md"]));
+        assert_eq!(applied.last().unwrap()["paths"], serde_json::json!(["Library/Projects/plan.md"]));
         // And it stays applied: the next cycle has nothing to do.
         applies_quietly(d, &be).await;
     }
@@ -5135,9 +5201,9 @@ async fn the_same_line_changed_here_and_by_the_worker_keeps_both() {
     assert_eq!(a.read(&copies[0]).as_deref(), Some("the agent's take on the line\n"));
     let conflicts = a.events.of(EV_CONFLICT);
     assert_eq!(conflicts.len(), 1);
-    assert_eq!(conflicts[0]["path"], "doc.md");
+    assert_eq!(conflicts[0]["path"], "Library/doc.md");
     assert_eq!(conflicts[0]["by"], "Grok bot");
-    assert_eq!(conflicts[0]["conflictPath"], copies[0]);
+    assert_eq!(conflicts[0]["conflictPath"], format!("Library/{}", copies[0]));
 
     // Both are Alice's to push: her text as the next revision, the copy as a
     // file of its own that every Mac gets.
@@ -5504,7 +5570,7 @@ async fn a_page_follows_a_document_the_worker_moved_and_no_mac_has_to_say_so() {
     for d in [&mut a, &mut b] {
         applies_quietly(d, &be).await;
         let page = d.page("page1").unwrap();
-        assert_eq!(page.path, "sub/renamed.md");
+        assert_eq!(page.path, "Library/sub/renamed.md");
         assert!(page.alive);
     }
     assert_eq!(public_of(&be)["page1"], entry);
@@ -5534,7 +5600,7 @@ async fn a_folder_page_follows_a_folder_the_worker_moved() {
     for d in [&mut a, &mut b] {
         applies_quietly(d, &be).await;
         let page = d.page("roadmap").unwrap();
-        assert_eq!(page.path, "Projects/Plans");
+        assert_eq!(page.path, "Library/Projects/Plans");
         assert!(page.alive);
         assert_eq!(d.files(), vec!["Other.md", "Projects/Plans/a.md", "Projects/Plans/b.md"]);
     }
@@ -5557,13 +5623,13 @@ async fn a_page_the_agent_published_is_named_after_it_and_outlives_its_document(
     worker_writes(&be, |tx| tx.publish("launch", &fid));
     applies_quietly(&mut a, &be).await;
     let page = a.page("launch").unwrap();
-    assert_eq!((page.path.as_str(), page.by.as_str(), page.alive), ("doc.md", "Grok bot", true));
+    assert_eq!((page.path.as_str(), page.by.as_str(), page.alive), ("Library/doc.md", "Grok bot", true));
 
     worker_writes(&be, |tx| tx.remove(&fid));
     applies_quietly(&mut a, &be).await;
     assert!(a.read("doc.md").is_none());
     let page = a.page("launch").unwrap();
-    assert_eq!((page.path.as_str(), page.alive), ("doc.md", false));
+    assert_eq!((page.path.as_str(), page.alive), ("Library/doc.md", false));
     assert_eq!(public_of(&be)["launch"].file.as_deref(), Some(fid.as_str()));
 
     let reborn = worker_writes(&be, |tx| {
@@ -5599,7 +5665,7 @@ async fn a_page_moves_to_the_markdown_an_html_only_document_gains() {
     applies_quietly(&mut a, &be).await;
     assert_eq!(a.files(), vec!["deck.html", "deck.md"]);
     let page = a.page("deck").unwrap();
-    assert_eq!((page.path.as_str(), page.alive), ("deck.md", true));
+    assert_eq!((page.path.as_str(), page.alive), ("Library/deck.md", true));
     assert_eq!(public_of(&be)["deck"].file.as_deref(), Some(md.as_str()));
 }
 
@@ -6146,7 +6212,7 @@ async fn an_address_another_section_holds_is_refused_and_said_so() {
     alice.cycle().await;
     let taken = alice.events.of(EV_ADDRESS_TAKEN);
     assert_eq!(taken.len(), 1);
-    assert_eq!((taken[0]["slug"].as_str(), taken[0]["path"].as_str()), (Some("bobs-page"), Some("a.md")));
+    assert_eq!((taken[0]["slug"].as_str(), taken[0]["path"].as_str()), (Some("bobs-page"), Some("Library/a.md")));
     assert!(alice.page("bobs-page").is_none(), "the page was not published");
     assert!(!public_of(&be).contains_key("bobs-page"));
     assert_eq!(alice.phase(), Phase::Idle);
@@ -6163,7 +6229,7 @@ async fn an_address_another_section_holds_is_refused_and_said_so() {
     alice.publish("Private/x.md", PublicKind::File, Some("only-hers")).unwrap();
     alice.cycle().await;
     let no_home = alice.engine.queue_set_root(Some("only-hers".into())).unwrap_err();
-    assert!(no_home.contains("shared workspace"), "{no_home}");
+    assert!(no_home.contains("chosen from Library"), "{no_home}");
 }
 
 /// A document open in a section says which section: her own other Mac sees
@@ -6189,7 +6255,7 @@ async fn presence_and_leases_in_a_section_are_only_for_the_people_in_it() {
         matches!(&beat, Some(Beat::Here { space: Some(s), path: Some(p), .. }) if *s == hers && p == "Diary.md"),
         "the beat names the section and the path inside it: {beat:?}"
     );
-    assert!(alice.engine.holds_for_test("Private/Diary.md"));
+    assert!(alice.holds("Private/Diary.md"));
 
     air.engine.poll_for_test().await;
     let seen = air.status();
@@ -6299,7 +6365,7 @@ async fn a_private_folder_is_found_however_the_disk_spells_it() {
 
     open(&mut alice, "private/diary.md");
     alice.engine.poll_for_test().await;
-    assert!(alice.engine.holds_for_test("private/diary.md"));
+    assert!(alice.holds("private/diary.md"));
     assert_eq!(alice.publish("private/diary.md", PublicKind::File, Some("diary")).unwrap(), "diary");
     alice.cycle().await;
     assert_eq!(alice.page("diary").unwrap().path, "private/diary.md");
@@ -6316,20 +6382,20 @@ async fn a_link_finds_its_file_on_another_mac_after_a_rename() {
     let mut alice = person(&be, "Alice").await;
     let mut bob = person(&be, "Bob").await;
     alice.write("Plans/q3.md", "the plan\n");
-    assert_eq!(alice.engine.linked("Plans/q3.md"), None, "a file never synced has no id yet");
+    assert_eq!(alice.engine.linked("Library/Plans/q3.md"), None, "a file never synced has no id yet");
     alice.sync().await;
-    let linked = alice.engine.linked("Plans/q3.md").expect("a link once it has synced");
+    let linked = alice.engine.linked("Library/Plans/q3.md").expect("a link once it has synced");
     assert_eq!(linked.space, None, "the shared workspace is no space");
     assert_eq!(linked.who, "Everyone in Test can open it.");
     assert!(manifest_of(&be).files.contains_key(&linked.file));
 
     bob.sync().await;
-    assert_eq!(bob.engine.follow(None, &linked.file).as_deref(), Some("Plans/q3.md"));
+    assert_eq!(bob.engine.follow(None, &linked.file).as_deref(), Some("Library/Plans/q3.md"));
     alice.rename("Plans/q3.md", "Archive/Q3 plan.md");
     alice.sync().await;
     bob.sync().await;
-    assert_eq!(bob.engine.follow(None, &linked.file).as_deref(), Some("Archive/Q3 plan.md"));
-    assert_eq!(alice.engine.linked("Archive/Q3 plan.md"), Some(linked.clone()), "the same link as before");
+    assert_eq!(bob.engine.follow(None, &linked.file).as_deref(), Some("Library/Archive/Q3 plan.md"));
+    assert_eq!(alice.engine.linked("Library/Archive/Q3 plan.md"), Some(linked.clone()), "the same link as before");
 
     alice.delete("Archive/Q3 plan.md");
     alice.sync().await;
@@ -6609,7 +6675,7 @@ async fn many_new_documents_wait_for_a_yes() {
     let asked = a.events.of(EV_PENDING_ADDS);
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0]["count"], 210);
-    assert_eq!(asked[0]["folders"][0]["path"], "Projects/foo");
+    assert_eq!(asked[0]["folders"][0]["path"], "Library/Projects/foo");
 
     // Edits still go, and the question is not asked again.
     a.write("kept.md", "kept, edited\n");
@@ -6655,7 +6721,7 @@ async fn past_its_allowance_a_device_sends_its_own_edits_and_holds_the_rest_unti
         a.write(&format!("bulk/n{:03}.md", i), &format!("note {}\n", i));
     }
     a.write("mine.md", "mine, edited\n");
-    a.engine.touch_activity("mine.md");
+    a.touch("mine.md");
     a.cycle().await;
     let m = manifest_of(&be);
     assert!(m.files.values().any(|f| f.path == "mine.md" && f.rev == 2), "a person's own edit goes");
@@ -6754,8 +6820,8 @@ async fn the_daily_limit_holds_everything_but_a_probe_every_half_hour() {
     assert!(status.usage.resumes_at.is_some());
 
     let before = be.lock().unwrap().requests;
-    std::fs::write(root.path().join("typed.md"), "typed\n").unwrap();
-    cmd_tx.send(EngineCmd::Touched("typed.md".into())).unwrap();
+    std::fs::write(root.path().join("Library/typed.md"), "typed\n").unwrap();
+    cmd_tx.send(EngineCmd::Touched("Library/typed.md".into())).unwrap();
     tokio::time::sleep(Duration::from_secs(25 * 60)).await;
     assert_eq!(be.lock().unwrap().requests, before, "nothing goes");
     tokio::time::sleep(Duration::from_secs(6 * 60)).await;
@@ -6867,7 +6933,7 @@ async fn what_changed_lately_is_every_document_newest_first_with_who_changed_it(
 
     let recent = a.engine.recent(50);
     let paths: Vec<&str> = recent.files.iter().map(|f| f.path.as_str()).collect();
-    assert_eq!(paths, ["plan.md", "old.md"], "newest first, and no comment file");
+    assert_eq!(paths, ["Library/plan.md", "Library/old.md"], "newest first, and no comment file");
     let top = &recent.files[0];
     assert_eq!((top.by.as_str(), top.rev, top.file_id.as_deref()), (AGENT, 2, Some(plan.as_str())));
     assert_eq!(top.hash.as_deref(), Some(hash16(b"# Plan\n\nThe agent's words.\n").as_str()));
@@ -6884,16 +6950,16 @@ async fn what_changed_lately_is_every_document_newest_first_with_who_changed_it(
     let recent = a.engine.recent(50);
     let mine: Vec<(&str, &str, Option<&str>, u64)> =
         recent.files.iter().take(2).map(|f| (f.path.as_str(), f.by.as_str(), f.hash.as_deref(), f.rev)).collect();
-    assert!(mine.contains(&("new.md", ADA, None, 0)), "a new file no manifest carries: {:?}", mine);
-    assert!(mine.contains(&("old.md", ADA, None, 1)), "an edit not synced yet: {:?}", mine);
+    assert!(mine.contains(&("Library/new.md", ADA, None, 0)), "a new file no manifest carries: {:?}", mine);
+    assert!(mine.contains(&("Library/old.md", ADA, None, 1)), "an edit not synced yet: {:?}", mine);
     assert_eq!(a.engine.recent(1).files.len(), 1, "at most the limit");
 
     // A rename moves it, and changes nothing about when it last changed.
     a.cycle().await;
-    let before = a.engine.recent(50).files.into_iter().find(|f| f.path == "plan.md").unwrap().mtime;
+    let before = a.engine.recent(50).files.into_iter().find(|f| f.path == "Library/plan.md").unwrap().mtime;
     a.rename("plan.md", "Plans/plan.md");
     a.cycle().await;
-    let moved = a.engine.recent(50).files.into_iter().find(|f| f.path == "Plans/plan.md").expect("moved");
+    let moved = a.engine.recent(50).files.into_iter().find(|f| f.path == "Library/Plans/plan.md").expect("moved");
     assert_eq!(moved.mtime, before, "a move is not an edit");
 }
 
@@ -7030,4 +7096,428 @@ async fn a_held_copy_whose_folder_is_gone_has_stopped() {
     drop(root);
     let held = super::cloud_held(&core, endpoint).unwrap().expect("still held");
     assert!(!held.syncs, "its folder is gone");
+}
+
+/* ---------- The Library layout ---------- */
+
+fn set_layout(root: &Path, layout: Option<&str>) {
+    let marker = read_marker(root).expect("a marker");
+    write_marker(root, &Marker { layout: layout.map(String::from), ..marker }).unwrap();
+}
+
+/// Every file under `dir`, hidden ones too, relative to it and sorted.
+fn tree(dir: &Path) -> Vec<String> {
+    fn walk(base: &Path, at: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(at).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(base, &path, out);
+            } else {
+                out.push(path.strip_prefix(base).unwrap().to_string_lossy().to_string());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// A connected folder in the layout from before Library: shared files at
+/// its top beside `Private/`, `Restricted/` and hidden folders, and the
+/// version store at its root.
+fn folder_before_library(data: &Path) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for (rel, text) in [
+        ("notes.md", "notes\n"),
+        ("Projects/plan.md", "plan\n"),
+        ("node_modules/x/readme.md", "ignored, and still the section's own\n"),
+        (".git/HEAD", "ref: refs/heads/main\n"),
+        (".obsidian/app.json", "{}\n"),
+        ("Private/diary.md", "mine\n"),
+        ("Restricted/Finance/budget.md", "ours\n"),
+    ] {
+        let abs = root.join(rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(abs, text).unwrap();
+    }
+    write_marker(root, &Marker { domain: "notes.example.com".into(), ws_id: "w-test".into(), layout: None }).unwrap();
+    let store = crate::versions::store_for_root(data, root);
+    let mut index = store.read_index();
+    index.snapshots.push(SnapshotRow { ts: 1_700_000_000_000, reason: Reason::Seed, files: 2, ..Default::default() });
+    store.write_index(&index).unwrap();
+    tmp
+}
+
+/// What the move leaves, whatever it started from.
+fn assert_moved(root: &Path, data: &Path) {
+    let top: BTreeSet<String> =
+        std::fs::read_dir(root).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    assert_eq!(
+        top,
+        [".doklin", ".git", ".obsidian", "Library", "Private", "Restricted"].map(String::from).into(),
+        "hidden entries and the other two sections stay where they were"
+    );
+    let library: Vec<String> = tree(&root.join("Library"));
+    assert_eq!(library, ["Projects/plan.md", "node_modules/x/readme.md", "notes.md"]);
+    assert_eq!(tree(&root.join("Private")), ["diary.md"]);
+    assert_eq!(tree(&root.join(".git")), ["HEAD"]);
+    assert_eq!(read_marker(root).unwrap().layout.as_deref(), Some(super::layout::LIBRARY));
+    assert!(!root.join(".doklin/moving-into-library").exists());
+    let old = crate::versions::store_for_root(data, root);
+    assert!(!old.dir.exists(), "the folder's root keeps no store of its own");
+    let store = crate::versions::store_for_root(data, &root.join("Library"));
+    let index = store.read_index();
+    assert_eq!(index.snapshots.len(), 1, "its history is Library's now");
+    assert_eq!(index.root, root.join("Library").to_string_lossy());
+}
+
+#[test]
+fn the_move_carries_the_shared_section_into_library_and_leaves_the_rest() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = folder_before_library(data.path());
+    super::layout::move_into_library(folder.path(), data.path()).unwrap();
+    assert_moved(folder.path(), data.path());
+    // Once moved, it stays as it is.
+    super::layout::move_into_library(folder.path(), data.path()).unwrap();
+    assert_moved(folder.path(), data.path());
+}
+
+/// A move that stopped anywhere — a crash, a power cut — finishes from
+/// there, and ends in the same folder.
+#[test]
+fn the_move_finishes_from_wherever_it_stopped() {
+    let staging = |root: &Path| root.join(".doklin/moving-into-library");
+    let gather_all = |root: &Path| {
+        for name in ["notes.md", "Projects", "node_modules"] {
+            std::fs::rename(root.join(name), staging(root).join(name)).unwrap();
+        }
+    };
+    let stops: [(&str, &dyn Fn(&Path, &Path)); 5] = [
+        ("after its folder was made", &|root, _| std::fs::create_dir_all(staging(root)).unwrap()),
+        ("after it said it was moving", &|root, _| assert!(super::layout::begin(root).unwrap())),
+        ("halfway through the renames", &|root, _| {
+            super::layout::begin(root).unwrap();
+            std::fs::rename(root.join("notes.md"), staging(root).join("notes.md")).unwrap();
+            std::fs::rename(root.join("Projects"), staging(root).join("Projects")).unwrap();
+        }),
+        ("after Library got its name", &|root, _| {
+            super::layout::begin(root).unwrap();
+            gather_all(root);
+            std::fs::rename(staging(root), root.join("Library")).unwrap();
+        }),
+        ("after the history was re-keyed", &|root, data| {
+            super::layout::begin(root).unwrap();
+            gather_all(root);
+            std::fs::rename(staging(root), root.join("Library")).unwrap();
+            let old = crate::versions::store_for_root(data, root);
+            std::fs::rename(&old.dir, crate::versions::store_for_root(data, &root.join("Library")).dir).unwrap();
+        }),
+    ];
+    for (when, stop) in stops {
+        let data = tempfile::tempdir().unwrap();
+        let folder = folder_before_library(data.path());
+        stop(folder.path(), data.path());
+        super::layout::move_into_library(folder.path(), data.path()).unwrap_or_else(|e| panic!("{when}: {e}"));
+        assert_moved(folder.path(), data.path());
+    }
+}
+
+/// Inside Library the name `Library` is reserved, so a folder that already
+/// holds something called that does not move — a shared folder carried in
+/// under it would read as deleted — until it is renamed.
+#[test]
+fn a_folder_that_already_holds_a_library_does_not_move() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = folder_before_library(data.path());
+    let root = folder.path();
+    std::fs::create_dir_all(root.join("library")).unwrap();
+    std::fs::write(root.join("library/old.md"), "a shared folder of that name\n").unwrap();
+    let before = tree(root);
+
+    let refused = super::layout::move_into_library(root, data.path()).unwrap_err();
+    assert!(refused.contains("already holds something called “Library”"), "{refused}");
+    assert_eq!(tree(root), before, "nothing moved");
+    assert_eq!(read_marker(root).unwrap().layout, None, "and it has not begun");
+    assert!(super::layout::ready(root, Some(&refused)).unwrap_err().contains("Rename it"), "which the status says");
+
+    std::fs::rename(root.join("library"), root.join("Books")).unwrap();
+    super::layout::move_into_library(root, data.path()).unwrap();
+    assert_eq!(tree(&root.join("Library")), ["Books/old.md", "Projects/plan.md", "node_modules/x/readme.md", "notes.md"]);
+}
+
+/// The update on a device that synced in the old layout: the move sends
+/// nothing, the first pass after it finds nothing changed — a partly moved
+/// tree would have read as thirty deletions — and the history is where it
+/// was, the mirrored part included.
+#[tokio::test]
+async fn a_device_that_moves_sends_nothing_and_keeps_its_history() {
+    let be = fake_worker();
+    let mut old = old_layout(device("Air", &be));
+    for i in 0..30 {
+        old.write(&format!("notes/n{i}.md"), &format!("note {i}\n"));
+    }
+    old.write("Home.md", "home\n");
+    old.sync().await;
+    old.captured(ago(30 * MINUTE), Reason::Seed, &[("Home.md", "home\n")]);
+    old.engine.mirror_versions().await;
+    let before = manifest_of(&be);
+    let (calls, versions_etag) = {
+        let worker = be.lock().unwrap();
+        (worker.put_manifest_calls, worker.versions_etag)
+    };
+    let rows: Vec<u64> = old.store().read_index().snapshots.iter().map(|r| r.ts).collect();
+
+    // The old build quits, the update's move runs, the new build starts.
+    let Device { engine, root, _state: state, data, .. } = old;
+    drop(engine);
+    set_layout(root.path(), None);
+    super::layout::move_into_library(root.path(), data.path()).unwrap();
+    let mut moved = device_in("Air", &be, root, state, data, OWNER_TOKEN);
+    moved.sync().await;
+
+    assert_eq!(be.lock().unwrap().put_manifest_calls, calls, "nothing was sent");
+    let after = manifest_of(&be);
+    assert_eq!((after.seq, paths(&after), after.tombstones.len()), (before.seq, paths(&before), before.tombstones.len()));
+    assert_eq!(moved.phase(), Phase::Idle, "and nothing read as deleted");
+    assert_eq!(moved.read("Home.md").as_deref(), Some("home\n"));
+    assert_eq!(moved.store().read_index().snapshots.iter().map(|r| r.ts).collect::<Vec<_>>(), rows);
+    moved.engine.mirror_versions().await;
+    assert_eq!(be.lock().unwrap().versions_etag, versions_etag, "the mirror finds all of it up there already");
+}
+
+/// The wire does not change, so a device still on a build from before the
+/// Library layout and a moved one sync the same manifests side by side.
+#[tokio::test]
+async fn an_old_device_and_a_moved_one_sync_side_by_side() {
+    let be = fake_worker();
+    let mut old = old_layout(device("Air", &be));
+    let mut new = device("Book", &be);
+    old.sync().await;
+    new.sync().await;
+    let (old_root, new_root) = (old.root.path().to_path_buf(), new.root.path().to_path_buf());
+
+    // Edits, both ways.
+    old.write("doc.md", "one\n");
+    old.cycle().await;
+    new.cycle().await;
+    assert_eq!(std::fs::read_to_string(new_root.join("Library/doc.md")).unwrap(), "one\n");
+    new.write("Projects/plan.md", "plan\n");
+    new.cycle().await;
+    old.cycle().await;
+    assert_eq!(std::fs::read_to_string(old_root.join("Projects/plan.md")).unwrap(), "plan\n");
+    assert_eq!(paths(&manifest_of(&be)), ["Projects/plan.md", "doc.md"], "paths relative to the section, as ever");
+
+    // Moves between sections, both ways.
+    old.rename("doc.md", "Private/doc.md");
+    old.sync().await;
+    new.sync().await;
+    assert_eq!(new.read("Private/doc.md").as_deref(), Some("one\n"));
+    assert!(!new_root.join("Library/doc.md").exists());
+    new.rename("Private/doc.md", "doc.md");
+    new.sync().await;
+    old.sync().await;
+    assert_eq!(std::fs::read_to_string(old_root.join("doc.md")).unwrap(), "one\n");
+    assert!(!old_root.join("Private/doc.md").exists());
+
+    // A page.
+    new.publish("doc.md", PublicKind::File, Some("the-doc")).unwrap();
+    new.cycle().await;
+    old.cycle().await;
+    assert_eq!(public_of(&be)["the-doc"].path, "doc.md");
+    assert_eq!(new.page("the-doc").unwrap().path, "Library/doc.md");
+    assert_eq!(old.page("the-doc").unwrap().path, "doc.md");
+
+    // A lease.
+    open(&mut old, "doc.md");
+    old.engine.poll_for_test().await;
+    new.engine.poll_for_test().await;
+    assert!(new.status().leases.iter().any(|l| l.path == "library/doc.md"), "{:?}", new.status().leases);
+    old.engine.set_activity(None);
+    old.engine.poll_for_test().await;
+
+    // A conflict copy.
+    old.write("doc.md", "the old build's line\n");
+    new.write("doc.md", "the new build's line\n");
+    old.cycle().await;
+    new.cycle().await;
+    old.cycle().await;
+    let copy = |d: &Device| d.files().into_iter().find(|f| f.contains("conflict"));
+    assert!(copy(&new).is_some() && copy(&new) == copy(&old), "one copy, the same on both");
+
+    // A deletion.
+    old.delete("Projects/plan.md");
+    old.cycle().await;
+    new.cycle().await;
+    assert!(!new_root.join("Library/Projects/plan.md").exists());
+
+    // `Private` inside Library is in no section on a moved device: an old one
+    // would put a shared `Private/x.md` in its own Private.
+    new.write("Library/Private/x.md", "x\n");
+    new.cycle().await;
+    assert!(!paths(&manifest_of(&be)).iter().any(|p| p.ends_with("x.md")));
+    assert!(new_root.join("Library/Private/x.md").exists());
+}
+
+/// Anything at the top of a moved folder but the sections is in no section:
+/// it stays on this device, and an edit to it is nothing to sync.
+#[tokio::test]
+async fn a_stray_at_the_top_syncs_nowhere() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    a.write("doc.md", "doc\n");
+    a.cycle().await;
+    let calls = be.lock().unwrap().put_manifest_calls;
+    std::fs::write(a.root.path().join("stray.md"), "on this Mac only\n").unwrap();
+    a.engine.touch_activity("stray.md");
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().put_manifest_calls, calls);
+    assert_eq!(paths(&manifest_of(&be)), ["doc.md"]);
+    assert!(a.root.path().join("stray.md").exists());
+}
+
+/// `Library/` gone from this device — renamed in Finder, or deleted — is a
+/// section to bring back, never a folder whose every file was deleted.
+#[tokio::test]
+async fn a_missing_library_comes_back_whole() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    a.write("doc.md", "doc\n");
+    a.write("notes/n.md", "n\n");
+    a.cycle().await;
+    let calls = be.lock().unwrap().put_manifest_calls;
+
+    std::fs::rename(a.library(), a.root.path().join("Library old")).unwrap();
+    a.cycle().await;
+    assert_eq!(a.read("doc.md").as_deref(), Some("doc\n"));
+    assert_eq!(a.read("notes/n.md").as_deref(), Some("n\n"));
+    assert!(a.root.path().join("Library old/doc.md").exists(), "the renamed folder is left where it is");
+
+    std::fs::remove_dir_all(a.library()).unwrap();
+    a.cycle().await;
+    assert_eq!(a.files(), ["doc.md", "notes/n.md"]);
+
+    assert_eq!(be.lock().unwrap().put_manifest_calls, calls, "nothing was deleted for anyone");
+    assert!(manifest_of(&be).tombstones.is_empty());
+
+    // A file of that name is in the way: said in a sentence, and what was
+    // synced is not forgotten on every pass.
+    std::fs::remove_dir_all(a.library()).unwrap();
+    std::fs::write(a.root.path().join("Library"), "not a folder\n").unwrap();
+    a.cycle().await;
+    assert_eq!(a.phase(), Phase::Error);
+    assert!(a.status().error.unwrap().contains("isn't a folder"));
+    assert!(a._state.path().join("state.json").exists());
+    std::fs::remove_file(a.root.path().join("Library")).unwrap();
+    a.cycle().await;
+    assert_eq!(a.files(), ["doc.md", "notes/n.md"]);
+    assert_eq!(be.lock().unwrap().put_manifest_calls, calls);
+}
+
+/// Inside Library, a folder with a section's name is in no section: the
+/// shared section holds nothing under `Library`, `Private` or `Restricted`.
+#[tokio::test]
+async fn a_folder_with_a_sections_name_inside_library_syncs_nowhere() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    a.write("doc.md", "doc\n");
+    for name in ["Library", "private", "Restricted"] {
+        std::fs::create_dir_all(a.library().join(name)).unwrap();
+        std::fs::write(a.library().join(name).join("x.md"), "x\n").unwrap();
+    }
+    a.cycle().await;
+    assert_eq!(paths(&manifest_of(&be)), ["doc.md"]);
+    assert_eq!(space::reserved_top("library/x.md"), Some("Library"));
+    assert_eq!(space::reserved_top("Library.md"), None, "a name is reserved as a folder, not as a word");
+}
+
+/// A folder that is not in the Library layout is never synced: a later
+/// build's layout, or a move that has not finished.
+#[tokio::test]
+async fn a_folder_not_in_the_library_layout_is_never_synced() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    a.write("doc.md", "doc\n");
+    set_layout(a.root.path(), Some("shelves"));
+    a.cycle().await;
+    assert_eq!(a.phase(), Phase::Error);
+    assert!(a.status().error.unwrap().contains("newer version of Doklin"));
+    assert!(super::layout::begin(a.root.path()).is_err(), "and this build does not move it");
+
+    set_layout(a.root.path(), Some(super::layout::MOVING));
+    a.cycle().await;
+    assert!(a.status().error.unwrap().contains("hasn't finished moving"));
+    assert!(manifest_of(&be).files.is_empty());
+
+    // What stopped this launch's move is what an unfinished one says, and
+    // nothing else does.
+    let ready = |stopped| super::layout::ready(a.root.path(), stopped);
+    assert_eq!(ready(Some("The disk is full.")), Err("The disk is full.".to_string()));
+    set_layout(a.root.path(), Some("shelves"));
+    assert!(ready(Some("The disk is full.")).unwrap_err().contains("newer version of Doklin"));
+    set_layout(a.root.path(), Some(super::layout::LIBRARY));
+    assert_eq!(ready(Some("The disk is full.")), Ok(()));
+}
+
+/// A joining device's shared section is its `Library/`, there from the
+/// start even when the workspace has nothing in it yet.
+#[tokio::test]
+async fn join_makes_library_even_for_an_empty_workspace() {
+    let be = fake_worker();
+    let events: Arc<dyn Events> = Arc::new(Collected::default());
+    let alice = Arc::new(FakeRemote::new(&be, "d-alice"));
+    bind_domain(&alice, "Notes", "Alice's Mac").await.unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let dest = parent.path().join("Notes");
+    let state = tempfile::tempdir().unwrap();
+    seed_download(&alice, &dest.join(LIBRARY_DIR), state.path(), &events, "n").await.unwrap();
+    assert!(dest.join(LIBRARY_DIR).is_dir());
+}
+
+#[test]
+fn a_path_stored_before_the_move_follows_its_file() {
+    use super::layout::moved_rel;
+    assert_eq!(moved_rel("notes.md"), "Library/notes.md");
+    assert_eq!(moved_rel("Projects/plan.md"), "Library/Projects/plan.md");
+    // As it is: no folder moves while it holds something called Library,
+    // so a path under that name was stored after the move.
+    assert_eq!(moved_rel("Library/plan.md"), "Library/plan.md");
+    assert_eq!(moved_rel("Private/x.md"), "Private/x.md");
+    assert_eq!(moved_rel("restricted/Finance/x.md"), "restricted/Finance/x.md");
+    assert_eq!(moved_rel(".git/HEAD"), ".git/HEAD");
+    assert_eq!(moved_rel(""), "");
+}
+
+/// Which folders keep a version history: in a moved workspace, each section
+/// and never its root — Library's walk leaving out the two names it keeps
+/// at its top — and in one that has not moved yet, its root as before.
+#[test]
+fn each_section_of_a_moved_workspace_keeps_its_own_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for dir in ["Library/Private", "Private", "Restricted/Finance"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    let marker = |space: &str, name: &str| space::SpaceMarker { ws_id: "w-test".into(), space: space.into(), name: name.into() };
+    space::write_space_marker(&root.join("Private"), &marker("p-00000001", "Private")).unwrap();
+    space::write_space_marker(&root.join("Restricted/Finance"), &marker("s-00000002", "Finance")).unwrap();
+    let roots = |root: &Path| super::section_roots(root).into_iter().map(|d| d.strip_prefix(root).unwrap().to_string_lossy().to_string()).collect::<Vec<_>>();
+
+    assert!(super::keeps_own_versions(root), "a folder with no marker is a plain folder");
+    assert!(roots(root).is_empty());
+    assert!(space::shared_skip(&root.join("Library")).is_empty());
+
+    write_marker(root, &Marker { domain: "notes.example.com".into(), ws_id: "w-test".into(), layout: None }).unwrap();
+    assert!(super::keeps_own_versions(root), "not moved yet: the root's store is the shared section's");
+    assert_eq!(roots(root), ["Private", "Restricted/Finance"]);
+    assert_eq!(space::shared_skip(root), RESERVED_DIRS);
+
+    set_layout(root, Some(super::layout::MOVING));
+    assert!(!super::keeps_own_versions(root), "nothing versions a folder that is moving");
+    set_layout(root, Some(super::layout::LIBRARY));
+    assert!(!super::keeps_own_versions(root));
+    assert_eq!(roots(root), ["Library", "Private", "Restricted/Finance"]);
+    assert_eq!(space::shared_skip(&root.join("Library")), RESERVED_DIRS);
+    assert!(space::shared_skip(&root.join("Private")).is_empty());
 }

@@ -12,10 +12,11 @@ a domain of their own. Doklin syncs markdown and html documents; any other file 
 the folder stays on the device it is on. This program reads and changes the
 workspace through that domain. Nothing is copied to this machine.
 
-You work as one person's agent, and see what they see. A path says where a thing is:
+You work as one person's agent, and see what they see. Every path starts with the
+section it is in, and a path with no section is refused:
+  Library/…                    everyone in the workspace sees it
   Private/…                    only your person sees it
   Restricted/<folder>/…        only the people in that folder
-  anything else                shared with everyone in the workspace
 
 Wherever a command takes a document, it also takes a link to one, as people copy it
 in the app (https://doklin.cc/open#…); the command then runs in that link's workspace.
@@ -58,7 +59,7 @@ More
   doklin help documents        one document, two versions: markdown and html
   doklin help comments         how a comment attaches to text
   doklin help publishing       what public means
-  doklin help sections         Private, Restricted and what is shared
+  doklin help sections         Library, Private and Restricted: who sees what
   doklin help drawings         diagrams: how to draw one that reads well
   doklin help agent            a short brief for an AI agent using this
   doklin help <command>
@@ -69,7 +70,7 @@ Exit codes: 0 done · 2 bad usage · 3 not found · 4 not permitted · 5 conflic
 
 const DOCUMENTS: &str = r#"DOCUMENTS
 
-A document is named by its path, without an extension: Projects/plan
+A document is named by its path, without an extension: Library/Projects/plan
 
 One document can have two versions.
 
@@ -80,16 +81,16 @@ One document can have two versions.
 They are one document: one name, one set of comments, one public address. `ls`
 shows which versions a document has, and --md or --html picks one.
 
-  doklin read Projects/plan            the markdown (the html, when that is all there is)
-  doklin read Projects/plan --html     the html version
-  doklin write Projects/plan --html    create or replace the html version
+  doklin read Library/Projects/plan            the markdown (the html, when that is all there is)
+  doklin read Library/Projects/plan --html     the html version
+  doklin write Library/Projects/plan --html    create or replace the html version
 
 Keep the two in step. Changing the markdown does not change the html, which goes on
 saying what the old text said. Doklin tells you when that has happened: `ls` and
 `info` show "html is behind", and so does the answer to a markdown write. Then
 either write the html again from the new markdown, or remove it:
 
-  doklin rm Projects/plan --html
+  doklin rm Library/Projects/plan --html
 
 A document may have only an html version. Everything works on it, with one
 exception: `write` with no flag is refused, so that markdown text never replaces an
@@ -113,10 +114,10 @@ const COMMENTS: &str = r#"COMMENTS
 
 A comment thread sits on some text of a document.
 
-  doklin comments Projects/plan
-  doklin comment Projects/plan --on "ships in June" -m "Is that still true?"
-  doklin reply Projects/plan c7k2x9 -m "Yes."
-  doklin comment rm Projects/plan c7k2x9
+  doklin comments Library/Projects/plan
+  doklin comment Library/Projects/plan --on "ships in June" -m "Is that still true?"
+  doklin reply Library/Projects/plan c7k2x9 -m "Yes."
+  doklin comment rm Library/Projects/plan c7k2x9
 
 --on says which words the thread is on.
 
@@ -144,12 +145,12 @@ const PUBLISHING: &str = r#"PUBLISHING
 Publishing gives a document a public address on the workspace's domain. Anyone who
 has the address can read it. There is no login.
 
-  doklin publish Projects/plan                prints the address
-  doklin publish Projects/plan --slug plan    choose the last part of the address
-  doklin publish Projects/                    a folder: every document in it
-  doklin publish Projects/ --dry-run          list what that would make public
-  doklin published                            everything that is public now
-  doklin unpublish Projects/plan              stop
+  doklin publish Library/Projects/plan                prints the address
+  doklin publish Library/Projects/plan --slug plan    choose the last part of the address
+  doklin publish Library/Projects/                    a folder: every document in it
+  doklin publish Library/Projects/ --dry-run          list what that would make public
+  doklin published                                    everything that is public now
+  doklin unpublish Library/Projects/plan              stop
 
 The page is the document, live: a change shows on the page as soon as it is made.
 A document with an html version shows that first, with a switch to the markdown.
@@ -167,12 +168,15 @@ a page from Private/ is public, and its document is still only your person's."#;
 
 const SECTIONS: &str = r#"SECTIONS
 
-A workspace has three kinds of place, and a path says which one a thing is in.
+A workspace has three sections, and every path starts with the one it is in.
 
+  Library/…                 Everyone in the workspace sees and edits it.
   Private/…                 Your person's own. Nobody else in the workspace sees it.
   Restricted/<folder>/…     A restricted folder: only the people in it. `doklin ls
                             Restricted` lists the ones your person is in.
-  anything else             Shared: everyone in the workspace sees and edits it.
+
+A path with no section is refused. For Projects/plan, say which one you mean:
+Library/Projects/plan, Private/Projects/plan or Restricted/<folder>/Projects/plan.
 
 You are one person's agent and see exactly what they see. If they are added to a
 folder you can work in it from your next command; if they are taken out, it is gone
@@ -184,13 +188,15 @@ Put new work under Private/ unless your person says where it goes:
 
 Moving a thing changes who can see it, so do it only when asked:
 
-  doklin mv Private/drafts/summary Projects/        now everyone sees it
-  doklin mv Projects/summary Restricted/Finance/    now only that folder's people
+  doklin mv Private/drafts/summary Library/                now everyone sees it
+  doklin mv Library/Projects/summary Restricted/Finance/   now only that folder's people
 
-`doklin ls` and `doklin search` with no folder cover everything you can see;
-`doklin ls Private` or `doklin search "…" --in Restricted/Finance` only that place.
+`doklin ls` lists the sections you can see, `doklin ls --deep` everything in them,
+and `doklin search` with no folder searches all of it. `doklin ls Private` or
+`doklin search "…" --in Restricted/Finance` keeps to that place.
 You cannot make a restricted folder or change who is in one — people do that in the
-Doklin app. `Private` and `Restricted` themselves are not folders to move or rename."#;
+Doklin app. A section itself — Library, Private, a restricted folder — is not a
+folder to move or rename."#;
 
 const DRAWINGS: &str = r##"DRAWINGS
 
@@ -330,10 +336,10 @@ Start here
   doklin search "<words>"      find documents by name or by what they say
 
 Where things go
-  You see what your person sees. Private/ is theirs alone, Restricted/<folder>/ is
-  for the people in that folder, and everything else is shared with the whole
-  workspace (doklin help sections).
-  · Create anything new under Private/, unless your person tells you where it goes.
+  You see what the person who gave you this sees. Every path starts with its
+  section: Library/ is what everyone sees, Private/ only them, Restricted/<folder>/
+  that folder's people. Put anything new under Private/ unless they tell you where
+  it goes (doklin help sections).
   · Do not move a document out of Private/ or a restricted folder unless asked:
     that shows it to more people.
 

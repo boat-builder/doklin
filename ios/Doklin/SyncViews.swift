@@ -184,7 +184,7 @@ struct NeedsYouBar: View {
         if status.phase == .pendingAdds {
             row(
                 symbol: "doc.badge.plus", tint: Theme.warnInk,
-                text: LimitWords.adds(status.pendingAdds, in: workspace.adds?.folders ?? [], workspace: workspace.name),
+                text: LimitWords.adds(status.pendingAdds, in: workspace.adds?.folders ?? []),
                 id: "pending-adds"
             ) {
                 Button("Not now") { answerAdds(sync: false) }

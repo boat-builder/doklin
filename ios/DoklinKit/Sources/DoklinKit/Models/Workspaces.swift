@@ -134,6 +134,7 @@ public final class Workspaces {
     }
 
     private func take(_ all: [CloudStatus]) {
+        for status in all { movedIntoLibrary(status) }
         statuses = all
         defer { Task { await focus() } }
         if let selected, let status = all.first(where: { $0.root == selected }) {
@@ -148,6 +149,33 @@ public final class Workspaces {
     }
 
     private static let selectedKey = "selected-workspace"
+
+    /// One-time stored-data migration. The engine moves each workspace's
+    /// folder into the Library layout as it starts, before any screen
+    /// (engine/src/cloud/layout.rs); the paths this iPhone keeps of one —
+    /// what was open in its tree, what was read before it had a file id —
+    /// move with it, once, when its marker first says it has moved.
+    private func movedIntoLibrary(_ status: CloudStatus) {
+        var done = Set(remembered.stringArray(forKey: Self.movedKey) ?? [])
+        guard !done.contains(status.wsId), Self.inLibraryLayout(status.root) else { return }
+        TreeModel.moveIntoLibrary(status.wsId, in: remembered)
+        seen?.moveIntoLibrary(status.wsId)
+        done.insert(status.wsId)
+        remembered.set(done.sorted(), forKey: Self.movedKey)
+    }
+
+    /// The workspaces whose kept paths `movedIntoLibrary` has moved, by id.
+    private static let movedKey = "moved-into-library"
+
+    /// Whether the workspace at `root` has moved into the Library layout:
+    /// its marker (`<root>/.doklin/cloud.json`, engine/src/cloud/config.rs)
+    /// says `"layout": "library"`.
+    nonisolated static func inLibraryLayout(_ root: String) -> Bool {
+        let marker = URL(fileURLWithPath: root).appendingPathComponent(".doklin/cloud.json")
+        guard let data = try? Data(contentsOf: marker),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return json["layout"] as? String == "library"
+    }
 
     /* ---------- Looking at one ---------- */
 
@@ -651,9 +679,10 @@ public final class Workspace: Identifiable {
     }
 }
 
-/// Who can open what is at a path, read off the sections the engine lists.
+/// Who can open what is at a path, read off the sections the engine lists,
+/// as the Mac's `placeOf` (src/cloud.ts) reads it.
 public enum Audience: Equatable, Sendable {
-    /// Everyone in the workspace.
+    /// Everyone in the workspace: what is in Library.
     case everyone
     /// Only this person: their Private.
     case onlyYou
@@ -661,7 +690,9 @@ public enum Audience: Equatable, Sendable {
     case folder(String)
     /// The folder that holds the restricted folders, which is nobody's itself.
     case folders
-    /// Under a section's name but in no section: it stays on this iPhone.
+    /// In no section — the top of the workspace and anything else there, a
+    /// folder with a section's name at the top of Library, or a folder under
+    /// `Restricted/` that is not a restricted folder: it stays on this iPhone.
     case nowhere
 
     public static func of(_ path: String, in status: CloudStatus?) -> Audience {
@@ -670,9 +701,13 @@ public enum Audience: Equatable, Sendable {
         for space in status.spaces where under(space.path) {
             return space.kind == .private ? .onlyYou : .folder(space.name)
         }
-        if path.lowercased() == "restricted" { return .folders }
-        if under("restricted") || under("private") { return .nowhere }
-        return .everyone
+        if path.lowercased() == TreeModel.restrictedFolder.lowercased() { return .folders }
+        guard under(TreeModel.libraryFolder) else { return .nowhere }
+        // Library never holds anything under a section's name at its own
+        // top: the shared section skips them, as the engine's `reserved_top`
+        // does.
+        let inside = path.split(separator: "/").dropFirst().first.map(String.init)
+        return inside.map(TreeModel.isSectionName) == true ? .nowhere : .everyone
     }
 }
 

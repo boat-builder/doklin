@@ -1,8 +1,9 @@
-// The parts of a workspace only some people have: a person's Private, and
-// restricted folders under `Restricted/` that only the people in them have,
-// on their own devices. Nobody else sees one, or that it exists. Everyone
-// in a restricted folder is equal: any of them adds people, takes them out,
-// leaves, or deletes it for everyone.
+// The parts of a workspace only some people have, beside `Library/`, which
+// everyone has: a person's Private, and restricted folders under
+// `Restricted/` that only the people in them have, on their own devices.
+// Nobody else sees one, or that it exists. Everyone in a restricted folder
+// is equal: any of them adds people, takes them out, leaves, or deletes it
+// for everyone.
 //
 // The engine names a new restricted folder and puts it in place — the app
 // never makes one under `Restricted/` itself — and the workspace's status
@@ -49,12 +50,24 @@ public enum Sections {
     }
 
     /// What a move that lets more people see something asks — "Move “plan”
-    /// to the workspace?", "Move “plan” to “Finance”?" — named for who will
-    /// see it there, not for the folder it lands in.
+    /// to Library?", "Move “plan” to “Finance”?" — named for who will see it
+    /// there, not for the folder it lands in.
     public static func moveTitle(_ name: String, to folder: String, in status: CloudStatus?) -> String {
         let to: String
-        if case .folder(let space) = Audience.of(folder, in: status) { to = "“\(space)”" } else { to = "the workspace" }
+        if case .folder(let space) = Audience.of(folder, in: status) { to = "“\(space)”" } else { to = TreeModel.libraryFolder }
         return "Move “\(name)” to \(to)?"
+    }
+
+    /// One-time stored-data migration: a workspace-relative path this
+    /// iPhone kept from before its folder moved into the Library layout, as
+    /// it is now — `Library/` in front, unless it already starts with a
+    /// section's name (any case) or a hidden one. The engine's `moved_rel`
+    /// (engine/src/cloud/layout.rs) and the Mac's `toLibraryLayout`
+    /// (src/cloud.ts) move a path the same way: change all three.
+    public static func moved(_ rel: String) -> String {
+        let top = String(rel.prefix { $0 != "/" })
+        if rel.isEmpty || top.hasPrefix(".") || TreeModel.isSectionName(top) { return rel }
+        return "\(TreeModel.libraryFolder)/\(rel)"
     }
 
     /// Who gains sight of something moved from `from` to `to` — "Everyone in
@@ -124,8 +137,10 @@ public enum RestrictedSource: Hashable, Identifiable, Sendable {
         switch self {
         case .new:
             return "A restricted folder is only on the devices of the people in it. Nobody else in the workspace sees it, or that it exists."
-        case .folder:
-            return "It becomes a restricted folder: only the people you pick keep it, and it is removed from everyone else’s devices. Versions from before stay in the workspace’s history until they age out."
+        case .folder(let path):
+            // Named for the section it is in now: its versions stay in that one's store.
+            let section = String(path.prefix { $0 != "/" })
+            return "It becomes a restricted folder: only the people you pick keep it, and it is removed from everyone else’s devices. Versions from before stay in \(section)’s history until they age out."
         case .note:
             return "The note moves into a new restricted folder that holds you and the people you pick. Nobody else sees it."
         }
@@ -356,8 +371,8 @@ extension FolderModel {
     /// them is made in it.
     public var holdsRestrictedFolders: Bool { workspace.audience(of: dir) == .folders }
 
-    /// A folder of the shared workspace or of this person's Private, which
-    /// can become a restricted folder.
+    /// A folder of Library or of this person's Private, which can become a
+    /// restricted folder.
     public func restrictable(_ entry: FolderEntry) -> Bool {
         guard case .folder(let path) = entry, workspace.mayRestrict, !isManaged(entry) else { return false }
         let audience = workspace.audience(of: path)

@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
 import {
+  LIBRARY_DIR,
   pageForPath,
   relPathIn,
   slugProblem,
@@ -23,6 +24,14 @@ const countNotes = (node: TreeNode): number =>
       ? 1
       : 0
     : node.children.reduce((n, c) => n + countNotes(c), 0);
+// What publishing Library takes: not what is under `Private` or `Restricted`
+// at its own top, which is in no section.
+const countLibraryNotes = (node: TreeNode): number =>
+  node.kind === "file"
+    ? countNotes(node)
+    : node.children
+        .filter((c) => !(c.kind === "dir" && ["private", "restricted"].includes(c.name.toLowerCase())))
+        .reduce((n, c) => n + countNotes(c), 0);
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -43,18 +52,19 @@ export default function PublishFolder({
   onOpenExternal,
 }: {
   cloud: CloudStatus;
-  /** The folder's absolute path — the workspace root publishes the whole workspace. */
+  /** The folder's absolute path — Library's publishes the whole shared section. */
   dir: string;
   onClose: () => void;
   onOpenExternal: (url: string) => void;
 }) {
   const rel = relPathIn(cloud.root, dir) ?? "";
   const existing = pageForPath(cloud, rel, "dir");
-  const folderName = basename(dir) || cloud.name;
-  const isRoot = rel === "";
+  const folderName = basename(dir);
+  // The whole shared section goes by the workspace's name.
+  const isLibrary = rel.toLowerCase() === LIBRARY_DIR.toLowerCase();
 
-  const [slug, setSlug] = useState(existing?.slug ?? suggestSlug(isRoot ? cloud.name : folderName));
-  const [title, setTitle] = useState(existing?.title ?? (isRoot ? cloud.name : folderName));
+  const [slug, setSlug] = useState(existing?.slug ?? suggestSlug(isLibrary ? cloud.name : folderName));
+  const [title, setTitle] = useState(existing?.title ?? (isLibrary ? cloud.name : folderName));
   const [desc, setDesc] = useState(existing?.desc ?? "");
   const [count, setCount] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -72,7 +82,7 @@ export default function PublishFolder({
     void backend.documents
       .tree(dir)
       .then((tree) => {
-        if (live) setCount(countNotes(tree));
+        if (live) setCount(isLibrary ? countLibraryNotes(tree) : countNotes(tree));
       })
       .catch(() => {
         if (live) setCount(null);
@@ -80,7 +90,7 @@ export default function PublishFolder({
     return () => {
       live = false;
     };
-  }, [dir]);
+  }, [dir, isLibrary]);
 
   const run = useCallback(
     async (f: () => Promise<unknown>) => {
@@ -113,7 +123,7 @@ export default function PublishFolder({
         </div>
         <div className="cloud-body">
           <p className="cloud-hint" data-testid="folder-count">
-            {isRoot ? "The whole workspace" : `“${folderName}”`}
+            {isLibrary ? "Library" : `“${folderName}”`}
             {count === null ? "" : ` — ${count} note${count === 1 ? "" : "s"}`}
             {existing ? " is public" : " will be public"}, every note in it, at addresses under one slug. Notes
             added later are public the moment they sync; a note can still be published on its own too.

@@ -60,10 +60,7 @@ public final class SeenStore: @unchecked Sendable {
         }
         let snapshot = stored
         lock.unlock()
-        guard changed, let file else { return }
-        if let data = try? JSONEncoder().encode(snapshot) {
-            try? data.write(to: file, options: .atomic)
-        }
+        if changed { write(snapshot) }
     }
 
     /// A workspace left this device: what was read in it goes too.
@@ -72,6 +69,31 @@ public final class SeenStore: @unchecked Sendable {
         stored.workspaces[wsId] = nil
         let snapshot = stored
         lock.unlock()
+        write(snapshot)
+    }
+
+    /// One-time stored-data migration: what was kept by path in a workspace
+    /// whose folder has moved into the Library layout is kept under its path
+    /// there now (`Sections.moved`). What is kept by file id stays as it is.
+    public func moveIntoLibrary(_ wsId: String) {
+        lock.lock()
+        guard let kept = stored.workspaces[wsId] else { return lock.unlock() }
+        var moved: [String: String] = [:]
+        for (key, hash) in kept {
+            if key.hasPrefix("path:") {
+                moved[Self.key(fileId: nil, path: Sections.moved(String(key.dropFirst("path:".count))))] = hash
+            } else {
+                moved[key] = hash
+            }
+        }
+        let changed = moved != kept
+        stored.workspaces[wsId] = moved
+        let snapshot = stored
+        lock.unlock()
+        if changed { write(snapshot) }
+    }
+
+    private func write(_ snapshot: Stored) {
         if let file, let data = try? JSONEncoder().encode(snapshot) {
             try? data.write(to: file, options: .atomic)
         }
