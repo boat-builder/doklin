@@ -43,8 +43,9 @@ pub struct ScanEntry {
 /// or more than `MAX_WALK_ENTRIES` entries visited.
 ///
 /// `skip` names folders at the top of `root` the walk never enters, whatever
-/// their case: the shared workspace passes the two reserved names
-/// (`space::RESERVED_DIRS`), because what is under them is another section's.
+/// their case: the shared section passes the two names it keeps at its top
+/// (`space::RESERVED_DIRS`), because a device still in the layout from
+/// before Library would put what is under them in a section of its own.
 pub fn scan_local(root: &Path, skip: &[&str]) -> Result<BTreeMap<String, ScanEntry>, String> {
     let mut out = BTreeMap::new();
     let mut walked = MAX_WALK_ENTRIES;

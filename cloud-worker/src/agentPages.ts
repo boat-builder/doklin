@@ -26,15 +26,15 @@ import { mirrorAfter } from "./search";
 import { MAX_SECTIONS_READ } from "./spaces";
 
 /**
- * What a path means to publishing. `/` is the whole workspace; a trailing
- * slash says "the folder"; otherwise a document, then a folder — the order a
- * path is read in everywhere else. A picture or a PDF is refused by `locate`:
+ * What a path means to publishing. A trailing slash says "the folder";
+ * otherwise a document, then a folder — the order a path is read in
+ * everywhere else. A section's own folder is the whole section: `Library/`
+ * is everything everyone sees. A picture or a PDF is refused by `locate`:
  * nothing but documents syncs, so there is nothing else to show.
  */
 function targetAt(index: Index, raw: string): Found | Refusal {
   const asFolder = raw.endsWith("/");
   const path = raw.replace(/^\/+|\/+$/g, "");
-  if (path === "") return asFolder ? folderTarget(index, "")! : new Refusal(400, "say what to publish");
   const problem = pathProblem(path);
   if (problem) return new Refusal(400, problem);
   const found = (asFolder ? null : documentTarget(index, path)) ?? folderTarget(index, path);
@@ -49,8 +49,8 @@ export async function getPages(c: Call): Promise<Response> {
   const [all, holding, directory] = await Promise.all([places.all(), spacesWithPages(env), listDirectory(env)]);
   if (all === null || holding === null) return unavailable();
   const names = new Map((directory ?? []).map((p) => [p.id, p.name]));
-  // The shared workspace's map, and that of each section the registry says
-  // holds an address: a section that publishes nothing is not opened.
+  // Library's map, and that of each section the registry says holds an
+  // address: a section that publishes nothing is not opened.
   const publishing = all.filter((s) => s.space === "" || holding.has(s.space));
   const pages: Record<string, unknown>[] = [];
   const notListed: string[] = [];
@@ -133,8 +133,8 @@ export async function deletePage(c: Call): Promise<Response> {
   if (!slugParam && !path) return json({ error: "say which page — a document, a folder or an address" }, 400);
   const dryRun = url.searchParams.get("dry") === "1";
 
-  /** The section of this agent's person that holds an address — the shared
-   *  workspace when none does, where it then is not published either. */
+  /** The section of this agent's person that holds an address — Library
+   *  when none does, where it then is not published either. */
   const holderOf = async (slug: string): Promise<Section | null> => {
     const [all, space] = [await places.all(), await spaceAt(c.env, slug)];
     if (all === null) return null;
@@ -161,14 +161,19 @@ export async function deletePage(c: Call): Promise<Response> {
     return { at, done };
   };
 
-  const section = slugParam ? await holderOf(slugParam) : await places.of(path);
+  // The word may be an address rather than a path, and an address is in
+  // whichever section published it: a word that is in no section is tried
+  // as one, and so is a path whose section has published nothing by it.
+  const word = path.replace(/^\/+|\/+$/g, "").toLowerCase();
+  const named = slugParam ? await holderOf(slugParam) : await places.of(path);
+  const unplaced = !slugParam && named instanceof Refusal && named.status === 400 && SLUG_RE.test(word) ? named : null;
+  const section = unplaced ? await holderOf(word) : named;
   if (section === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
   if (section instanceof Refusal) return refuse(section);
-  let { at, done } = await stop(section, slugParam);
-  // The word may be an address rather than a path, and an address is in
-  // whichever section published it.
-  const word = path.replace(/^\/+|\/+$/g, "").toLowerCase();
-  if (done instanceof Refusal && done.status === 404 && !slugParam && SLUG_RE.test(word)) {
+  let { at, done } = await stop(section, slugParam || (unplaced ? word : ""));
+  // No address either: what the word is told is that a path needs its section.
+  if (unplaced && done instanceof Refusal && done.status === 404) return refuse(unplaced);
+  if (done instanceof Refusal && done.status === 404 && !slugParam && !unplaced && SLUG_RE.test(word)) {
     const holder = await holderOf(word);
     if (holder && holder.space !== section.space) ({ at, done } = await stop(holder, word));
   }

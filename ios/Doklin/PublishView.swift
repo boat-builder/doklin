@@ -4,7 +4,7 @@ import UIKit
 
 /// What a publish sheet is about.
 struct PublishTarget: Identifiable {
-    /// Workspace-relative; a folder's `""` is the whole workspace.
+    /// Workspace-relative; the folder `Library` is the whole of it.
     let path: String
     let kind: PublicKind
 
@@ -16,7 +16,7 @@ struct PublishTarget: Identifiable {
 /// What the Mac's Live chip and its folder dialog offer, in one sheet.
 struct PublishView: View {
     let workspace: Workspace
-    /// Workspace-relative; a folder's `""` is the whole workspace.
+    /// Workspace-relative; the folder `Library` is the whole of it.
     let path: String
     let kind: PublicKind
     /// Called to show every published page, after the sheet goes.
@@ -39,11 +39,13 @@ struct PublishView: View {
     private var isFolder: Bool { kind == .dir }
     private var now: Int { Int(Date().timeIntervalSince1970 * 1000) }
 
-    /// What it is called: a note's name, a folder's, or the workspace's.
+    /// What it is called: a note's name, or a folder's.
     private var name: String {
-        if isFolder { return path.isEmpty ? workspace.name : DocLinks.name(of: path) }
-        return DocLinks.stem(of: DocLinks.name(of: path))
+        isFolder ? DocLinks.name(of: path) : DocLinks.stem(of: DocLinks.name(of: path))
     }
+
+    /// The whole of Library, which everyone has.
+    private var isLibrary: Bool { isFolder && path.lowercased() == TreeModel.libraryFolder.lowercased() }
 
     /// Why the typed address cannot be one. A note left without one gets
     /// random letters; a folder always needs one, as on the Mac.
@@ -70,7 +72,7 @@ struct PublishView: View {
                     }
                 }
             }
-            .navigationTitle(isFolder ? (path.isEmpty ? "Publish the workspace" : "Publish folder") : "Publish")
+            .navigationTitle(isFolder ? (isLibrary ? "Publish Library" : "Publish folder") : "Publish")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -152,7 +154,7 @@ struct PublishView: View {
     }
 
     private func folderWords(published: Bool) -> String {
-        let what = path.isEmpty ? "The whole workspace" : "“\(name)”"
+        let what = isLibrary ? "Library" : "“\(name)”"
         let count = workspace.notes(under: path)
         return "\(what) — \(count) note\(count == 1 ? "" : "s") \(published ? "is" : "will be") public, every note in it, at addresses under one slug. Notes added later are public the moment they sync; a note can still be published on its own too."
     }
@@ -280,7 +282,7 @@ struct PublishView: View {
             Section {
                 ForEach(nested, id: \.url) { place in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("\(lead) “\(Publishing.name(of: place.page, workspace: workspace.name))”")
+                        Text("\(lead) “\(Publishing.name(of: place.page))”")
                             .font(.footnote)
                             .foregroundStyle(Theme.text2)
                         if let link = URL(string: place.url) {

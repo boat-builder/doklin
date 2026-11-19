@@ -18,10 +18,11 @@ export type AgentCaller = { id: string; name: string; tokenId: string; scopes: r
 export type Call = {
   request: Request;
   /** The section this call is answered in: its part of the bucket. The
-   *  shared workspace until a route's path says otherwise (agentApi.ts). */
+   *  whole domain's until a route's path names a section (agentApi.ts). */
   env: Env;
-  /** The folder that section is at, as the caller names paths — "" for the
-   *  shared workspace. Every path a handler reads, writes or says is under it. */
+  /** The folder that section is at, as the caller names paths: `Library`,
+   *  `Private`, `Restricted/Finance` — "" until a path names one. Every path
+   *  a handler reads, writes or says is under it. */
   mount: string;
   url: URL;
   /** Absent under test, where work that would run after the response is awaited instead. */

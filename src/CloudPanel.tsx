@@ -117,8 +117,7 @@ export default function CloudPanel({
   /** The list of every published page (PublishedPages.tsx). */
   onOpenPublished: () => void;
   onOpenExternal: (url: string) => void;
-  /** The workspace timeline. The sidebar
-   *  root's menu is the other way in. */
+  /** Library's timeline. The Library heading's menu is the other way in. */
   onWorkspaceHistory?: () => void;
   /** The Versions settings — the two
    *  horizons, the space, the export. The gear popover is the other way in. */
@@ -236,10 +235,12 @@ export default function CloudPanel({
     body = (
       <>
         <p className="cloud-intro">
-          A workspace is a folder of notes everyone in it shares: each person works on a copy on
-          their own Mac, and the copies stay in step. It lives at a domain of your own — one
-          Cloudflare Worker, one bucket and one database on your account, set up by an agent from
-          a prompt this app writes — and publishing a note from it is one click.
+          A workspace is a folder of notes shared with the people you invite: its Library is
+          everyone’s, its Private only yours, and each restricted folder only its people’s. Each
+          person works on a copy on their own Mac, and the copies stay in step. It lives at a
+          domain of your own — one Cloudflare Worker, one bucket and one database on your account,
+          set up by an agent from a prompt this app writes — and publishing a note from it is one
+          click.
         </p>
         <div className="cloud-doors">
           <button className="modal-btn is-primary" data-testid="join-with-invite" onClick={onRedeem}>
@@ -455,7 +456,7 @@ export default function CloudPanel({
 
         {sync && cloud.phase === "pending-adds" && (
           <div className="cloud-card cloud-card--attention" data-testid="pending-adds">
-            <div className="cloud-card-title">{addsQuestion(adds, addsFolders, cloud.name)}</div>
+            <div className="cloud-card-title">{addsQuestion(adds, addsFolders)}</div>
             <p className="cloud-hint">
               Sync asks before sending this many new documents at once. Not now keeps them on this
               Mac, and Doklin asks again when another new document lands there or you press Sync now.
@@ -464,7 +465,7 @@ export default function CloudPanel({
               <ul className="cloud-paths">
                 {addsFolders.map((f) => (
                   <li key={f.path}>
-                    {f.path || cloud.name} — {f.count.toLocaleString()}
+                    {f.path} — {f.count.toLocaleString()}
                   </li>
                 ))}
               </ul>
@@ -540,7 +541,7 @@ export default function CloudPanel({
               data-testid="cloud-workspace-history"
               onClick={onWorkspaceHistory}
             >
-              Workspace history
+              Library history
             </button>
           </div>
         )}

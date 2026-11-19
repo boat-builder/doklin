@@ -25,7 +25,8 @@ class UITestCase: XCTestCase {
     }
 
     /// Ask the drive for something only the domain's side can do: `line`, or
-    /// `editing?path=<workspace-relative>` — another device editing it now.
+    /// `editing?path=<path in Library, without its name>` — another device
+    /// editing it now.
     /// What the drive could not do fails the journey there, in its words,
     /// rather than later as something else.
     @discardableResult
@@ -189,7 +190,8 @@ class UITestCase: XCTestCase {
     /* ---------- Joining and leaving ---------- */
 
     /// Launch, take off any workspace a stopped run left behind, and join
-    /// with this class's line. Ends on Browse, the workspace's tree.
+    /// with this class's line. Ends on Browse, the workspace's tree, where
+    /// what everyone has is under Library.
     func launchAndJoin() {
         app.launch()
         for _ in 0..<3 where marked("workspace-menu").waitForExistence(timeout: 8) {
@@ -201,6 +203,7 @@ class UITestCase: XCTestCase {
         expect(marked("workspace-menu"), "Home, once joined", timeout: 60)
         browse()
         expect(marked("entry-Projects"), "the workspace, downloaded", timeout: 60)
+        expect(app.staticTexts["Library"], "Library's heading over what everyone has")
     }
 
     /// Take the workspace being looked at off this iPhone, from its settings.

@@ -158,9 +158,12 @@ final class HistoryTests: XCTestCase {
     func testASectionsStoreIsNamedAndItsPathsAreTheWorkspaces() {
         let device = Workspaces(remembered: UserDefaults(suiteName: "doklin-history-\(UUID().uuidString)")!)
         let workspace = device.workspace("/phone/Documents/Team")
-        XCTAssertEqual(workspace.storeName("/phone/Documents/Team"), "Team")
+        // Library keeps a store of its own, as each section does; the root, which holds them, none.
+        XCTAssertEqual(workspace.libraryStore, "/phone/Documents/Team/Library")
+        XCTAssertEqual(device.stores(of: workspace), ["/phone/Documents/Team/Library"], "Library's, before the engine has listed any")
+        XCTAssertEqual(workspace.storeName("/phone/Documents/Team/Library"), "Library")
         XCTAssertEqual(workspace.storeName("/phone/Documents/Team/Private"), "Private")
-        XCTAssertEqual(workspace.path("Ideas.md", in: "/phone/Documents/Team"), "Ideas.md")
+        XCTAssertEqual(workspace.path("Ideas.md", in: "/phone/Documents/Team/Library"), "Library/Ideas.md")
         XCTAssertEqual(workspace.path("Mine/plan.md", in: "/phone/Documents/Team/Private"), "Private/Mine/plan.md")
 
         let deleted = RecentlyDeleted(workspace: workspace)
@@ -172,7 +175,8 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(opened.version.hash, "p")
         XCTAssertNil(opened.newer)
 
-        let top = DeletedDocument.group([DeletedFile(path: "Ideas.md", lastSeenMs: 5, hash: "i", size: 3)], store: workspace.root)[0]
-        XCTAssertEqual(deleted.place(of: top), "Team")
+        let top = DeletedDocument.group([DeletedFile(path: "Ideas.md", lastSeenMs: 5, hash: "i", size: 3)], store: workspace.libraryStore)[0]
+        XCTAssertEqual(deleted.place(of: top), "Library")
+        XCTAssertEqual(deleted.open(top).path, "Library/Ideas.md", "it comes back into Library")
     }
 }

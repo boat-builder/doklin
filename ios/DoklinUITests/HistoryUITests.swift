@@ -89,9 +89,10 @@ final class HistoryUITests: UITestCase {
         record("undone")
         back()
 
-        // The workspace's history lists its moments; the first, from joining,
-        // would put Scratch back as it was.
+        // The workspace's history opens on Library's moments; the first,
+        // from joining, would put Scratch back as it was.
         setting("Workspace history")
+        expect(app.navigationBars["Library history"], "Library's history, first")
         let moments = app.buttons.matching(identifier: "moment-row")
         expect(moments.element(boundBy: 1), "a second moment")
         XCTAssertGreaterThanOrEqual(moments.count, 2)

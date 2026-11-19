@@ -17,6 +17,8 @@ import { existsSync, mkdirSync } from "node:fs";
 
 const SHOTS = new URL("./shots/", import.meta.url).pathname;
 mkdirSync(SHOTS, { recursive: true });
+// `PORT` picks the vite server (default 1420).
+const PORT = process.env.PORT ?? "1420";
 
 const results = [];
 const step = (name, ok, detail = "") => {
@@ -49,7 +51,7 @@ const context = await browser.newContext({ viewport: { width: 1400, height: 900 
 const page = await context.newPage();
 page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
 
-await page.goto("http://localhost:1420/verify-harness/cloud.html");
+await page.goto(`http://localhost:${PORT}/verify-harness/cloud.html`);
 
 const tid = (name) => page.locator(`[data-testid="${name}"]`);
 const versionCalls = (cmd) =>
@@ -340,14 +342,17 @@ const openRootMenu = async () => {
 };
 
 /* 19 — the way in. The whole folder's timeline is on the root's menu, for
-   any workspace: like a document's history, it is not a cloud feature. */
+   any folder: like a document's history, it is not a cloud feature. The
+   tree never says "Workspace": a folder that is not connected calls it the
+   folder's, and the modal is named after the folder. */
 await tid("history-rail").locator(".history-rail-close").click();
 await poll(async () => (await tid("history-rail").count()) === 0);
 await openRootMenu();
 const rootMenu = await page.locator(".sidebar-menu-item").allTextContents();
 step(
-  "the sidebar root offers Workspace history…, and no Recently deleted while nothing is",
-  rootMenu.some((t) => t.startsWith("Workspace history")) &&
+  "the sidebar root offers Folder history…, and no Recently deleted while nothing is",
+  rootMenu.includes("Folder history…") &&
+    !rootMenu.some((t) => /workspace/i.test(t)) &&
     !rootMenu.some((t) => t.startsWith("Recently deleted")) &&
     (await tid("recently-deleted-button").count()) === 0,
   rootMenu.join(" | "),
@@ -355,8 +360,9 @@ step(
 
 /* 20 — the timeline, and what a moment would cost. Nothing has happened
    yet: the modal says what a restore WOULD do, in three lists. */
-await page.locator(".sidebar-menu-item", { hasText: "Workspace history" }).click();
+await page.locator(".sidebar-menu-item", { hasText: "Folder history" }).click();
 await poll(async () => (await tid("workspace-history").count()) === 1);
+const timelineTitle = (await tid("workspace-history").locator(".modal-title").textContent()).trim();
 const deltas = await page.locator('[data-testid="ws-delta"]').allTextContents();
 const namedRow = page.locator('[data-testid="ws-snapshot"]', { hasText: "Before the rewrite" });
 await namedRow.click();
@@ -365,8 +371,9 @@ const kinds = await page.locator('[data-testid="ws-file"]').evaluateAll((els) =>
   els.map((e) => `${e.dataset.kind}:${e.dataset.path}`),
 );
 step(
-  "the timeline groups moments by day with what each changed, and a moment shows changed / comes back / to the Trash",
-  deltas.some((d) => d.includes("+1")) &&
+  "the timeline is named after the folder, groups moments by day with what each changed, and a moment shows changed / comes back / to the Trash",
+  timelineTitle === "docs history" &&
+    deltas.some((d) => d.includes("+1")) &&
     kinds.includes("changed:other.md") &&
     kinds.includes("missing:Projects/plan.md") &&
     kinds.includes("added:third.md") &&
@@ -585,7 +592,8 @@ step(
 
 /* 30 — the second horizon. It appears only for a connected workspace whose
    mirror has run, and setting it is a CAS on the bucket, not a per-Mac
-   preference. */
+   preference. It is asked of Library's store: a connected workspace's top
+   has no history of its own. */
 step(
   "with nothing connected there is no cloud horizon to set",
   (await tid("vs-cloud-horizon").count()) === 0,
@@ -610,6 +618,8 @@ await page.evaluate(() => {
       versions: { mirrored: 4, cloud: 212, lastMirrorMs: Date.now(), horizonDays: null },
       public: [],
       presence: [],
+      leases: [],
+      spaces: [],
     },
   ]);
 });
@@ -624,7 +634,7 @@ step(
   "a connected workspace gets the bucket's horizon too, and every Mac reads the same answer",
   bucket.includes("212 versions") &&
     bucket.includes("kept forever") &&
-    cloudSet.args.root === "/docs" &&
+    cloudSet.args.root === "/docs/Library" &&
     cloudSet.args.days === 365,
   bucket,
 );

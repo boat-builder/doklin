@@ -160,7 +160,7 @@ pub fn login(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let shown = json!({ "workspace": v["workspace"], "agent": v["agent"], "scopes": v["scopes"], "endpoint": endpoint });
     ctx.answer(&shown, || {
         format!(
-            "Logged in to {} ({}) as {}. It may {}.\nPut new work under Private/ unless you are told where it goes.\nRun `doklin help agent` for what to do next.",
+            "Logged in to {} ({}) as {}. It may {}.\nEvery path starts with its section: Library/, Private/ or Restricted/<folder>/.\nPut new work under Private/ unless you are told where it goes.\nRun `doklin help agent` for what to do next.",
             text(&v["workspace"], "name"),
             domain,
             text(&v["agent"], "name"),
@@ -216,19 +216,16 @@ pub fn whoami(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let v = s.client.send("GET", "me", &[], &[], None)?.json()?;
     usage::keep_limits(s.ws.domain(), &v["limits"])?;
     ctx.answer(&v, || {
-        // Whose it is, and where that lets it work besides what is shared.
+        // Whose it is, and the sections that lets it work in — none listed
+        // when the domain's database could not say.
         let whose = match v["person"].get("name").and_then(Value::as_str) {
             Some(name) if !name.is_empty() => format!(", {}'s agent", name),
             _ => String::new(),
         };
-        let sections = strings(&v["sections"]);
-        let places = if sections.is_empty() {
-            "It sees the shared workspace.".to_string()
-        } else {
-            format!("It sees the shared workspace, and {}.", list(&sections.iter().map(|s| format!("{}/", s)).collect::<Vec<_>>()))
-        };
+        let sections: Vec<String> = strings(&v["sections"]).iter().map(|s| format!("{}/", s)).collect();
+        let places = if sections.is_empty() { String::new() } else { format!("\nIt sees {}.", list(&sections)) };
         format!(
-            "{}{} on {} ({})\nIt may {}.\n{}\nWorker version {}.",
+            "{}{} on {} ({})\nIt may {}.{}\nWorker version {}.",
             text(&v["agent"], "name"),
             whose,
             text(&v["workspace"], "name"),
@@ -613,7 +610,7 @@ pub fn publish(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         let created = v["created"].as_bool().unwrap_or(false);
         let folder = text(&v, "kind") == "folder";
         let name = if folder {
-            if text(&v, "path").is_empty() { "the whole workspace".to_string() } else { format!("the folder {}", text(&v, "path")) }
+            format!("the folder {}", text(&v, "path"))
         } else {
             text(&v, "path").to_string()
         };
@@ -679,7 +676,6 @@ pub fn published(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
             .iter()
             .map(|p| {
                 let what = match text(p, "kind") {
-                    "folder" if text(p, "path").is_empty() => "the whole workspace".to_string(),
                     "folder" => format!("folder {}/", text(p, "path")),
                     _ => text(p, "path").to_string(),
                 };

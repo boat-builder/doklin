@@ -1,20 +1,35 @@
 // Browse: a workspace as one tree, its folders opening in place — what each
 // holds read off this iPhone's copy by the Mac sidebar's rules
-// (`WorkspaceFiles.list`), in the sections the Mac's sidebar has: the
-// workspace, its restricted folders, and Private. What is open is kept on
-// the device, by workspace.
+// (`WorkspaceFiles.list`), in the sections the Mac's sidebar has: Library,
+// the restricted folders, and Private, each its folder at the top of the
+// workspace; then anything else there, which is in no section. What is open
+// is kept on the device, by workspace.
 
 import Foundation
 import Observation
 
 /// A part of the tree, as the Mac's sidebar heads them.
 public enum TreeSection: Hashable, Sendable {
-    /// Everyone in the workspace has it.
-    case workspace
+    /// Everyone in the workspace has it: what is in `Library/`.
+    case library
     /// Folders only the people chosen have: the restricted folders.
     case restricted
     /// Only this person has it.
     case personal
+    /// At the top of the workspace but in no section: it stays on this iPhone.
+    case nowhere
+
+    /// The section an entry at the top of the workspace is, by its name,
+    /// whatever its case.
+    public static func of(top entry: FolderEntry) -> TreeSection {
+        guard case .folder(let path) = entry else { return .nowhere }
+        switch path.lowercased() {
+        case TreeModel.libraryFolder.lowercased(): return .library
+        case TreeModel.restrictedFolder.lowercased(): return .restricted
+        case TreeModel.privateFolder.lowercased(): return .personal
+        default: return .nowhere
+        }
+    }
 }
 
 public struct TreeRow: Identifiable, Hashable, Sendable {
@@ -33,7 +48,8 @@ public struct TreeRow: Identifiable, Hashable, Sendable {
 
 public struct TreeGroup: Identifiable, Hashable, Sendable {
     public let section: TreeSection
-    /// The folder the section is, workspace-relative: `""`, `Restricted`, `Private`.
+    /// The folder the section is, workspace-relative: `Library`, `Restricted`,
+    /// `Private` — `""` for what is in none.
     public let folder: String
     public let rows: [TreeRow]
 
@@ -55,8 +71,13 @@ public final class TreeModel {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let key: String
 
-    public static let privateFolder = "Private"
-    public static let restrictedFolder = "Restricted"
+    /// The shared section's folder, at the top of the workspace, where
+    /// everything new lands (`LIBRARY_DIR`, engine/src/cloud/space.rs;
+    /// `LIBRARY_FOLDER`, cloud-worker/src/layout.ts; `LIBRARY_DIR`,
+    /// src/cloud.ts: change all four).
+    public nonisolated static let libraryFolder = "Library"
+    public nonisolated static let privateFolder = "Private"
+    public nonisolated static let restrictedFolder = "Restricted"
 
     public init(workspace: Workspace, defaults: UserDefaults = .standard) {
         self.workspace = workspace
@@ -70,6 +91,13 @@ public final class TreeModel {
     /// A workspace left this device: what was open in its tree goes too.
     public static func forget(_ wsId: String, in defaults: UserDefaults) {
         defaults.removeObject(forKey: key(wsId))
+    }
+
+    /// One-time stored-data migration: what was open in a workspace's tree,
+    /// once its folder has moved into the Library layout (`Sections.moved`).
+    public static func moveIntoLibrary(_ wsId: String, in defaults: UserDefaults) {
+        guard let open = defaults.stringArray(forKey: key(wsId)) else { return }
+        defaults.set(Set(open.map { Sections.moved($0).lowercased() }).sorted(), forKey: key(wsId))
     }
 
     public var isFiltering: Bool { !filter.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -114,37 +142,30 @@ public final class TreeModel {
             phase = .failed(error.localizedDescription)
             return
         }
-        let section = { (entry: FolderEntry) -> TreeSection in
-            guard case .folder(let path) = entry else { return .workspace }
-            switch path.lowercased() {
-            case Self.privateFolder.lowercased(): return .personal
-            case Self.restrictedFolder.lowercased(): return .restricted
-            default: return .workspace
-            }
-        }
-        let shared = top.filter { section($0) == .workspace }
-        let restricted = top.first { section($0) == .restricted }?.path
-        let personal = top.first { section($0) == .personal }?.path
+        let folder = { (section: TreeSection) in top.first { TreeSection.of(top: $0) == section }?.path }
+        let strays = top.filter { TreeSection.of(top: $0) == .nowhere }
         let wanted = filter.trimmingCharacters(in: .whitespaces).lowercased()
         let keep: Set<String>? = wanted.isEmpty ? nil : matching(wanted)
-        func entries(_ dir: String) -> [FolderEntry] {
-            dir.isEmpty ? shared : ((try? files.list(dir)) ?? [])
-        }
-        func flatten(_ dir: String, depth: Int) -> [TreeRow] {
+        func flatten(_ entries: [FolderEntry], depth: Int) -> [TreeRow] {
             guard depth < 12 else { return [] }
             var rows: [TreeRow] = []
-            for entry in entries(dir) {
+            for entry in entries {
                 if let keep, !keep.contains(entry.id) { continue }
                 let isOpen: Bool
                 if case .folder = entry { isOpen = keep != nil || open.contains(entry.id) } else { isOpen = false }
                 rows.append(TreeRow(entry: entry, depth: depth, open: isOpen))
-                if isOpen, case .folder(let path) = entry { rows += flatten(path, depth: depth + 1) }
+                if isOpen, case .folder(let path) = entry { rows += flatten((try? files.list(path)) ?? [], depth: depth + 1) }
             }
             return rows
         }
-        var out = [TreeGroup(section: .workspace, folder: "", rows: flatten("", depth: 0))]
-        if let restricted { out.append(TreeGroup(section: .restricted, folder: restricted, rows: flatten(restricted, depth: 0))) }
-        if let personal { out.append(TreeGroup(section: .personal, folder: personal, rows: flatten(personal, depth: 0))) }
+        func group(_ section: TreeSection, _ dir: String) -> TreeGroup {
+            TreeGroup(section: section, folder: dir, rows: flatten((try? files.list(dir)) ?? [], depth: 0))
+        }
+        // Library is always there: the engine brings its folder back when it goes.
+        var out = [group(.library, folder(.library) ?? Self.libraryFolder)]
+        if let restricted = folder(.restricted) { out.append(group(.restricted, restricted)) }
+        if let personal = folder(.personal) { out.append(group(.personal, personal)) }
+        if !strays.isEmpty { out.append(TreeGroup(section: .nowhere, folder: "", rows: flatten(strays, depth: 0))) }
         if keep != nil { out = out.filter { !$0.rows.isEmpty } }
         groups = out
         phase = .loaded
@@ -172,5 +193,13 @@ public final class TreeModel {
         }
         walk("", depth: 0)
         return keep
+    }
+}
+
+extension WorkspaceFiles {
+    /// The sections' own folders at the top of the workspace, as the disk
+    /// spells them: what search looks in, and never what is in none.
+    public func sectionFolders() -> [String] {
+        ((try? list("")) ?? []).filter { TreeSection.of(top: $0) != .nowhere }.map(\.path)
     }
 }

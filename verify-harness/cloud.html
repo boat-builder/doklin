@@ -23,14 +23,45 @@
           (_, i) => `Paragraph ${i + 1} of ${seed}. The quick brown fox jumps over the lazy dog.`,
         ).join("\n\n");
 
+      const params = new URLSearchParams(location.search);
+      // The folders in the Library layout (the engine's move,
+      // engine/src/cloud/layout.rs): their shared files are in `Library/`,
+      // beside `Private/` and `Restricted/`. /docs starts there in a
+      // workspace that is in sections (`?sections`), and moves on a connect
+      // or a resume; a joined folder is in it from the start. Anything else
+      // at the top of a moved folder is in no section: `__strays` (file
+      // names) and `__strayDirs` (folder name → file names).
+      window.__moved = new Set(params.has("sections") ? ["/docs"] : []);
+      window.__strays = [];
+      window.__strayDirs = {};
+      // Where a root's shared files are.
+      const sharedOf = (root) => (window.__moved.has(root) ? `${root}/Library` : root);
+      window.__sharedOf = sharedOf;
+      const S = sharedOf("/docs");
       window.__fs = new Map([
-        ["/docs/notes.md", `# Notes\n\n${para("notes", 6)}\n`],
-        ["/docs/other.md", `# Other\n\n${para("other", 6)}\n`],
-        ["/docs/third.md", `# Third\n\n${para("third", 6)}\n`],
-        ["/docs/Projects/plan.md", `# Plan\n\n${para("plan", 3)}\n`],
+        [`${S}/notes.md`, `# Notes\n\n${para("notes", 6)}\n`],
+        [`${S}/other.md`, `# Other\n\n${para("other", 6)}\n`],
+        [`${S}/third.md`, `# Third\n\n${para("third", 6)}\n`],
+        [`${S}/Projects/plan.md`, `# Plan\n\n${para("plan", 3)}\n`],
       ]);
       // The folders the workspace holds (publishing a folder is a folder page).
-      window.__dirs = new Set(["/docs", "/docs/Projects"]);
+      window.__dirs = new Set(["/docs", S, `${S}/Projects`]);
+      // The engine's move, as the stub keeps it: every path at the top of
+      // `root` that is not a section's or hidden goes into `Library/`.
+      const intoLibrary = (root, p) => {
+        if (!p.startsWith(`${root}/`)) return p;
+        const top = p.slice(root.length + 1).split("/")[0];
+        return top.startsWith(".") || ["library", "private", "restricted"].includes(top.toLowerCase())
+          ? p
+          : `${root}/Library/${p.slice(root.length + 1)}`;
+      };
+      window.__moveIntoLibrary = (root) => {
+        if (window.__moved.has(root)) return;
+        window.__fs = new Map([...window.__fs].map(([p, c]) => [intoLibrary(root, p), c]));
+        window.__dirs = new Set([...window.__dirs].map((d) => intoLibrary(root, d)));
+        window.__dirs.add(`${root}/Library`);
+        window.__moved.add(root);
+      };
       window.__mtime = 1000;
       window.__writes = [];
       const snap = (c) => ({ mtime_ms: ++window.__mtime, size: c.length });
@@ -85,8 +116,14 @@
       // what creating or moving a note has to touch for the tree to show it.
       const listOf = (path) => {
         const sec = window.__sections;
+        const shared = sharedOf("/docs");
+        const inShared = path.startsWith(`${shared}/`) ? path.slice(shared.length + 1).split("/") : [];
+        if (inShared.length === 1) return { list: window.__treeFiles, name: inShared[0] };
         const parts = path.startsWith("/docs/") ? path.slice("/docs/".length).split("/") : [];
-        if (parts.length === 1) return { list: window.__treeFiles, name: parts[0] };
+        if (window.__moved.has("/docs") && parts.length === 1) return { list: window.__strays, name: parts[0] };
+        if (window.__moved.has("/docs") && parts.length === 2 && window.__strayDirs[parts[0]]) {
+          return { list: window.__strayDirs[parts[0]], name: parts[1] };
+        }
         if (!sec) return null;
         if (parts[0] === "Private" && parts.length === 2 && sec.private) return { list: sec.private, name: parts[1] };
         if (parts[0] === "Restricted" && parts.length === 2) return { list: sec.loose, name: parts[1] };
@@ -95,19 +132,35 @@
         }
         return null;
       };
+      // The shared section's files, in the folder `dir`.
+      const sharedNodes = (dir, all) => [
+        ...(window.__sections?.projectsGone ? [] : [projectsNode(dir)]),
+        ...window.__treeFiles.map((f) => ({ kind: "file", name: f, path: `${dir}/${f}` })),
+        ...(all ? window.__otherFiles.map((f) => ({ kind: "file", name: f, path: `${dir}/${f}`, supported: false })) : []),
+      ];
       const treeFor = (path, all = false) => {
         if (path.endsWith("/Projects")) return projectsNode(path.slice(0, -"/Projects".length));
-        return {
-          kind: "dir",
-          name: basename(path),
-          path,
-          children: [
-            ...(window.__sections?.projectsGone ? [] : [projectsNode(path)]),
-            ...window.__treeFiles.map((f) => ({ kind: "file", name: f, path: `${path}/${f}` })),
-            ...(all ? window.__otherFiles.map((f) => ({ kind: "file", name: f, path: `${path}/${f}`, supported: false })) : []),
-            ...sectionNodes(path),
-          ],
-        };
+        const node = (children) => ({ kind: "dir", name: basename(path), path, children });
+        // A moved folder's Library, asked for on its own (publishing it counts its notes).
+        if (path.endsWith("/Library") && window.__moved.has(path.slice(0, -"/Library".length))) {
+          return node(sharedNodes(path, all));
+        }
+        if (!window.__moved.has(path)) return node([...sharedNodes(path, all), ...sectionNodes(path)]);
+        return node([
+          { kind: "dir", name: "Library", path: `${path}/Library`, children: sharedNodes(`${path}/Library`, all) },
+          ...sectionNodes(path),
+          ...(path === "/docs"
+            ? [
+                ...Object.entries(window.__strayDirs).map(([name, files]) => ({
+                  kind: "dir",
+                  name,
+                  path: `${path}/${name}`,
+                  children: files.map((f) => fileNode(`${path}/${name}`, f)),
+                })),
+                ...window.__strays.map((f) => fileNode(path, f)),
+              ]
+            : []),
+        ]);
       };
       const SLUG_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789";
       const randomSlug = () =>
@@ -122,7 +175,9 @@
         statuses: [],
         // What cloud_probe answers: a CloudProbe, or a string to reject with.
         probe: null,
-        // What cloud_marker answers for any root.
+        // What cloud_marker answers for any root — with `layout: "library"`
+        // added for a folder that has moved, which also answers with one of
+        // its status's when this is null.
         marker: null,
         // What the folder picker answers.
         pickedDir: "/Users/me/Downloads",
@@ -537,8 +592,13 @@
               return typeof window.__cloud.probe === "string"
                 ? Promise.reject(window.__cloud.probe)
                 : Promise.resolve(window.__cloud.probe);
-            case "cloud_marker":
-              return Promise.resolve(window.__cloud.marker);
+            case "cloud_marker": {
+              const set = window.__cloud.marker;
+              if (!window.__moved.has(args.root)) return Promise.resolve(set);
+              const s = window.__cloud.statuses.find((st) => st.root === args.root);
+              const marker = set ?? (s ? { domain: s.domain, wsId: s.wsId } : null);
+              return Promise.resolve(marker && { ...marker, layout: "library" });
+            }
             // The copy of the domain this Mac already has: a status of that
             // domain's, stopped once its sign-in is refused (the engine also
             // counts a folder that is gone).
@@ -549,8 +609,10 @@
                 s ? { root: s.root, name: s.name, domain: s.domain, syncs: s.phase !== "revoked" } : null,
               );
             }
+            // Both move the folder's files into Library first, as the engine does.
             case "cloud_connect":
               return (async () => {
+                window.__moveIntoLibrary(args.root);
                 await progress(args.root, "upload", 3);
                 window.__setStatuses([
                   ...window.__cloud.statuses,
@@ -569,6 +631,7 @@
                 // No folder is asked for: the engine keeps a joined workspace
                 // in a folder of its own under ~/Doklin.
                 const dest = `${window.__cloud.joinParent}/${ws?.name ?? "Notes"}`;
+                window.__moved.add(dest);
                 await progress(dest, "download", 3);
                 window.__setStatuses([
                   ...window.__cloud.statuses,
@@ -577,6 +640,7 @@
                 return dest;
               })();
             case "cloud_resume": {
+              window.__moveIntoLibrary(args.root);
               const ws = window.__cloud.probe?.workspace;
               window.__setStatuses([
                 ...window.__cloud.statuses,
@@ -834,11 +898,12 @@
               window.__emit("versions-status", window.__versions.statuses.map((s) => ({ ...s })));
               return Promise.resolve(null);
             }
+            // Asked of Library's store; the bucket's horizon is the workspace's.
             case "versions_set_cloud_horizon": {
               recordVersion(cmd, args);
               window.__setStatuses(
                 window.__cloud.statuses.map((s) =>
-                  s.root === args.root && s.versions
+                  args.root === `${s.root}/Library` && s.versions
                     ? { ...s, versions: { ...s.versions, horizonDays: args.days } }
                     : s,
                 ),
@@ -978,11 +1043,11 @@
               }
               // The shared Projects folder dropped under Restricted: the
               // engine makes it a restricted folder with only its mover.
-              if (sec && args.from === "/docs/Projects" && folderOf(args.to)) {
+              if (sec && args.from === `${sharedOf("/docs")}/Projects` && folderOf(args.to)) {
                 const name = folderOf(args.to);
                 sec.projectsGone = true;
                 sec.restricted[name] = ["plan.md"];
-                window.__dirs.delete("/docs/Projects");
+                window.__dirs.delete(args.from);
                 window.__dirs.add(args.to);
                 const s = window.__cloud.statuses.find((st) => st.root === "/docs");
                 patchStatus("/docs", {
@@ -1017,13 +1082,14 @@
               const dir = sec.restricted[args.name] ? `${args.name} (${window.__cloud.me})` : args.name;
               sec.restricted[dir] = [];
               window.__dirs.add(`/docs/Restricted/${dir}`);
-              if (args.from === "/docs/Projects") {
+              const projects = `${sharedOf("/docs")}/Projects`;
+              if (args.from === projects) {
                 // The folder itself becomes it.
                 sec.projectsGone = true;
                 sec.restricted[dir] = ["plan.md"];
-                window.__dirs.delete("/docs/Projects");
-                const c = window.__fs.get("/docs/Projects/plan.md");
-                window.__fs.delete("/docs/Projects/plan.md");
+                window.__dirs.delete(projects);
+                const c = window.__fs.get(`${projects}/plan.md`);
+                window.__fs.delete(`${projects}/plan.md`);
                 window.__fs.set(`/docs/Restricted/${dir}/plan.md`, c);
               }
               window.__cloud.spaceSeq = (window.__cloud.spaceSeq ?? 0) + 1;
@@ -1083,7 +1149,9 @@
               if (!s) return Promise.reject("that file isn't in a workspace that syncs, so it has no link");
               const rel = args.path.slice(s.root.length + 1);
               const space = s.spaces.find((sp) => rel.toLowerCase().startsWith(`${sp.path.toLowerCase()}/`));
-              if (!space && ["private", "restricted"].includes(rel.split("/")[0].toLowerCase())) {
+              const [top, inLibrary] = rel.toLowerCase().split("/");
+              const shared = top === "library" && !["private", "restricted"].includes(inLibrary);
+              if (!space && !shared) {
                 return Promise.reject("that file is in no section, so it syncs nowhere and has no link");
               }
               const who = !space
@@ -1100,7 +1168,9 @@
                 (st) => args.path === st.root || args.path.startsWith(`${st.root}/`),
               );
               if (!s) return Promise.reject("that path isn't in a connected workspace");
-              const rel = args.path === s.root ? "" : args.path.slice(s.root.length + 1);
+              // The workspace's top is in no section: Library is what publishes the shared one.
+              if (args.path === s.root) return Promise.reject("the workspace's folder is in no section, so it has nothing to publish");
+              const rel = args.path.slice(s.root.length + 1);
               const kind = window.__dirs.has(args.path) ? "dir" : "file";
               const existing = s.public.find((p) => p.kind === kind && p.path === rel) ?? null;
               const slug = args.slug ? args.slug.trim().toLowerCase() : (existing?.slug ?? randomSlug());
@@ -1110,7 +1180,7 @@
                 );
               }
               const taken = s.public.find((p) => p.slug === slug && p !== existing);
-              if (taken) return Promise.reject(`"${slug}" is already the address of ${taken.path || "the workspace"}`);
+              if (taken) return Promise.reject(`"${slug}" is already the address of ${taken.path}`);
               const entry = {
                 slug,
                 kind,
@@ -1154,6 +1224,11 @@
       };
 
       // A restorable /docs workspace session so the sidebar renders.
+      // `?before-move`: what was stored about it is from before the folder
+      // moved into the Library layout — the open note at the top, Projects
+      // open and the shared list folded under the id it had — which the
+      // app moves after the folder once, on opening it.
+      const beforeMove = params.has("before-move");
       localStorage.clear();
       localStorage.setItem(
         "doklin:session",
@@ -1162,12 +1237,18 @@
           lastRoot: "/docs",
           sessions: {
             "/docs": {
-              tabs: [{ id: "t-notes", kind: "file", path: "/docs/notes.md" }],
+              tabs: [{ id: "t-notes", kind: "file", path: `${beforeMove ? "/docs" : S}/notes.md` }],
               activeId: "t-notes",
             },
           },
         }),
       );
+      if (beforeMove) {
+        localStorage.setItem(
+          "doklin:sidebar-tree",
+          JSON.stringify({ "/docs": { open: ["Projects", "Restricted/Finance"], folded: ["workspace"] } }),
+        );
+      }
       // `?sections`: the app starts in a connected workspace that is in
       // sections — this person (the superadmin) has a
       // Private with a note in it and is in one restricted folder with Bob;
@@ -1197,6 +1278,11 @@
         window.__fs.set("/docs/Restricted/Finance/budget.md", "# Budget\n\nNumbers.\n");
         window.__fs.set("/docs/Restricted/stray.md", "# Stray\n");
         for (const dir of ["/docs/Private", "/docs/Restricted", "/docs/Restricted/Finance"]) window.__dirs.add(dir);
+        // What Finder or an agent put at the workspace's top, in no section.
+        window.__strays = ["todo.md"];
+        window.__strayDirs = { Scratch: [] };
+        window.__fs.set("/docs/todo.md", "# Todo\n");
+        window.__dirs.add("/docs/Scratch");
         window.__cloud.everyPages = {
           pages: [
             { slug: "carols-notes", kind: "dir", title: "Private", by: "Carol", at: Date.now() - 2 * 86400000, shared: false },

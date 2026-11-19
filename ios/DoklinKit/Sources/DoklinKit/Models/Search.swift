@@ -114,7 +114,8 @@ public final class SearchModel {
         }
         phase = .loading
         let files = workspace.files
-        let found = await Task.detached(priority: .userInitiated) { files.search(query) }.value
+        // The sections, never what is in none at the top of the workspace.
+        let found = await Task.detached(priority: .userInitiated) { files.search(query, in: files.sectionFolders()) }.value
         guard ticket == asked else { return }
         self.query = query
         results = found

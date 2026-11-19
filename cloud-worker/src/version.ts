@@ -11,7 +11,7 @@
 // with, and a worker that is behind becomes an "update the worker" state
 // rather than an error. The counter starts at 1: nothing older speaks this
 // API, so no version below 1 can ever show up.
-export const WORKER_VERSION = 26;
+export const WORKER_VERSION = 27;
 
 // The manifest schema this worker understands.
 // A PUT carrying any other version is a 426 in both directions, with a

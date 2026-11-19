@@ -4,10 +4,12 @@ import {
   cloudForWorkspace,
   cloudNeedsAttention,
   leaseFor,
+  libraryDirOf,
   livePathsOf,
   mayOn,
   placeOf,
   relPathIn,
+  toLibraryLayout,
   widerAudience,
   type CloudPendingAddsEvent,
   type CloudPendingDeletesEvent,
@@ -49,6 +51,7 @@ import Editor, { type EditorHandle } from "./Editor";
 import type { SearchInfo } from "./searchPlugin";
 import Sidebar, {
   forgetTreeView,
+  moveTreeViewIntoLibrary,
   pruneNestedSelection,
   type SidebarSelection,
 } from "./Sidebar";
@@ -331,6 +334,7 @@ const suggestedFileName = (title: string) =>
 const COMMENTS_VISIBLE_STORAGE_KEY = "doklin:comments-visible";
 const SIDEBAR_OPEN_STORAGE_KEY = "doklin:sidebar-open";
 const SESSION_STORAGE_KEY = "doklin:session";
+const LIBRARY_LAYOUT_STORAGE_KEY = "doklin:library-layout";
 const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
 
 /* ---------- Document zoom (⌘+ / ⌘- / ⌘0) ----------
@@ -571,6 +575,73 @@ function forgetStoredSession(root: string) {
   }
 }
 
+/* ---------- One-time stored-data migration: the Library layout ----------
+   A connected workspace's folder moves once into the Library layout — the
+   shared section's files into `Library/`, beside `Private/` and
+   `Restricted/` — by the engine (engine/src/cloud/layout.rs): at launch, or
+   in a connect or a resume. What is stored about paths in such a folder
+   from before is moved after it, once a folder, by the move's rule
+   (`toLibraryLayout`): the tabs kept for every folder (`doklin:session`)
+   and how its tree was left (`doklin:sidebar-tree`). On a Mac the folders
+   done are recorded (`doklin:library-layout`), so one joined since is
+   recorded before it has anything stored, and nothing is moved twice. A
+   browser's paths move with the worker that serves it, and it calls
+   `moveStoredPathsIntoLibrary` itself, once (src/web/start.tsx). */
+
+function readLibraryLayoutDone(): Set<string> {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(LIBRARY_LAYOUT_STORAGE_KEY) || "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter((r): r is string => typeof r === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+// Where a path stored from before is, once the folder at `root` has moved.
+const intoLibrary = (root: string) => (path: string) => {
+  const rel = relPathIn(root, path);
+  return rel === null ? path : `${root}/${toLibraryLayout(rel)}`;
+};
+
+/** The stored tabs and tree of the folder at `root`, moved where the move
+ *  put their paths. Records nothing: whoever calls it keeps it to once. */
+export function moveStoredPathsIntoLibrary(root: string): void {
+  try {
+    const all = readAllSessions();
+    const moved = intoLibrary(root);
+    for (const entry of Object.values(all.sessions)) {
+      entry.tabs = entry.tabs.map((t) => ({ ...t, path: moved(t.path) }));
+    }
+    localStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({ version: 2, lastRoot: all.lastRoot, sessions: all.sessions }),
+    );
+  } catch {
+    // ignore
+  }
+  moveTreeViewIntoLibrary(root);
+}
+
+function recordLibraryLayoutDone(root: string) {
+  try {
+    localStorage.setItem(LIBRARY_LAYOUT_STORAGE_KEY, JSON.stringify([...readLibraryLayoutDone().add(root)]));
+  } catch {
+    // ignore
+  }
+}
+
+// Before a window takes up the folder at `root`: if the folder has moved and
+// what is stored about it has not, it follows. Only a platform that keeps a
+// copy of the workspace on the device has a folder to have moved.
+async function settleLibraryLayout(root: string): Promise<void> {
+  const setup = backend.setup;
+  if (!setup || readLibraryLayoutDone().has(root)) return;
+  const marker = await setup.marker(root).catch(() => null);
+  if (marker?.layout !== "library") return;
+  moveStoredPathsIntoLibrary(root);
+  recordLibraryLayoutDone(root);
+}
+
 export default function App() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -589,8 +660,8 @@ export default function App() {
   // Lives here — not in Sidebar — because the PRIMARY selection (the last
   // entry, the row clicked most recently) is the creation context: saving an
   // untitled note defaults into the selected folder (or next to the selected
-  // file), falling back to the workspace root. Mirrored in a ref for async
-  // readers.
+  // file), falling back to the sidebar's first list (`libraryDir`).
+  // Mirrored in a ref for async readers.
   const [sidebarSelection, setSidebarSelection] = useState<SidebarSelection[]>([]);
   const sidebarSelectionRef = useRef<SidebarSelection[]>([]);
   // The in-app Save As prompt (shown instead of the native save panel when a
@@ -617,6 +688,9 @@ export default function App() {
   });
   const [commentCount, setCommentCount] = useState(0);
   const [treeRefreshToken, setTreeRefreshToken] = useState(0);
+  // A new one remounts the sidebar, which then reads how its tree was left
+  // afresh: after the stored paths have moved under it (moveIntoLibrary).
+  const [treeViewEpoch, setTreeViewEpoch] = useState(0);
   // Undo stack for trashed entries. `files` is everything one delete moved to
   // the Trash (a markdown file's html rendition rides along); `openPaths` are
   // the file tabs the delete closed (the entry itself for a file, everything
@@ -906,6 +980,11 @@ export default function App() {
     () => cloudForWorkspace(cloudStatuses, workspaceRoot),
     [cloudStatuses, workspaceRoot],
   );
+  // The folder the sidebar's first list is: a connected workspace's Library,
+  // its top being in no section, or a folder that is not connected itself.
+  // Where something new lands when nothing says where, and whose version
+  // history the folder's own is (a connected top has none).
+  const libraryDir = workspaceRoot && cloudForRoot ? libraryDirOf(workspaceRoot) : workspaceRoot;
   // The workspaces this Mac belongs to — every connected one has an engine,
   // so the statuses are the list. What the sidebar's switcher shows.
   const myWorkspaces = useMemo(
@@ -982,9 +1061,9 @@ export default function App() {
     (id: number) => setToasts((ts) => ts.filter((t) => t.id !== id)),
     [],
   );
-  // Publishing: the folder dialog (a folder,
-  // or the root for the whole workspace) and the list of every published
-  // page. The Live chip lives in the title row (LiveChip).
+  // Publishing: the folder dialog (a folder, or Library's for the whole
+  // shared section) and the list of every published page. The Live chip
+  // lives in the title row (LiveChip).
   const [publishFolder, setPublishFolder] = useState<string | null>(null);
   const [publishedOpen, setPublishedOpen] = useState(false);
   // Stopping from the sidebar is immediate and undoable: the toast's Undo
@@ -993,10 +1072,10 @@ export default function App() {
     (page: PublicPage) => {
       const root = workspaceRoot;
       if (!root) return;
-      const abs = page.path ? `${root}/${page.path}` : root;
+      const abs = `${root}/${page.path}`;
       void backend.cloud.unpublish(root, page.slug)
         .then(() =>
-          pushToast("info", `Stopped publishing ${page.path ? basename(page.path) : "the workspace"}.`, {
+          pushToast("info", `Stopped publishing ${basename(page.path)}.`, {
             label: "Undo",
             run: () =>
               void backend.cloud.publish(abs, {
@@ -2129,6 +2208,7 @@ export default function App() {
       splitRef.current = null;
       setSplit(null);
       sessionSplit = null;
+      await settleLibraryLayout(root);
       const session = readStoredSession(root);
       sessionWorkspaceRoot = root;
       // The incoming folder's own tabs, then the notes that stayed. (A stored
@@ -2441,13 +2521,13 @@ export default function App() {
   // sync all bump that token.
   useEffect(() => {
     const versions = backend.versions;
-    if (!workspaceRoot || !versions) {
+    if (!libraryDir || !versions) {
       setDeletedFiles([]);
       return;
     }
     let cancelled = false;
     void versions
-      .deleted(workspaceRoot)
+      .deleted(libraryDir)
       .then((files) => {
         if (!cancelled) setDeletedFiles(files);
       })
@@ -2458,7 +2538,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [workspaceRoot, treeRefreshToken]);
+  }, [libraryDir, treeRefreshToken]);
   // A section's own deleted files, read while its column is showing.
   useEffect(() => {
     const versions = backend.versions;
@@ -3279,8 +3359,8 @@ export default function App() {
   // true once the note is a file, false if the question was dismissed. With a
   // workspace open there is no Finder navigation (VS Code-style): the
   // destination is already decided by context — the sidebar's selected
-  // folder, the selected file's folder, or the workspace root — so the in-app
-  // prompt only asks for a name. With none, the native Save dialog is the
+  // folder, the selected file's folder, or the sidebar's first list (Library,
+  // when connected) — so the in-app prompt only asks for a name. With none, the native Save dialog is the
   // only way to pick a location.
   const saveUntitled = useCallback(async (): Promise<boolean> => {
     catchUpWithEditor();
@@ -3289,11 +3369,9 @@ export default function App() {
     const suggested = suggestedFileName(noteTitle(currentMarkdownRef.current));
     const sels = sidebarSelectionRef.current;
     const sel = sels[sels.length - 1] ?? null; // primary selection
-    const contextDir = sel
-      ? sel.kind === "dir"
-        ? sel.path
-        : dirname(sel.path)
-      : workspaceRoot;
+    const selDir = sel ? (sel.kind === "dir" ? sel.path : dirname(sel.path)) : null;
+    // Never a connected workspace's top: a note there would be in no section.
+    const contextDir = selDir && selDir !== workspaceRoot ? selDir : libraryDir;
     if (contextDir) {
       savePromptDoneRef.current?.(false); // a prompt already up is superseded
       return new Promise<boolean>((resolve) => {
@@ -3304,7 +3382,7 @@ export default function App() {
     const chosen = await backend.localFiles?.pickSaveAs(`${suggested}.md`);
     if (!chosen) return false;
     return saveUntitledTo(note, chosen);
-  }, [catchUpWithEditor, saveUntitledTo, workspaceRoot]);
+  }, [catchUpWithEditor, saveUntitledTo, workspaceRoot, libraryDir]);
 
   // Close the in-app Save As prompt and tell whoever opened it how it went.
   const settleSavePrompt = useCallback((saved: boolean) => {
@@ -3531,19 +3609,11 @@ export default function App() {
     for (const p of entry.openPaths) await openTab(p);
   }, [openTab]);
 
-  // Something moved on disk from `from` to `to`: repoint every piece of state
-  // that keys off the old path — open tabs (including everything inside a
-  // moved folder), the active document's autosave target and watcher, the
-  // split pane, and the sidebar selection.
-  const repointMoved = useCallback(
-    async (from: string, to: string, kind: "file" | "dir") => {
-      const remap = (p: string) =>
-        p === from
-          ? to
-          : kind === "dir" && p.startsWith(from + "/")
-            ? to + p.slice(from.length)
-            : p;
-
+  // Things moved on disk, each path to `remap(path)`: repoint every piece of
+  // state that keys off an old path — open tabs, the active document's
+  // autosave target and watcher, the split pane, and the sidebar selection.
+  const repoint = useCallback(
+    async (remap: (path: string) => string) => {
       const activeBefore = tabsRef.current.find((t) => t.id === activeIdRef.current);
       let tabsChanged = false;
       const nextTabs = tabsRef.current.map((t) => {
@@ -3625,6 +3695,43 @@ export default function App() {
     [selectSidebarEntries, refreshWatchSet, setSplitState, loadActiveContent],
   );
 
+  // Something moved on disk from `from` to `to` — everything inside a moved
+  // folder with it.
+  const repointMoved = useCallback(
+    (from: string, to: string, kind: "file" | "dir") =>
+      repoint((p) =>
+        p === from ? to : kind === "dir" && p.startsWith(from + "/") ? to + p.slice(from.length) : p,
+      ),
+    [repoint],
+  );
+
+  // One-time stored-data migration (the Library layout): a connect or a
+  // resume moves the folder's files into `Library/` (the engine's move)
+  // unless its marker says it has moved already. What is being typed lands
+  // first; once the marker says the folder moved, this window's tabs follow,
+  // then everything stored about it. A failed step may have moved it too: a
+  // retry finds it moved.
+  const moveIntoLibrary = useCallback(
+    async (root: string, move: () => Promise<unknown>) => {
+      const markerOf = () => backend.setup?.marker(root).catch(() => null) ?? Promise.resolve(null);
+      const moved = (await markerOf())?.layout === "library";
+      await flushPendingAutosave();
+      await flushSidecarWrite();
+      try {
+        await move();
+      } finally {
+        if (!moved && (await markerOf())?.layout === "library") {
+          await repoint(intoLibrary(root));
+          moveStoredPathsIntoLibrary(root);
+          recordLibraryLayoutDone(root);
+          // The tree reads how it was left again, from where it is now.
+          setTreeViewEpoch((n) => n + 1);
+        }
+      }
+    },
+    [flushPendingAutosave, flushSidecarWrite, repoint],
+  );
+
   // Move or rename a file/folder on disk (the sidebar's drag-and-drop and
   // inline Rename both end here), then repoint the state that keyed off the
   // old path (`repointMoved`). Returns an error message for the caller to
@@ -3666,10 +3773,12 @@ export default function App() {
   const cloudForRootRef = useRef(cloudForRoot);
   cloudForRootRef.current = cloudForRoot;
 
-  // Asked once before anything moves between folders. Two moves change who
-  // can open a thing, and say so first: one that lets more people see it,
-  // and a folder put straight under Restricted, which becomes a restricted
-  // folder and leaves everyone else's devices. Every other move just happens.
+  // Asked once before anything moves between folders. Three moves change who
+  // can open a thing, and say so first: one that lets more people see it; a
+  // folder put straight under Restricted, which becomes a restricted folder
+  // and leaves everyone else's devices; and one into no section, which stops
+  // it syncing and takes it off every other device. Every other move just
+  // happens.
   const confirmMove = useCallback(
     async (entries: SidebarSelection[], toDir: string): Promise<boolean> => {
       const cloud = cloudForRootRef.current;
@@ -3680,25 +3789,38 @@ export default function App() {
         en.kind === "file" ? basename(en.path).replace(/\.(md|markdown|mdown|mkd|html)$/i, "") : basename(en.path);
       const what = one ? `“${label(entries[0])}”` : `${entries.length} items`;
       const to = placeOf(cloud, toRel);
-      if (to.kind === "nowhere") {
+      const from = (en: SidebarSelection) => {
+        const rel = relPathIn(cloud.root, en.path);
+        return rel === null ? null : placeOf(cloud, rel);
+      };
+      if (to.kind === "nowhere" && toRel.toLowerCase() === "restricted") {
         // Where no restricted folder can be made, the move is refused in its
         // own words and there is nothing to ask first.
-        if (toRel.toLowerCase() !== "restricted" || !backend.spaces) return true;
+        if (!backend.spaces) return true;
         return askUser({
           title: `Restrict ${what}?`,
           body: `${one ? "It becomes a restricted folder" : "Each becomes a restricted folder"} only you can open until you add people, and is removed from everyone else’s devices.`,
           confirm: "Restrict",
         });
       }
+      if (to.kind === "nowhere") {
+        // Only what syncs now has devices to leave.
+        if (!entries.some((en) => (from(en)?.kind ?? "nowhere") !== "nowhere")) return true;
+        return askUser({
+          title: `Move ${what} to “${basename(toDir)}”?`,
+          body: `Nothing there syncs: ${one ? "it stays on this Mac and is" : "they stay on this Mac and are"} removed from every other device.`,
+          confirm: "Move",
+        });
+      }
       const gains = new Set<string>();
       for (const en of entries) {
-        const rel = relPathIn(cloud.root, en.path);
-        const who = rel === null ? null : widerAudience(cloud, placeOf(cloud, rel), to);
+        const p = from(en);
+        const who = p === null ? null : widerAudience(cloud, p, to);
         if (who) gains.add(who);
       }
       if (gains.size === 0) return true;
       return askUser({
-        title: `Move ${what} to ${to.kind === "shared" ? "the workspace" : `“${to.space.name}”`}?`,
+        title: `Move ${what} to ${to.kind === "shared" ? "Library" : `“${to.space.name}”`}?`,
         body: `${[...gains][0]} will be able to see ${one ? "it" : "them"}.`,
         confirm: "Move",
       });
@@ -3874,6 +3996,7 @@ export default function App() {
       const init = backend.windows ? await backend.windows.init() : ONLY_WINDOW;
       if (!init.isMain) {
         isMainWindow = false;
+        if (init.folder) await settleLibraryLayout(init.folder);
         if (init.restored) {
           // A window brought back by quit-time session restore: re-adopt its
           // folder and rebuild its tabs directly — restoring isn't an "open"
@@ -3907,8 +4030,9 @@ export default function App() {
       // (Files never arrive as a pending folder: an externally opened file
       // always gets its own spawned window, so it can't attach to this session.)
       const pendingFolder = (await backend.windows?.pendingFolder()) ?? null;
+      const targetRoot = pendingFolder ?? backend.home ?? readAllSessions().lastRoot;
+      if (targetRoot) await settleLibraryLayout(targetRoot);
       const all = readAllSessions();
-      const targetRoot = pendingFolder ?? backend.home ?? all.lastRoot;
       // Adopt the target root into the module mirror BEFORE any
       // writeStoredSession below, so re-persisting keys tabs under the right
       // folder rather than wiping the map.
@@ -4495,13 +4619,11 @@ export default function App() {
         if (k === "v") {
           const sels = sidebarSelectionRef.current;
           const primary = sels[sels.length - 1];
-          const destDir = primary
-            ? primary.kind === "dir"
-              ? primary.path
-              : dirname(primary.path)
-            : workspaceRoot;
+          const selDir = primary ? (primary.kind === "dir" ? primary.path : dirname(primary.path)) : null;
+          // Nothing is pasted into a connected workspace's top, in no section.
+          const destDir = selDir && selDir !== workspaceRoot ? selDir : libraryDir;
           e.preventDefault();
-          void pasteEntries(destDir);
+          if (destDir) void pasteEntries(destDir);
         } else {
           const sels = sidebarSelectionRef.current;
           if (sels.length === 0) return;
@@ -4578,6 +4700,7 @@ export default function App() {
     openFolderInNewWindow,
     cycleTab,
     workspaceRoot,
+    libraryDir,
     sidebarOpen,
     undoDelete,
     openWorkspaceSearch,
@@ -4877,8 +5000,6 @@ export default function App() {
         sync.onPendingAdds((e) => {
           setPendingAdds(e);
           if (e.root !== sessionWorkspaceRoot || e.count === 0) return;
-          const open = cloudForRootRef.current;
-          const name = open?.root === e.root ? open.name : basename(e.root);
           const answer = (yes: boolean) => () => {
             addsToastRef.current = null;
             sync.confirmAdds(e.root, yes).catch((err) => pushToast("error", errText(err)));
@@ -4886,7 +5007,7 @@ export default function App() {
           if (addsToastRef.current != null) dismissToast(addsToastRef.current);
           addsToastRef.current = pushToast(
             "warn",
-            addsQuestion(e.count, e.folders, name),
+            addsQuestion(e.count, e.folders),
             { label: e.count === 1 ? "Sync it" : "Sync them", run: answer(true) },
             { label: "Not now", run: answer(false) },
           );
@@ -4898,8 +5019,11 @@ export default function App() {
       uns.push(
         // A restore wrote a document: the tree refreshes like sync's, and the
         // open editor reloads — the watcher stays quiet for our own writes.
+        // The event names the store's folder: the workspace's own, or one of
+        // its sections' (Library's, in a connected workspace).
         versions.onApplied((e) => {
-          if (e.root === sessionWorkspaceRoot) setTreeRefreshToken((t) => t + 1);
+          const ws = sessionWorkspaceRoot;
+          if (ws && (e.root === ws || e.root.startsWith(`${ws}/`))) setTreeRefreshToken((t) => t + 1);
           if (pathRef.current && e.paths.includes(pathRef.current)) void reloadFromDisk();
         }),
         // Every store's size, horizon and count, on every capture and sweep —
@@ -4937,6 +5061,10 @@ export default function App() {
   // file from outside the workspace.
   const activeRel =
     activeTab?.kind === "file" && workspaceRoot ? relPathIn(workspaceRoot, activeTab.path) : null;
+  // Publishing is for a file in a section of the open workspace — not one in
+  // no section. A folder not connected offers to connect.
+  const chipHere =
+    activeRel !== null && (cloudForRoot ? placeOf(cloudForRoot, activeRel).kind !== "nowhere" : !!setup);
   const hereNow = [
     ...new Set((cloudForRoot?.presence ?? []).filter((p) => p.path === activeRel).map((p) => p.name)),
   ];
@@ -5324,8 +5452,8 @@ export default function App() {
                 testid="note-facepile"
               />
               {/* Publishing: a file inside the open workspace only — not an
-                  untitled note, not a file from outside. */}
-              {activeRel !== null && (cloudForRoot || setup) && (
+                  untitled note, not a file from outside (`chipHere`). */}
+              {chipHere && activeRel !== null && (
                 <LiveChip
                   cloud={cloudForRoot}
                   absPath={activeTab.path}
@@ -5386,18 +5514,18 @@ export default function App() {
           focusToken={wsFocusToken}
         />
       )}
-      {showSidebar && workspaceRoot && sidebarMode === "deleted" && versionStore && (
+      {showSidebar && libraryDir && sidebarMode === "deleted" && versionStore && (
         <RecentlyDeleted
           store={versionStore}
-          // The workspace's own, or one section's: each folder with a
-          // history has its own list.
-          root={deletedFor ?? workspaceRoot}
+          // The first list's (Library's, when connected), or one
+          // section's: each folder with a history has its own list.
+          root={deletedFor ?? libraryDir}
           files={deletedFor ? sectionDeleted : deletedFiles}
           onBackToFiles={() => {
             setSidebarMode("files");
             setDeletedFor(null);
           }}
-          onOpen={(file) => previewDeleted(file, deletedFor ?? workspaceRoot)}
+          onOpen={(file) => previewDeleted(file, deletedFor ?? libraryDir)}
           onRestored={(path) => {
             setTreeRefreshToken((t) => t + 1);
             pushToast("done", `${basename(path)} is back.`, {
@@ -5410,6 +5538,7 @@ export default function App() {
       )}
       {showSidebar && workspaceRoot && sidebarMode === "files" && (
         <Sidebar
+          key={treeViewEpoch}
           root={workspaceRoot}
           cloud={cloudForRoot}
           currentPath={activeFilePath}
@@ -5454,7 +5583,7 @@ export default function App() {
           onCopyLink={(url) => void navigator.clipboard.writeText(url).catch(() => {})}
           onCopyPageLink={cloudForRoot ? (path) => void copyPageLink(path) : undefined}
           onHistory={onHistory}
-          onWorkspaceHistory={versionStore ? (dir) => setHistoryRoot(dir ?? workspaceRoot) : undefined}
+          onWorkspaceHistory={versionStore ? (dir) => setHistoryRoot(dir ?? libraryDir) : undefined}
           deletedCount={deletedFiles.length}
           onRecentlyDeleted={
             versionStore
@@ -5515,7 +5644,7 @@ export default function App() {
       {versionsSettingsOpen && versionStore && (
         <VersionsSettings
           store={versionStore}
-          root={workspaceRoot}
+          root={libraryDir}
           statuses={versionStatuses}
           cloud={cloudForRoot}
           onClose={() => setVersionsSettingsOpen(false)}
@@ -5619,7 +5748,7 @@ export default function App() {
             versionStore
               ? () => {
                   setCloudPanelOpen(false);
-                  setHistoryRoot(workspaceRoot);
+                  setHistoryRoot(libraryDir);
                 }
               : undefined
           }
@@ -5667,6 +5796,7 @@ export default function App() {
           sync={sync}
           mode={cloudSetup}
           root={workspaceRoot}
+          moveIntoLibrary={moveIntoLibrary}
           onClose={() => setCloudSetup(null)}
           onConnected={(root, how) => {
             setCloudSetup(null);

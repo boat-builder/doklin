@@ -88,8 +88,8 @@ pub async fn seed_upload<R: Remote>(
     events: &Arc<dyn Events>,
     progress_root: &str,
 ) -> Result<WorkspaceState, FlowError> {
-    // What is under a reserved name is never the shared workspace's: it is
-    // this person's own, and syncs as their sections do once the engine runs.
+    // `root` is the folder's Library, and what is under a reserved name at
+    // its top is in no section (`space::RESERVED_DIRS`).
     let scan = scan_local(root, &RESERVED_DIRS).map_err(FlowError::Other)?;
     let total = scan.len();
     let _ = std::fs::create_dir_all(state_dir.join("base"));
@@ -163,11 +163,15 @@ pub async fn seed_upload<R: Remote>(
 /// Pull a bound domain's workspace down into `dest` (an empty or absent
 /// folder) — the second machine's flow. Returns the engine state to start
 /// from.
+/// Download the shared section into `dest` — a joining device's `Library/`,
+/// made even when the workspace is empty. `progress_root` is the workspace
+/// the progress events speak for.
 pub async fn seed_download<R: Remote>(
     remote: &Arc<R>,
     dest: &Path,
     state_dir: &Path,
     events: &Arc<dyn Events>,
+    progress_root: &str,
 ) -> Result<WorkspaceState, FlowError> {
     let (manifest, etag) = remote
         .fetch_manifest(None)
@@ -185,7 +189,6 @@ pub async fn seed_download<R: Remote>(
     }
     std::fs::create_dir_all(dest).map_err(|e| FlowError::Other(format!("create {}: {}", dest.display(), e)))?;
     let _ = std::fs::create_dir_all(state_dir.join("base"));
-    let progress_root = dest.to_string_lossy().to_string();
 
     // What syncs, and nothing else: a manifest written before the rule may
     // still name a picture, and this folder will never hold one from here.

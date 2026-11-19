@@ -84,7 +84,7 @@ export async function putHome(c: WebCall): Promise<Response> {
     const map = tx.m.public ?? {};
     if (slug !== null && !map[slug]) {
       return elsewhere
-        ? new Refusal(409, "the home page is chosen from the shared workspace")
+        ? new Refusal(409, "The home page is chosen from Library.")
         : new Refusal(404, `nothing is published at "${slug}"`);
     }
     for (const [at, entry] of Object.entries(map)) {

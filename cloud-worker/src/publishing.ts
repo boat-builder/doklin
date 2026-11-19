@@ -40,7 +40,7 @@ export const sameTarget = (e: PublicEntry, t: Target, fids: readonly string[]): 
   t.kind === "dir" ? e.kind === "dir" && e.path.toLowerCase() === t.path.toLowerCase() : e.kind === "file" && fids.includes(e.file);
 
 const describe = (e: PublicEntry): string =>
-  e.kind === "file" ? e.path : e.path === "" ? "the whole workspace" : `the folder ${e.path}`;
+  e.kind === "file" ? e.path : e.path === "" ? "a whole section" : `the folder ${e.path}`;
 
 /** A title or a description as an entry keeps one, or undefined for none. */
 export const cleanText = (raw: unknown, max: number): string | undefined => {

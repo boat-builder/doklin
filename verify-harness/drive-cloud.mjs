@@ -254,6 +254,7 @@ step(
 await page.screenshot({ path: SHOTS + "cloud-02-wizard-fresh.png" });
 
 /* 7 — connect & upload: progress, then the done card; the engine got root + endpoint + token + name */
+const connectNote = await dialog("Create a workspace").locator(".cloud-step-note").first().textContent();
 await tid("connect-upload").click();
 const sawProgress = await poll(
   async () => {
@@ -281,6 +282,30 @@ step(
 );
 await page.locator(".modal-btn", { hasText: "Done" }).click();
 await poll(async () => (await dialog("Create a workspace").count()) === 0);
+
+/* 7b — the connect moved the folder's files into Library (the engine's
+   move, as the wizard said it would): the open note follows them there, and
+   so does what is stored about the folder, once — the folder is recorded as
+   done. The tree is three lists, the shared files under Library. */
+await poll(async () => (await page.locator('[data-testid="section-library"] [data-tree-path="/docs/Library/notes.md"]').count()) === 1);
+const afterMove = await page.evaluate(() => ({
+  tabs: JSON.parse(localStorage.getItem("doklin:session")).sessions["/docs"].tabs.map((t) => t.path),
+  done: localStorage.getItem("doklin:library-layout"),
+  oldGone: !window.__fs.has("/docs/notes.md"),
+}));
+const writesAtMove = await page.evaluate(() => window.__writes.length);
+step(
+  "connect: the wizard says the files move into Library; after it the open note, the stored tabs and the tree are there, and the folder is recorded as moved",
+  connectNote.includes("moves this folder’s files into a Library folder inside it") &&
+    connectNote.includes("leaves hidden ones where they are") &&
+    afterMove.tabs.join() === "/docs/Library/notes.md" &&
+    afterMove.done === '["/docs"]' &&
+    afterMove.oldGone &&
+    (await page.locator('[data-tree-path="/docs/notes.md"]').count()) === 0 &&
+    (await page.locator(".tab.is-active .tab-label").textContent()) === "notes" &&
+    (await page.locator(".ProseMirror h1").first().textContent())?.includes("Notes"),
+  JSON.stringify(afterMove),
+);
 
 /* 8 — the footer says Synced, in green, and its tooltip names the domain */
 await poll(async () => (await tid("sync-status").count()) === 1);
@@ -326,11 +351,11 @@ const firstPublish = await lastCall("cloud_publish");
 const publishedUrl = await tid("publish-url").textContent();
 step(
   "chip: Publish sends the note's path with no slug; the chip reads Live, the link is a random address, the sidebar row gets a dot",
-  firstPublish.args.path === "/docs/notes.md" &&
+  firstPublish.args.path === "/docs/Library/notes.md" &&
     firstPublish.args.slug === null &&
     /^notes\.example\.com\/[a-z0-9]{8}$/.test(publishedUrl) &&
     (await tid("publish-by").textContent()).includes("by you") &&
-    (await page.locator('[data-tree-path="/docs/notes.md"] [data-testid="tree-published"]').count()) === 1,
+    (await page.locator('[data-tree-path="/docs/Library/notes.md"] [data-testid="tree-published"]').count()) === 1,
   publishedUrl,
 );
 await page.screenshot({ path: SHOTS + "cloud-09-published.png" });
@@ -433,13 +458,18 @@ step(
     gone.reason.includes("Not found") &&
     updatingText === "Updating" &&
     updating.reason === "Your latest changes appear once synced." &&
-    updatingAfterSave,
+    updatingAfterSave &&
+    // The edit was saved where the note is now, and nothing at the top.
+    (await page.evaluate((from) => {
+      const since = window.__writes.slice(from);
+      return since.includes("/docs/Library/notes.md") && !since.includes("/docs/notes.md");
+    }, writesAtMove)),
   `${liveText} · ${staleText} · ${revokedText} · ${updatingText}`,
 );
 await page.screenshot({ path: SHOTS + "cloud-09b-chip.png" });
 
 /* 9c — the folder dialog from the sidebar */
-await page.locator('[data-tree-path="/docs/Projects"]').click({ button: "right" });
+await page.locator('[data-tree-path="/docs/Library/Projects"]').click({ button: "right" });
 await poll(async () => (await page.locator(".sidebar-menu-item", { hasText: "Publish folder…" }).count()) === 1);
 await page.locator(".sidebar-menu-item", { hasText: "Publish folder…" }).click();
 await poll(async () => (await dialog("Publish folder").count()) === 1);
@@ -450,12 +480,12 @@ await tid("folder-desc").fill("What we're building");
 await tid("folder-publish").click();
 await poll(async () => (await dialog("Publish folder").count()) === 0);
 const folderCall = await lastCall("cloud_publish");
-await poll(async () => (await page.locator('[data-tree-path="/docs/Projects"] [data-testid="tree-published"]').count()) === 1);
+await poll(async () => (await page.locator('[data-tree-path="/docs/Library/Projects"] [data-testid="tree-published"]').count()) === 1);
 step(
   "folder dialog: a slug suggested from the folder's name, the note count, title and description; Publish sends the folder's path; the folder row gets a dot",
   suggested === "projects" &&
     folderCount.includes("1 note") &&
-    folderCall.args.path === "/docs/Projects" &&
+    folderCall.args.path === "/docs/Library/Projects" &&
     folderCall.args.slug === "projects" &&
     folderCall.args.title === "Projects" &&
     folderCall.args.desc === "What we're building",
@@ -463,8 +493,8 @@ step(
 );
 
 /* 9d — a note inside the published folder: the pill knows its nested address */
-await page.locator('[data-tree-path="/docs/Projects"]').click(); // folders start closed
-await page.locator('[data-tree-path="/docs/Projects/plan.md"]').click();
+await page.locator('[data-tree-path="/docs/Library/Projects"]').click(); // folders start closed
+await page.locator('[data-tree-path="/docs/Library/Projects/plan.md"]').click();
 await poll(async () => (await page.locator(".ProseMirror h1").first().textContent())?.includes("Plan"));
 await poll(async () => (await tid("live-chip").getAttribute("data-state")) === "publish");
 await tid("live-chip").click();
@@ -504,7 +534,7 @@ await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Published pages").count()) === 0);
 
 /* 9f — the sidebar's Stop publishing is immediate and undoable */
-await page.locator('[data-tree-path="/docs/notes.md"]').click({ button: "right" });
+await page.locator('[data-tree-path="/docs/Library/notes.md"]').click({ button: "right" });
 await poll(async () => (await page.locator(".sidebar-menu-item", { hasText: "Stop publishing" }).count()) === 1);
 await page.locator(".sidebar-menu-item", { hasText: "Stop publishing" }).click();
 await poll(async () => (await lastCall("cloud_unpublish")).args.slug === "team-notes");
@@ -512,14 +542,14 @@ await poll(async () => (await page.locator(".toast").count()) === 1);
 const stopToast = await page.locator(".toast").textContent();
 await page.locator(".toast-btn", { hasText: "Undo" }).click();
 await poll(async () => (await lastCall("cloud_publish")).args.slug === "team-notes");
-await poll(async () => (await page.locator('[data-tree-path="/docs/notes.md"] [data-testid="tree-published"]').count()) === 1);
+await poll(async () => (await page.locator('[data-tree-path="/docs/Library/notes.md"] [data-testid="tree-published"]').count()) === 1);
 step(
   "sidebar: Stop publishing stops at once and the toast's Undo brings the page back under the same slug",
   stopToast.includes("Stopped publishing notes.md") &&
-    (await page.locator('[data-tree-path="/docs/Projects"] [data-testid="tree-published"]').count()) === 0,
+    (await page.locator('[data-tree-path="/docs/Library/Projects"] [data-testid="tree-published"]').count()) === 0,
   stopToast,
 );
-await page.locator('[data-tree-path="/docs/notes.md"]').click();
+await page.locator('[data-tree-path="/docs/Library/notes.md"]').click();
 await poll(async () => (await page.locator(".ProseMirror h1").first().textContent())?.includes("Notes"));
 await tid("sync-status").click();
 await poll(async () => (await dialog("Cloud").count()) === 1);
@@ -651,13 +681,13 @@ await poll(async () => (await dialog("Cloud").count()) === 0);
 
 /* 14 — a conflict copy: the toast's Open the copy opens it */
 await page.evaluate(() => {
-  window.__fs.set("/docs/notes (conflict — Bob, Jul 11 14.32).md", "# Conflict copy\n\nBob's side.\n");
+  window.__fs.set("/docs/Library/notes (conflict — Bob, Jul 11 14.32).md", "# Conflict copy\n\nBob's side.\n");
 });
 await emit("cloud-conflict", {
   root: "/docs",
-  path: "notes.md",
+  path: "Library/notes.md",
   by: "Bob",
-  conflictPath: "notes (conflict — Bob, Jul 11 14.32).md",
+  conflictPath: "Library/notes (conflict — Bob, Jul 11 14.32).md",
 });
 await poll(async () => (await page.locator(".toast").count()) === 1);
 const conflictToast = await page.locator(".toast").textContent();
@@ -683,8 +713,8 @@ step(
 
 /* 15 — cloud-applied refreshes the tree */
 await page.evaluate(() => window.__treeFiles.push("fresh.md"));
-await emit("cloud-applied", { root: "/docs", paths: ["fresh.md"] });
-await poll(async () => (await page.locator('[data-tree-path="/docs/fresh.md"]').count()) === 1);
+await emit("cloud-applied", { root: "/docs", paths: ["Library/fresh.md"] });
+await poll(async () => (await page.locator('[data-tree-path="/docs/Library/fresh.md"]').count()) === 1);
 step("cloud-applied: the tree picks up the file sync wrote", true);
 
 /* 16 — presence: a chip on the row being edited, and the panel's list. The
@@ -693,7 +723,7 @@ step("cloud-applied: the tree picks up the file sync wrote", true);
 await setStatuses([
   status({
     presence: [
-      { deviceId: "d-bob", memberId: "m-0000b0b0", name: "Bob Mbeki", device: "Bob's Air", path: "other.md", ts: Date.now() },
+      { deviceId: "d-bob", memberId: "m-0000b0b0", name: "Bob Mbeki", device: "Bob's Air", path: "Library/other.md", ts: Date.now() },
       { deviceId: "d-studio", memberId: "m-00000001", name: "Studio", device: "Studio", path: null, ts: Date.now() },
     ],
   }),
@@ -707,9 +737,9 @@ step(
   "presence: Bob Mbeki's face on other.md's row; the panel names the person, his Mac, and your own other Mac once",
   (await tid("tree-presence").textContent()) === "BM" &&
     (await tid("tree-presence").getAttribute("title")) === "Bob Mbeki — editing now" &&
-    chipRow === "/docs/other.md" &&
+    chipRow === "/docs/Library/other.md" &&
     hereNow.includes("Bob Mbeki") &&
-    hereNow.includes("on Bob's Air · editing other.md") &&
+    hereNow.includes("on Bob's Air · editing Library/other.md") &&
     hereNow.includes("Studio") &&
     !hereNow.includes("on Studio"),
 );
@@ -718,7 +748,7 @@ step(
    and then +N, the same person on two Macs once, the names on hover */
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Cloud").count()) === 0);
-await page.locator('[data-tree-path="/docs/notes.md"]').click();
+await page.locator('[data-tree-path="/docs/Library/notes.md"]').click();
 await poll(async () => (await page.locator(".tab.is-active .tab-label").textContent()) === "notes");
 const noFacesAlone = (await tid("note-facepile").count()) === 0;
 const here = (deviceId, name) => ({
@@ -726,7 +756,7 @@ const here = (deviceId, name) => ({
   memberId: `m-${name.split(" ")[0].toLowerCase()}`,
   name,
   device: `${name}'s Mac`,
-  path: "notes.md",
+  path: "Library/notes.md",
   ts: Date.now(),
 });
 await setStatuses([
@@ -737,7 +767,7 @@ await setStatuses([
       here("d-ana", "Ana Lima"),
       here("d-cy", "Cy"),
       here("d-dee", "Dee"),
-      { ...here("d-eve", "Eve"), path: "other.md" },
+      { ...here("d-eve", "Eve"), path: "Library/other.md" },
     ],
   }),
 ]);
@@ -760,21 +790,21 @@ step(
    and the path is the lease's lowercased key. */
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Cloud").count()) === 0);
-await page.locator('[data-tree-path="/docs/other.md"]').click();
+await page.locator('[data-tree-path="/docs/Library/other.md"]').click();
 await poll(async () => (await page.locator(".ProseMirror h1").first().textContent())?.includes("Other"));
 const editable = () => page.locator(".milkdown .ProseMirror").first().getAttribute("contenteditable");
 await poll(async () => (await editable()) === "true");
-const bobsLease = { path: "other.md", deviceId: "d-bob", memberId: "m-0000b0b0", name: "Bob Mbeki", device: "Bob's Air", own: false, until: Date.now() + 90_000 };
+const bobsLease = { path: "library/other.md", deviceId: "d-bob", memberId: "m-0000b0b0", name: "Bob Mbeki", device: "Bob's Air", own: false, until: Date.now() + 90_000 };
 await setStatuses([status({ leases: [bobsLease] })]);
 await poll(async () => (await tid("lease-banner").count()) === 1);
 await poll(async () => (await editable()) === "false");
 const leaseText = await tid("lease-banner-text").textContent();
 await page.screenshot({ path: SHOTS + "cloud-16-lease.png" });
-const before16b = await page.evaluate(() => window.__fs.get("/docs/other.md"));
+const before16b = await page.evaluate(() => window.__fs.get("/docs/Library/other.md"));
 await page.locator(".milkdown .ProseMirror").first().click();
 await page.keyboard.type("typed while held");
 await page.waitForTimeout(900);
-const after16b = await page.evaluate(() => window.__fs.get("/docs/other.md"));
+const after16b = await page.evaluate(() => window.__fs.get("/docs/Library/other.md"));
 await tid("lease-take-over").click();
 await poll(async () => (await tid("lease-banner").count()) === 0);
 await poll(async () => (await editable()) === "true");
@@ -784,14 +814,14 @@ await setStatuses([status({ leases: [{ ...bobsLease, deviceId: "d-studio", membe
 await poll(async () => (await tid("lease-banner").count()) === 1);
 const ownText = await tid("lease-banner-text").textContent();
 // A lease on some other document is not a lock on this one.
-await setStatuses([status({ leases: [{ ...bobsLease, path: "notes.md" }] })]);
+await setStatuses([status({ leases: [{ ...bobsLease, path: "library/notes.md" }] })]);
 await poll(async () => (await tid("lease-banner").count()) === 0);
 step(
   "leases: Bob's document opens view-only ('Bob Mbeki is editing — view only'), typing writes nothing, Take over hands it here; your own other Mac is named as one",
   leaseText === "Bob Mbeki is editing — view only" &&
     before16b === after16b &&
     take?.args.root === "/docs" &&
-    take?.args.path === "/docs/other.md" &&
+    take?.args.path === "/docs/Library/other.md" &&
     ownText === "Open on your other device, Studio — view only" &&
     (await editable()) === "true",
 );
@@ -834,8 +864,8 @@ await poll(async () => (await dialog("People, devices and agents").count()) === 
 await page.evaluate(() => {
   const midnight = new Date();
   midnight.setHours(0, 0, 0, 0);
-  window.__versions.histories["/docs/other.md"] = {
-    root: "/docs",
+  window.__versions.histories["/docs/Library/other.md"] = {
+    root: "/docs/Library",
     currentHash: "a".repeat(64),
     versions: [
       {
@@ -868,7 +898,7 @@ await page.evaluate(() => {
   };
   window.__versions.blobs["f".repeat(64)] = "# Other\n\nwritten on the iMac\n";
 });
-await page.locator('[data-tree-path="/docs/other.md"]').click({ button: "right" });
+await page.locator('[data-tree-path="/docs/Library/other.md"]').click({ button: "right" });
 await poll(async () => (await page.locator(".sidebar-menu-item", { hasText: "Version history" }).count()) === 1);
 await page.locator(".sidebar-menu-item", { hasText: "Version history" }).click();
 await poll(async () => (await tid("history-rail").count()) === 1);
@@ -886,7 +916,7 @@ const mirroredRead = await lastVersionCall("versions_read");
 const mirroredComparable = (await tid("show-changes").count()) === 1;
 await tid("restore-version").click();
 await poll(
-  async () => (await page.evaluate(() => window.__fs.get("/docs/other.md"))) === "# Other\n\nwritten on the iMac\n",
+  async () => (await page.evaluate(() => window.__fs.get("/docs/Library/other.md"))) === "# Other\n\nwritten on the iMac\n",
 );
 const cloudRestore = await lastVersionCall("versions_restore_file");
 step(
@@ -924,7 +954,7 @@ step(
 
 /* 20 — the bound outcome with this folder's marker: Resume syncing this folder */
 await setCloud({
-  marker: { domain: "notes.example.com", wsId: "w-1" },
+  marker: { domain: "notes.example.com", wsId: "w-1", layout: "library" },
   probe: {
     workerVersion: WORKER_VERSION,
     bundledVersion: WORKER_VERSION,
@@ -1240,7 +1270,7 @@ const joinDoor = (await tid("sidebar-menu-join").textContent()).trim();
 await page.screenshot({ path: SHOTS + "cloud-09b-switcher.png" });
 await tid("sidebar-menu-workspace").filter({ hasText: "Team docs" }).click();
 await poll(async () => (await page.locator(".sidebar-header-name").textContent()) === "Team docs");
-await poll(async () => (await page.locator('[data-tree-path="/docs/other.md"]').count()) === 1);
+await poll(async () => (await page.locator('[data-tree-path="/docs/Library/other.md"]').count()) === 1);
 step(
   "switcher: the menu lists this Mac's workspaces by name with the open one ticked and Join a workspace… under them; picking another opens it",
   wsListed.some((t) => t.endsWith("Notes")) &&
@@ -1488,11 +1518,13 @@ await tid("tab-agents").click();
 const promptKept = (await tid("agent-prompt").isVisible()) && (await tid("agent-prompt").textContent()) === prompt;
 const LOGIN_1 = "doklin login https://notes.example.com dkla-7QK2M-9XVR4-8TBHN-3WGYD";
 step(
-  "Agents: their own tab, the door above the list; the list is your own agents, naming what each may do and where it is logged in, and an owner is shown other people's under it — whose each is, to log out or remove and nothing else; a new one starts without publishing, reading fixed; what is handed over is one short prompt — what Doklin is, install, login, what the address is, and that new work goes under Private/ — copied by one button, shown once, and kept through a look at the other tab",
+  "Agents: their own tab, the door above the list; the list is your own agents, naming what each may do and where it is logged in, and an owner is shown other people's under it — whose each is, to log out or remove and nothing else; a new one starts without publishing, reading fixed; what is handed over is one short prompt — what Doklin is, install, login, what the address is, that every path starts with its section and that new work goes under Private/ — copied by one button, shown once, and kept through a look at the other tab",
   agentsTab &&
     bobsHelperIsHis &&
-    (await tid("agents-intro").textContent()).includes("it sees what you see") &&
-    prompt.includes("Put anything new under `Private/`") &&
+    (await tid("agents-intro").textContent()).includes("it sees what you see — Library, your Private, the restricted folders you are in") &&
+    prompt.includes(
+      "Every path starts with its section: `Library/` is what everyone sees, `Private/` only them, `Restricted/<folder>/` that folder's people. Put anything new under `Private/` unless they tell you where it goes.",
+    ) &&
     reviewBot.includes("Review bot") &&
     reviewBot.includes("read · comment") &&
     !reviewBot.includes("can publish") &&

@@ -108,7 +108,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "ls",
         usage: "doklin ls [folder] [--deep]",
-        about: "What a folder holds: its folders and its documents, with their versions. --deep lists everything beneath it.",
+        about: "What a folder holds: its folders and its documents, with their versions. --deep lists everything beneath it. With no folder, the sections this agent can see.",
         accepts: Accepts { values: &[], switches: &["deep"] },
         run: commands::ls,
     },
@@ -171,7 +171,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "mv",
         usage: "doklin mv <from> <to>",
-        about: "Move or rename a document (both versions and its comments) or a folder. A destination that is a folder means into it. Moving between Private/, a restricted folder and what is shared changes who can see it.",
+        about: "Move or rename a document (both versions and its comments) or a folder. A destination that is a folder or a section means into it. Moving between Library/, Private/ and a restricted folder changes who can see it.",
         accepts: Accepts { values: &[], switches: &[] },
         run: commands::mv,
     },

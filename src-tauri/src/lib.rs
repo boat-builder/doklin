@@ -236,6 +236,36 @@ fn persist_session(app: &AppHandle) {
     }
 }
 
+/// A one-time stored-data migration: the workspaces `engine::init` has just
+/// moved into the Library layout hold their shared files under `Library/`
+/// now, so a saved tab under one of them follows its file
+/// (`layout::moved_rel`). Runs on the session the launch is about to restore,
+/// before it is read. Window folders stay: a window still shows the
+/// workspace.
+fn move_session_paths(app: &AppHandle, moved: &[String]) {
+    if moved.is_empty() {
+        return;
+    }
+    let Some(path) = session_path(app) else { return };
+    let mut session = read_persisted_session(app);
+    for tab in session.windows.iter_mut().flat_map(|w| w.content.tabs.iter_mut()) {
+        if tab.kind != TabKind::File {
+            continue;
+        }
+        let under = moved.iter().find_map(|root| {
+            let rel = Path::new(&tab.path).strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
+            Some(Path::new(root).join(doklin_engine::cloud::layout::moved_rel(&rel)))
+        });
+        if let Some(now) = under {
+            tab.path = now.to_string_lossy().to_string();
+        }
+    }
+    let Ok(json) = serde_json::to_string_pretty(&session) else { return };
+    if let Err(e) = std::fs::write(&path, json) {
+        eprintln!("failed to rewrite the session's tabs: {}", e);
+    }
+}
+
 /// Refreshes the registry's frame snapshot for `label` from the live window.
 /// Fullscreen and minimized frames are skipped — restoring those transient
 /// coordinates would pin the window to a state it shouldn't reopen in. Runs on
@@ -1827,8 +1857,10 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             // The cloud engines start with the app: one per connected
-            // workspace, from cloud.json.
-            engine::init(&handle);
+            // workspace, from cloud.json, each folder moved into the Library
+            // layout first, and the saved tabs under it with it.
+            let moved = engine::init(&handle);
+            move_session_paths(&handle, &moved);
             // The versioners start with it too: one per open folder.
             // `reconcile` starts the rest as windows report in.
             engine::init_versions(&handle);

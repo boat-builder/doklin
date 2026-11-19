@@ -20,9 +20,9 @@
 // file's: a person in a browser makes the same ones (changes.ts).
 //
 // A call is answered in the section its path is in (agentPlace.ts), with
-// every path under the folder that section is at. Two routes look at more
-// than one: a listing of the workspace itself, or of `Restricted`, and a move
-// from one section to another.
+// every path under the folder that section is at. Three routes look at more
+// than one: a listing or a search of the workspace itself, or of
+// `Restricted`, and a move from one section to another.
 
 import { change, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
 import type { Section } from "./agentPlace";
@@ -82,15 +82,11 @@ export async function getTree(c: Call): Promise<Response> {
   const { url, places } = c;
   const dir = (url.searchParams.get("dir") ?? "").replace(/^\/+|\/+$/g, "");
   const deep = url.searchParams.get("deep") === "1";
-  if (dir) {
-    const problem = pathProblem(dir);
-    if (problem) return json({ error: problem }, 400);
-  }
-  const at = dir === "" ? null : await places.at(dir);
+  const at = await places.at(dir);
   if (at instanceof Refusal) return refuse(at);
 
-  // A folder of one section — which the shared workspace's own are.
-  if (at && at !== "restricted") {
+  // A folder of one section, the section's own included.
+  if (at !== "workspace" && at !== "restricted") {
     const tree = await openTree(inSection(c, at));
     if (!tree) return notBound();
     const listing = listTree(tree.manifest, dir, deep);
@@ -101,31 +97,29 @@ export async function getTree(c: Call): Promise<Response> {
   }
 
   // The workspace itself, or `Restricted`: what is in more than one section.
+  // At the top that is the sections this person has, and nothing else.
+  if (at === "workspace" && !(await readWorkspace(c.env))) return notBound();
   const all = await places.all();
   if (all === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
-  const sections = all.filter((s) => (at === "restricted" ? s.kind === "restricted" : s.kind !== "shared"));
-  let listing: Listing = { dir, folders: [], documents: [] };
-  if (at === null) {
-    const tree = await openTree(c);
-    if (!tree) return notBound();
-    listing = listTree(tree.manifest, "", deep);
-    // The two folders a workspace keeps for itself, when there is something
-    // behind them for this person.
-    for (const s of sections) {
-      const top = s.mount.split("/")[0];
-      if (!listing.folders.includes(top)) listing.folders.push(top);
-    }
-  }
+  const sections = all.filter((s) => at === "workspace" || s.kind === "restricted");
+  const listing: Listing = { dir, folders: [], documents: [] };
   const notListed: string[] = [];
-  for (const [i, s] of sections.entries()) {
+  let opened = 0;
+  for (const s of sections) {
+    const top = s.mount.split("/")[0];
+    if (at === "workspace" && !listing.folders.includes(top)) listing.folders.push(top);
     if ((at === "restricted" || deep) && !listing.folders.includes(s.mount)) listing.folders.push(s.mount);
     if (!deep) continue;
-    if (i >= MAX_SECTIONS_READ) {
+    // Library is one read like the others; the rest are what a request opens.
+    if (s.kind !== "shared" && (opened += 1) > MAX_SECTIONS_READ) {
       notListed.push(s.mount);
       continue;
     }
     const tree = await openTree(inSection(c, s));
-    if (!tree) continue;
+    if (!tree) {
+      if (s.kind === "shared") return notBound();
+      continue;
+    }
     const inside = listTree(tree.manifest, s.mount, true);
     listing.folders.push(...inside.folders);
     listing.documents.push(...inside.documents);
@@ -183,14 +177,10 @@ export async function getSearch(c: Call): Promise<Response> {
   const dir = (url.searchParams.get("dir") ?? "").replace(/^\/+|\/+$/g, "");
   const ask = askOf(url.searchParams, dir);
   if (ask instanceof Refusal) return refuse(ask);
-  if (dir) {
-    const problem = pathProblem(dir);
-    if (problem) return json({ error: problem }, 400);
-  }
-  const at = dir === "" ? null : await places.at(dir);
+  const at = await places.at(dir);
   if (at instanceof Refusal) return refuse(at);
   let sections: Section[];
-  if (at && at !== "restricted") {
+  if (at !== "workspace" && at !== "restricted") {
     sections = [at];
   } else {
     const all = await places.all();
@@ -582,13 +572,13 @@ export async function postMove(c: Call): Promise<Response> {
   const [source, dest] = [await c.places.of(rawFrom), await c.places.of(rawTo)];
   if (source instanceof Refusal) return refuse(source);
   if (dest instanceof Refusal) return refuse(dest);
-  if (source.mount !== "" && sameName(from, source.mount)) {
+  if (sameName(from, source.mount)) {
     return json({ error: `${source.mount} is a section of this workspace, not a folder to move — move what is in it` }, 400);
   }
   // What was typed says what is meant, as `mv` reads it: a trailing slash
   // names a folder, and a destination that is a folder means "into it".
   const what = rawFrom.endsWith("/") ? "folder" : "either";
-  const intoSection = dest.mount !== "" && sameName(to, dest.mount);
+  const intoSection = sameName(to, dest.mount);
 
   if (source.space !== dest.space) {
     const into = (there: Index): boolean => rawTo.endsWith("/") || there.isFolder(to) || intoSection;

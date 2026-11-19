@@ -12,7 +12,7 @@
 // it (`onSubmit`), and answers with a sentence when it could not.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type CloudMember, type CloudStatus } from "./cloud";
+import { placeOf, relPathIn, type CloudMember, type CloudStatus } from "./cloud";
 import Avatar from "./Avatar";
 import { useDismiss } from "./dismiss";
 import type { CloudAccess } from "./backend";
@@ -86,6 +86,10 @@ export default function RestrictedFolder({
       : source.kind === "folder"
         ? `Restrict access to “${basename(source.path)}”`
         : `Share “${stemOf(source.path)}”`;
+  // A folder is made restricted from Library or Private, and its versions
+  // from before stay in that one's history.
+  const fromRel = source.kind === "folder" ? relPathIn(cloud.root, source.path) : null;
+  const fromSection = fromRel !== null && placeOf(cloud, fromRel).kind === "private" ? "Private" : "Library";
   const trimmed = name.trim();
   // A note is shared *with* somebody; a folder may start with only its maker.
   const ready = trimmed.length > 0 && (source.kind !== "note" || picked.size > 0);
@@ -129,7 +133,7 @@ export default function RestrictedFolder({
             {source.kind === "new" &&
               "A restricted folder is only on the devices of the people in it. Nobody else in the workspace sees it, or that it exists."}
             {source.kind === "folder" &&
-              "It becomes a restricted folder: only the people you pick keep it, and it is removed from everyone else’s devices. Versions from before stay in the workspace’s history until they age out."}
+              `It becomes a restricted folder: only the people you pick keep it, and it is removed from everyone else’s devices. Versions from before stay in ${fromSection}’s history until they age out.`}
             {source.kind === "note" &&
               "The note moves into a new restricted folder that holds you and the people you pick. Nobody else sees it."}
           </p>

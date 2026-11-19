@@ -3020,7 +3020,8 @@ body.sidebar-resizing {
   background: var(--hover);
 }
 
-/* Dropping on empty space = move to the workspace root: ring the whole tree. */
+/* Dropping on empty space in a folder that is not connected = move to its
+   top: ring the whole tree. */
 .sidebar-body.is-drop-root {
   box-shadow: inset 0 0 0 1.5px var(--accent);
   border-radius: 8px;

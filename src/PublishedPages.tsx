@@ -1,5 +1,5 @@
-// Every published page you can open — from the shared workspace, your
-// Private and the restricted folders you are in:
+// Every published page you can open — from Library, your Private and the
+// restricted folders you are in:
 // folders above files (the engine's order), path · slug · by / when, copy /
 // open / stop, "Use as home page", and a "file missing" flag on an entry
 // whose file is gone (the page 404s until the file returns or the entry is
@@ -121,9 +121,9 @@ export default function PublishedPages({
     }
   }, []);
 
-  const abs = (page: PublicPage) => (page.path ? `${cloud.root}/${page.path}` : cloud.root);
+  const abs = (page: PublicPage) => `${cloud.root}/${page.path}`;
   const nameOf = (page: PublicPage) =>
-    page.title?.trim() || (page.kind === "dir" ? basename(page.path) || cloud.name : stemOf(page.path));
+    page.title?.trim() || (page.kind === "dir" ? basename(page.path) : stemOf(page.path));
   const pages = cloud.public;
   // The ones published from a section this Mac's person is not in.
   const elsewhere = (every?.pages ?? []).filter((p) => !p.shared && !pages.some((mine) => mine.slug === p.slug));
@@ -168,7 +168,7 @@ export default function PublishedPages({
                       )}
                     </div>
                     <div className="published-row-sub">
-                      {page.path || "the whole workspace"} · /{page.slug} · {page.by || "someone"} · {timeAgo(page.at, now)}
+                      {page.path} · /{page.slug} · {page.by || "someone"} · {timeAgo(page.at, now)}
                     </div>
                     <div className="published-row-actions">
                       <button className="modal-btn" onClick={() => void copy(page.slug, url)}>

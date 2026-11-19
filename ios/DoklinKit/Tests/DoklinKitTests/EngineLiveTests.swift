@@ -5,7 +5,8 @@
 //
 // One journey, because the engine is one per process and a device code
 // works once: join as a device through the models the screens use, hold the
-// whole workspace locally, sync a change up, and leave.
+// whole workspace locally — its shared files in `Library/` — sync a change
+// up, and leave.
 
 import XCTest
 @testable import DoklinKit
@@ -39,7 +40,8 @@ final class EngineLiveTests: XCTestCase {
         defer { try? fm.removeItem(at: container) }
         let data = container.appendingPathComponent("Library/Application Support/Doklin")
         let keychain = MemorySecretStore()
-        let device = Workspaces(remembered: UserDefaults(suiteName: "doklin-test-\(UUID().uuidString)")!)
+        let remembered = try XCTUnwrap(UserDefaults(suiteName: "doklin-test-\(UUID().uuidString)"))
+        let device = Workspaces(remembered: remembered)
         device.start(EngineSetup(
             secrets: keychain,
             dataDirectory: data,
@@ -77,9 +79,11 @@ final class EngineLiveTests: XCTestCase {
         XCTAssertEqual(device.selected, root)
         let workspace = device.workspace(root)
 
-        let home = try workspace.files.text("Home.md")
+        // What everyone has is in Library; nothing shared is at the top.
+        let home = try workspace.files.text("Library/Home.md")
         XCTAssertTrue(home.hasPrefix("# Home"), home)
-        XCTAssertTrue(workspace.files.exists("Projects/Roadmap/Ship the boat.md"))
+        XCTAssertTrue(workspace.files.exists("Library/Projects/Roadmap/Ship the boat.md"))
+        XCTAssertEqual(try workspace.files.list("").filter { TreeSection.of(top: $0) == .nowhere }, [], "a stray at the top")
         try await synced(device, root)
 
         // The sign-in is in the keeper, by workspace id, and nowhere on disk;
@@ -87,6 +91,10 @@ final class EngineLiveTests: XCTestCase {
         // container.
         let status = try XCTUnwrap(device.status(root))
         XCTAssertEqual(keychain.keys, [status.wsId])
+        // Joined in the Library layout, so what this iPhone keeps by path is
+        // never moved again.
+        XCTAssertTrue(Workspaces.inLibraryLayout(root))
+        XCTAssertEqual(remembered.stringArray(forKey: "moved-into-library"), [status.wsId])
         let cloud = try String(contentsOf: data.appendingPathComponent("cloud.json"), encoding: .utf8)
         XCTAssertFalse(cloud.contains(container.path), cloud)
         XCTAssertTrue(cloud.contains("\"Documents/"), cloud)
@@ -95,18 +103,20 @@ final class EngineLiveTests: XCTestCase {
 
         // A folder reads as the Mac's sidebar shows it: a page beside its
         // note is that note's, and comment files are nobody's row.
-        let projects = try workspace.files.list("Projects")
-        XCTAssertTrue(projects.contains(.folder("Projects/Roadmap")))
-        let plan = projects.first { $0.path == "Projects/plan.md" }
+        let projects = try workspace.files.list("Library/Projects")
+        XCTAssertTrue(projects.contains(.folder("Library/Projects/Roadmap")))
+        let plan = projects.first { $0.path == "Library/Projects/plan.md" }
         guard case .document(let row) = plan else { return XCTFail("the plan is not a document: \(projects)") }
-        XCTAssertEqual(row.html, "Projects/plan.html")
-        XCTAssertFalse(try workspace.files.list("").contains { $0.path.hasSuffix(".meta.jsonl") })
+        XCTAssertEqual(row.html, "Library/Projects/plan.html")
+        XCTAssertFalse(try workspace.files.list("Library").contains { $0.path.hasSuffix(".meta.jsonl") })
 
-        // A note made here reaches the domain: write it, say so, sync.
+        // A note made here reaches the domain: write it, say so, sync. New
+        // things land in Library, where everyone sees them.
         let before = try XCTUnwrap(device.status(root)?.lastSyncMs)
-        let folder = FolderModel(workspace: workspace, dir: "")
+        let folder = FolderModel(workspace: workspace, dir: TreeModel.libraryFolder)
+        XCTAssertEqual(folder.whoSeesNew, "Everyone in \(workspace.name) will see it.")
         let made = try await folder.createNote(named: "From the phone")
-        XCTAssertEqual(made, "From the phone.md")
+        XCTAssertEqual(made, "Library/From the phone.md")
         let note = DocumentModel(workspace: workspace, path: made)
         note.load()
         try await note.save("# From the phone\n\nWritten on a device.\n\n- [ ] a box to tick\n", over: "# From the phone\n\n")
@@ -118,8 +128,8 @@ final class EngineLiveTests: XCTestCase {
         // Search reads this copy.
         let search = SearchModel(workspace: workspace)
         await search.run("written on a device")
-        XCTAssertEqual(search.results.map(\.path), ["From the phone.md"])
-        XCTAssertEqual(search.inText.map(\.path), ["From the phone.md"], "found by its words, not its name")
+        XCTAssertEqual(search.results.map(\.path), [made])
+        XCTAssertEqual(search.inText.map(\.path), [made], "found by its words, not its name")
 
         // Home: what changed, newest first — the note made here, by this
         // person — and the seed's documents, by the people who wrote them.
@@ -129,7 +139,7 @@ final class EngineLiveTests: XCTestCase {
         XCTAssertEqual(mine.who, "You")
         XCTAssertTrue(mine.byMe)
         XCTAssertFalse(mine.unread, "your own change is never unread")
-        XCTAssertTrue(recent.all.contains { $0.path == "Projects/plan.md" && $0.html == "Projects/plan.html" }, "the plan and its page, one row")
+        XCTAssertTrue(recent.all.contains { $0.path == "Library/Projects/plan.md" && $0.html == "Library/Projects/plan.html" }, "the plan and its page, one row")
         XCTAssertEqual(recent.all.map(\.changed), recent.all.map(\.changed).sorted(by: >), "newest first")
         await note.shown()
         XCTAssertNotNil(workspace.lastRead(made).seen, "shown, so read")
@@ -198,8 +208,11 @@ final class EngineLiveTests: XCTestCase {
         XCTAssertNil(access.problem)
         XCTAssertFalse(workspace.files.exists(folderPath))
 
-        // The folder has a history of its own.
-        XCTAssertTrue(device.versions.contains { $0.root == root && $0.snapshots >= 1 }, "\(device.versions.map(\.root))")
+        // Library has a history of its own; the workspace's root, which
+        // holds the sections, has none.
+        XCTAssertTrue(device.versions.contains { $0.root == workspace.libraryStore && $0.snapshots >= 1 }, "\(device.versions.map(\.root))")
+        XCTAssertFalse(device.versions.contains { $0.root == root }, "\(device.versions.map(\.root))")
+        XCTAssertEqual(device.stores(of: workspace).first, workspace.libraryStore)
 
         // A note's history keeps what was typed here once it is opened; an
         // older version reads, compares and goes back, and the restore undoes.
@@ -222,45 +235,51 @@ final class EngineLiveTests: XCTestCase {
         try await VersionReader.undo(outcome, of: older, in: workspace)
         XCTAssertEqual(try workspace.files.text(made), "# From the phone\n\nA second thought.\n")
 
-        // The workspace's moments start where this device joined; restoring
-        // that one would take away the note made since.
-        let timeline = WorkspaceTimeline(workspace: workspace, store: root)
+        // Library's moments start where this device joined; restoring that
+        // one would take away the note made since. A moment's paths are
+        // Library's own, without its name.
+        let library = workspace.libraryStore
+        let inLibrary = "From the phone.md"
+        XCTAssertEqual(workspace.path(inLibrary, in: library), made)
+        let timeline = WorkspaceTimeline(workspace: workspace, store: library)
         await timeline.load()
         let joined = try XCTUnwrap(timeline.moments.last)
         XCTAssertEqual(joined.reason, "seed")
-        let restoring = MomentPlan(workspace: workspace, store: root, moment: joined)
+        let restoring = MomentPlan(workspace: workspace, store: library, moment: joined)
         await restoring.load()
-        XCTAssertTrue(restoring.rows.contains(PlanRow(path: made, kind: .isRemoved)), "\(restoring.rows)")
+        XCTAssertTrue(restoring.rows.contains(PlanRow(path: inLibrary, kind: .isRemoved)), "\(restoring.rows)")
 
         // Restoring that row alone removes the note outright — this device
         // has no Trash — and keeps the moment before it for good, so the note
         // stays under Recently deleted; the undo brings it back as it was.
-        for row in restoring.rows where row.path != made { restoring.toggle(row.path) }
-        XCTAssertEqual(restoring.scope(all: false), [PlanRow(path: made, kind: .isRemoved)])
+        for row in restoring.rows where row.path != inLibrary { restoring.toggle(row.path) }
+        XCTAssertEqual(restoring.scope(all: false), [PlanRow(path: inLibrary, kind: .isRemoved)])
         XCTAssertEqual(restoring.question(all: false), "Remove 1?")
         let (report, paths) = try await restoring.restore(all: false)
         XCTAssertEqual(report.trashed, 1)
         XCTAssertEqual(report.written, 0)
-        XCTAssertEqual(paths, [made])
+        XCTAssertEqual(paths, [inLibrary])
         XCTAssertFalse(workspace.files.exists(made))
         let preRestore = try XCTUnwrap(report.preRestoreTs)
         await timeline.load()
         XCTAssertTrue(timeline.moments.contains { $0.ts == preRestore && $0.pinned }, "\(timeline.moments)")
         let removed = RecentlyDeleted(workspace: workspace)
         await removed.load(stores: device.stores(of: workspace))
-        XCTAssertTrue(removed.documents.contains { $0.primary.path == made }, "\(removed.documents)")
-        try await MomentPlan.undo(report, paths: paths, store: root)
+        XCTAssertTrue(removed.documents.contains { $0.store == library && $0.primary.path == inLibrary }, "\(removed.documents)")
+        try await MomentPlan.undo(report, paths: paths, store: library)
         XCTAssertEqual(try workspace.files.text(made), "# From the phone\n\nA second thought.\n")
 
-        // A note removed here is under Recently deleted, and comes back where it was.
-        let ideas = try XCTUnwrap(try workspace.files.list("").first { $0.path == "Ideas.md" })
+        // A note removed here is under Recently deleted, and comes back where
+        // it was: into Library, the store's own folder.
+        let ideas = try XCTUnwrap(try workspace.files.list("Library").first { $0.path == "Library/Ideas.md" })
         try await folder.remove(ideas)
         let deleted = RecentlyDeleted(workspace: workspace)
         await deleted.load(stores: device.stores(of: workspace))
         let gone = try XCTUnwrap(deleted.documents.first { $0.primary.path == "Ideas.md" }, "\(deleted.documents)")
+        XCTAssertEqual(deleted.place(of: gone), "Library")
         let back = try await gone.bringBack(in: workspace)
-        XCTAssertEqual(back, "Ideas.md")
-        XCTAssertTrue(try workspace.files.text("Ideas.md").hasPrefix("# Ideas"))
+        XCTAssertEqual(back, "Library/Ideas.md")
+        XCTAssertTrue(try workspace.files.text("Library/Ideas.md").hasPrefix("# Ideas"))
 
         // Leaving ends the sign-in and takes the copy, and the keeper's
         // sign-in, with it.

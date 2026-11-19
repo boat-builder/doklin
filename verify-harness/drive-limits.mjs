@@ -108,21 +108,28 @@ const closePanel = async () => {
   await poll(async () => (await dialog("Cloud").count()) === 0);
 };
 
-/* 1 — a file Doklin does not sync: its greyed row says so once the workspace is connected */
+/* 1 — a file Doklin does not sync: its greyed row says so once the workspace
+   is connected — which moves the folder's files into Library (the engine's
+   move, as the stub plays it) */
 await poll(async () => (await page.locator('[data-tree-path="/docs/other.md"]').count()) === 1);
 // The sidebar lists every file, so a non-document shows as a greyed row.
 await page.locator(".sidebar-header-button").click();
 await page.locator(".sidebar-menu-item", { hasText: "Show all files" }).click();
 await poll(async () => (await page.locator('[data-tree-path="/docs/photo.png"]').count()) === 1);
 const rowBefore = await page.locator('[data-tree-path="/docs/photo.png"]').getAttribute("title");
+await page.evaluate(() => window.__moveIntoLibrary("/docs"));
 await setStatuses([status()]);
 await poll(async () => (await tid("sync-status").count()) === 1);
-const rowAfter = await page.locator('[data-tree-path="/docs/photo.png"]').getAttribute("title");
+// What sync applies is what redraws the tree.
+await page.evaluate(() => window.__emit("cloud-applied", { root: "/docs", paths: [] }));
+const photo = page.locator('[data-tree-path="/docs/Library/photo.png"]');
+await poll(async () => (await photo.count()) === 1);
+const rowAfter = await photo.getAttribute("title");
 step(
   "greyed row: stays on this Mac once connected (and says Doklin can't open it before)",
   rowBefore.includes("Doklin can’t open this file type") &&
     rowAfter === "Stays on this Mac — Doklin syncs markdown and html" &&
-    ((await page.locator('[data-tree-path="/docs/photo.png"]').getAttribute("class")) ?? "").includes("is-unsupported"),
+    ((await photo.getAttribute("class")) ?? "").includes("is-unsupported"),
   `${rowBefore} / ${rowAfter}`,
 );
 
@@ -277,7 +284,7 @@ await closePanel();
 
 /* 7 — many new documents: the notice asks with both answers; Not now */
 await setStatuses([status({ phase: "pending-adds", pendingAdds: 212 })]);
-await emit("cloud-pending-adds", { root: "/docs", count: 212, folders: [{ path: "Projects/foo", count: 212 }] });
+await emit("cloud-pending-adds", { root: "/docs", count: 212, folders: [{ path: "Library/Projects/foo", count: 212 }] });
 await poll(async () => (await page.locator(".toast").count()) === 1);
 const addsToast = await page.locator(".toast .toast-text").textContent();
 const addsButtons = (await page.locator(".toast .toast-btn").allTextContents()).map((t) => t.trim());
@@ -288,8 +295,8 @@ await page.locator(".toast-btn", { hasText: "Not now" }).click();
 await poll(async () => (await calls("cloud_confirm_adds")).length === 1);
 const notNow = (await calls("cloud_confirm_adds"))[0].args;
 step(
-  "many new documents: the notice asks '212 new documents appeared in Projects/foo. Sync them?' with Sync them / Not now; the footer asks too; Not now answers sync: false",
-  addsToast === "212 new documents appeared in Projects/foo. Sync them?" &&
+  "many new documents: the notice asks '212 new documents appeared in Library/Projects/foo. Sync them?' with Sync them / Not now; the footer asks too; Not now answers sync: false",
+  addsToast === "212 new documents appeared in Library/Projects/foo. Sync them?" &&
     addsButtons.join("|") === "Sync them|Not now" &&
     addsFooter.text === "212 new documents — Sync them?" &&
     addsFooter.tone === "is-warn" &&
@@ -301,10 +308,12 @@ step(
 
 /* 8 — asked again across three folders: the panel lists them, Sync them
    there answers, and the notice goes with the question */
+// Grouped two levels below a section's folder; the files straight in
+// Library are Library's.
 const FOLDERS = [
-  { path: "Projects/foo", count: 150 },
-  { path: "Projects/bar", count: 40 },
-  { path: "", count: 22 },
+  { path: "Library/Projects/foo", count: 150 },
+  { path: "Library/Projects/bar", count: 40 },
+  { path: "Library", count: 22 },
 ];
 await setStatuses([status({ phase: "pending-adds", pendingAdds: 212 })]);
 await emit("cloud-pending-adds", { root: "/docs", count: 212, folders: FOLDERS });
@@ -320,10 +329,10 @@ await poll(async () => (await calls("cloud_confirm_adds")).length === 2);
 const syncThem = (await calls("cloud_confirm_adds"))[1].args;
 await poll(async () => (await tid("pending-adds").count()) === 0);
 step(
-  "asked again: 'in 3 folders' on the notice and the card, each folder listed (the top by the workspace's name); Sync them answers sync: true and the notice leaves",
+  "asked again: 'in 3 folders' on the notice and the card, each folder listed by its path (Library's own files as Library); Sync them answers sync: true and the notice leaves",
   threeToast === "212 new documents appeared in 3 folders. Sync them?" &&
     addsCard.startsWith("212 new documents appeared in 3 folders. Sync them?") &&
-    listed.join("|") === "Projects/foo — 150|Projects/bar — 40|docs — 22" &&
+    listed.join("|") === "Library/Projects/foo — 150|Library/Projects/bar — 40|Library — 22" &&
     syncThem.sync === true &&
     (await holds(async () => (await page.locator(".toast").count()) === 0)),
   `${threeToast} | ${listed.join(" · ")}`,

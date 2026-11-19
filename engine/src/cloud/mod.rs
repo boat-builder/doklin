@@ -17,6 +17,7 @@
 //! flows.rs      bind + upload, download, wipe — generic, tested
 //! invite.rs     the invite code and the paste blob — the grammar, and the
 //!               only place a code is ever in the clear
+//! layout.rs     the Library layout, and each device's one move into it
 //! link.rs       a link to a page — the grammar of what *Copy link* copies
 //! merge.rs      the three-way merge and conflict copies
 //! pace.rs       the request counter, the daily allowances, the bulk lane
@@ -34,6 +35,7 @@ pub mod config;
 mod engine;
 mod flows;
 pub mod invite;
+pub mod layout;
 pub mod link;
 pub mod manifest;
 mod merge;
@@ -113,12 +115,21 @@ pub fn device_name(core: &Core) -> String {
 }
 
 /// The folders inside the workspace at `root` that are sections of their
-/// own — this person's Private and the restricted folders they are in — by
-/// what the folders themselves say. Empty for a folder that is not a
-/// connected workspace.
+/// own — Library, once the folder is in the Library layout, this person's
+/// Private and the restricted folders they are in — by what the folders
+/// themselves say. Empty for a folder that is not a connected workspace.
 pub(crate) fn section_roots(root: &Path) -> Vec<PathBuf> {
     let Some(marker) = read_marker(root) else { return Vec::new() };
-    space::held(root, &marker.ws_id).into_iter().map(|held| held.dir).collect()
+    let library = marker.moved().then(|| space::top(root, space::LIBRARY_DIR));
+    library.into_iter().chain(space::held(root, &marker.ws_id).into_iter().map(|held| held.dir)).collect()
+}
+
+/// Whether the folder at `root` keeps a version store of its own: every
+/// folder but a connected workspace that has begun its move into the Library
+/// layout. Once it has, each section keeps one (`section_roots`), and the
+/// folder's root none — while it moves, not even that.
+pub(crate) fn keeps_own_versions(root: &Path) -> bool {
+    read_marker(root).is_none_or(|marker| marker.layout.is_none())
 }
 
 /* ---------- The manager ---------- */
@@ -169,8 +180,11 @@ pub fn connected_roots(data_dir: &Path, secrets: Option<&dyn crate::Secrets>) ->
 }
 
 /// Called once as the app boots: load cloud.json, mint a device identity
-/// on first run, spawn an engine per connected workspace.
-pub fn init(core: &Arc<Core>) {
+/// on first run, move each connected folder into the Library layout if it
+/// is not in it yet, spawn an engine per connected workspace. Answers the
+/// folders that moved just now, so the app can rewrite the paths it stored
+/// under them (the move's `layout::moved_rel`).
+pub fn init(core: &Arc<Core>) -> Vec<String> {
     let data_dir = core.data_dir.clone();
     let _ = std::fs::create_dir_all(&data_dir);
 
@@ -187,11 +201,21 @@ pub fn init(core: &Arc<Core>) {
         focus: HashMap::new(),
         removed: Vec::new(),
     };
+    let mut moved = Vec::new();
     for ws in &file.workspaces {
+        // Before its engine starts, and before anything versions the folder
+        // (`versions::init` runs after this): nothing may watch a move. A
+        // move that fails leaves the engine refusing to sync, and saying why
+        // (`layout::ready`).
+        let root = Path::new(&ws.root);
+        if matches!(layout::begin(root), Ok(true)) && layout::finish(root, &inner.data_dir).is_ok() {
+            moved.push(ws.root.clone());
+        }
         spawn_engine(core, &mut inner, ws);
     }
 
     *core.cloud.lock().unwrap() = Some(inner);
+    moved
 }
 
 /// A recursive watcher on `root` (external editors, git, Finder): any
@@ -350,13 +374,16 @@ async fn delete_copy(core: &Arc<Core>, entry: &WorkspaceEntry) -> bool {
     let data_dir = core.data_dir.clone();
     let root = PathBuf::from(&entry.root);
     // Found while the folder still exists: a store's key is the folder's
-    // canonical path. Each section inside it has a store of its own.
+    // canonical path. Each section inside it has a store of its own, and a
+    // folder that never moved into the Library layout has one at its root.
     let store_dir = crate::versions::store_for_root(&data_dir, &root).dir;
-    let sections: Vec<(String, PathBuf)> = space::held(&root, &entry.ws_id)
+    let library = read_marker(&root).filter(|marker| marker.moved()).map(|_| space::top(&root, space::LIBRARY_DIR));
+    let sections: Vec<(String, PathBuf)> = library
         .into_iter()
-        .map(|held| {
-            let store = crate::versions::store_for_root(&data_dir, &held.dir).dir;
-            (held.dir.to_string_lossy().to_string(), store)
+        .chain(space::held(&root, &entry.ws_id).into_iter().map(|held| held.dir))
+        .map(|dir| {
+            let store = crate::versions::store_for_root(&data_dir, &dir).dir;
+            (dir.to_string_lossy().to_string(), store)
         })
         .collect();
     let home = core.home.clone();
@@ -1064,13 +1091,20 @@ pub async fn cloud_connect(
     let ws_id = bound.workspace.id.clone();
     // The marker goes down the moment the domain is ours: a connect that
     // dies mid-upload leaves a folder that can be resumed, not a bound
-    // domain nothing remembers.
-    write_marker(&root_path, &Marker { domain: domain.clone(), ws_id: ws_id.clone() })?;
+    // domain nothing remembers. Then the folder's files move into Library,
+    // and Library is what goes up: a connect that dies after the move leaves
+    // a folder the next try takes as moved.
+    // A folder that was connected before keeps how far it has moved: one
+    // already in the Library layout must not move into it again.
+    let layout = read_marker(&root_path).and_then(|marker| marker.layout);
+    write_marker(&root_path, &Marker { domain: domain.clone(), ws_id: ws_id.clone(), layout })?;
+    move_open_folder(core, &root).await?;
 
     let sdir = state_dir(&data_dir, &ws_id);
     let _ = std::fs::remove_dir_all(&sdir);
     let events = core.events();
-    let state = flows::seed_upload(&remote, &root_path, &sdir, &name, &bound.manifest_etag, &me, &events, &root)
+    let library = space::top(&root_path, space::LIBRARY_DIR);
+    let state = flows::seed_upload(&remote, &library, &sdir, &name, &bound.manifest_etag, &me, &events, &root)
         .await
         .map_err(|e| flows::describe(&domain, e))?;
     write_json(&sdir.join("state.json"), &state).map_err(|e| format!("save the sync state: {}", e))?;
@@ -1107,11 +1141,14 @@ pub async fn cloud_join(core: &Arc<Core>, endpoint: String, token: String) -> Re
     let sdir = state_dir(&data_dir, &workspace.id);
     let _ = std::fs::remove_dir_all(&sdir);
     let events = core.events();
-    let state = flows::seed_download(&remote, &dest, &sdir, &events)
+    let state = flows::seed_download(&remote, &dest.join(space::LIBRARY_DIR), &sdir, &events, &root)
         .await
         .map_err(|e| flows::describe(&domain, e))?;
     write_json(&sdir.join("state.json"), &state).map_err(|e| format!("save the sync state: {}", e))?;
-    write_marker(&dest, &Marker { domain: domain.clone(), ws_id: workspace.id.clone() })?;
+    write_marker(
+        &dest,
+        &Marker { domain: domain.clone(), ws_id: workspace.id.clone(), layout: Some(layout::LIBRARY.to_string()) },
+    )?;
 
     record_and_spawn(
         core,
@@ -1168,6 +1205,10 @@ pub async fn cloud_resume(
         ));
     }
 
+    // A folder disconnected before it moved into the Library layout moves
+    // now, before its engine starts.
+    move_open_folder(core, &root).await?;
+
     let sdir = state_dir(&data_dir, &workspace.id);
     let _ = std::fs::remove_dir_all(&sdir);
     let _ = std::fs::create_dir_all(sdir.join("base"));
@@ -1176,6 +1217,24 @@ pub async fn cloud_resume(
         WorkspaceEntry { root, domain, endpoint, ws_id: workspace.id.clone(), name: workspace.name, token },
     )?;
     Ok(workspace.id)
+}
+
+/// The move into the Library layout (layout.rs) for a folder a window may
+/// have open, which no engine syncs yet: once the move has begun nothing
+/// versions the folder's root, so its versioner captures what it holds and
+/// stops before any file moves, and Library's starts once they all have.
+async fn move_open_folder(core: &Arc<Core>, root: &str) -> Result<(), String> {
+    let path = PathBuf::from(root);
+    if !layout::begin(&path)? {
+        return Ok(());
+    }
+    crate::versions::release_root(core, root).await;
+    let data_dir = core.data_dir.clone();
+    tokio::task::spawn_blocking(move || layout::finish(&path, &data_dir))
+        .await
+        .map_err(|_| "Doklin couldn't move this folder's files into Library.".to_string())??;
+    crate::versions::reconcile(core);
+    Ok(())
 }
 
 /// Forget a workspace on this Mac: the engine stops, the entry and the

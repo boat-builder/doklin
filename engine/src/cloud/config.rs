@@ -9,8 +9,10 @@
 //! entry here has none. Both functions below are the one way in and out, so
 //! nothing else knows which.
 //!
-//! `<root>/.doklin/cloud.json` — the marker, no secrets: `{domain, wsId}`.
-//! Hidden, so the tree walk, search and the sync scan already ignore it. It
+//! `<root>/.doklin/cloud.json` — the marker, no secrets: `{domain, wsId,
+//! layout}`, `layout` saying how far the folder has moved into the Library
+//! layout (layout.rs). Hidden, so the tree walk, search and the sync scan
+//! already ignore it. It
 //! makes the folder self-describing: a machine that opens a folder carrying
 //! a marker with no matching cloud.json entry is offered *resume*, and a
 //! folder that already carries a marker for domain A cannot be connected to
@@ -179,6 +181,19 @@ pub fn ensure_device(
 pub struct Marker {
     pub domain: String,
     pub ws_id: String,
+    /// Absent: the folder is still in the layout from before Library, the
+    /// shared section at its root. `"moving"`, then `"library"`: the move
+    /// (layout.rs). Anything else is a layout a later build made, which this
+    /// one does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+}
+
+impl Marker {
+    /// Whether the folder is in the Library layout.
+    pub fn moved(&self) -> bool {
+        self.layout.as_deref() == Some(super::layout::LIBRARY)
+    }
 }
 
 pub fn marker_path(root: &Path) -> PathBuf {

@@ -1,4 +1,5 @@
-// The workspace as it was, as a modal.
+// A folder with a history of its own as it was, as a modal: Library, a
+// Private, a restricted folder, or a folder that is not connected.
 // Choosing a moment for a whole folder is a deliberate,
 // occasional act — Dropbox Rewind's shape, not a rail — so it says exactly
 // what a restore would do before anything happens, and confirms with the
@@ -72,7 +73,7 @@ export default function WorkspaceHistory({
 }: {
   /** The version store: what this reads and restores from. */
   store: Versions;
-  /** The workspace whose timeline this is — the store's display root. */
+  /** The folder whose timeline this is — the store's root. */
   root: string;
   onClose: () => void;
   /** A restore landed. The app toasts it with an *Undo* that restores
@@ -197,11 +198,11 @@ export default function WorkspaceHistory({
         className="modal cloud-modal cloud-modal--wide"
         role="dialog"
         aria-modal="true"
-        aria-label="Workspace history"
+        aria-label={`${basename(root)} history`}
         data-testid="workspace-history"
       >
         <div className="modal-header">
-          <div className="modal-title">Workspace history · {basename(root)}</div>
+          <div className="modal-title">{basename(root)} history</div>
           <button className="modal-close" onClick={onClose} aria-label="Close">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden>
               <line x1="5" y1="5" x2="19" y2="19" />

@@ -6,9 +6,10 @@
 // branches. The engine then says `versions-applied`, and every screen of the
 // workspace reads its files again.
 //
-// The workspace keeps one store, and each section (Private, a restricted
-// folder) one of its own. What this iPhone's stores hold starts when it
-// joined; a note's versions also include those other devices sent up.
+// Each section keeps a store of its own — Library, Private, each restricted
+// folder — and the workspace's root, which holds them, keeps none. What this
+// iPhone's stores hold starts when it joined; a note's versions also include
+// those other devices sent up.
 
 import Foundation
 import Observation
@@ -29,17 +30,22 @@ public struct OpenVersion: Hashable, Sendable {
 }
 
 extension Workspaces {
-    /// The version stores of a workspace: its own, then each section's.
+    /// The version stores of a workspace: Library's, then each other section's.
     public func stores(of workspace: Workspace) -> [String] {
-        [workspace.root] + versions.map(\.root).filter { $0.hasPrefix(workspace.root + "/") }.sorted()
+        let library = workspace.libraryStore
+        return [library] + versions.map(\.root).filter { $0.hasPrefix(workspace.root + "/") && $0 != library }.sorted()
     }
 }
 
 extension Workspace {
-    /// What a person calls the folder a store keeps: the workspace, Private,
-    /// or a restricted folder by its name.
+    /// The version store of Library, the section everyone has: where its
+    /// history is read, and where its restores land.
+    public var libraryStore: String { files.absolute(TreeModel.libraryFolder) }
+
+    /// What a person calls the folder a store keeps: Library, Private, or a
+    /// restricted folder by its name.
     public func storeName(_ store: String) -> String {
-        guard let folder = relative(store), !folder.isEmpty else { return name }
+        let folder = relative(store) ?? store
         return status?.spaces.first { $0.path.lowercased() == folder.lowercased() }?.name ?? DocLinks.name(of: folder)
     }
 
@@ -101,8 +107,8 @@ public final class NoteHistory {
         return OpenVersion(store: history.root, path: path, version: version, newer: newer, deleted: nil)
     }
 
-    /// Name the workspace as it is now. The name shows on that row here and
-    /// in the workspace's history, and a named version is never thinned out.
+    /// Name the note's section as it is now. The name shows on that row here
+    /// and in the section's history, and a named version is never thinned out.
     public func name(_ label: String) async throws {
         let label = label.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !label.isEmpty, let store = history?.root else { return }
@@ -219,7 +225,7 @@ public final class VersionReader {
 @Observable
 public final class WorkspaceTimeline {
     public let workspace: Workspace
-    /// The store being looked at: the workspace's, or a section's.
+    /// The store being looked at: Library's, or another section's.
     public private(set) var store: String
     public private(set) var moments: [SnapshotMeta] = []
     public private(set) var phase: LoadPhase = .idle
@@ -358,7 +364,7 @@ public final class MomentPlan {
 @Observable
 public final class RecentlyDeleted {
     public let workspace: Workspace
-    /// Across the workspace and its sections, the most recently seen first.
+    /// Across the workspace's sections, the most recently seen first.
     public private(set) var documents: [DeletedDocument] = []
     public private(set) var phase: LoadPhase = .idle
 
@@ -385,10 +391,9 @@ public final class RecentlyDeleted {
         phase = read == 0 ? .failed(problem ?? "This workspace has no history on this iPhone yet.") : .loaded
     }
 
-    /// Where it was, in words: its folder, or the workspace's name.
+    /// Where it was, in words: its folder, which starts with its section.
     public func place(of document: DeletedDocument) -> String {
-        let folder = DocLinks.directory(of: workspace.path(document.primary.path, in: document.store))
-        return folder.isEmpty ? workspace.name : folder
+        DocLinks.directory(of: workspace.path(document.primary.path, in: document.store))
     }
 
     /// Its last version, to read.

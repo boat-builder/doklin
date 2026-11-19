@@ -61,14 +61,16 @@ const RETRY_LIMITED_MS = 5 * 60_000;
 const ATTEMPTS = 4;
 
 /** Where what waits is kept: `<prefix><workspace>:<person>:<tab>:<path>`. */
-const DRAFTS = "doklin:web:draft:";
+export const DRAFTS = "doklin:web:draft:";
 /** Held by a tab for as long as it lives: what it keeps is its own to send. */
 const TAB_LOCK = "doklin:web:tab:";
 /** Held while a tab takes over what closed tabs left. */
 const DRAFTS_LOCK = "doklin:web:drafts";
 
-/** What is said of a place the browser version does not change. */
+/** What is said of a place the browser version does not change: a section itself… */
 const IN_THE_APP = "That is done in the Doklin app, not in a browser.";
+/** …and of one that is in no section, which nothing syncs. */
+const IN_NO_SECTION = "That would be in no section: a browser keeps only what is in Library, Private or a restricted folder.";
 
 /** Why something failed, as a sentence that ends. */
 const whyOf = (e: unknown): string => (e instanceof Error ? e.message : String(e)).replace(/[.]?$/, ".");
@@ -700,7 +702,8 @@ export class Saving {
    *  version does not change: a section itself, or outside every section. */
   private placed(path: string): Place {
     const place = this.ws.place(path);
-    if (!place || place.path === "") throw new Error(IN_THE_APP);
+    if (!place) throw new Error(IN_NO_SECTION);
+    if (place.path === "") throw new Error(IN_THE_APP);
     return place;
   }
 

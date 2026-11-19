@@ -189,7 +189,7 @@ function validatePublic(map: unknown, space: boolean): string | null {
     if (e.root !== undefined && typeof e.root !== "boolean") return `invalid root for ${slug}`;
     if (e.root === true) roots += 1;
   }
-  if (roots > 0 && space) return "the home page is chosen from the shared workspace";
+  if (roots > 0 && space) return "The home page is chosen from Library.";
   if (roots > 1) return "more than one root page";
   return null;
 }

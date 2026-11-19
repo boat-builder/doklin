@@ -2,7 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { Facepile } from "./Avatar";
-import { pageUrl, placeOf, publishedByPath, type CloudSpace, type CloudStatus, type PublicPage } from "./cloud";
+import {
+  LIBRARY_DIR,
+  pageUrl,
+  placeOf,
+  publishedByPath,
+  toLibraryLayout,
+  type CloudSpace,
+  type CloudStatus,
+  type PublicPage,
+} from "./cloud";
 import { backend, type FileClipboardPayload, type TreeNode } from "./backend";
 import { keys } from "./keys";
 
@@ -39,15 +48,16 @@ type PendingCreate = { parentDir: string; kind: "file" | "dir" };
 type PendingRename = { path: string; kind: "file" | "dir"; openable?: boolean };
 
 // A context-menu invocation: where it was opened and what it targets. "root"
-// is a right-click on empty sidebar space (creation lands at the workspace
-// root); "section" is empty space under Restricted or Private, whose folder
-// `path` names. `space` marks a restricted folder's own row.
+// is a right-click on empty sidebar space (creation lands in the first list's
+// folder); "section" is a connected workspace's heading or the empty space
+// under it, whose folder `path` names. `space` marks a restricted folder's
+// own row.
 type MenuTarget = {
   path: string;
   kind: "file" | "dir" | "root" | "section";
   openable?: boolean;
   space?: CloudSpace;
-  section?: "restricted" | "private";
+  section?: SectionId;
 };
 type MenuState = { x: number; y: number; target: MenuTarget };
 
@@ -137,17 +147,19 @@ type Props = {
   // Version history for a document — the rail, for any workspace, cloud or
   // not.
   onHistory?: (path: string) => void;
-  // The workspace's own timeline, a modal — or, with a folder, that
-  // section's: each has a history of its own.
+  // The first list's whole timeline (Library's, in a connected workspace),
+  // a modal — or, with a folder, that section's: each has a history of its
+  // own.
   onWorkspaceHistory?: (dir?: string) => void;
-  // Files this folder's history holds and the folder does not: the root's
-  // menu offers them when there are any. The footer bar's count (App.tsx)
-  // is the main way in; this is the second. With a folder, that section's.
+  // Files the first list's history holds and its folder does not (Library's
+  // in a connected workspace): its menu offers them when there are any. The
+  // footer bar's count (App.tsx) is the main way in; this is the second.
+  // With a folder, that section's.
   deletedCount?: number;
   onRecentlyDeleted?: (dir?: string) => void;
-  // Publishing: the folder dialog for a
-  // folder (or the root, for the whole workspace), stopping a page, and
-  // copying a page's public link. Offered only in a connected workspace.
+  // Publishing: the folder dialog for a folder (Library's own, for the whole
+  // shared section), stopping a page, and copying a page's public link.
+  // Offered only in a connected workspace.
   onPublishFolder?: (dir: string) => void;
   onStopPublishing?: (page: PublicPage) => void;
   onCopyLink?: (url: string) => void;
@@ -190,9 +202,14 @@ const readShowAll = () => {
   }
 };
 
-// The three lists of a workspace in sections.
-type SectionId = "workspace" | "restricted" | "private";
-const SECTION_IDS: readonly string[] = ["workspace", "restricted", "private"] satisfies SectionId[];
+// The three lists of a connected workspace, one per section. A folder that is
+// not connected is one list, `library`'s.
+type SectionId = "library" | "restricted" | "private";
+const SECTION_IDS: readonly string[] = ["library", "restricted", "private"] satisfies SectionId[];
+
+// Why a row syncs nowhere, on its "not synced" mark.
+const STRAY_LINE = "In no section, so it stays on this Mac — move it into Library or Private";
+const UNFOLDERED_LINE = "In no restricted folder, so it stays on this Mac — move it into one";
 
 // How the tree was left, per workspace — a view preference kept on this Mac:
 // the folders open in it, and the sections folded away. A folder is closed
@@ -249,6 +266,25 @@ export const forgetTreeView = (root: string) => {
   const all = readAllTreeViews();
   delete all[root];
   writeAllTreeViews(all);
+};
+// One-time stored-data migration (the Library layout, App.tsx): how a
+// connected workspace's tree was left before its folder moved — each open
+// folder where the move put it, and the shared list's fold under the id it
+// has now. Read raw, as the id it had is no longer one `readAllTreeViews`
+// keeps.
+export const moveTreeViewIntoLibrary = (root: string) => {
+  try {
+    const all = JSON.parse(localStorage.getItem(TREE_VIEW_STORAGE_KEY) || "{}") as Record<string, unknown>;
+    const v = all[root] as { open?: unknown; folded?: unknown } | undefined;
+    if (!v || typeof v !== "object") return;
+    all[root] = {
+      open: strings(v.open).map(toLibraryLayout),
+      folded: strings(v.folded).map((id) => (id === "workspace" ? "library" : id)),
+    };
+    localStorage.setItem(TREE_VIEW_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    /* nothing kept, or nothing to keep it in */
+  }
 };
 
 // The folders from just under `root` down to `dir`, `dir` included: what has
@@ -391,29 +427,46 @@ export default function Sidebar({
 
   /* ---------- Sections ---------- */
 
-  // A workspace in sections draws three lists instead of one: what everyone
-  // has, the restricted folders this person is in, and their Private. On
-  // disk the last two are the folders `Restricted` and `Private` at the top;
-  // here they are headings, and those two folders have no row of their own.
+  // A connected workspace draws three lists instead of one: Library, what
+  // everyone has; the restricted folders this person is in; and their
+  // Private. On disk they are the folders `Library`, `Restricted` and
+  // `Private` at the top, found however the disk spells them; here they are
+  // headings, and those folders have no row of their own. Anything else at
+  // the top is in no section — only Finder or an agent puts it there — and is
+  // listed after them, while there is any. A folder that is not connected is
+  // one list, of everything in it: its `libraryDir` is the folder itself.
   const sectioned = cloud != null;
   const layout = useMemo(() => {
     if (!tree || tree.kind !== "dir") return null;
+    if (!sectioned) {
+      return {
+        shared: tree.children,
+        restricted: [],
+        private: [],
+        strays: [],
+        libraryDir: root,
+        restrictedDir: `${root}/Restricted`,
+        privateDir: `${root}/Private`,
+      };
+    }
     const top = (name: string) =>
-      sectioned
-        ? (tree.children.find(
-            (c): c is Extract<TreeNode, { kind: "dir" }> => c.kind === "dir" && c.name.toLowerCase() === name,
-          ) ?? null)
-        : null;
+      tree.children.find(
+        (c): c is Extract<TreeNode, { kind: "dir" }> => c.kind === "dir" && c.name.toLowerCase() === name,
+      ) ?? null;
+    const library = top(LIBRARY_DIR.toLowerCase());
     const restricted = top("restricted");
     const mine = top("private");
     return {
-      shared: tree.children.filter((c) => c !== restricted && c !== mine),
+      shared: library?.children ?? [],
       restricted: restricted?.children ?? [],
       private: mine?.children ?? [],
+      strays: tree.children.filter((c) => c !== library && c !== restricted && c !== mine && !c.name.startsWith(".")),
+      libraryDir: library?.path ?? `${root}/${LIBRARY_DIR}`,
       restrictedDir: restricted?.path ?? `${root}/Restricted`,
       privateDir: mine?.path ?? `${root}/Private`,
     };
   }, [tree, sectioned, root]);
+  const libraryDir = layout?.libraryDir ?? (sectioned ? `${root}/${LIBRARY_DIR}` : root);
   const restrictedDir = layout?.restrictedDir ?? `${root}/Restricted`;
   const privateDir = layout?.privateDir ?? `${root}/Private`;
   // The restricted folders, by where each is on this Mac.
@@ -424,16 +477,17 @@ export default function Sidebar({
   }, [cloud, root]);
   const hasPrivate = (cloud?.spaces ?? []).some((sp) => sp.kind === "private");
 
-  // Which list a path is in. A folder tree (no sections) is one list.
+  // Which list a path is in; null for one in no section, whose list does not
+  // fold. A folder that is not connected is one list.
   const sectionOf = useCallback(
-    (path: string): SectionId => {
+    (path: string): SectionId | null => {
       const within = (dir: string) => path === dir || path.startsWith(`${dir}/`);
-      if (!sectioned) return "workspace";
+      if (!sectioned || within(libraryDir)) return "library";
       if (within(privateDir)) return "private";
       if (within(restrictedDir)) return "restricted";
-      return "workspace";
+      return null;
     },
-    [sectioned, privateDir, restrictedDir],
+    [sectioned, libraryDir, privateDir, restrictedDir],
   );
   const toggleSection = useCallback((id: SectionId) => {
     setFolded((prev) => {
@@ -447,7 +501,7 @@ export default function Sidebar({
   const unfoldSectionOf = useCallback(
     (path: string) => {
       const id = sectionOf(path);
-      setFolded((prev) => (prev.has(id) ? new Set([...prev].filter((s) => s !== id)) : prev));
+      setFolded((prev) => (id && prev.has(id) ? new Set([...prev].filter((s) => s !== id)) : prev));
     },
     [sectionOf],
   );
@@ -460,8 +514,12 @@ export default function Sidebar({
   useEffect(() => {
     if (!reveal || revealedRef.current === reveal.seq || !tree) return;
     const target = reveal.path;
-    const shut = foldersDownTo(root, target).filter((dir) => !openDirs.has(dir));
-    if (shut.length > 0 || folded.has(sectionOf(target))) {
+    // A section's own folder has no row to open.
+    const shut = foldersDownTo(root, target).filter(
+      (dir) => !openDirs.has(dir) && !(sectioned && [libraryDir, restrictedDir, privateDir].includes(dir)),
+    );
+    const list = sectionOf(target);
+    if (shut.length > 0 || (list && folded.has(list))) {
       openFolders(shut);
       unfoldSectionOf(target);
       return; // this runs again once they are open
@@ -470,7 +528,20 @@ export default function Sidebar({
     if (!row) return;
     revealedRef.current = reveal.seq;
     row.scrollIntoView({ block: "nearest" });
-  }, [reveal, tree, openDirs, folded, root, openFolders, sectionOf, unfoldSectionOf]);
+  }, [
+    reveal,
+    tree,
+    openDirs,
+    folded,
+    root,
+    sectioned,
+    libraryDir,
+    restrictedDir,
+    privateDir,
+    openFolders,
+    sectionOf,
+    unfoldSectionOf,
+  ]);
 
   /* ---------- Selection (single, ⌘-toggle, ⇧-range) ---------- */
 
@@ -485,9 +556,10 @@ export default function Sidebar({
       }
     };
     if (layout) {
-      if (!folded.has("workspace")) walk(layout.shared);
+      if (!folded.has("library")) walk(layout.shared);
       if (!folded.has("restricted")) walk(layout.restricted);
       if (!folded.has("private")) walk(layout.private);
+      walk(layout.strays);
     }
     return out;
   }, [layout, openDirs, folded]);
@@ -589,6 +661,9 @@ export default function Sidebar({
   const canDrop = useCallback(
     (entries: DragEntry[], toDir: string | null): boolean => {
       if (!toDir) return false;
+      // A connected workspace's top holds its sections: nothing is dropped
+      // there to be in none.
+      if (sectioned && toDir === root) return false;
       if (entries.every((en) => dirname(en.path) === toDir)) return false;
       // Straight under Restricted is where the restricted folders are: a
       // folder dropped there becomes one — where one can be made at all —
@@ -601,7 +676,7 @@ export default function Sidebar({
           en.kind === "dir" && (toDir === en.path || toDir.startsWith(en.path + "/")),
       );
     },
-    [sectioned, restrictedDir, onNewRestricted],
+    [sectioned, root, restrictedDir, onNewRestricted],
   );
 
   const setDropState = useCallback((dir: string | null) => {
@@ -615,7 +690,8 @@ export default function Sidebar({
   }, []);
 
   // Hit-test the pointer against the tree: a folder row targets that folder, a
-  // file row targets its parent, empty tree space targets the workspace root.
+  // file row targets its parent, empty tree space targets the first list's
+  // folder (Library, in a connected workspace).
   const updateDropTarget = useCallback(
     (x: number, y: number) => {
       const drag = dragRef.current;
@@ -634,7 +710,7 @@ export default function Sidebar({
         }
       } else if (el && bodyRef.current?.contains(el)) {
         // Empty space under a heading is that section's own folder.
-        toDir = el.closest<HTMLElement>("[data-section-dir]")?.dataset.sectionDir ?? root;
+        toDir = el.closest<HTMLElement>("[data-section-dir]")?.dataset.sectionDir ?? libraryDir;
       }
       const valid = canDrop(drag.entries, toDir);
       setDropState(valid ? toDir : null);
@@ -658,7 +734,7 @@ export default function Sidebar({
         };
       }
     },
-    [root, canDrop, setDropState, openFolders],
+    [libraryDir, canDrop, setDropState, openFolders],
   );
 
   // Dragging near the tree's top/bottom edge scrolls it (rAF loop, so the
@@ -730,7 +806,7 @@ export default function Sidebar({
       // Moved folders stay as open as they were, and the destination opens
       // (its list unfolds) so the moved rows are visible where they landed.
       // A list's own folder has no row to open.
-      const listDir = toDir === root || toDir === restrictedDir || toDir === privateDir;
+      const listDir = toDir === libraryDir || toDir === restrictedDir || toDir === privateDir;
       setOpenDirs((prev) => {
         let next = prev;
         for (const [from, to] of movedDirs) next = movedOpen(next, from, to);
@@ -738,7 +814,7 @@ export default function Sidebar({
       });
       unfoldSectionOf(toDir);
     },
-    [onMovePath, onSelect, onConfirmMove, root, restrictedDir, privateDir, unfoldSectionOf],
+    [onMovePath, onSelect, onConfirmMove, libraryDir, restrictedDir, privateDir, unfoldSectionOf],
   );
 
   const onRowPointerDown = useCallback(
@@ -892,25 +968,30 @@ export default function Sidebar({
     (kind: "file" | "dir", wantedDir: string) => {
       // Nothing is made straight under Restricted from here: a note there
       // would be in no folder, and a folder there is made with its people.
-      const parentDir = sectioned && wantedDir === restrictedDir ? root : wantedDir;
+      const parentDir = sectioned && wantedDir === restrictedDir ? libraryDir : wantedDir;
       setCtxMenu(null);
       setMenuOpen(false);
       setPendingRename(null); // one inline input at a time
-      openFolders(foldersDownTo(root, parentDir).filter((d) => d !== restrictedDir && d !== privateDir));
+      openFolders(
+        foldersDownTo(root, parentDir).filter((d) => d !== libraryDir && d !== restrictedDir && d !== privateDir),
+      );
       unfoldSectionOf(parentDir);
       setPendingCreate({ parentDir, kind });
     },
-    [root, sectioned, restrictedDir, privateDir, openFolders, unfoldSectionOf],
+    [root, sectioned, libraryDir, restrictedDir, privateDir, openFolders, unfoldSectionOf],
   );
 
-  // Where "New File" / "New Folder" should land for a given target: inside a
-  // folder, next to a file, at the root for empty-space actions.
+  // Where "New File" / "New Folder" (and Paste) land for a given target:
+  // inside a folder, next to a file, in the first list's folder for
+  // empty-space actions — and in Library for anything that would land at a
+  // connected workspace's top, where it would be in no section.
   const createDirFor = useCallback(
     (target: { path: string; kind: "file" | "dir" | "root" | "section" } | null) => {
-      if (!target || target.kind === "root") return root;
-      return target.kind === "file" ? dirname(target.path) : target.path;
+      const dir =
+        !target || target.kind === "root" ? libraryDir : target.kind === "file" ? dirname(target.path) : target.path;
+      return dir === root ? libraryDir : dir;
     },
-    [root],
+    [root, libraryDir],
   );
 
   // Commit the pending inline creation. Returns an error message to show under
@@ -1014,15 +1095,15 @@ export default function Sidebar({
     }
     return out;
   }, [cloud, root]);
-  // Rows with a page of their own, by absolute path (the root itself when
-  // the whole workspace is a folder page).
+  // Rows with a page of their own, by absolute path (Library's folder when
+  // the whole shared section is a folder page).
   const publishedByAbs = useMemo(() => {
     const out = new Map<string, PublicPage>();
-    for (const [rel, page] of publishedByPath(cloud)) out.set(rel ? `${root}/${rel}` : root, page);
+    for (const [rel, page] of publishedByPath(cloud)) out.set(`${root}/${rel}`, page);
     return out;
   }, [cloud, root]);
-  const showCreateAtRoot = pendingCreate?.parentDir === root;
-  const workspaceFolded = sectioned && folded.has("workspace");
+  const showCreateInLibrary = pendingCreate?.parentDir === libraryDir;
+  const libraryFolded = sectioned && folded.has("library");
   const showCreateInPrivate = sectioned && pendingCreate?.parentDir === privateDir;
 
   const ctxItems: ContextMenuItem[] = useMemo(() => {
@@ -1064,7 +1145,8 @@ export default function Sidebar({
       });
     }
     // A file in one of the workspace's sections has a link of its own: it
-    // opens in Doklin for whoever can see it, wherever it is clicked.
+    // opens in Doklin for whoever can see it, wherever it is clicked. One in
+    // no section has none.
     if (
       target.kind === "file" &&
       target.openable !== false &&
@@ -1093,11 +1175,16 @@ export default function Sidebar({
         items.push({ label: "Share with…", onClick: () => onShareWith(target.path) });
       }
     }
-    // The whole folder's, on the root — where "put it back to Tuesday" is
-    // asked from. Each section has a history of its own, asked for on it.
-    const ownHistory = target.space != null || target.kind === "section";
-    if (target.kind === "root" && onWorkspaceHistory) {
-      items.push({ label: "Workspace history…", onClick: () => onWorkspaceHistory() });
+    // The first list's whole history — where "put it back to Tuesday" is
+    // asked from: on Library's heading in a connected workspace, on the
+    // empty space of a folder that is not. Each other section has a history
+    // of its own, asked for on it.
+    const libraryTarget = sectioned
+      ? target.kind === "section" && target.section === "library"
+      : target.kind === "root";
+    const ownHistory = target.space != null || (target.kind === "section" && target.section === "private");
+    if (libraryTarget && onWorkspaceHistory) {
+      items.push({ label: sectioned ? "Library history…" : "Folder history…", onClick: () => onWorkspaceHistory() });
     }
     if (ownHistory && onWorkspaceHistory) {
       items.push({
@@ -1105,27 +1192,24 @@ export default function Sidebar({
         onClick: () => onWorkspaceHistory(target.path),
       });
     }
-    if (target.kind === "root" && onRecentlyDeleted && deletedCount > 0) {
+    if (libraryTarget && onRecentlyDeleted && deletedCount > 0) {
       items.push({ label: `Recently deleted (${deletedCount})`, onClick: () => onRecentlyDeleted() });
     }
     if (ownHistory && onRecentlyDeleted) {
       items.push({ label: "Recently deleted…", onClick: () => onRecentlyDeleted(target.path) });
     }
-    // Publishing: a folder (or the whole workspace) publishes every note in
-    // it; a note published on its own offers its link and its stop here —
-    // publishing one is the pill's job.
-    if (cloud) {
-      const targetPath = target.kind === "root" ? root : target.path;
+    // Publishing: a folder (Library's own, for the whole shared section)
+    // publishes every note in it; a note published on its own offers its
+    // link and its stop here — publishing one is the pill's job. The
+    // workspace's top is in no section, and publishes nothing.
+    if (cloud && target.kind !== "root") {
+      const targetPath = target.path;
       const page = publishedByAbs.get(targetPath) ?? null;
       if (target.kind !== "file") {
         const folderPage = page?.kind === "dir" ? page : null;
         if (onPublishFolder) {
           items.push({
-            label: folderPage
-              ? "Edit publishing…"
-              : target.kind === "root"
-                ? "Publish the whole workspace…"
-                : "Publish folder…",
+            label: folderPage ? "Edit publishing…" : libraryTarget ? "Publish Library…" : "Publish folder…",
             onClick: () => onPublishFolder(targetPath),
           });
         }
@@ -1142,10 +1226,10 @@ export default function Sidebar({
         }
       }
     }
-    // Cut/Copy/Paste, VS Code's explorer trio. Paste lands inside a folder
-    // target, next to a file target, at the root for empty space — and stays
-    // visible-but-disabled while the clipboard is empty. A restricted folder
-    // is copied, never cut: it leaves by its own dialog.
+    // Cut/Copy/Paste, VS Code's explorer trio. Paste lands where New File
+    // would (`createDirFor`) — and stays visible-but-disabled while the
+    // clipboard is empty. A restricted folder is copied, never cut: it leaves
+    // by its own dialog.
     if (target.kind === "file" || target.kind === "dir") {
       const entry: SidebarSelection = { path: target.path, kind: target.kind };
       if (!target.space) items.push({ label: "Cut", onClick: () => onCopyEntries([entry], true) });
@@ -1234,10 +1318,11 @@ export default function Sidebar({
       onCancel={cancelCreate}
     />
   );
-  // A top-level row of one of the lists. `loose` marks a list whose notes
-  // are in no section — straight under Restricted — and so sync nowhere.
-  const sectionDirs = [root, restrictedDir, privateDir];
-  const renderItem = (child: TreeNode, parentDir: string, loose: boolean) => (
+  // A top-level row of one of the lists. `loose` is why the row is in no
+  // section and so syncs nowhere — a note straight under Restricted, anything
+  // at the workspace's top — or null when it is in one.
+  const sectionDirs = [libraryDir, restrictedDir, privateDir];
+  const renderItem = (child: TreeNode, parentDir: string, loose: string | null) => (
     <TreeItem
       key={child.path}
       node={child}
@@ -1302,12 +1387,13 @@ export default function Sidebar({
         ref={bodyRef}
         className={`sidebar-body ${!sectioned && dropDir === root ? "is-drop-root" : ""}`}
         onClick={(e) => {
-          // Clicking empty space clears the selection (root becomes the
-          // creation context again).
+          // Clicking empty space clears the selection (the first list's
+          // folder becomes the creation context again).
           if (e.target === e.currentTarget) onSelect([]);
         }}
         onContextMenu={(e) => {
-          // Right-click on empty space targets the workspace root. Row-level
+          // Right-click on empty space targets the workspace's folder: what
+          // it makes lands in the first list's (`createDirFor`). Row-level
           // handlers stopPropagation, so reaching here means no row was hit.
           e.preventDefault();
           onSelect([]);
@@ -1315,19 +1401,33 @@ export default function Sidebar({
         }}
       >
         <div
-          className={`tree-section ${sectioned && dropDir === root ? "is-drop-section" : ""}`}
-          data-section-dir={root}
-          data-testid="section-workspace"
+          className={`tree-section ${sectioned && dropDir === libraryDir ? "is-drop-section" : ""}`}
+          data-section-dir={libraryDir}
+          data-testid={sectioned ? "section-library" : "section-files"}
+          onContextMenu={
+            sectioned
+              ? (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onSelect([]);
+                  setCtxMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    target: { path: libraryDir, kind: "section", section: "library" },
+                  });
+                }
+              : undefined
+          }
         >
           {/* A folder tree is one list, and its heading only names it; in
               sections, each heading folds its list away. */}
           <SectionHead
-            icon={sectioned ? <WorkspaceIcon /> : null}
-            label={sectioned ? "Workspace" : "Files"}
-            folded={workspaceFolded}
+            icon={sectioned ? <LibraryIcon /> : null}
+            label={sectioned ? "Library" : "Files"}
+            folded={libraryFolded}
             count={layout?.shared.length ?? 0}
-            onToggle={sectioned ? () => toggleSection("workspace") : undefined}
-            testid="workspace"
+            onToggle={sectioned ? () => toggleSection("library") : undefined}
+            testid={sectioned ? "library" : "files"}
           >
             <button
               className="sidebar-section-btn"
@@ -1348,13 +1448,13 @@ export default function Sidebar({
           </SectionHead>
           {error && <div className="sidebar-message sidebar-message-error">{error}</div>}
           {!error && loading && !tree && <div className="sidebar-message">Loading…</div>}
-          {!error && layout && !workspaceFolded && (
+          {!error && layout && !libraryFolded && (
             <>
-              {layout.shared.length === 0 && !showCreateAtRoot && <div className="sidebar-message">No files yet</div>}
-              {(layout.shared.length > 0 || showCreateAtRoot) && (
+              {layout.shared.length === 0 && !showCreateInLibrary && <div className="sidebar-message">No files yet</div>}
+              {(layout.shared.length > 0 || showCreateInLibrary) && (
                 <ul className="tree" role="tree">
-                  {showCreateAtRoot && pendingCreate && createRow}
-                  {layout.shared.map((child) => renderItem(child, root, false))}
+                  {showCreateInLibrary && pendingCreate && createRow}
+                  {layout.shared.map((child) => renderItem(child, libraryDir, null))}
                 </ul>
               )}
             </>
@@ -1404,7 +1504,9 @@ export default function Sidebar({
                 ) : (
                   <ul className="tree" role="tree">
                     {/* Straight under Restricted a note is in no folder, so nobody else has it. */}
-                    {layout.restricted.map((child) => renderItem(child, restrictedDir, true))}
+                    {layout.restricted.map((child) =>
+                      renderItem(child, restrictedDir, child.kind === "file" ? UNFOLDERED_LINE : null),
+                    )}
                   </ul>
                 ))}
             </div>
@@ -1452,12 +1554,24 @@ export default function Sidebar({
                   {(layout.private.length > 0 || showCreateInPrivate) && (
                     <ul className="tree" role="tree">
                       {showCreateInPrivate && createRow}
-                      {layout.private.map((child) => renderItem(child, privateDir, !hasPrivate))}
+                      {layout.private.map((child) =>
+                        renderItem(child, privateDir, !hasPrivate && child.kind === "file" ? UNFOLDERED_LINE : null),
+                      )}
                     </ul>
                   )}
                 </>
               )}
             </div>
+            {/* What Finder or an agent put at the workspace's top: in no
+                section, so it stays on this Mac. Nothing is dropped here. */}
+            {layout.strays.length > 0 && (
+              <div className="tree-section" data-section-dir="" data-testid="section-strays">
+                <SectionHead icon={<NowhereIcon />} label="In no section" folded={false} count={0} testid="strays" />
+                <ul className="tree" role="tree">
+                  {layout.strays.map((child) => renderItem(child, root, STRAY_LINE))}
+                </ul>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -1807,7 +1921,7 @@ function TreeItem({
   presence,
   published,
   spaces,
-  loose = false,
+  loose = null,
   synced,
   onToggle,
   onOpenFile,
@@ -1830,8 +1944,9 @@ function TreeItem({
   pendingCreate: PendingCreate | null;
   pendingRename: PendingRename | null;
   // The dragged rows' paths (dimmed) and the highlighted destination folder.
-  // dropDir is null when the target is the workspace root — the tree container
-  // carries that highlight instead of any row.
+  // dropDir is null when the target is a list's own folder — its section (or,
+  // for a folder that is not connected, the tree container) carries that
+  // highlight instead of any row.
   dragPaths: Set<string>;
   dropDir: string | null;
   dnd: TreeDnd;
@@ -1842,8 +1957,9 @@ function TreeItem({
   // The restricted folders, by absolute path: such a row says how many
   // people are in it, and is not dragged away.
   spaces: Map<string, CloudSpace>;
-  // A note at this level is in no section, so it syncs nowhere.
-  loose?: boolean;
+  // Why the row at this level is in no section, so syncs nowhere; null when
+  // it is in one.
+  loose?: string | null;
   // The workspace is connected: what it holds besides markdown and html stays
   // on this Mac, and its row says so.
   synced: boolean;
@@ -1921,15 +2037,7 @@ function TreeItem({
         >
           {openable ? <DocTypeIcon node={node} /> : <FileIcon />}
           <span className="tree-label">{openable ? stripDocExt(node.name) : node.name}</span>
-          {loose && (
-            <span
-              className="tree-nowhere"
-              data-testid="tree-nowhere"
-              title="In no restricted folder, so it stays on this Mac — move it into one"
-            >
-              not synced
-            </span>
-          )}
+          {loose && <NowhereMark line={loose} />}
           {page?.kind === "file" && (
             <span className="tree-published" title={`Published at /${page.slug}`} data-testid="tree-published" />
           )}
@@ -1966,7 +2074,7 @@ function TreeItem({
         />
       ) : (
         <button
-          className={`tree-row tree-dir ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${isDropTarget ? "is-drop-target" : ""} ${inDropDir ? "is-drop-within" : ""}`}
+          className={`tree-row tree-dir ${isSelected ? "is-selected" : ""} ${isCut ? "is-cut" : ""} ${isDragSource ? "is-drag-source" : ""} ${isDropTarget ? "is-drop-target" : ""} ${inDropDir ? "is-drop-within" : ""} ${loose ? "is-nowhere" : ""}`}
           style={{ paddingLeft: 8 + depth * 14 }}
           data-tree-path={node.path}
           data-tree-kind="dir"
@@ -1989,6 +2097,7 @@ function TreeItem({
             <ChevronRightIcon />
           </span>
           <span className="tree-label tree-dir-label">{node.name}</span>
+          {loose && <NowhereMark line={loose} />}
           {space && space.members.length > 0 && (
             <span
               className="tree-space-count"
@@ -2052,6 +2161,15 @@ function TreeItem({
         </ul>
       )}
     </li>
+  );
+}
+
+// A row's "not synced" mark, with why on hover.
+function NowhereMark({ line }: { line: string }) {
+  return (
+    <span className="tree-nowhere" data-testid="tree-nowhere" title={line}>
+      not synced
+    </span>
   );
 }
 
@@ -2359,8 +2477,9 @@ function FolderIcon() {
   );
 }
 
-// The lists' icons: everyone in the workspace, the people you choose, you.
-function WorkspaceIcon() {
+// The lists' icons: Library (books on a shelf), the people you choose, you,
+// and what is in no section.
+function LibraryIcon() {
   return (
     <svg
       width="14"
@@ -2373,10 +2492,10 @@ function WorkspaceIcon() {
       strokeLinejoin="round"
       aria-hidden
     >
-      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      <path d="M4 4v16" />
+      <path d="M8 7v13" />
+      <path d="M12 5v15" />
+      <path d="m16 6 4 14" />
     </svg>
   );
 }
@@ -2416,6 +2535,25 @@ function PrivateIcon() {
     >
       <rect x="4" y="11" width="16" height="10" rx="2" />
       <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </svg>
+  );
+}
+
+function NowhereIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 0 1 2.5 8.24" />
+      <line x1="3" y1="3" x2="21" y2="21" />
     </svg>
   );
 }

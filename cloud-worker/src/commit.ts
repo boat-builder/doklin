@@ -24,10 +24,10 @@
 //   · an address the change adds to the public map is claimed before the
 //     manifest is stored, and one it drops is let go after (addresses.ts).
 //
-// An agent's change to a space is made under the names its person uses
-// (`mount`, mount.ts): the transaction sees `Private/notes/plan.md`, and what
-// is checked and stored is the space's own `notes/plan.md`. A browser names a
-// space's paths as the space stores them: its changes are mounted at "".
+// An agent's change is made under the names its person uses (`mount`,
+// mount.ts): the transaction sees `Private/notes/plan.md`, and what is
+// checked and stored is the section's own `notes/plan.md`. A browser names a
+// section's paths as the section stores them: its changes are mounted at "".
 //
 // A lost race is nearly always another device's unrelated write, so the loop
 // re-reads and re-applies rather than failing. That is why a caller's own

@@ -149,7 +149,7 @@ struct SearchView: View {
                 }
                 Menu {
                     Button("Anywhere") { model.scope = .all }
-                    ForEach(workspace.files.everyFolder(), id: \.self) { folder in
+                    ForEach(workspace.files.everyFolder().filter { workspace.audience(of: $0) != .nowhere }, id: \.self) { folder in
                         Button(folder) { model.scope = .folder(folder) }
                     }
                 } label: {
@@ -242,7 +242,7 @@ private struct NameResult: View {
 
     private var place: String {
         let folder = DocLinks.directory(of: result.path)
-        let where_ = folder.isEmpty ? workspace.name : folder.replacingOccurrences(of: "/", with: " › ")
+        let where_ = folder.replacingOccurrences(of: "/", with: " › ")
         guard let changed = workspace.recentItem(result.path)?.changed else { return where_ }
         let when = Date(timeIntervalSince1970: Double(changed) / 1000).formatted(.relative(presentation: .named))
         return "\(where_) · edited \(when)"

@@ -371,12 +371,12 @@ public struct WorkspaceFiles: Sendable {
 
     /* ---------- Search ---------- */
 
-    /// Every document called something holding `query`, or whose text holds
-    /// it, ignoring case — the ones named for it first: each line it is on,
-    /// trimmed. A note is read for its text; a page is found by its name
-    /// alone (the Mac's `search_workspace` and the worker's search match the
-    /// same name). Not other files.
-    public func search(_ query: String, limit: Int = 2000) -> [SearchResult] {
+    /// Every document under `folders` called something holding `query`, or
+    /// whose text holds it, ignoring case — the ones named for it first:
+    /// each line it is on, trimmed. A note is read for its text; a page is
+    /// found by its name alone (the Mac's `search_workspace` and the worker's
+    /// search match the same name). Not other files.
+    public func search(_ query: String, in folders: [String], limit: Int = 2000) -> [SearchResult] {
         let wanted = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !wanted.isEmpty else { return [] }
         var named: [SearchResult] = []
@@ -392,7 +392,7 @@ public struct WorkspaceFiles: Sendable {
                 }
             }
         }
-        walk("", depth: 0)
+        for folder in folders { walk(folder, depth: 0) }
         for row in documents.prefix(limit) {
             var hits: [SearchHit] = []
             if !row.isHTML, let text = try? text(row.path) {

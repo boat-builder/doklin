@@ -106,7 +106,7 @@ struct EntryActionsHost: ViewModifier {
     private var removingWords: String {
         if case .folder(let dir) = acting.removing {
             let count = workspace.files.count(under: dir)
-            return count == 0 ? "The folder is empty." : "The \(count) file\(count == 1 ? "" : "s") in it go from every device that has \(workspace.name). The workspace's history keeps them, under Recently deleted."
+            return count == 0 ? "The folder is empty." : "The \(count) file\(count == 1 ? "" : "s") in it go from every device that has \(workspace.name). History keeps them, under Recently deleted."
         }
         return "It goes from every device that has \(workspace.name). Its history keeps it, under Recently deleted."
     }
@@ -218,7 +218,7 @@ struct EntryMenu: View {
                 Label("Share with…", systemImage: "person.crop.circle.badge.plus")
             }
         }
-        if case .folder(let dir) = entry, workspace.mayPublish, workspace.status != nil {
+        if case .folder(let dir) = entry, workspace.mayPublish, workspace.status != nil, workspace.audience(of: dir) != .nowhere {
             Button {
                 acting.publishing = PublishTarget(path: dir, kind: .dir)
             } label: {
@@ -268,9 +268,9 @@ struct MoveSheet: View {
         NavigationStack {
             List {
                 Button {
-                    choose("")
+                    choose(TreeModel.libraryFolder)
                 } label: {
-                    Label(model.workspace.name, systemImage: "tray.full")
+                    Label("Library", systemImage: "books.vertical")
                 }
                 ForEach(folders.filter(allowed), id: \.self) { folder in
                     Button {
@@ -307,12 +307,15 @@ struct MoveSheet: View {
         Binding(get: { widening != nil }, set: { if !$0 { widening = nil } })
     }
 
-    /// Not where it already is, not itself, and not the folder that only
-    /// holds other folders.
+    /// Not Library itself, which is the top choice; not where it already
+    /// is, not itself; not the folder that only holds other folders, and
+    /// nowhere in no section, which would take it off every other device.
     private func allowed(_ folder: String) -> Bool {
+        if folder.lowercased() == TreeModel.libraryFolder.lowercased() { return false }
         if folder == DocLinks.directory(of: entry.path) { return false }
         if case .folder(let own) = entry, folder == own || folder.hasPrefix(own + "/") { return false }
-        return model.workspace.audience(of: folder) != .folders
+        let audience = model.workspace.audience(of: folder)
+        return audience != .folders && audience != .nowhere
     }
 
     private func choose(_ folder: String) {

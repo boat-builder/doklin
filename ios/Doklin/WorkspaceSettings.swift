@@ -118,7 +118,7 @@ struct SettingsView: View {
     /// What has not synced would go with the copy: asked once more.
     @State private var confirmingUnsynced = false
     @State private var leaving = false
-    @State private var publishingWorkspace = false
+    @State private var publishingLibrary = false
     @State private var failure: String?
     @State private var question: Question?
 
@@ -146,9 +146,9 @@ struct SettingsView: View {
                 row("Published pages", "globe", .publishedPages, count: workspace.status?.public.count)
                 if workspace.mayPublish {
                     Button {
-                        publishingWorkspace = true
+                        publishingLibrary = true
                     } label: {
-                        Label(workspace.pages(of: "").contains { $0.kind == .dir } ? "Edit the workspace’s page…" : "Publish the whole workspace…", systemImage: "network")
+                        Label(workspace.pages(of: TreeModel.libraryFolder).contains { $0.kind == .dir } ? "Edit Library’s page…" : "Publish Library…", systemImage: "network")
                     }
                 }
                 row("Workspace history", "clock.arrow.circlepath", .history(.timeline))
@@ -168,8 +168,8 @@ struct SettingsView: View {
         }
         .navigationTitle(workspace.name)
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $publishingWorkspace) {
-            PublishView(workspace: workspace, path: "", kind: .dir) { path.append(.publishedPages) }
+        .sheet(isPresented: $publishingLibrary) {
+            PublishView(workspace: workspace, path: TreeModel.libraryFolder, kind: .dir) { path.append(.publishedPages) }
         }
         .confirmationDialog(
             "Remove \(workspace.name) from this \(device.kind)?",

@@ -36,7 +36,8 @@ use super::merge::conflict_copy_path;
 use super::pace::{next_midnight_ms, Mode, Pacer, MIN_BATCH};
 use super::remote::{Remote, RemoteError, RemoteResult};
 use super::scan::{hash16, now_ms, read_file_checked, rel_path};
-use super::space::{self, SpaceMarker, PRIVATE_DIR, SHARED};
+use super::layout;
+use super::space::{self, SpaceMarker, LIBRARY_DIR, PRIVATE_DIR, SHARED};
 use super::status::{
     emit_statuses, CloudStatus, DirectoryPerson, Events, LeaseHolder, Phase, PresenceDevice, PublicPage, RecentFiles,
     SpaceStatus, StatusTable, UsageStatus, VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT,
@@ -117,7 +118,8 @@ pub(crate) const DIRECTORY_MIN_GAP: Duration = Duration::from_secs(300);
 /* ---------- Commands ---------- */
 
 pub struct PublishRequest {
-    /// Workspace-relative; `""` publishes the workspace root as a folder.
+    /// Workspace-relative; a section's own folder (`Library`) publishes the
+    /// whole section as a folder.
     pub rel: String,
     pub kind: PublicKind,
     pub slug: Option<String>,
@@ -267,7 +269,7 @@ pub struct EngineConfig {
     pub root: PathBuf,
     pub domain: String,
     pub endpoint: String,
-    /// The shared workspace's `state.json` + `base/`; each space's are under
+    /// The shared section's `state.json` + `base/`; each space's are under
     /// `spaces/<id>/` in here.
     pub state_dir: PathBuf,
     /// `<app_data>`, so the engine can open each section's version store —
@@ -418,16 +420,7 @@ pub struct Engine<R: Remote> {
 impl<R: Remote> Engine<R> {
     pub fn new(cfg: EngineConfig, remote: Arc<R>, events: Arc<dyn Events>, statuses: StatusTable) -> Self {
         let mut units = BTreeMap::new();
-        let shared = UnitConfig {
-            id: SHARED.to_string(),
-            name: cfg.name.clone(),
-            root: cfg.root.clone(),
-            prefix: String::new(),
-            state_dir: cfg.state_dir.clone(),
-            data_dir: cfg.data_dir.clone(),
-            device_id: cfg.device_id.clone(),
-        };
-        units.insert(SHARED.to_string(), Unit::new(shared, remote.clone()));
+        units.insert(SHARED.to_string(), Self::shared_unit(&cfg, &remote));
         // The folders that say they are spaces are the record of which spaces
         // this Mac holds: each one syncs from where it left off. Whether this
         // person is still in each is the first poll's to say.
@@ -479,6 +472,24 @@ impl<R: Remote> Engine<R> {
         }
     }
 
+    /// The shared section's unit: `Library/`, however the disk spells it.
+    fn shared_unit(cfg: &EngineConfig, remote: &Arc<R>) -> Unit<R> {
+        let root = space::top(&cfg.root, LIBRARY_DIR);
+        let prefix = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        Unit::new(
+            UnitConfig {
+                id: SHARED.to_string(),
+                name: cfg.name.clone(),
+                root,
+                prefix,
+                state_dir: cfg.state_dir.clone(),
+                data_dir: cfg.data_dir.clone(),
+                device_id: cfg.device_id.clone(),
+            },
+            remote.clone(),
+        )
+    }
+
     fn space_state_dir(cfg: &EngineConfig, id: &str) -> PathBuf {
         cfg.state_dir.join("spaces").join(id)
     }
@@ -525,14 +536,12 @@ impl<R: Remote> Engine<R> {
     }
 
     /// Which unit a workspace-relative path is in, and the path as that unit
-    /// spells it. None for a path that is no section's: `Restricted` itself,
-    /// a file directly under it, a folder there that is not a space yet.
+    /// spells it. None for a path that is no section's: the workspace's root,
+    /// anything else at its top, `Restricted` itself, a file directly under
+    /// it, a folder there that is not a space yet, and `Private` or
+    /// `Restricted` inside Library.
     fn place(&self, ws_rel: &str) -> Option<(String, String)> {
-        self.units
-            .values()
-            .filter(|unit| !unit.is_shared())
-            .find_map(|unit| unit.in_unit(ws_rel).map(|rel| (unit.id.clone(), rel)))
-            .or_else(|| self.shared().in_unit(ws_rel).map(|rel| (SHARED.to_string(), rel)))
+        self.units.values().find_map(|unit| unit.in_unit(ws_rel).map(|rel| (unit.id.clone(), rel)))
     }
 
     /* ----- links ----- */
@@ -817,9 +826,19 @@ impl<R: Remote> Engine<R> {
             self.set_status(Phase::Error, Some("workspace folder is missing — sync is paused".into()));
             return Ok(());
         }
+        // A folder that is not in the Library layout is never synced: every
+        // file would read as moved, and the manifest would tell every device.
+        // The move is the app's, at launch (`cloud::init`).
+        if let Err(why) = layout::ready(&self.cfg.root) {
+            self.set_status(Phase::Error, Some(why));
+            return Ok(());
+        }
+        if !self.shared().root.is_dir() {
+            self.mend_library();
+        }
         // A folder dropped under `Restricted/` becomes a space before the
-        // shared workspace reads its files as gone, so that they leave it as
-        // a move. And a space whose folder was deleted here is made whole
+        // section it came from reads its files as gone, so that they leave it
+        // as a move. And a space whose folder was deleted here is made whole
         // again before its unit could read every file in it as deleted.
         let lost = self.units.values().any(|u| !u.is_shared() && !u.root.is_dir());
         if lost || !space::unclaimed(&self.cfg.root, &self.cfg.ws_id).is_empty() {
@@ -1041,7 +1060,7 @@ impl<R: Remote> Engine<R> {
                 if arriving || renamed.contains(hash.as_str()) || path.to_lowercase().ends_with(".meta.jsonl") {
                     continue;
                 }
-                news.push(unit.ws_rel(path));
+                news.push(unit.ws_rel(&counted_under(path)));
             }
         }
         if (news.len() as u64) < threshold {
@@ -1275,7 +1294,7 @@ impl<R: Remote> Engine<R> {
     pub(crate) async fn reconcile_spaces(&mut self) {
         let Some(mut list) = self.spaces.clone() else { return };
         let root = self.cfg.root.clone();
-        if !root.is_dir() {
+        if !root.is_dir() || layout::ready(&root).is_err() {
             return;
         }
         let ws_id = self.cfg.ws_id.clone();
@@ -1430,6 +1449,21 @@ impl<R: Remote> Engine<R> {
         }
     }
 
+    /// `Library/` is gone from this device — deleted, or renamed in Finder,
+    /// which leaves it at the top in no section. Like a space's missing
+    /// folder (`reconcile_spaces`), it is a section to bring back whole, never
+    /// a folder whose every file was deleted: what the shared unit had synced
+    /// is forgotten, and its next cycle downloads everything into a new one.
+    fn mend_library(&mut self) {
+        let _ = std::fs::remove_file(self.cfg.state_dir.join("state.json"));
+        let _ = std::fs::remove_dir_all(self.cfg.state_dir.join("base"));
+        let _ = std::fs::create_dir_all(self.cfg.root.join(LIBRARY_DIR));
+        self.units.insert(SHARED.to_string(), Self::shared_unit(&self.cfg, &self.remote));
+        if let Some(tell) = &self.cfg.on_spaces {
+            tell(SpacesChanged::default());
+        }
+    }
+
     /* ----- restricted folders, by hand ----- */
 
     /// A failed call about a restricted folder, in a sentence.
@@ -1467,11 +1501,12 @@ impl<R: Remote> Engine<R> {
         }
         let root = self.cfg.root.clone();
         if let Some(from) = from {
-            let inside = from.starts_with(&root) && from != root.as_path();
+            // A folder inside Library or inside Private: never a section's
+            // own folder, nor anything in no section.
             let real = std::fs::symlink_metadata(from).map(|m| m.file_type().is_dir()).unwrap_or(false);
-            let reserved = from.parent() == Some(root.as_path())
-                && from.file_name().is_some_and(|n| space::reserved_top(&n.to_string_lossy()).is_some());
-            if !inside || !real || reserved {
+            let placed = rel_path(&root, from).and_then(|rel| self.place(&rel));
+            let in_section = placed.is_some_and(|(id, rel)| !rel.is_empty() && (id == SHARED || id.starts_with("p-")));
+            if !real || !in_section {
                 return Err("That is not a folder of this workspace that can be restricted.".to_string());
             }
             if self.units.values().any(|unit| !unit.is_shared() && unit.root == from) {
@@ -1648,7 +1683,7 @@ impl<R: Remote> Engine<R> {
                 .values()
                 .any(|unit| !unit.is_shared() && unit.effective_public().contains_key(wanted));
             if elsewhere && !self.shared().effective_public().contains_key(wanted) {
-                return Err("the home page is chosen from the shared workspace".into());
+                return Err("The home page is chosen from Library.".into());
             }
         }
         let Some(shared) = self.units.get_mut(SHARED) else { return Err("that workspace isn't connected".into()) };
@@ -2419,12 +2454,20 @@ fn local_time(ms: u64) -> String {
 
 /// Where new documents are, for the valve's question: each path's folder,
 /// two levels deep at most, counted — most first, five at most.
-fn folders_of(paths: &[String]) -> Vec<(String, u32)> {
+/// The folder a new document is counted under: at most two levels below
+/// its section's folder, `""` for one directly in it.
+fn counted_under(path: &str) -> String {
+    let dirs: Vec<&str> = path.split('/').collect();
+    let dirs = &dirs[..dirs.len().saturating_sub(1)];
+    dirs[..dirs.len().min(2)].join("/")
+}
+
+/// The folders with the most new documents (`counted_under`, made
+/// workspace-relative), the most first.
+fn folders_of(folders: &[String]) -> Vec<(String, u32)> {
     let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-    for path in paths {
-        let dirs: Vec<&str> = path.split('/').collect();
-        let dirs = &dirs[..dirs.len().saturating_sub(1)];
-        *counts.entry(dirs[..dirs.len().min(2)].join("/")).or_default() += 1;
+    for folder in folders {
+        *counts.entry(folder.clone()).or_default() += 1;
     }
     let mut out: Vec<(String, u32)> = counts.into_iter().collect();
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));

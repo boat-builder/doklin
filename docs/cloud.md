@@ -14,7 +14,7 @@ synced manifest, rendered by the worker from the synced files.
 
 - **Workspace** — the folder Doklin opens; unit of sync and publishing. Untitled notes are in none.
 - **Domain** — a worker's hostname (custom or `workers.dev`). "Backend" here means the app's Rust side, never the worker.
-- **Section** — a part of a workspace with its own people: the shared workspace (everyone), a person's Private, a restricted folder. The last two are *spaces* on the domain.
+- **Section** — a part of a workspace with its own people: Library (everyone; the *shared section*), a person's Private, a restricted folder. The last two are *spaces* on the domain; the shared section is the bucket's root, space id `""`.
 - **Engine** — the Rust task syncing a workspace. **Unit** — its sync of one section.
 - **Manifest** — a section's one mutable object: every file's path, rev, hash, plus the public map.
 - **Key** — worker secret `OWNER_TOKEN`, minted by the app for setup and for each recovery and set on the worker by an agent. Never a sign-in: traded once for a device sign-in as the superadmin. No device keeps it.
@@ -50,7 +50,7 @@ synced manifest, rendered by the worker from the synced files.
 ## Engine ⇄ frontend contract
 
 - Commands: `cloud_*` in `engine/src/cloud/mod.rs`, each with a Tauri wrapper in `src-tauri/src/cloud.rs` and an arm in `engine/src/command.rs` (a test fails without the arm), and a method of `Cloud` (`src/backend.ts`) that `src/mac/backend.ts` answers with it. Events (`status.rs`): `cloud-status` (whole `CloudStatus[]` on every change; disconnect = array without it), `cloud-applied`, `cloud-conflict`, `cloud-pending-deletes`, `cloud-pending-adds`, `cloud-progress`, `cloud-address-taken`, `cloud-space-left` (a restricted folder was deleted from this Mac), `cloud-removed` (this Mac's copy was deleted: [cloud-people-agents.md](cloud-people-agents.md) *Losing access*).
-- Every path in a status or an event is workspace-relative, whichever section it is in (`Private/x.md`); a lease's `path` is that, lowercased.
+- Every path in a status or an event is workspace-relative, whichever section it is in (`Library/x.md`, `Private/x.md`); a lease's `path` is that, lowercased. A section's whole folder is its name: publishing `Library` (a folder) publishes the shared section, and its page's `path` is `Library`; `""` is no section. Pending adds are grouped two levels below a section's folder (`Library` for one directly in it).
 - Payload types: `status.rs` serde structs ⇄ `src/cloud.ts` ⇄ `ios/DoklinKit/Sources/DoklinKit/Engine/Payloads.swift`. **Change all three.**
 - `CloudStatus` is the frontend's whole cloud model; surfaces derive from it. Phases: `idle syncing offline paused pending-deletes pending-adds revoked worker-outdated limited error`. `usage` says what this device spent today and the mode it puts sync in (*Pacing*); its sentences are the surfaces', from `usage`, except `limited`'s, which is the engine's `error`.
 - The Mac reports window focus from Rust (`WindowEvent::Focused` → `cloud_set_focus`, the window's folder from the registry); the iPhone from `woke`/`settle`. No frontend code is involved.
@@ -66,7 +66,11 @@ synced manifest, rendered by the worker from the synced files.
 - Hints say *when*, never *what*: the cycle always walks the whole tree and decides from content.
 
 **Sections** (`engine.rs`, `space.rs`):
-- On disk: the shared workspace is the root, a Private is `Private/`, a restricted folder is `Restricted/<folder>/`. The shared unit never walks the two reserved names, nor does `seed_upload` (`RESERVED_DIRS`, `space.rs` ⇄ `RESERVED_FOLDERS`, `layout.ts`: **change both**).
+- On disk the sections sit side by side, and every path names its section: `Library/` (the shared unit, `LIBRARY_DIR` ⇄ `LIBRARY_FOLDER` in `layout.ts` ⇄ `src/cloud.ts` ⇄ `TreeModel.libraryFolder` in the iPhone's `Tree.swift`: **change all four**), `Private/`, `Restricted/<folder>/`. The three names are found in any case (`space::top`). Hidden entries at the root are the folder's, not a section's.
+- **Anything else at the root is in no section**: it stays on this device and syncs nowhere (`Engine::place` answers none, so the edit bus drops its touch). So is the root itself.
+- Inside Library, `Private` and `Restricted` at its top are in no section: the shared unit and `seed_upload` never walk them (`RESERVED_DIRS`, `space.rs` ⇄ `RESERVED_FOLDERS`, `layout.ts`: **change both**). A device in the layout from before Library mounts the shared section at its root, where a shared `Private/x.md` would land in its own Private.
+- Manifests, tombstones' `to`, presence, leases and every wire path stay relative to their section: a moved device and one in the old layout sync the same manifests side by side.
+- `Library/` missing (deleted, or renamed in Finder — it is then a stray) is a section to bring back (`Engine::mend_library`): the shared unit's `state.json` and `base/` are wiped and it downloads into a new `Library/`. Never tombstones.
 - A folder is a space by its marker, `<folder>/.doklin/space.json` `{wsId, space, name}`. That marker is the only record of which folders are spaces; a folder without it is never deleted.
 - `reconcile_spaces` runs after every poll that lists spaces, and before a pass when a folder under `Restricted/` has no marker or a unit's folder is missing:
   - listed, no folder → make it, download;
@@ -83,9 +87,21 @@ synced manifest, rendered by the worker from the synced files.
 - Leaving or deleting a folder on this Mac drops it from `spaces` and reconciles at once; other Macs learn from their poll. Either way the folder's going emits `cloud-space-left`.
 - `CloudStatus.spaces` is drawn from the units, so a Mac that started offline still lists its folders (no members, kind by where the folder is).
 
+**The move into Library** (`layout.rs`), a one-time stored-data migration each device runs on its own folder:
+- The marker's `layout`: absent (the old layout: the shared section at the root), `"moving"`, `"library"`. The steps and how each is resumed after a crash are in `layout.rs`'s header. Renames only, never copies: the sync state needs no rewrite and the first survey after it finds nothing changed. No id or rev changes and nothing is sent.
+- When: `cloud::init`, for each connected root before its engine spawns and before `versions::init`; `cloud_connect` (after the marker, before `seed_upload`, which uploads `Library/`); `cloud_resume` (a folder disconnected before it moved). Connect and resume stop the root's versioner once the move has begun (`versions::release_root`) and reconcile after.
+- `init` answers the roots it moved, and src-tauri rewrites `session.json`'s tabs under them (`layout::moved_rel`) before the session is read. Each frontend rewrites its own stored paths once per root (*Sections in the app*).
+- **No engine syncs a folder that is not in the Library layout** (`layout::ready`, checked at the start of every pass and of `reconcile_spaces`): no marker, an unfinished move, or a layout a later build wrote is phase `error` with a sentence. A move that failed finishes at the next launch.
+- **Traps.** Never move while an engine or a watcher runs for the root: with the shared unit at the root, `x` → `Library/x` reads as a move and every device follows it. Never point the shared unit at `Library/` before every file is in it: a partly moved tree reads as deletions. Never run an older build on a moved folder — the first trap from the other side; a revert of this layout on `main` ships exactly that, so fix forward.
+
 **Sections in the app** (`Sidebar.tsx`, `App.tsx`, `src/cloud.ts`):
-- `placeOf(cloud, rel)` is the one answer to "who can open this path". `nowhere` = under a reserved name but in no space.
-- A move that lets more people see something is confirmed first (`widerAudience`, `confirmMove`): every drag and every cut-paste goes through it. A move that narrows is not asked about.
+- `placeOf(cloud, rel)` is the one answer to "who can open this path". `nowhere` = the root, anything at it outside the three sections, `Private`/`Restricted` inside Library, a file directly under `Restricted/` and a folder there that is no space.
+- The tree of a connected workspace is three headings — Library, Restricted, Private — and never says "Workspace". Each heading stands for its folder (found however the disk spells it) and is never a row of its own. Strays follow under "In no section", each marked as not synced. A folder that is not connected is one "Files" list.
+- Whatever would land at a connected root lands in Library: nothing selected, empty space, ⌘V, saving an untitled note, the redirect away from `Restricted/`. The root is never a drop or paste target.
+- The Library heading carries the shared section's own items: *Library history…*, *Recently deleted*, *Publish Library…* (a publish of `<root>/Library`). The shared section's history is Library's store (`libraryDirOf`); every versions command for it names `<root>/Library`.
+- The Live chip shows only for a file in a section; *Copy link* and *Restrict access…* are never offered on `nowhere`.
+- Stored paths are rewritten once per root by the move's rule (`toLibraryLayout` ⇄ `layout::moved_rel` ⇄ the iPhone's `Sections.moved`, **change all three**): `doklin:session` tabs and `doklin:sidebar-tree` (`open` folders, `folded` `"workspace"` → `"library"`). On the Mac, when a window takes up a root whose marker says `layout: "library"` and `doklin:library-layout` does not list it yet, and around `cloud_connect`/`cloud_resume` (autosaves flushed first, open tabs repointed after). A browser rewrites its own once (`doklin:web:library-layout`).
+- A move that lets more people see something is confirmed first (`widerAudience`, `confirmMove`; "Move … to Library?"): every drag and every cut-paste goes through it. So is a move into `nowhere`, which takes a file off every other device. Any other move that narrows is not asked about.
 - A restricted folder's row is not dragged, cut or trashed: trashing it would only bring it back whole. It is left or deleted from *Manage access…*.
 - A note is never dropped straight under `Restricted/` (`canDrop`); a folder dropped there is a new restricted folder, and is confirmed.
 
@@ -141,11 +157,11 @@ synced manifest, rendered by the worker from the synced files.
 
 ## Flows (`flows.rs`, `mod.rs`)
 
-- **Connect**: name + email asked first → mint key → setup prompt → agent prints `ENDPOINT: https://…` → `cloud_probe` (with the key) → `cloud_recover` trades it for this Mac's sign-in → `cloud_connect` binds with that, uploads, writes `cloud.json` + marker, spawns the engine.
+- **Connect**: name + email asked first → mint key → setup prompt → agent prints `ENDPOINT: https://…` → `cloud_probe` (with the key) → `cloud_recover` trades it for this Mac's sign-in → `cloud_connect` binds with that, writes the marker, moves the folder's files into `Library/` (hidden ones stay), uploads `Library/`, writes `cloud.json`, spawns the engine.
 - **Recover** (every device lost): address + name + email → mint key → recovery prompt (`secret put OWNER_TOKEN --name <worker>`, nothing else) → probe → `cloud_recover` → `cloud_join` or `cloud_resume`. Whoever recovers is the superadmin from then on.
 - **A key works once** (`spent_keys`): a step after the trade that fails is retried with the token it bought, never the key. A lost key costs nothing — the next recovery mints another, and no device syncs on one.
-- **Already bound** (probe shows a workspace): *Download it* (`cloud_join` into `~/Doklin/<name>`) or, when the open folder's marker has that `wsId`, *Resume* (`cloud_resume`). Never "bind anyway".
-- **Resume**: empty engine state; `stage_local` adopts remote fileIds by path, identical bytes count as synced, merges own the rest (reinstall, restored folder).
+- **Already bound** (probe shows a workspace): *Download it* (`cloud_join` into `~/Doklin/<name>/Library/`, made even when the workspace is empty; the marker says `layout: "library"`) or, when the open folder's marker has that `wsId`, *Resume* (`cloud_resume`). Never "bind anyway".
+- **Resume**: the move first, for a folder in the old layout; then empty engine state; `stage_local` adopts remote fileIds by path, identical bytes count as synced, merges own the rest (reinstall, restored folder).
 - **Join** (a line: an invite, or a device code from another device of the person's): `cloud_redeem` → `cloud_join`, or `cloud_resume` when the open folder's marker has that `wsId`.
 - **Never trade for a domain this device holds.** One copy a device per domain, and every step after a trade refuses a second, so `cloud_redeem` and `cloud_recover` refuse first and what was to be spent still works. The wizard asks `cloud_held` before it trades: a copy that syncs is opened; one that has stopped (`revoked`, or its folder gone) is disconnected, then the trade goes on.
 - **Disconnect**: stop the engine, end this Mac's sign-in, drop the `cloud.json` entry and state; folder, marker and cloud stay.
@@ -155,7 +171,7 @@ synced manifest, rendered by the worker from the synced files.
 
 - `<app_data_dir>/cloud.json`: `{version, device: {id, name}, workspaces: [{root, domain, endpoint, wsId, name, token}]}`. One entry per root and per domain; parsed by shape (malformed = nothing connected; an entry with no token = not connected). It is read and written only by `read_cloud_file`/`write_cloud_file` (`cloud/config.rs`).
 - Where the token lives: in that entry on a Mac. An app whose `Host::secrets` keeps sign-ins (the iPhone: its Keychain, by `wsId`, this device only, never in a backup) gets each token there and finds `token: ""` in the file; a workspace dropped from the file has its kept sign-in deleted with it. A sign-in the keeper cannot read just now leaves that entry out of the engine and writes it back untouched. The phone keeps its engine files out of backups, so a restored phone has no device id or entries either, and joins again as a new device.
-- `<root>/.doklin/cloud.json`: the marker `{domain, wsId}`. Never a secret (a copied folder must not carry a credential). Hidden, so tree walk, search and scan skip it. A marker with no `cloud.json` entry → offer *Resume*.
+- `<root>/.doklin/cloud.json`: the marker `{domain, wsId, layout}` (`layout`: *The move into Library*). Never a secret (a copied folder must not carry a credential). Hidden, so tree walk, search and scan skip it. A marker with no `cloud.json` entry → offer *Resume*.
 - `<app_data_dir>/cloud/<wsId>/state.json` + `base/`: last applied manifest and etag, per-file synced state, queued public ops; merge bases. Each space's are under `spaces/<spaceId>/` in it.
 - `<folder>/.doklin/space.json`: a space's marker (*Sections*). No secret.
 

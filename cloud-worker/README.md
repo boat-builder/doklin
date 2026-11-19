@@ -180,21 +180,32 @@ Under `/api/agent/`. Missing scope → `403 {error, need, scopes}`. JSON except
 document bytes; refusals `{error, code?, …}`. `dry=1` / `dryRun: true`
 validates without writing (`written: false`). Commit lost 5 times → `503`.
 
-Every path is literal, as on the disk of the agent's person (`src/agentPlace.ts`):
-`Private/…` is their Private, `Restricted/<folder>/…` a restricted folder they
-are in, anything else the shared workspace. A route is answered in the space
-its path names, with that space's manifest mounted at its folder
-(`src/mount.ts`); a folder the person is not in → `404`. `tree`, `search` and `pages` at the top
-cover every section, opening at most 8 spaces a request (`notListed`,
-`sectionsNotSearched`). A restricted folder's name is the Mac's (`candidates`,
-`engine/src/cloud/space.rs`, **change both**), given out in creation order.
+Every path is literal, as on the disk of the agent's person, and starts with
+its section (`src/agentPlace.ts`): `Library/…` is the shared section,
+`Private/…` their Private, `Restricted/<folder>/…` a restricted folder they
+are in. Section names match in any case. Any other path is in no section →
+`400 "Projects/plan is in no section. Say which: Library/Projects/plan
+(everyone), Private/Projects/plan (only your person) or
+Restricted/<folder>/Projects/plan."`, with the path as sent. A route is
+answered in the section its path names, with that section's manifest
+mounted at its folder (`src/mount.ts`): the stored paths stay relative to
+the section, and every answer carries the mounted path. A folder the person
+is not in → `404`. `Library/Private/…` and `Library/Restricted/…` are
+refused by the shared manifest (`409`). `""` is the workspace itself, for
+`tree` and `search` only: its listing is the sections the person has
+(`Library`, `Private`, `Restricted` when they are in a folder) and no
+document. `tree` (`deep=1`), `search` and `pages` at the top cover every
+section, Library among them, opening at most 8 spaces a request beside it
+(`notListed`, `sectionsNotSearched`). A restricted folder's name is the
+Mac's (`candidates`, `engine/src/cloud/space.rs`, **change both**), given
+out in creation order.
 
 ```
 POST   login  no bearer; {code, host?} → 201 {token, agent: {id, name}, scopes, workspace: {id,
        name}|null, version, limits}; 400 not a code; 401 unknown/used/expired (identical); 503
 DELETE login  revoke this token (204)
-GET    me     {agent, person: {id, name}|null, scopes, sections: [folder], workspace, version,
-       limits}
+GET    me     {agent, person: {id, name}|null, scopes, sections: [folder] (Library first),
+       workspace, version, limits}
 read:
 GET tree?dir=&deep=1  {dir, folders, documents: [{path, md?, html?, htmlBehind?}]}; a
     version is {file, rev, size, changed, by}; 404 empty
@@ -213,8 +224,10 @@ edit:
 PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → {kind, path, version,
        file, rev, size, created, unchanged?, htmlBehind?}; 409 {rev}; 413 > 25 MB
 DELETE doc?path=&v=[&dry=1]  document, or one version → {kind, path, versions, stillPublic, threadsRemoved?}
-POST   move {from, to, dryRun?}  document/folder; to ending in / = into → {kind, from, to,
-       files, newLinks?, unpublished?}. Between two sections (`newLinks: true`): ≤ 16 files,
+POST   move {from, to, dryRun?}  document/folder; to ending in /, or a section's own folder,
+       = into → {kind, from, to, files, newLinks?, unpublished?}. A section's own folder
+       (`Library`, `Private`, `Restricted/<f>`) never moves → 400. Between two sections
+       (`newLinks: true`): ≤ 16 files,
        written where they go (new file ids) before they are removed with a tombstone `to`;
        pages re-claimed after, and `unpublished` lists addresses that could not be
 comment:
@@ -222,9 +235,11 @@ POST   comments {path, on, body, v?} → 201 {path, thread, version, on, line?|t
        {path, thread, body} → 200 {path, thread, version, comments}
 DELETE comments?path=&thread= → {path, thread, version, removed}
 publish:
-PUT    pages {path, slug?, title?, desc?}  document, folder/ or "/" → 201 {slug, url, kind, path,
-       documents, created}
-DELETE pages?path= | ?slug= → {stopped: [...]}
+PUT    pages {path, slug?, title?, desc?}  document or folder/; a section's own folder is the
+       whole section (`Library/` → path "Library", stored as "") → 201 {slug, url, kind,
+       path, documents, created}
+DELETE pages?path= | ?slug= → {stopped: [...]}; a path in no section that is an address is
+       stopped as one
 ```
 
 | `code` | Status | Means |

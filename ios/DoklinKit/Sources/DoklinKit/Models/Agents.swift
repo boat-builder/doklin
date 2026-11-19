@@ -90,7 +90,7 @@ public enum AgentPrompt {
         \(installLine)
         \(line)
 
-        You see what the person who gave you this sees. Put anything new under `Private/`, which only they see, unless they tell you where it goes.
+        You see what the person who gave you this sees. Every path starts with its section: `Library/` is what everyone sees, `Private/` only them, `Restricted/<folder>/` that folder's people. Put anything new under `Private/` unless they tell you where it goes.
 
         Then run `doklin help agent` to see what you can do.
         """

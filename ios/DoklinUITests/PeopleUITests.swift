@@ -157,7 +157,8 @@ final class PeopleUITests: UITestCase {
         expect(marked("here-alone"), "only this iPhone here")
         try ask("editing?path=Projects/plan.md")
         // It is here once a poll has said so: pulling the list down asks now.
-        let editing = text(containing: "editing Projects/plan.md")
+        // This iPhone names the plan by its path here, Library's name first.
+        let editing = text(containing: "editing Library/Projects/plan.md")
         for _ in 0..<6 where !editing.waitForExistence(timeout: 10) {
             app.collectionViews.firstMatch.swipeDown()
         }

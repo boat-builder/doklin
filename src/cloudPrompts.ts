@@ -325,9 +325,10 @@ export type AgentLoginPromptInput = {
 
 /** What a person hands an agent of theirs to log it in — pasted into its
  *  chat, or read by whoever sets its machine up. Short on purpose: what
- *  Doklin is, the two commands, what the address in the second one is, and
- *  where its work goes when nobody says: the agent sees everything its person
- *  sees, so "under Private/" is an instruction here and nowhere a setting.
+ *  Doklin is, the two commands, what the address in the second one is, that
+ *  every path starts with its section, and where its work goes when nobody
+ *  says: the agent sees everything its person sees, so "under Private/" is an
+ *  instruction here and nowhere a setting.
  *  `doklin help agent` is the briefing; this only gets the agent that far.
  *  It carries the login code, which works once — the one prompt here with a
  *  secret in it besides setup's and recovery's. The iPhone hands out the same
@@ -342,7 +343,7 @@ The first command below installs \`doklin\` (skip it if it is already installed)
 ${CLI_INSTALL_LINE}
 ${i.line}
 
-You see what the person who gave you this sees. Put anything new under \`Private/\`, which only they see, unless they tell you where it goes.
+You see what the person who gave you this sees. Every path starts with its section: \`Library/\` is what everyone sees, \`Private/\` only them, \`Restricted/<folder>/\` that folder's people. Put anything new under \`Private/\` unless they tell you where it goes.
 
 Then run \`doklin help agent\` to see what you can do.`;
 }

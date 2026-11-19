@@ -2,15 +2,15 @@ import DoklinKit
 import SwiftUI
 
 /// The workspace as it was: every moment this iPhone kept of it, by day,
-/// with what each changed. A section (Private, a restricted folder) keeps
-/// moments of its own, picked from the bar.
+/// with what each changed. Each section (Library, Private, a restricted
+/// folder) keeps moments of its own, picked from the bar; Library's first.
 struct WorkspaceHistoryView: View {
     @Environment(Workspaces.self) private var device
     @State private var timeline: WorkspaceTimeline
     @State private var expanded: Set<Date> = []
 
     init(workspace: Workspace) {
-        _timeline = State(initialValue: WorkspaceTimeline(workspace: workspace, store: workspace.root))
+        _timeline = State(initialValue: WorkspaceTimeline(workspace: workspace, store: workspace.libraryStore))
     }
 
     private var workspace: Workspace { timeline.workspace }
@@ -50,7 +50,7 @@ struct WorkspaceHistoryView: View {
         }
         .listStyle(.insetGrouped)
         .overlay { emptiness }
-        .navigationTitle(timeline.store == workspace.root ? "Workspace history" : "\(workspace.storeName(timeline.store)) history")
+        .navigationTitle("\(workspace.storeName(timeline.store)) history")
         .navigationBarTitleDisplayMode(.inline)
         .task { await timeline.load() }
         .refreshable { await timeline.load() }
@@ -58,7 +58,7 @@ struct WorkspaceHistoryView: View {
         .onChange(of: workspace.left) { _, left in
             // The section shown left this iPhone, its history with it.
             if let left, workspace.relative(timeline.store).map(left.holds) == true {
-                Task { await timeline.show(workspace.root) }
+                Task { await timeline.show(workspace.libraryStore) }
             }
         }
     }

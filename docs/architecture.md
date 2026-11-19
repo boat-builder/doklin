@@ -106,9 +106,13 @@ Its sign-in and the worker's routes: [cloud-people-agents.md](cloud-people-agent
 - `workspace.ts` holds every section's manifest and derives from them what
   the engine tells the UI on a Mac: one `CloudStatus`, the tree, what changed
   elsewhere. A path is the workspace's name as a root, then where the Mac
-  app would put the same file (`Private/…`, `Restricted/<name>/…`). It asks
-  the worker by attention with the engine's numbers (`poll_gap`): change
-  both.
+  app would put the same file: `/<Name>/Library/…` for the shared section
+  (`LIBRARY_FOLDER`, `cloud-worker/src/layout.ts`), `/<Name>/Private/…`,
+  `/<Name>/Restricted/<name>/…`. **A path outside the three is in no
+  section** (`place` answers null), and so is one under `Library/Private`
+  or `Library/Restricted`; the browser changes nothing there. What it sends
+  is a section's id and the path inside it, never a UI path. It asks the
+  worker by attention with the engine's numbers (`poll_gap`): change both.
 - It reads the worker's answers with the worker's own types:
   `cloud-worker/src/wire.ts`, `manifest.ts`, `layout.ts`, `roles.ts`.
   **Those files import nothing of the worker's runtime; keep them so.** The
