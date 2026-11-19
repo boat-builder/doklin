@@ -13,7 +13,6 @@ import { installBackend } from "../backend";
 import { applyTheme, readStoredTheme } from "../theme";
 import { webBackend } from "./backend";
 import { Unreachable, onSignedOut, refused, send } from "./http";
-import { moveIntoLibrary } from "./libraryLayout";
 import { Saving } from "./saving";
 import SignIn from "./SignIn";
 import { Workspace } from "./workspace";
@@ -68,13 +67,10 @@ async function start(): Promise<void> {
     // somebody to show it to, and while the workspace is being read.
     const app = import("../App");
     const ws = await Workspace.open(meta);
-    const { default: App, moveStoredPathsIntoLibrary } = await app;
+    const { default: App } = await app;
     // Signed out somewhere else, or taken off the workspace: the worker has
     // said to drop the cookie and what the page kept. Back to the sign-in.
     onSignedOut(() => location.reload());
-    // Before anything reads what this browser kept: once, into the Library
-    // layout (libraryLayout.ts).
-    moveIntoLibrary(ws.root, moveStoredPathsIntoLibrary);
     const saving = new Saving(ws);
     // What a closed tab left unsent is taken over before the app reads a
     // document, so the one it opens shows what was typed.

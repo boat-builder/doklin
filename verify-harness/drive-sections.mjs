@@ -14,8 +14,7 @@
 // more people see a note asking first, and one that narrows asking nothing;
 // who is in a folder — adding, removing, the last person handing it on;
 // a folder taken away elsewhere saying so; deleting one for everyone; an
-// owner taking down a page published from a section they are not in; and
-// what was stored from before the folder moved following it into Library.
+// owner taking down a page published from a section they are not in.
 import { chromium } from "playwright";
 import { existsSync, mkdirSync } from "node:fs";
 
@@ -679,34 +678,6 @@ step(
 );
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Published pages").count()) === 0);
-
-/* 15 — what was stored about the folder from before it moved into the
-       Library layout moves after it, once, when the folder is opened: the
-       open note, the open folders, the folded list — and the folder is
-       recorded as done. (A page of its own: cloud.html starts every load
-       with nothing stored.) */
-const before = await context.newPage();
-before.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
-await before.goto(`http://localhost:${PORT}/verify-harness/cloud.html?sections&before-move`);
-await poll(async () => (await before.locator(".ProseMirror h1").first().textContent().catch(() => ""))?.includes("Notes"));
-await poll(async () => (await before.locator('[data-testid="section-library-toggle"]').count()) === 1);
-const movedStore = await before.evaluate(() => ({
-  tabs: JSON.parse(localStorage.getItem("doklin:session")).sessions["/docs"].tabs.map((t) => t.path),
-  tree: localStorage.getItem("doklin:sidebar-tree"),
-  done: localStorage.getItem("doklin:library-layout"),
-}));
-const libraryFoldedAfter = (await before.locator('[data-testid="section-library-toggle"]').getAttribute("aria-expanded")) === "false";
-await before.locator('[data-testid="section-library-toggle"]').click();
-await poll(async () => (await before.locator('[data-tree-path="/docs/Library/Projects/plan.md"]').count()) === 1);
-step(
-  "stored from before the move: the open note, the open folders and the folded list follow the folder into Library, once, and it is recorded",
-  movedStore.tabs.join() === "/docs/Library/notes.md" &&
-    movedStore.tree === '{"/docs":{"open":["Library/Projects","Restricted/Finance"],"folded":["library"]}}' &&
-    movedStore.done === '["/docs"]' &&
-    libraryFoldedAfter,
-  JSON.stringify(movedStore),
-);
-await before.close();
 
 await settle();
 const failed = results.filter((r) => !r.ok).length;

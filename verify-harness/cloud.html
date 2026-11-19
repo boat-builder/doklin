@@ -1226,11 +1226,6 @@
       };
 
       // A restorable /docs workspace session so the sidebar renders.
-      // `?before-move`: what was stored about it is from before the folder
-      // moved into the Library layout — the open note at the top, Projects
-      // open and the shared list folded under the id it had — which the
-      // app moves after the folder once, on opening it.
-      const beforeMove = params.has("before-move");
       localStorage.clear();
       localStorage.setItem(
         "doklin:session",
@@ -1239,18 +1234,12 @@
           lastRoot: "/docs",
           sessions: {
             "/docs": {
-              tabs: [{ id: "t-notes", kind: "file", path: `${beforeMove ? "/docs" : S}/notes.md` }],
+              tabs: [{ id: "t-notes", kind: "file", path: `${S}/notes.md` }],
               activeId: "t-notes",
             },
           },
         }),
       );
-      if (beforeMove) {
-        localStorage.setItem(
-          "doklin:sidebar-tree",
-          JSON.stringify({ "/docs": { open: ["Projects", "Restricted/Finance"], folded: ["workspace"] } }),
-        );
-      }
       // `?sections`: the app starts in a connected workspace that is in
       // sections — this person (the superadmin) has a
       // Private with a note in it and is in one restricted folder with Bob;

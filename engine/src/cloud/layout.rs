@@ -1,16 +1,16 @@
-//! The Library layout, and the one move into it.
+//! The Library layout, and the move into it.
 //!
 //! A connected workspace's folder holds its sections side by side —
 //! `Library/`, `Private/`, `Restricted/<folder>/` — and every path names its
-//! section (space.rs). Before it, the shared section was the folder itself.
+//! section (space.rs).
 //!
-//! The move is a one-time stored-data migration: each device moves its own
-//! folder once, before anything syncs it, and nothing is sent. It is renames
-//! only, on one volume, so every file keeps its size and mtime and the first
-//! survey after it finds nothing changed; the sync state (`state.json`,
-//! `base/`) holds paths relative to the shared unit's root and needs no
-//! rewrite once that root is `Library/`. The marker's `layout` says how far
-//! it got, and every step is safe to repeat after a crash:
+//! The move is how a folder gets there: connecting a folder moves its files
+//! into `Library/`, and so does resuming one whose files are not in it yet
+//! (`cloud_connect`, `cloud_resume`). It is renames only, on one volume, so
+//! every file keeps its size and mtime, and the sync state (`state.json`,
+//! `base/`) holds paths relative to the shared unit's root, which is
+//! `Library/` from the start. The marker's `layout` says how far it got, and
+//! every step is safe to repeat after a crash:
 //!
 //! 1. `layout` is `"library"`: done.
 //! 2. Make `.doklin/moving-into-library/` if it is not there.
@@ -55,31 +55,17 @@ fn staging(root: &Path) -> PathBuf {
 
 const NO_MARKER: &str = "This folder's hidden .doklin folder is missing, so Doklin can't tell how its files are laid out. Disconnect it in Cloud settings and download the workspace again.";
 const NEWER: &str = "A newer version of Doklin set this folder up. Update Doklin to sync it.";
-const UNFINISHED: &str = "Doklin hasn't finished moving this folder's files into Library. Quit Doklin and open it again to finish.";
+const UNFINISHED: &str = "This folder's files aren't in Library yet. Disconnect it in the Cloud panel, then join again with this folder open and choose Resume syncing this folder: Doklin moves them into Library first.";
 
 /// Whether a sync engine may run on the workspace at `root`: only once it
-/// is in the Library layout. Otherwise the sentence the status shows — for
-/// a move that is not finished, what stopped this launch's try at it
-/// (`stopped`), when one did.
-pub fn ready(root: &Path, stopped: Option<&str>) -> Result<(), String> {
+/// is in the Library layout. Otherwise the sentence the status shows.
+pub fn ready(root: &Path) -> Result<(), String> {
     match read_marker(root) {
         None => Err(NO_MARKER.to_string()),
         Some(marker) if marker.moved() => Ok(()),
-        Some(marker) if marker.layout.as_deref().is_none_or(|layout| layout == MOVING) => {
-            Err(stopped.unwrap_or(UNFINISHED).to_string())
-        }
+        Some(marker) if marker.layout.as_deref().is_none_or(|layout| layout == MOVING) => Err(UNFINISHED.to_string()),
         Some(_) => Err(NEWER.to_string()),
     }
-}
-
-/// The whole move, for a folder nothing is watching (`begin`, then
-/// `finish`). True when the folder moved just now.
-pub fn move_into_library(root: &Path, data_dir: &Path) -> Result<bool, String> {
-    let moving = begin(root)?;
-    if moving {
-        finish(root, data_dir)?;
-    }
-    Ok(moving)
 }
 
 /// Steps 1 to 3. True when there is the rest to do. Once this has
@@ -171,18 +157,4 @@ fn rekey_versions(root: &Path, library: &Path, data_dir: &Path) -> Result<(), St
         }
     }
     Ok(())
-}
-
-/// A path under a workspace that has just moved, as it is now: what a path
-/// an app stored before the move — a tab, an open folder — becomes. `rel` is
-/// relative to the workspace's root; one that already starts with a section
-/// or a hidden name is left as it is (`toLibraryLayout`, src/cloud.ts;
-/// `Sections.moved`, the iPhone's Sections.swift: change all three).
-pub fn moved_rel(rel: &str) -> String {
-    let top = rel.split('/').next().unwrap_or_default();
-    if rel.is_empty() || top.starts_with('.') || space::reserved_top(rel).is_some() {
-        rel.to_string()
-    } else {
-        format!("{}/{}", LIBRARY_DIR, rel)
-    }
 }

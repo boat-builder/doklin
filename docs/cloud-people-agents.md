@@ -132,7 +132,7 @@ What a Mac does with them: [cloud.md](cloud.md) *Sections*.
 - A link to a page is taken wherever a document is named (`TAKE_LINKS`, `main.rs`): one `GET find` turns it into the path before the command runs, in the link's workspace; `-w` naming another is exit `2`.
 - One `doklin` per Mac. The app carries it at `Doklin.app/Contents/Helpers/doklin` (`bundle.macOS.files`); *Doklin → Install Command Line Tool* (`cli_install.rs`) links `/usr/local/bin/doklin` to it, replacing what is there and naming a `doklin` the terminal finds first. `CLI_INSTALL_LINE` (`scripts/install-doklin.sh`) is for everything else; on a Mac with the app it links to that copy instead of downloading.
 - Concepts: `doklin help agent|sections|documents|comments|publishing`.
-- Paths go to the worker as typed, and the sections are the worker's to read: the CLI has no check of the worker's version for them. **Trap: the `doklin` that knows `Library/` must never meet a worker from before it** — there `Library/plan` makes a shared folder called `Library`, a name the new worker reserves: once it is deployed no write to the shared section is taken until that folder is renamed, on a device still in the old layout or in Finder before a device moves. Agents stay off from such a release until its worker is deployed. An older `doklin` works against the new worker: only its help is out of date. `publish` and `published` call the whole shared section "the folder Library".
+- Paths go to the worker as typed, and the sections are the worker's to read: the CLI has no check of the worker's version for them. `publish` and `published` call the whole shared section "the folder Library".
 
 ## Limits
 

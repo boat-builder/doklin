@@ -1363,9 +1363,6 @@ impl Collected {
 struct Device {
     engine: Engine<FakeRemote>,
     root: tempfile::TempDir,
-    /// The folder is in the Library layout; false for a device standing in
-    /// for one still in the layout from before it (`old_layout`).
-    moved: bool,
     _state: tempfile::TempDir,
     /// `<app_data>` — where this device's version store lives.
     data: tempfile::TempDir,
@@ -1430,7 +1427,6 @@ fn device_in(
             device_id: format!("d-{}", name.to_lowercase()),
             device_name: name.to_string(),
             device_kind: "Mac".into(),
-            unmoved: None,
             trash: None,
             on_spaces: None,
         },
@@ -1441,33 +1437,18 @@ fn device_in(
         events.clone(),
         statuses.clone(),
     );
-    Device { engine, root, moved: true, data, _state: state, statuses, events }
-}
-
-/// A device standing in for one whose build predates the Library layout:
-/// its shared unit at the workspace's root, as such a build has it. The
-/// wire is the same, so on one worker it syncs beside a moved device as an
-/// old build would.
-fn old_layout(mut d: Device) -> Device {
-    let root = d.root.path().to_path_buf();
-    let shared = d.engine.shared_mut();
-    shared.root = root.clone();
-    shared.prefix = String::new();
-    let _ = std::fs::remove_dir(root.join(LIBRARY_DIR));
-    d.moved = false;
-    d
+    Device { engine, root, data, _state: state, statuses, events }
 }
 
 impl Device {
     /// `rel` names a file as these tests always have: a shared one by its
     /// path in the shared section, any other with its section in front
-    /// (`Private/x.md`). In the folder it is where the move put it
-    /// (`layout::moved_rel`) — or, in the old layout, where it always was.
+    /// (`Private/x.md`). In the folder a shared one is under `Library/`.
     fn ws(&self, rel: &str) -> String {
-        if self.moved {
-            super::layout::moved_rel(rel)
-        } else {
+        if rel.is_empty() || rel.starts_with('.') || space::reserved_top(rel).is_some() {
             rel.to_string()
+        } else {
+            format!("{}/{}", LIBRARY_DIR, rel)
         }
     }
     fn abs(&self, rel: &str) -> PathBuf {
@@ -7123,7 +7104,7 @@ fn tree(dir: &Path) -> Vec<String> {
     out
 }
 
-/// A connected folder in the layout from before Library: shared files at
+/// A connected folder before its move into Library: shared files at
 /// its top beside `Private/`, `Restricted/` and hidden folders, and the
 /// version store at its root.
 fn folder_before_library(data: &Path) -> tempfile::TempDir {
@@ -7148,6 +7129,15 @@ fn folder_before_library(data: &Path) -> tempfile::TempDir {
     index.snapshots.push(SnapshotRow { ts: 1_700_000_000_000, reason: Reason::Seed, files: 2, ..Default::default() });
     store.write_index(&index).unwrap();
     tmp
+}
+
+/// The whole move on a folder nothing is watching, as connect and resume
+/// run it (`begin`, then `finish`).
+fn move_folder(root: &Path, data: &Path) -> Result<(), String> {
+    if super::layout::begin(root)? {
+        super::layout::finish(root, data)?;
+    }
+    Ok(())
 }
 
 /// What the move leaves, whatever it started from.
@@ -7177,10 +7167,10 @@ fn assert_moved(root: &Path, data: &Path) {
 fn the_move_carries_the_shared_section_into_library_and_leaves_the_rest() {
     let data = tempfile::tempdir().unwrap();
     let folder = folder_before_library(data.path());
-    super::layout::move_into_library(folder.path(), data.path()).unwrap();
+    move_folder(folder.path(), data.path()).unwrap();
     assert_moved(folder.path(), data.path());
     // Once moved, it stays as it is.
-    super::layout::move_into_library(folder.path(), data.path()).unwrap();
+    move_folder(folder.path(), data.path()).unwrap();
     assert_moved(folder.path(), data.path());
 }
 
@@ -7219,7 +7209,7 @@ fn the_move_finishes_from_wherever_it_stopped() {
         let data = tempfile::tempdir().unwrap();
         let folder = folder_before_library(data.path());
         stop(folder.path(), data.path());
-        super::layout::move_into_library(folder.path(), data.path()).unwrap_or_else(|e| panic!("{when}: {e}"));
+        move_folder(folder.path(), data.path()).unwrap_or_else(|e| panic!("{when}: {e}"));
         assert_moved(folder.path(), data.path());
     }
 }
@@ -7236,128 +7226,15 @@ fn a_folder_that_already_holds_a_library_does_not_move() {
     std::fs::write(root.join("library/old.md"), "a shared folder of that name\n").unwrap();
     let before = tree(root);
 
-    let refused = super::layout::move_into_library(root, data.path()).unwrap_err();
+    let refused = move_folder(root, data.path()).unwrap_err();
     assert!(refused.contains("already holds something called “Library”"), "{refused}");
     assert_eq!(tree(root), before, "nothing moved");
     assert_eq!(read_marker(root).unwrap().layout, None, "and it has not begun");
-    assert!(super::layout::ready(root, Some(&refused)).unwrap_err().contains("Rename it"), "which the status says");
+    assert!(refused.contains("Rename it"), "{refused}");
 
     std::fs::rename(root.join("library"), root.join("Books")).unwrap();
-    super::layout::move_into_library(root, data.path()).unwrap();
+    move_folder(root, data.path()).unwrap();
     assert_eq!(tree(&root.join("Library")), ["Books/old.md", "Projects/plan.md", "node_modules/x/readme.md", "notes.md"]);
-}
-
-/// The update on a device that synced in the old layout: the move sends
-/// nothing, the first pass after it finds nothing changed — a partly moved
-/// tree would have read as thirty deletions — and the history is where it
-/// was, the mirrored part included.
-#[tokio::test]
-async fn a_device_that_moves_sends_nothing_and_keeps_its_history() {
-    let be = fake_worker();
-    let mut old = old_layout(device("Air", &be));
-    for i in 0..30 {
-        old.write(&format!("notes/n{i}.md"), &format!("note {i}\n"));
-    }
-    old.write("Home.md", "home\n");
-    old.sync().await;
-    old.captured(ago(30 * MINUTE), Reason::Seed, &[("Home.md", "home\n")]);
-    old.engine.mirror_versions().await;
-    let before = manifest_of(&be);
-    let (calls, versions_etag) = {
-        let worker = be.lock().unwrap();
-        (worker.put_manifest_calls, worker.versions_etag)
-    };
-    let rows: Vec<u64> = old.store().read_index().snapshots.iter().map(|r| r.ts).collect();
-
-    // The old build quits, the update's move runs, the new build starts.
-    let Device { engine, root, _state: state, data, .. } = old;
-    drop(engine);
-    set_layout(root.path(), None);
-    super::layout::move_into_library(root.path(), data.path()).unwrap();
-    let mut moved = device_in("Air", &be, root, state, data, OWNER_TOKEN);
-    moved.sync().await;
-
-    assert_eq!(be.lock().unwrap().put_manifest_calls, calls, "nothing was sent");
-    let after = manifest_of(&be);
-    assert_eq!((after.seq, paths(&after), after.tombstones.len()), (before.seq, paths(&before), before.tombstones.len()));
-    assert_eq!(moved.phase(), Phase::Idle, "and nothing read as deleted");
-    assert_eq!(moved.read("Home.md").as_deref(), Some("home\n"));
-    assert_eq!(moved.store().read_index().snapshots.iter().map(|r| r.ts).collect::<Vec<_>>(), rows);
-    moved.engine.mirror_versions().await;
-    assert_eq!(be.lock().unwrap().versions_etag, versions_etag, "the mirror finds all of it up there already");
-}
-
-/// The wire does not change, so a device still on a build from before the
-/// Library layout and a moved one sync the same manifests side by side.
-#[tokio::test]
-async fn an_old_device_and_a_moved_one_sync_side_by_side() {
-    let be = fake_worker();
-    let mut old = old_layout(device("Air", &be));
-    let mut new = device("Book", &be);
-    old.sync().await;
-    new.sync().await;
-    let (old_root, new_root) = (old.root.path().to_path_buf(), new.root.path().to_path_buf());
-
-    // Edits, both ways.
-    old.write("doc.md", "one\n");
-    old.cycle().await;
-    new.cycle().await;
-    assert_eq!(std::fs::read_to_string(new_root.join("Library/doc.md")).unwrap(), "one\n");
-    new.write("Projects/plan.md", "plan\n");
-    new.cycle().await;
-    old.cycle().await;
-    assert_eq!(std::fs::read_to_string(old_root.join("Projects/plan.md")).unwrap(), "plan\n");
-    assert_eq!(paths(&manifest_of(&be)), ["Projects/plan.md", "doc.md"], "paths relative to the section, as ever");
-
-    // Moves between sections, both ways.
-    old.rename("doc.md", "Private/doc.md");
-    old.sync().await;
-    new.sync().await;
-    assert_eq!(new.read("Private/doc.md").as_deref(), Some("one\n"));
-    assert!(!new_root.join("Library/doc.md").exists());
-    new.rename("Private/doc.md", "doc.md");
-    new.sync().await;
-    old.sync().await;
-    assert_eq!(std::fs::read_to_string(old_root.join("doc.md")).unwrap(), "one\n");
-    assert!(!old_root.join("Private/doc.md").exists());
-
-    // A page.
-    new.publish("doc.md", PublicKind::File, Some("the-doc")).unwrap();
-    new.cycle().await;
-    old.cycle().await;
-    assert_eq!(public_of(&be)["the-doc"].path, "doc.md");
-    assert_eq!(new.page("the-doc").unwrap().path, "Library/doc.md");
-    assert_eq!(old.page("the-doc").unwrap().path, "doc.md");
-
-    // A lease.
-    open(&mut old, "doc.md");
-    old.engine.poll_for_test().await;
-    new.engine.poll_for_test().await;
-    assert!(new.status().leases.iter().any(|l| l.path == "library/doc.md"), "{:?}", new.status().leases);
-    old.engine.set_activity(None);
-    old.engine.poll_for_test().await;
-
-    // A conflict copy.
-    old.write("doc.md", "the old build's line\n");
-    new.write("doc.md", "the new build's line\n");
-    old.cycle().await;
-    new.cycle().await;
-    old.cycle().await;
-    let copy = |d: &Device| d.files().into_iter().find(|f| f.contains("conflict"));
-    assert!(copy(&new).is_some() && copy(&new) == copy(&old), "one copy, the same on both");
-
-    // A deletion.
-    old.delete("Projects/plan.md");
-    old.cycle().await;
-    new.cycle().await;
-    assert!(!new_root.join("Library/Projects/plan.md").exists());
-
-    // `Private` inside Library is in no section on a moved device: an old one
-    // would put a shared `Private/x.md` in its own Private.
-    new.write("Library/Private/x.md", "x\n");
-    new.cycle().await;
-    assert!(!paths(&manifest_of(&be)).iter().any(|p| p.ends_with("x.md")));
-    assert!(new_root.join("Library/Private/x.md").exists());
 }
 
 /// Anything at the top of a moved folder but the sections is in no section:
@@ -7445,19 +7322,13 @@ async fn a_folder_not_in_the_library_layout_is_never_synced() {
     assert!(a.status().error.unwrap().contains("newer version of Doklin"));
     assert!(super::layout::begin(a.root.path()).is_err(), "and this build does not move it");
 
-    set_layout(a.root.path(), Some(super::layout::MOVING));
-    a.cycle().await;
-    assert!(a.status().error.unwrap().contains("hasn't finished moving"));
+    // Not moved, or not finished: resuming the folder moves it.
+    for layout in [None, Some(super::layout::MOVING)] {
+        set_layout(a.root.path(), layout);
+        a.cycle().await;
+        assert!(a.status().error.unwrap().contains("choose Resume syncing this folder"));
+    }
     assert!(manifest_of(&be).files.is_empty());
-
-    // What stopped this launch's move is what an unfinished one says, and
-    // nothing else does.
-    let ready = |stopped| super::layout::ready(a.root.path(), stopped);
-    assert_eq!(ready(Some("The disk is full.")), Err("The disk is full.".to_string()));
-    set_layout(a.root.path(), Some("shelves"));
-    assert!(ready(Some("The disk is full.")).unwrap_err().contains("newer version of Doklin"));
-    set_layout(a.root.path(), Some(super::layout::LIBRARY));
-    assert_eq!(ready(Some("The disk is full.")), Ok(()));
 }
 
 /// A joining device's shared section is its `Library/`, there from the
@@ -7473,20 +7344,6 @@ async fn join_makes_library_even_for_an_empty_workspace() {
     let state = tempfile::tempdir().unwrap();
     seed_download(&alice, &dest.join(LIBRARY_DIR), state.path(), &events, "n").await.unwrap();
     assert!(dest.join(LIBRARY_DIR).is_dir());
-}
-
-#[test]
-fn a_path_stored_before_the_move_follows_its_file() {
-    use super::layout::moved_rel;
-    assert_eq!(moved_rel("notes.md"), "Library/notes.md");
-    assert_eq!(moved_rel("Projects/plan.md"), "Library/Projects/plan.md");
-    // As it is: no folder moves while it holds something called Library,
-    // so a path under that name was stored after the move.
-    assert_eq!(moved_rel("Library/plan.md"), "Library/plan.md");
-    assert_eq!(moved_rel("Private/x.md"), "Private/x.md");
-    assert_eq!(moved_rel("restricted/Finance/x.md"), "restricted/Finance/x.md");
-    assert_eq!(moved_rel(".git/HEAD"), ".git/HEAD");
-    assert_eq!(moved_rel(""), "");
 }
 
 /// Which folders keep a version history: in a moved workspace, each section

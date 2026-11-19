@@ -58,18 +58,6 @@ public enum Sections {
         return "Move “\(name)” to \(to)?"
     }
 
-    /// One-time stored-data migration: a workspace-relative path this
-    /// iPhone kept from before its folder moved into the Library layout, as
-    /// it is now — `Library/` in front, unless it already starts with a
-    /// section's name (any case) or a hidden one. The engine's `moved_rel`
-    /// (engine/src/cloud/layout.rs) and the Mac's `toLibraryLayout`
-    /// (src/cloud.ts) move a path the same way: change all three.
-    public static func moved(_ rel: String) -> String {
-        let top = String(rel.prefix { $0 != "/" })
-        if rel.isEmpty || top.hasPrefix(".") || TreeModel.isSectionName(top) { return rel }
-        return "\(TreeModel.libraryFolder)/\(rel)"
-    }
-
     /// Who gains sight of something moved from `from` to `to` — "Everyone in
     /// Acme will be able to see it", "All 3 people in “Finance” will…" — or
     /// nil when nobody does: a move that keeps who sees it, or narrows it,

@@ -61,7 +61,7 @@ const RETRY_LIMITED_MS = 5 * 60_000;
 const ATTEMPTS = 4;
 
 /** Where what waits is kept: `<prefix><workspace>:<person>:<tab>:<path>`. */
-export const DRAFTS = "doklin:web:draft:";
+const DRAFTS = "doklin:web:draft:";
 /** Held by a tab for as long as it lives: what it keeps is its own to send. */
 const TAB_LOCK = "doklin:web:tab:";
 /** Held while a tab takes over what closed tabs left. */

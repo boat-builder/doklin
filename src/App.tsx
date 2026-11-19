@@ -334,7 +334,6 @@ const suggestedFileName = (title: string) =>
 const COMMENTS_VISIBLE_STORAGE_KEY = "doklin:comments-visible";
 const SIDEBAR_OPEN_STORAGE_KEY = "doklin:sidebar-open";
 const SESSION_STORAGE_KEY = "doklin:session";
-const LIBRARY_LAYOUT_STORAGE_KEY = "doklin:library-layout";
 const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
 const FULL_WIDTH_STORAGE_KEY = "doklin:full-width";
 
@@ -595,27 +594,13 @@ function forgetStoredSession(root: string) {
   }
 }
 
-/* ---------- One-time stored-data migration: the Library layout ----------
-   A connected workspace's folder moves once into the Library layout — the
-   shared section's files into `Library/`, beside `Private/` and
-   `Restricted/` — by the engine (engine/src/cloud/layout.rs): at launch, or
-   in a connect or a resume. What is stored about paths in such a folder
-   from before is moved after it, once a folder, by the move's rule
+/* ---------- A folder connected: its files into Library ----------
+   Connecting a folder, or resuming one whose files are not in Library yet,
+   moves the files at its top into `Library/`, beside `Private/` and
+   `Restricted/` (the engine's move, engine/src/cloud/layout.rs). What is
+   stored about paths in that folder follows, by the move's rule
    (`toLibraryLayout`): the tabs kept for every folder (`doklin:session`)
-   and how its tree was left (`doklin:sidebar-tree`). On a Mac the folders
-   done are recorded (`doklin:library-layout`), so one joined since is
-   recorded before it has anything stored, and nothing is moved twice. A
-   browser's paths move with the worker that serves it, and it calls
-   `moveStoredPathsIntoLibrary` itself, once (src/web/start.tsx). */
-
-function readLibraryLayoutDone(): Set<string> {
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(LIBRARY_LAYOUT_STORAGE_KEY) || "[]");
-    return new Set(Array.isArray(parsed) ? parsed.filter((r): r is string => typeof r === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
+   and how its tree was left (`doklin:sidebar-tree`). */
 
 // Where a path stored from before is, once the folder at `root` has moved.
 const intoLibrary = (root: string) => (path: string) => {
@@ -624,8 +609,8 @@ const intoLibrary = (root: string) => (path: string) => {
 };
 
 /** The stored tabs and tree of the folder at `root`, moved where the move
- *  put their paths. Records nothing: whoever calls it keeps it to once. */
-export function moveStoredPathsIntoLibrary(root: string): void {
+ *  put their paths. */
+function moveStoredPathsIntoLibrary(root: string): void {
   try {
     const all = readAllSessions();
     const moved = intoLibrary(root);
@@ -640,26 +625,6 @@ export function moveStoredPathsIntoLibrary(root: string): void {
     // ignore
   }
   moveTreeViewIntoLibrary(root);
-}
-
-function recordLibraryLayoutDone(root: string) {
-  try {
-    localStorage.setItem(LIBRARY_LAYOUT_STORAGE_KEY, JSON.stringify([...readLibraryLayoutDone().add(root)]));
-  } catch {
-    // ignore
-  }
-}
-
-// Before a window takes up the folder at `root`: if the folder has moved and
-// what is stored about it has not, it follows. Only a platform that keeps a
-// copy of the workspace on the device has a folder to have moved.
-async function settleLibraryLayout(root: string): Promise<void> {
-  const setup = backend.setup;
-  if (!setup || readLibraryLayoutDone().has(root)) return;
-  const marker = await setup.marker(root).catch(() => null);
-  if (marker?.layout !== "library") return;
-  moveStoredPathsIntoLibrary(root);
-  recordLibraryLayoutDone(root);
 }
 
 export default function App() {
@@ -2238,7 +2203,6 @@ export default function App() {
       splitRef.current = null;
       setSplit(null);
       sessionSplit = null;
-      await settleLibraryLayout(root);
       const session = readStoredSession(root);
       sessionWorkspaceRoot = root;
       // The incoming folder's own tabs, then the notes that stayed. (A stored
@@ -3735,12 +3699,11 @@ export default function App() {
     [repoint],
   );
 
-  // One-time stored-data migration (the Library layout): a connect or a
-  // resume moves the folder's files into `Library/` (the engine's move)
-  // unless its marker says it has moved already. What is being typed lands
-  // first; once the marker says the folder moved, this window's tabs follow,
-  // then everything stored about it. A failed step may have moved it too: a
-  // retry finds it moved.
+  // A connect or a resume moves the folder's files into `Library/` (the
+  // engine's move) unless its marker says it has moved already. What is
+  // being typed lands first; once the marker says the folder moved, this
+  // window's tabs follow, then everything stored about it. A failed step
+  // may have moved it too: a retry finds it moved.
   const moveIntoLibrary = useCallback(
     async (root: string, move: () => Promise<unknown>) => {
       const markerOf = () => backend.setup?.marker(root).catch(() => null) ?? Promise.resolve(null);
@@ -3753,7 +3716,6 @@ export default function App() {
         if (!moved && (await markerOf())?.layout === "library") {
           await repoint(intoLibrary(root));
           moveStoredPathsIntoLibrary(root);
-          recordLibraryLayoutDone(root);
           // The tree reads how it was left again, from where it is now.
           setTreeViewEpoch((n) => n + 1);
         }
@@ -4026,7 +3988,6 @@ export default function App() {
       const init = backend.windows ? await backend.windows.init() : ONLY_WINDOW;
       if (!init.isMain) {
         isMainWindow = false;
-        if (init.folder) await settleLibraryLayout(init.folder);
         if (init.restored) {
           // A window brought back by quit-time session restore: re-adopt its
           // folder and rebuild its tabs directly — restoring isn't an "open"
@@ -4060,9 +4021,8 @@ export default function App() {
       // (Files never arrive as a pending folder: an externally opened file
       // always gets its own spawned window, so it can't attach to this session.)
       const pendingFolder = (await backend.windows?.pendingFolder()) ?? null;
-      const targetRoot = pendingFolder ?? backend.home ?? readAllSessions().lastRoot;
-      if (targetRoot) await settleLibraryLayout(targetRoot);
       const all = readAllSessions();
+      const targetRoot = pendingFolder ?? backend.home ?? all.lastRoot;
       // Adopt the target root into the module mirror BEFORE any
       // writeStoredSession below, so re-persisting keys tabs under the right
       // folder rather than wiping the map.

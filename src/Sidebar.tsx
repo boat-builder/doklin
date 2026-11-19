@@ -271,24 +271,14 @@ export const forgetTreeView = (root: string) => {
   delete all[root];
   writeAllTreeViews(all);
 };
-// One-time stored-data migration (the Library layout, App.tsx): how a
-// connected workspace's tree was left before its folder moved — each open
-// folder where the move put it, and the shared list's fold under the id it
-// has now. Read raw, as the id it had is no longer one `readAllTreeViews`
-// keeps.
+// A folder just connected (App.tsx `moveIntoLibrary`): its files were at
+// its top and are in Library now, so each folder its tree had open follows.
 export const moveTreeViewIntoLibrary = (root: string) => {
-  try {
-    const all = JSON.parse(localStorage.getItem(TREE_VIEW_STORAGE_KEY) || "{}") as Record<string, unknown>;
-    const v = all[root] as { open?: unknown; folded?: unknown } | undefined;
-    if (!v || typeof v !== "object") return;
-    all[root] = {
-      open: strings(v.open).map(toLibraryLayout),
-      folded: strings(v.folded).map((id) => (id === "workspace" ? "library" : id)),
-    };
-    localStorage.setItem(TREE_VIEW_STORAGE_KEY, JSON.stringify(all));
-  } catch {
-    /* nothing kept, or nothing to keep it in */
-  }
+  const all = readAllTreeViews();
+  const v = all[root];
+  if (!v) return;
+  all[root] = { ...v, open: v.open.map(toLibraryLayout) };
+  writeAllTreeViews(all);
 };
 
 // The folders from just under `root` down to `dir`, `dir` included: what has
