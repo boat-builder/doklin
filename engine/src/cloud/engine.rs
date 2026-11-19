@@ -279,6 +279,10 @@ pub struct EngineConfig {
     pub device_name: String,
     /// `Mac`, `iPhone`, `iPad`: what the sentences about this device call it.
     pub device_kind: String,
+    /// Why this launch's move into the Library layout stopped, when it did
+    /// (`cloud::init`): what the status says of the unfinished move
+    /// (`layout::ready`).
+    pub unmoved: Option<String>,
     /// Where a real deletion goes: the platform's trash (`Host::trash`).
     /// None — the tests, and a platform with no trash — removes outright.
     pub trash: Option<Trash>,
@@ -829,7 +833,7 @@ impl<R: Remote> Engine<R> {
         // A folder that is not in the Library layout is never synced: every
         // file would read as moved, and the manifest would tell every device.
         // The move is the app's, at launch (`cloud::init`).
-        if let Err(why) = layout::ready(&self.cfg.root) {
+        if let Err(why) = layout::ready(&self.cfg.root, self.cfg.unmoved.as_deref()) {
             self.set_status(Phase::Error, Some(why));
             return Ok(());
         }
@@ -1294,7 +1298,7 @@ impl<R: Remote> Engine<R> {
     pub(crate) async fn reconcile_spaces(&mut self) {
         let Some(mut list) = self.spaces.clone() else { return };
         let root = self.cfg.root.clone();
-        if !root.is_dir() || layout::ready(&root).is_err() {
+        if !root.is_dir() || layout::ready(&root, None).is_err() {
             return;
         }
         let ws_id = self.cfg.ws_id.clone();
@@ -2452,10 +2456,9 @@ fn local_time(ms: u64) -> String {
         .unwrap_or_default()
 }
 
-/// Where new documents are, for the valve's question: each path's folder,
-/// two levels deep at most, counted — most first, five at most.
-/// The folder a new document is counted under: at most two levels below
-/// its section's folder, `""` for one directly in it.
+/// The folder a new document is counted under, for the valve's question:
+/// at most two levels below its section's folder, `""` for one directly in
+/// it.
 fn counted_under(path: &str) -> String {
     let dirs: Vec<&str> = path.split('/').collect();
     let dirs = &dirs[..dirs.len().saturating_sub(1)];
@@ -2463,7 +2466,7 @@ fn counted_under(path: &str) -> String {
 }
 
 /// The folders with the most new documents (`counted_under`, made
-/// workspace-relative), the most first.
+/// workspace-relative), the most first — five at most.
 fn folders_of(folders: &[String]) -> Vec<(String, u32)> {
     let mut counts: BTreeMap<String, u32> = BTreeMap::new();
     for folder in folders {

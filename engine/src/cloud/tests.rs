@@ -1430,6 +1430,7 @@ fn device_in(
             device_id: format!("d-{}", name.to_lowercase()),
             device_name: name.to_string(),
             device_kind: "Mac".into(),
+            unmoved: None,
             trash: None,
             on_spaces: None,
         },
@@ -7396,6 +7397,15 @@ async fn a_folder_not_in_the_library_layout_is_never_synced() {
     a.cycle().await;
     assert!(a.status().error.unwrap().contains("hasn't finished moving"));
     assert!(manifest_of(&be).files.is_empty());
+
+    // What stopped this launch's move is what an unfinished one says, and
+    // nothing else does.
+    let ready = |stopped| super::layout::ready(a.root.path(), stopped);
+    assert_eq!(ready(Some("The disk is full.")), Err("The disk is full.".to_string()));
+    set_layout(a.root.path(), Some("shelves"));
+    assert!(ready(Some("The disk is full.")).unwrap_err().contains("newer version of Doklin"));
+    set_layout(a.root.path(), Some(super::layout::LIBRARY));
+    assert_eq!(ready(Some("The disk is full.")), Ok(()));
 }
 
 /// A joining device's shared section is its `Library/`, there from the

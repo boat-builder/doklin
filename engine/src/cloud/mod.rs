@@ -205,13 +205,20 @@ pub fn init(core: &Arc<Core>) -> Vec<String> {
     for ws in &file.workspaces {
         // Before its engine starts, and before anything versions the folder
         // (`versions::init` runs after this): nothing may watch a move. A
-        // move that fails leaves the engine refusing to sync, and saying why
-        // (`layout::ready`).
+        // move that fails leaves the engine refusing to sync (`layout::ready`)
+        // and saying what stopped it. A folder whose marker cannot be read —
+        // a disk not mounted yet — has nothing to move at this launch.
         let root = Path::new(&ws.root);
-        if matches!(layout::begin(root), Ok(true)) && layout::finish(root, &inner.data_dir).is_ok() {
-            moved.push(ws.root.clone());
-        }
-        spawn_engine(core, &mut inner, ws);
+        let unmoved = read_marker(root).and_then(|_| match layout::move_into_library(root, &inner.data_dir) {
+            Ok(now) => {
+                if now {
+                    moved.push(ws.root.clone());
+                }
+                None
+            }
+            Err(why) => Some(why),
+        });
+        spawn_engine(core, &mut inner, ws, unmoved);
     }
 
     *core.cloud.lock().unwrap() = Some(inner);
@@ -257,7 +264,10 @@ pub(crate) fn watch_folder(core: &Core, root: &Path, who: &str) -> (Option<Watch
     (watcher, fs_rx)
 }
 
-fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry) {
+/// `unmoved`: why this launch's move into the Library layout stopped, from
+/// `init` alone — every other caller starts an engine on a folder that is in
+/// the layout, or whose state the engine reads off its marker.
+fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry, unmoved: Option<String>) {
     let root = PathBuf::from(&ws.root);
     let state_dir = state_dir(&inner.data_dir, &ws.ws_id);
     let _ = std::fs::create_dir_all(state_dir.join("base"));
@@ -279,6 +289,7 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
             device_id: inner.device.id.clone(),
             device_name: inner.device.name.clone(),
             device_kind: core.device_kind.clone(),
+            unmoved,
             trash: Some({
                 let host = core.host.clone();
                 Arc::new(move |path: &Path| host.trash(path).is_ok()) as Trash
@@ -557,7 +568,7 @@ fn record_and_spawn(core: &Arc<Core>, entry: WorkspaceEntry) -> Result<(), Strin
         // one arriving now: a window that asks what was removed must not be
         // told to let go of it (`cloud_removed`).
         inner.removed.retain(|gone| gone.root != entry.root);
-        spawn_engine(core, inner, &entry);
+        spawn_engine(core, inner, &entry, None);
         Ok(())
     })?;
     // What follows a connection is the app's: the Mac logs its terminal in.
@@ -1662,7 +1673,7 @@ pub async fn cloud_wipe(core: &Arc<Core>, root: String) -> Result<u64, String> {
         Err(e) => {
             // The wipe didn't happen: bring the engine back.
             with_inner(core, |inner| {
-                spawn_engine(core, inner, &entry);
+                spawn_engine(core, inner, &entry, None);
                 Ok(())
             })?;
             Err(e)

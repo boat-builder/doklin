@@ -54,23 +54,28 @@ const NEWER: &str = "A newer version of Doklin set this folder up. Update Doklin
 const UNFINISHED: &str = "Doklin hasn't finished moving this folder's files into Library. Quit Doklin and open it again to finish.";
 
 /// Whether a sync engine may run on the workspace at `root`: only once it
-/// is in the Library layout. Otherwise the sentence the status shows.
-pub fn ready(root: &Path) -> Result<(), String> {
+/// is in the Library layout. Otherwise the sentence the status shows — for
+/// a move that is not finished, what stopped this launch's try at it
+/// (`stopped`), when one did.
+pub fn ready(root: &Path, stopped: Option<&str>) -> Result<(), String> {
     match read_marker(root) {
         None => Err(NO_MARKER.to_string()),
         Some(marker) if marker.moved() => Ok(()),
-        Some(marker) if marker.layout.as_deref().is_none_or(|layout| layout == MOVING) => Err(UNFINISHED.to_string()),
+        Some(marker) if marker.layout.as_deref().is_none_or(|layout| layout == MOVING) => {
+            Err(stopped.unwrap_or(UNFINISHED).to_string())
+        }
         Some(_) => Err(NEWER.to_string()),
     }
 }
 
 /// The whole move, for a folder nothing is watching (`begin`, then
-/// `finish`).
-pub fn move_into_library(root: &Path, data_dir: &Path) -> Result<(), String> {
-    if begin(root)? {
+/// `finish`). True when the folder moved just now.
+pub fn move_into_library(root: &Path, data_dir: &Path) -> Result<bool, String> {
+    let moving = begin(root)?;
+    if moving {
         finish(root, data_dir)?;
     }
-    Ok(())
+    Ok(moving)
 }
 
 /// Steps 1 to 3. True when there is the rest to do. Once this has

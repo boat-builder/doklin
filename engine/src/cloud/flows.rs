@@ -160,12 +160,10 @@ pub async fn seed_upload<R: Remote>(
     })
 }
 
-/// Pull a bound domain's workspace down into `dest` (an empty or absent
-/// folder) — the second machine's flow. Returns the engine state to start
-/// from.
-/// Download the shared section into `dest` — a joining device's `Library/`,
-/// made even when the workspace is empty. `progress_root` is the workspace
-/// the progress events speak for.
+/// Download a bound domain's shared section into `dest` (an empty or absent
+/// folder) — a joining device's `Library/`, made even when the workspace is
+/// empty. `progress_root` is the workspace the progress events speak for.
+/// Returns the engine state to start from.
 pub async fn seed_download<R: Remote>(
     remote: &Arc<R>,
     dest: &Path,

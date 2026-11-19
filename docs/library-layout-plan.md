@@ -4,7 +4,7 @@ The Library layout is built: its rules are in docs/cloud.md (*Sections*, *The
 move into Library*, *Sections in the app*), docs/cloud-people-agents.md,
 docs/versioning.md, docs/architecture.md, docs/ios.md and
 cloud-worker/README.md. What is left is cutting base.aeoxoxo.ai over. Delete
-this file, and its row in CLAUDE.md, once step 8 is done.
+this file, and its row in CLAUDE.md, once step 9 is done.
 
 ## Cutover (base.aeoxoxo.ai)
 
@@ -37,6 +37,16 @@ update card is advice. The window does two things:
 
 A release takes 5–10 minutes (`release.yml`), so the window is about an
 hour with the checks. Ask for two.
+
+**Builds on the superadmin's Mac.** `pnpm tauri dev` has the installed app's
+identifier, so it opens the same workspace folder with the same sign-in:
+
+- Before the window, never run this change with `pnpm tauri dev`. It moves
+  the real folder at launch, and from then on the installed app is an older
+  build on a moved folder. To try the change, build it under an identifier
+  of its own (`TAURI_CONFIG`) and connect that copy to a test domain.
+- After the window, every branch cut before the merge is an older build.
+  Rebase it onto `main` before running it.
 
 **Steps.** `$N` is `doklin-base-aeoxoxo-ai`, `$ROOT` is the superadmin's
 workspace folder, and `CLOUDFLARE_ACCOUNT_ID` is set to the account that
@@ -93,7 +103,9 @@ holds the worker. Every command before step 5 only reads.
      `Library/` is refused with the sentence.
    - `https://base.aeoxoxo.ai/app` shows the same tree.
 7. **Send message B.**
-8. **The day after**, fetch the shared manifest again. The `library/` count
+8. **Upload the iPhone build** (docs/ios.md *TestFlight*). Until it is
+   installed, an iPhone keeps syncing in the old layout, which is safe.
+9. **The day after**, fetch the shared manifest again. The `library/` count
    is still what step 3 found, and the tombstones have not jumped. Then
    delete both folders of copies.
 
@@ -110,8 +122,10 @@ holds the worker. Every command before step 5 only reads.
   it and stop it. Then, on one moved Mac, move everything in
   `Library/Library/` up into `Library/`, which moves the paths back for
   every device.
-- **A Mac's marker says `"moving"`.** The move stopped partway. Open Doklin
-  again and the move finishes (docs/cloud.md *The move into Library*). Nobody moves files by hand.
+- **A Mac's marker says `"moving"`.** The move stopped partway, and the
+  Cloud panel's status says what stopped it. Fix that, then open Doklin
+  again and the move finishes (docs/cloud.md *The move into Library*).
+  Nobody moves files by hand.
 - **The mass-delete valve asks on a Mac right after it updates.** Decline.
   The shared unit saw a partly moved tree, which the move is built to rule
   out. That is a bug to find before anyone approves.
