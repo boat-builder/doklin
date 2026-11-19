@@ -99,9 +99,7 @@ public final class FolderModel {
     /// restricted: Library, Private, Restricted, and each restricted folder.
     public func isManaged(_ entry: FolderEntry) -> Bool {
         guard case .folder(let path) = entry, let status = workspace.status else { return false }
-        let lower = path.lowercased()
-        return [TreeModel.libraryFolder, TreeModel.privateFolder, TreeModel.restrictedFolder].contains { $0.lowercased() == lower }
-            || status.spaces.contains { $0.path.lowercased() == lower }
+        return TreeModel.isSectionName(path) || status.spaces.contains { $0.path.lowercased() == path.lowercased() }
     }
 
     /// Moving `entry` into `folder` lets more people see it: the sentence

@@ -65,9 +65,8 @@ public enum Sections {
     /// (engine/src/cloud/layout.rs) and the Mac's `toLibraryLayout`
     /// (src/cloud.ts) move a path the same way: change all three.
     public static func moved(_ rel: String) -> String {
-        let top = String(rel.prefix { $0 != "/" }).lowercased()
-        let sections = [TreeModel.libraryFolder, TreeModel.privateFolder, TreeModel.restrictedFolder].map { $0.lowercased() }
-        if rel.isEmpty || top.hasPrefix(".") || sections.contains(top) { return rel }
+        let top = String(rel.prefix { $0 != "/" })
+        if rel.isEmpty || top.hasPrefix(".") || TreeModel.isSectionName(top) { return rel }
         return "\(TreeModel.libraryFolder)/\(rel)"
     }
 

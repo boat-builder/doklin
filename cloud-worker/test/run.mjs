@@ -1250,8 +1250,8 @@ await test("manifest: validation rejects traversal, duplicate paths, bad revs an
     [manifest(3, {}, { tombstones: { "f-old": { path: "a/../b.md" } } }), /tombstone/],
     [manifest(3, {}, { tombstones: [] }), /tombstones/],
     [manifest(3, {}, { tombstones: { "f-old": { path: "a.md", rev: 2, ts: 1700000000000, by: "m-1a2b3c4d", to: "the finance folder" } } }), /tombstone to/],
-    [manifest(3, { "f-a": fileEntry("Private/diary.md", 1, "a") }), /kept for/],
-    [manifest(3, { "f-a": fileEntry("restricted/Finance/q3.md", 1, "a") }), /kept for/],
+    [manifest(3, { "f-a": fileEntry("Private/diary.md", 1, "a") }), /names of a workspace's sections/],
+    [manifest(3, { "f-a": fileEntry("restricted/Finance/q3.md", 1, "a") }), /names of a workspace's sections/],
     [manifest(-1, {}), /seq/],
     [manifest(3, {}, { name: "n".repeat(81) }), /name/],
     [{ ...manifest(3, {}), files: [] }, /files/],
@@ -1327,10 +1327,21 @@ await test("manifest: either side of a schema skew is 426, and the sentence says
   assert.equal((await putManifest(manifest(3, {}, { version: "4" }))).status, 400, "a version that is not a number is garbage");
 });
 
-await test("manifest: the shared workspace holds nothing under Private or Restricted, a space holds what it likes, and a tombstone may say where its file went", async () => {
+await test("manifest: the shared workspace holds nothing under Library, Private or Restricted, a space holds what it likes, and a tombstone may say where its file went", async () => {
   const etag = await currentEtag();
+  // What a build from before the Library layout sends when it is run on a
+  // folder that has moved: every shared file, moved under `Library/`. It is
+  // refused, so no other device follows.
+  for (const path of ["Library/notes.md", "library/Projects/plan.md"]) {
+    const refused = await putManifest(manifest(3, { "f-res000": fileEntry(path, 1, "r") }));
+    assert.equal(refused.status, 400, path);
+    assert.match(refused.json.error, /Library, Private and Restricted are the names of a workspace's sections/);
+  }
+  assert.equal(await currentEtag(), etag, "and nothing was stored");
   // A folder that only looks like one of them is an ordinary folder.
-  const near = await putManifest(manifest(3, { "f-near01": fileEntry("Private (shared)/diary.md", 1, "n"), "f-near02": fileEntry("Docs/Private/x.md", 1, "m") }));
+  const near = await putManifest(
+    manifest(3, { "f-near01": fileEntry("Private (shared)/diary.md", 1, "n"), "f-near02": fileEntry("Docs/Private/x.md", 1, "m"), "f-near03": fileEntry("Library.md", 1, "l"), "f-near04": fileEntry("Docs/Library/x.md", 1, "k") }),
+  );
   assert.equal(near.status, 200, JSON.stringify(near.json));
   // A file that moved to a section is a tombstone that says so: a space's id, or "" for the shared workspace.
   const moved = await putManifest(
@@ -1340,7 +1351,7 @@ await test("manifest: the shared workspace holds nothing under Private or Restri
   // A tombstone is a path the shared workspace held, so never one under a reserved name.
   const reserved = await putManifest(manifest(5, {}, { tombstones: { "f-res001": { path: "Private/gone.md", rev: 3, ts: 1700000000000, by: "m-1a2b3c4d" } } }));
   assert.equal(reserved.status, 400);
-  assert.match(reserved.json.error, /Private and Restricted/);
+  assert.match(reserved.json.error, /Library, Private and Restricted/);
   await putManifest(manifest(6, {}));
   assert.notEqual(await currentEtag(), etag);
 });
@@ -3689,10 +3700,10 @@ await test("documents: what a Mac would never see is refused — and so is anyth
     assert.ok(kept.status === 404 || kept.status === 400, `writing ${p}: ${kept.text}`);
     assert.ok(/restricted folder/.test(kept.json.error), kept.json.error);
   }
-  for (const p of ["Library/Private/q3", "library/RESTRICTED/Finance/q3"]) {
+  for (const p of ["Library/Private/q3", "library/RESTRICTED/Finance/q3", "Library/Library/q3"]) {
     const kept = await api(docUrl(p, "", "&force=1"), { method: "PUT", body: "# x\n" });
     assert.equal(kept.status, 409, `writing ${p}: ${kept.text}`);
-    assert.ok(/Private and Restricted are kept for a person's own and restricted folders/.test(kept.json.error), kept.json.error);
+    assert.ok(/Library, Private and Restricted are the names of a workspace's sections/.test(kept.json.error), kept.json.error);
   }
   assert.equal(etagNow(), etag, "nor did those");
   assert.ok(/does not sync names that begin with a dot/.test((await api(docUrl("Library/.secret/plan"))).json.error));

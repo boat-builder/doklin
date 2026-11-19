@@ -435,7 +435,8 @@ export type Place =
   /** In no section, so it stays on this Mac and syncs nowhere until it is
    *  moved: the workspace's folder itself and anything else at its top,
    *  straight under `Restricted` or in a folder there that is not a
-   *  restricted folder yet, and `Private` or `Restricted` inside Library. */
+   *  restricted folder yet, and a folder with a section's name at the top of
+   *  Library. */
   | { kind: "nowhere" };
 
 /** The shared section's folder, at the top of a connected workspace beside
@@ -446,8 +447,13 @@ export type Place =
 export const LIBRARY_DIR = "Library";
 
 /** The names a section's folder has at the top of a connected workspace,
- *  compared without case. */
+ *  compared without case — and so the names no folder at the top of Library
+ *  has: the shared section holds nothing under them (`RESERVED_DIRS`,
+ *  engine/src/cloud/space.rs). */
 const RESERVED_TOP = new Set([LIBRARY_DIR.toLowerCase(), "private", "restricted"]);
+
+/** Whether `name` is a section's own, whatever its case. */
+export const isSectionName = (name: string): boolean => RESERVED_TOP.has(name.toLowerCase());
 
 /** The section `rel` — workspace-relative — is in. Names are compared
  *  without case, as the disk compares them. */
@@ -461,8 +467,8 @@ export function placeOf(cloud: CloudStatus | null, rel: string): Place {
   if (space) return { kind: space.kind, space };
   const [top, inLibrary] = lower.split("/", 2);
   if (top !== LIBRARY_DIR.toLowerCase()) return { kind: "nowhere" };
-  // Library never holds anything under the other two names at its own top.
-  return inLibrary === "private" || inLibrary === "restricted" ? { kind: "nowhere" } : { kind: "shared" };
+  // Library never holds anything under a section's name at its own top.
+  return inLibrary !== undefined && RESERVED_TOP.has(inLibrary) ? { kind: "nowhere" } : { kind: "shared" };
 }
 
 /** Where a path inside a workspace's folder (`rel`, relative to it) is once

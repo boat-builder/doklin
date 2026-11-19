@@ -4,6 +4,7 @@ import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { Facepile } from "./Avatar";
 import {
   LIBRARY_DIR,
+  isSectionName,
   pageUrl,
   placeOf,
   publishedByPath,
@@ -210,6 +211,9 @@ const SECTION_IDS: readonly string[] = ["library", "restricted", "private"] sati
 // Why a row syncs nowhere, on its "not synced" mark.
 const STRAY_LINE = "In no section, so it stays on this Mac — move it into Library or Private";
 const UNFOLDERED_LINE = "In no restricted folder, so it stays on this Mac — move it into one";
+const SECTION_NAMED_LINE = "A folder in Library with a section's name stays on this Mac — rename it";
+// What making or renaming a folder to one of those names is told.
+const SECTION_NAMED = "A folder in Library can't be called Library, Private or Restricted.";
 
 // How the tree was left, per workspace — a view preference kept on this Mac:
 // the folders open in it, and the sections folded away. A folder is closed
@@ -1004,6 +1008,7 @@ export default function Sidebar({
       if (!name) return "A name is required.";
       if (/[/\\:]/.test(name)) return "Names can't contain /, \\ or :";
       if (name.startsWith(".")) return "Names can't start with a dot.";
+      if (sectioned && pc.kind === "dir" && pc.parentDir === libraryDir && isSectionName(name)) return SECTION_NAMED;
       // Bare names become markdown; an explicit .html (or md) extension is kept.
       const fileName = pc.kind === "file" && !DOC_EXT_RE.test(name) ? `${name}.md` : name;
       const path = `${pc.parentDir}/${fileName}`;
@@ -1018,7 +1023,7 @@ export default function Sidebar({
       if (pc.kind === "file") onOpenFile(path);
       return null;
     },
-    [pendingCreate, refresh, onSelect, onOpenFile],
+    [pendingCreate, sectioned, libraryDir, refresh, onSelect, onOpenFile],
   );
 
   const cancelCreate = useCallback(() => setPendingCreate(null), []);
@@ -1054,6 +1059,9 @@ export default function Sidebar({
         setPendingRename(null); // nothing changed
         return null;
       }
+      if (sectioned && pr.kind === "dir" && dirname(pr.path) === libraryDir && isSectionName(newName)) {
+        return SECTION_NAMED;
+      }
       const to = `${dirname(pr.path)}/${newName}`;
       const err = await onMovePath(pr.path, to, pr.kind);
       if (err) return err;
@@ -1062,7 +1070,7 @@ export default function Sidebar({
       onSelect([{ path: to, kind: pr.kind }]);
       return null;
     },
-    [pendingRename, onMovePath, onSelect],
+    [pendingRename, sectioned, libraryDir, onMovePath, onSelect],
   );
 
   const cancelRename = useCallback(() => setPendingRename(null), []);
@@ -1454,7 +1462,14 @@ export default function Sidebar({
               {(layout.shared.length > 0 || showCreateInLibrary) && (
                 <ul className="tree" role="tree">
                   {showCreateInLibrary && pendingCreate && createRow}
-                  {layout.shared.map((child) => renderItem(child, libraryDir, null))}
+                  {/* Only Finder makes a folder here with a section's name: Library holds nothing under one. */}
+                  {layout.shared.map((child) =>
+                    renderItem(
+                      child,
+                      libraryDir,
+                      sectioned && child.kind === "dir" && isSectionName(child.name) ? SECTION_NAMED_LINE : null,
+                    ),
+                  )}
                 </ul>
               )}
             </>

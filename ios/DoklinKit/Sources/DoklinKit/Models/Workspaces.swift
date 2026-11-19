@@ -690,8 +690,8 @@ public enum Audience: Equatable, Sendable {
     case folder(String)
     /// The folder that holds the restricted folders, which is nobody's itself.
     case folders
-    /// In no section — the top of the workspace and anything else there,
-    /// Library's own `Private` and `Restricted`, or a folder under
+    /// In no section — the top of the workspace and anything else there, a
+    /// folder with a section's name at the top of Library, or a folder under
     /// `Restricted/` that is not a restricted folder: it stays on this iPhone.
     case nowhere
 
@@ -703,11 +703,11 @@ public enum Audience: Equatable, Sendable {
         }
         if path.lowercased() == TreeModel.restrictedFolder.lowercased() { return .folders }
         guard under(TreeModel.libraryFolder) else { return .nowhere }
-        // Library never holds anything under these at its own top: the
-        // shared section skips them, as the engine's `reserved_top` does.
-        let inside = path.split(separator: "/").dropFirst().first?.lowercased()
-        let reserved = [TreeModel.privateFolder, TreeModel.restrictedFolder].map { $0.lowercased() }
-        return inside.map(reserved.contains) == true ? .nowhere : .everyone
+        // Library never holds anything under a section's name at its own
+        // top: the shared section skips them, as the engine's `reserved_top`
+        // does.
+        let inside = path.split(separator: "/").dropFirst().first.map(String.init)
+        return inside.map(TreeModel.isSectionName) == true ? .nowhere : .everyone
     }
 }
 

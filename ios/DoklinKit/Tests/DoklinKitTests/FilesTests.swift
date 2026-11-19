@@ -118,6 +118,22 @@ final class FilesTests: XCTestCase {
         XCTAssertTrue(files.exists("Old/b.md"))
     }
 
+    func testNoFolderAtTheTopOfLibraryHasASectionsName() throws {
+        try put("Library/Notes/a.md")
+        try put("Archive/Private/b.md")
+        for name in ["Library", "private", "Restricted"] {
+            XCTAssertThrowsError(try files.createFolder(in: "Library", named: name)) { error in
+                XCTAssertEqual(error.localizedDescription, "A folder in Library can't be called Library, Private or Restricted.")
+            }
+            XCTAssertThrowsError(try files.rename(.folder("Library/Notes"), to: name))
+        }
+        XCTAssertThrowsError(try files.move(.folder("Archive/Private"), into: "Library"))
+        XCTAssertFalse(files.exists("Library/Private"))
+        // Deeper, or in another section, the names mean nothing.
+        XCTAssertEqual(try files.createFolder(in: "Library/Notes", named: "Private"), "Library/Notes/Private")
+        XCTAssertEqual(try files.createFolder(in: "Private", named: "Library"), "Private/Library")
+    }
+
     func testRemovingADocumentTakesWhatIsItsAlong() throws {
         try put("plan.md")
         try put("plan.html")
@@ -190,7 +206,6 @@ final class AudienceTests: XCTestCase {
         let s = try status(spaces: spaces)
         XCTAssertEqual(Audience.of("Library/Projects/plan.md", in: s), .everyone)
         XCTAssertEqual(Audience.of("library", in: s), .everyone)
-        XCTAssertEqual(Audience.of("Library/Library/old.md", in: s), .everyone, "a folder called Library inside Library is Library's")
         XCTAssertEqual(Audience.of("private/diary.md", in: s), .onlyYou)
         XCTAssertEqual(Audience.of("Restricted/Finance/q3.md", in: s), .folder("Finance"))
         XCTAssertEqual(Audience.of("Restricted", in: s), .folders)
@@ -201,6 +216,8 @@ final class AudienceTests: XCTestCase {
         XCTAssertEqual(Audience.of("Projects/plan.md", in: s), .nowhere)
         XCTAssertEqual(Audience.of("Library/Private/x.md", in: s), .nowhere)
         XCTAssertEqual(Audience.of("Library/restricted", in: s), .nowhere)
+        XCTAssertEqual(Audience.of("Library/Library/x.md", in: s), .nowhere)
+        XCTAssertEqual(Audience.of("Library/Library.md", in: s), .everyone)
         XCTAssertEqual(Audience.of("Library/Privateer/x.md", in: s), .everyone)
         XCTAssertEqual(Audience.of("anything", in: nil), .everyone)
     }

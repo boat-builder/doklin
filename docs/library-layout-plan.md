@@ -46,7 +46,8 @@ identifier, so it opens the same workspace folder with the same sign-in:
   build on a moved folder. To try the change, build it under an identifier
   of its own (`TAURI_CONFIG`) and connect that copy to a test domain.
 - After the window, every branch cut before the merge is an older build.
-  Rebase it onto `main` before running it.
+  The new worker refuses what it sends, so it only stops syncing, but
+  rebase it onto `main` before running it.
 
 **Steps.** `$N` is `doklin-base-aeoxoxo-ai`, `$ROOT` is the superadmin's
 workspace folder, and `CLOUDFLARE_ACCOUNT_ID` is set to the account that
@@ -73,15 +74,17 @@ holds the worker. Every command before step 5 only reads.
    jq '[.files[].path | select(ascii_downcase | startswith("library/"))] | length' "$B/manifest.json"   # 0 expected
    scripts/versions.sh "$ROOT" > "$B/versions.txt"   # the root's version history
    ```
-   A count above 0 means a shared folder is already called `Library`. It
-   moves to `Library/Library/` (docs/cloud.md *Sections*), and the later checks count from
-   that number instead of 0.
+   A count above 0 means a shared folder is already called `Library`. The
+   new worker reserves that name and no device moves while its folder holds
+   it (docs/cloud.md *Sections*): rename the folder in Doklin, let it sync,
+   and start this step again.
 4. **Merge the implementation's PR** and wait for `release.yml` to publish
    (`latest.json` names the new version).
 5. **Deploy the worker:**
    `sh doklin-cloud-update.sh https://base.aeoxoxo.ai`, fetched from the
-   release as its header says. Agents may run again after this step, with
-   the new rule.
+   release as its header says. Then fetch the shared manifest and count its
+   `library/` paths again: still 0. Agents may run again after this step,
+   with the new rule.
 6. **Update the superadmin's Mac first.** Open Doklin and install the
    update. It relaunches and moves the folder. Check:
    - The sidebar shows Library, Restricted and Private, with nothing called
@@ -106,8 +109,8 @@ holds the worker. Every command before step 5 only reads.
 8. **Upload the iPhone build** (docs/ios.md *TestFlight*). Until it is
    installed, an iPhone keeps syncing in the old layout, which is safe.
 9. **The day after**, fetch the shared manifest again. The `library/` count
-   is still what step 3 found, and the tombstones have not jumped. Then
-   delete both folders of copies.
+   is still 0, and the tombstones have not jumped. Then delete both folders
+   of copies.
 
 **If something goes wrong:**
 
@@ -117,11 +120,17 @@ holds the worker. Every command before step 5 only reads.
   forward.
 - **The worker deploy fails.** The old worker keeps serving and the apps are
   unaffected. Keep agents off and run the script again.
-- **Shared paths start with `Library/`** (the count went up). An old build
-  ran on a moved folder, or the new `doklin` wrote to the old worker. Find
-  it and stop it. Then, on one moved Mac, move everything in
-  `Library/Library/` up into `Library/`, which moves the paths back for
-  every device.
+- **The `library/` count is above 0 after the worker deploy.** The new
+  `doklin` wrote to the old worker between the release and the deploy. The
+  new worker takes no write to the shared section while that folder is
+  there. On a Mac that has not updated yet, open Doklin, rename the shared
+  folder `Library` and let it sync. Then go on.
+- **An older build ran on a moved folder.** The worker refuses what it
+  sends, so its status shows an error and no device follows it. Quit it and
+  open the current build.
+- **A Mac says its folder already holds something called "Library".**
+  Something of that name was at the top of its folder before the update,
+  not synced. Rename it in Finder, then open Doklin again.
 - **A Mac's marker says `"moving"`.** The move stopped partway, and the
   Cloud panel's status says what stopped it. Fix that, then open Doklin
   again and the move finishes (docs/cloud.md *The move into Library*).

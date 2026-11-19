@@ -190,8 +190,8 @@ Restricted/<folder>/Projects/plan."`, with the path as sent. A route is
 answered in the section its path names, with that section's manifest
 mounted at its folder (`src/mount.ts`): the stored paths stay relative to
 the section, and every answer carries the mounted path. A folder the person
-is not in → `404`. `Library/Private/…` and `Library/Restricted/…` are
-refused by the shared manifest (`409`). `""` is the workspace itself, for
+is not in → `404`. `Library/Library/…`, `Library/Private/…` and
+`Library/Restricted/…` are refused by the shared manifest (`409`). `""` is the workspace itself, for
 `tree` and `search` only: its listing is the sections the person has
 (`Library`, `Private`, `Restricted` when they are in a folder) and no
 document. `tree` (`deep=1`), `search` and `pages` at the top cover every
@@ -421,9 +421,13 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   entry `at`.
 - A tombstone may carry `to`: the file was moved to another section, not
   deleted — a space id, or `""` for the shared workspace.
-- The shared manifest holds no file under `Private/` or `Restricted/`, in any
-  case (`RESERVED_FOLDERS`, `layout.ts` ⇄ `RESERVED_DIRS`, `space.rs`:
-  **change both**), tombstones included; a space's manifest may.
+- The shared manifest holds no file under `Library/`, `Private/` or
+  `Restricted/`, in any case (`RESERVED_FOLDERS`, `layout.ts` ⇄
+  `RESERVED_DIRS`, `space.rs`: **change both**), tombstones included; a
+  space's manifest may. A PUT that names one is `400`, which is what stops a
+  build from before the Library layout that is run on a moved folder: it
+  sends every shared file as moved under `Library/`. A stored manifest that
+  already names one refuses every write until a device takes the path out.
 - PUT checks ids, hashes, relative paths (no traversal), one path per file
   case-insensitively, rev/size ranges, slug grammar and reserved words,
   reference shape, ≤ 1 `root` (none in a space). Never existence. Merge semantics are the engine's.

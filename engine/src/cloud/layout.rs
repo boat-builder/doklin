@@ -16,9 +16,8 @@
 //! 2. Make `.doklin/moving-into-library/` if it is not there.
 //! 3. Write `layout: "moving"`.
 //! 4. Rename every entry at the top into that folder, except hidden ones
-//!    (they belong to the folder, not to a section) and the `Private` and
-//!    `Restricted` folders. A shared folder already called `Library` goes in
-//!    with the rest.
+//!    (they belong to the folder, not to a section) and anything under a
+//!    section's name.
 //! 5. Rename that folder to `Library`.
 //! 6. Re-key the version store: the workspace's store becomes Library's.
 //! 7. Write `layout: "library"`.
@@ -27,6 +26,11 @@
 //! run: 4 and 5 again. It gone means step 5 ran: on from 6. Step 2 runs
 //! before step 3 so that "moving, and no folder" can only mean that.
 //!
+//! A folder that already holds something called `Library` at its top does
+//! not move until that is renamed: inside Library the name is reserved
+//! (`space::RESERVED_DIRS`), so a shared folder carried in under it would
+//! read as deleted.
+//!
 //! Never while an engine or a watcher runs for the folder: with the shared
 //! unit still at the root, the moved files would read as moves into a shared
 //! folder called `Library`, and the manifest would tell every device.
@@ -34,7 +38,7 @@
 use std::path::{Path, PathBuf};
 
 use super::config::{read_marker, write_marker, Marker, MARKER_DIR};
-use super::space::{self, LIBRARY_DIR, PRIVATE_DIR, RESTRICTED_DIR};
+use super::space::{self, LIBRARY_DIR};
 
 /// `layout` while the move is under way.
 pub const MOVING: &str = "moving";
@@ -87,6 +91,9 @@ pub fn begin(root: &Path) -> Result<bool, String> {
         Some(MOVING) => Ok(true),
         Some(_) => Err(NEWER.to_string()),
         None => {
+            if holds_library(root) {
+                return Err(could_not("it already holds something called “Library”. Rename it, then open Doklin again"));
+            }
             std::fs::create_dir_all(staging(root)).map_err(|e| could_not(&format!("make a folder for it: {}", e)))?;
             marker.layout = Some(MOVING.to_string());
             write_marker(root, &marker)?;
@@ -95,13 +102,19 @@ pub fn begin(root: &Path) -> Result<bool, String> {
     }
 }
 
+/// Whether the folder at `root` has something called `Library` at its top,
+/// whatever its case: what stops a folder not in the layout from moving.
+pub fn holds_library(root: &Path) -> bool {
+    std::fs::symlink_metadata(space::top(root, LIBRARY_DIR)).is_ok()
+}
+
 /// Steps 4 to 7, after `begin` answered true.
 pub fn finish(root: &Path, data_dir: &Path) -> Result<(), String> {
     let staging = staging(root);
     if staging.is_dir() {
         gather(root, &staging)?;
         let library = root.join(LIBRARY_DIR);
-        if std::fs::symlink_metadata(&library).is_ok() {
+        if holds_library(root) {
             return Err(could_not("a new “Library” appeared at the top of the folder while it was moving. Move it somewhere else, then open Doklin again"));
         }
         std::fs::rename(&staging, &library).map_err(|e| could_not(&format!("name the folder Library: {}", e)))?;
@@ -120,13 +133,12 @@ fn could_not(why: &str) -> String {
 /// name already moved, and at the top it is in no section — on this device
 /// only, which loses nothing — where an overwrite would lose the other.
 fn gather(root: &Path, staging: &Path) -> Result<(), String> {
-    let private = space::top(root, PRIVATE_DIR);
-    let restricted = space::top(root, RESTRICTED_DIR);
     let entries = std::fs::read_dir(root).map_err(|e| could_not(&format!("read the folder: {}", e)))?;
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name();
-        if name.to_string_lossy().starts_with('.') || path == private || path == restricted {
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') || space::reserved_top(&name_str).is_some() {
             continue;
         }
         let to = staging.join(&name);
@@ -168,7 +180,7 @@ fn rekey_versions(root: &Path, library: &Path, data_dir: &Path) -> Result<(), St
 /// `Sections.moved`, the iPhone's Sections.swift: change all three).
 pub fn moved_rel(rel: &str) -> String {
     let top = rel.split('/').next().unwrap_or_default();
-    if rel.is_empty() || top.starts_with('.') || space::SECTION_DIRS.iter().any(|name| name.eq_ignore_ascii_case(top)) {
+    if rel.is_empty() || top.starts_with('.') || space::reserved_top(rel).is_some() {
         rel.to_string()
     } else {
         format!("{}/{}", LIBRARY_DIR, rel)

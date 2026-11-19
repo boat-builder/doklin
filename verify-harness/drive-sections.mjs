@@ -309,6 +309,38 @@ step(
   madeInLibrary && fromStrayInLibrary,
 );
 
+/* 2d′ — no folder at the top of Library has a section's name: making one
+        is refused in a sentence, and one Finder made says it is not synced. */
+await tid("section-library").locator('[aria-label="New folder"]').click();
+await poll(async () => (await tid("section-library").locator(".tree-create-input").count()) === 1);
+await tid("section-library").locator(".tree-create-input").fill("private");
+await page.keyboard.press("Enter");
+await poll(async () => (await page.locator(".tree-create-error").count()) === 1);
+const sectionNameRefused = (await page.locator(".tree-create-error").textContent()).trim();
+const sectionNameNotMade = await page.evaluate(() => !window.__dirs.has("/docs/Library/private"));
+await page.keyboard.press("Escape");
+await poll(async () => (await page.locator(".tree-create-input").count()) === 0);
+await page.evaluate(() => {
+  window.__finderDirs = ["Restricted"];
+  window.__emit("cloud-applied", { root: "/docs", paths: [] });
+});
+await poll(async () => (await row("/docs/Library/Restricted").count()) === 1);
+const sectionNamedMark = await row("/docs/Library/Restricted").locator('[data-testid="tree-nowhere"]').getAttribute("title");
+const ordinaryUnmarked = (await row("/docs/Library/Projects").locator('[data-testid="tree-nowhere"]').count()) === 0;
+await page.evaluate(() => {
+  window.__finderDirs = [];
+  window.__emit("cloud-applied", { root: "/docs", paths: [] });
+});
+await poll(async () => (await row("/docs/Library/Restricted").count()) === 0);
+step(
+  "a folder in Library is not called Library, Private or Restricted: making one is refused, and one Finder made is marked not synced",
+  sectionNameRefused === "A folder in Library can't be called Library, Private or Restricted." &&
+    sectionNameNotMade &&
+    sectionNamedMark === "A folder in Library with a section's name stays on this Mac — rename it" &&
+    ordinaryUnmarked,
+  `${sectionNameRefused} // ${sectionNamedMark}`,
+);
+
 /* 2e — nothing is dropped at the workspace's top; a note dropped into a
        folder in no section is asked about first: it would stop syncing and
        leave every other device. */

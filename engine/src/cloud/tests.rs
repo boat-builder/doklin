@@ -7124,15 +7124,14 @@ fn tree(dir: &Path) -> Vec<String> {
 }
 
 /// A connected folder in the layout from before Library: shared files at
-/// its top beside `Private/`, `Restricted/` and hidden folders, a shared
-/// folder already called `library`, and the version store at its root.
+/// its top beside `Private/`, `Restricted/` and hidden folders, and the
+/// version store at its root.
 fn folder_before_library(data: &Path) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     for (rel, text) in [
         ("notes.md", "notes\n"),
         ("Projects/plan.md", "plan\n"),
-        ("library/old.md", "a shared folder of that name\n"),
         ("node_modules/x/readme.md", "ignored, and still the section's own\n"),
         (".git/HEAD", "ref: refs/heads/main\n"),
         (".obsidian/app.json", "{}\n"),
@@ -7161,7 +7160,7 @@ fn assert_moved(root: &Path, data: &Path) {
         "hidden entries and the other two sections stay where they were"
     );
     let library: Vec<String> = tree(&root.join("Library"));
-    assert_eq!(library, ["Projects/plan.md", "library/old.md", "node_modules/x/readme.md", "notes.md"]);
+    assert_eq!(library, ["Projects/plan.md", "node_modules/x/readme.md", "notes.md"]);
     assert_eq!(tree(&root.join("Private")), ["diary.md"]);
     assert_eq!(tree(&root.join(".git")), ["HEAD"]);
     assert_eq!(read_marker(root).unwrap().layout.as_deref(), Some(super::layout::LIBRARY));
@@ -7191,7 +7190,7 @@ fn the_move_carries_the_shared_section_into_library_and_leaves_the_rest() {
 fn the_move_finishes_from_wherever_it_stopped() {
     let staging = |root: &Path| root.join(".doklin/moving-into-library");
     let gather_all = |root: &Path| {
-        for name in ["notes.md", "Projects", "library", "node_modules"] {
+        for name in ["notes.md", "Projects", "node_modules"] {
             std::fs::rename(root.join(name), staging(root).join(name)).unwrap();
         }
     };
@@ -7201,7 +7200,7 @@ fn the_move_finishes_from_wherever_it_stopped() {
         ("halfway through the renames", &|root, _| {
             super::layout::begin(root).unwrap();
             std::fs::rename(root.join("notes.md"), staging(root).join("notes.md")).unwrap();
-            std::fs::rename(root.join("library"), staging(root).join("library")).unwrap();
+            std::fs::rename(root.join("Projects"), staging(root).join("Projects")).unwrap();
         }),
         ("after Library got its name", &|root, _| {
             super::layout::begin(root).unwrap();
@@ -7223,6 +7222,29 @@ fn the_move_finishes_from_wherever_it_stopped() {
         super::layout::move_into_library(folder.path(), data.path()).unwrap_or_else(|e| panic!("{when}: {e}"));
         assert_moved(folder.path(), data.path());
     }
+}
+
+/// Inside Library the name `Library` is reserved, so a folder that already
+/// holds something called that does not move — a shared folder carried in
+/// under it would read as deleted — until it is renamed.
+#[test]
+fn a_folder_that_already_holds_a_library_does_not_move() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = folder_before_library(data.path());
+    let root = folder.path();
+    std::fs::create_dir_all(root.join("library")).unwrap();
+    std::fs::write(root.join("library/old.md"), "a shared folder of that name\n").unwrap();
+    let before = tree(root);
+
+    let refused = super::layout::move_into_library(root, data.path()).unwrap_err();
+    assert!(refused.contains("already holds something called “Library”"), "{refused}");
+    assert_eq!(tree(root), before, "nothing moved");
+    assert_eq!(read_marker(root).unwrap().layout, None, "and it has not begun");
+    assert!(super::layout::ready(root, Some(&refused)).unwrap_err().contains("Rename it"), "which the status says");
+
+    std::fs::rename(root.join("library"), root.join("Books")).unwrap();
+    super::layout::move_into_library(root, data.path()).unwrap();
+    assert_eq!(tree(&root.join("Library")), ["Books/old.md", "Projects/plan.md", "node_modules/x/readme.md", "notes.md"]);
 }
 
 /// The update on a device that synced in the old layout: the move sends
@@ -7378,6 +7400,36 @@ async fn a_missing_library_comes_back_whole() {
 
     assert_eq!(be.lock().unwrap().put_manifest_calls, calls, "nothing was deleted for anyone");
     assert!(manifest_of(&be).tombstones.is_empty());
+
+    // A file of that name is in the way: said in a sentence, and what was
+    // synced is not forgotten on every pass.
+    std::fs::remove_dir_all(a.library()).unwrap();
+    std::fs::write(a.root.path().join("Library"), "not a folder\n").unwrap();
+    a.cycle().await;
+    assert_eq!(a.phase(), Phase::Error);
+    assert!(a.status().error.unwrap().contains("isn't a folder"));
+    assert!(a._state.path().join("state.json").exists());
+    std::fs::remove_file(a.root.path().join("Library")).unwrap();
+    a.cycle().await;
+    assert_eq!(a.files(), ["doc.md", "notes/n.md"]);
+    assert_eq!(be.lock().unwrap().put_manifest_calls, calls);
+}
+
+/// Inside Library, a folder with a section's name is in no section: the
+/// shared section holds nothing under `Library`, `Private` or `Restricted`.
+#[tokio::test]
+async fn a_folder_with_a_sections_name_inside_library_syncs_nowhere() {
+    let be = fake_worker();
+    let mut a = device("Air", &be);
+    a.write("doc.md", "doc\n");
+    for name in ["Library", "private", "Restricted"] {
+        std::fs::create_dir_all(a.library().join(name)).unwrap();
+        std::fs::write(a.library().join(name).join("x.md"), "x\n").unwrap();
+    }
+    a.cycle().await;
+    assert_eq!(paths(&manifest_of(&be)), ["doc.md"]);
+    assert_eq!(space::reserved_top("library/x.md"), Some("Library"));
+    assert_eq!(space::reserved_top("Library.md"), None, "a name is reserved as a folder, not as a word");
 }
 
 /// A folder that is not in the Library layout is never synced: a later
@@ -7428,8 +7480,8 @@ fn a_path_stored_before_the_move_follows_its_file() {
     use super::layout::moved_rel;
     assert_eq!(moved_rel("notes.md"), "Library/notes.md");
     assert_eq!(moved_rel("Projects/plan.md"), "Library/Projects/plan.md");
-    // As it is: a path can't say whether it named a shared folder called
-    // Library, which the move put at `Library/Library/`.
+    // As it is: no folder moves while it holds something called Library,
+    // so a path under that name was stored after the move.
     assert_eq!(moved_rel("Library/plan.md"), "Library/plan.md");
     assert_eq!(moved_rel("Private/x.md"), "Private/x.md");
     assert_eq!(moved_rel("restricted/Finance/x.md"), "restricted/Finance/x.md");

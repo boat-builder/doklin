@@ -79,6 +79,13 @@ public final class TreeModel {
     public nonisolated static let privateFolder = "Private"
     public nonisolated static let restrictedFolder = "Restricted"
 
+    /// Whether `name` is a section's own folder's, whatever its case. No
+    /// folder at the top of Library has one either: the shared section holds
+    /// nothing under them (`RESERVED_DIRS`, engine/src/cloud/space.rs).
+    public nonisolated static func isSectionName(_ name: String) -> Bool {
+        [libraryFolder, privateFolder, restrictedFolder].contains { $0.lowercased() == name.lowercased() }
+    }
+
     public init(workspace: Workspace, defaults: UserDefaults = .standard) {
         self.workspace = workspace
         self.defaults = defaults

@@ -194,11 +194,15 @@ export function validName(raw: unknown, fallback: string): string {
  *  ios/DoklinKit/Sources/DoklinKit/Models/Tree.swift): change all four. */
 export const LIBRARY_FOLDER = "Library";
 
-/** The two names the shared section keeps out of its own top: where a
- *  person's Private and their restricted folders are on disk. Nothing in the
- *  shared manifest lives under either, whatever its case (`RESERVED_DIRS`,
- *  engine/src/cloud/space.rs: change both). */
-export const RESERVED_FOLDERS: ReadonlySet<string> = new Set(["private", "restricted"]);
+/** The names the shared section keeps out of its own top: the sections' own
+ *  folders on disk. Nothing in the shared manifest lives under any of them,
+ *  whatever its case (`RESERVED_DIRS`, engine/src/cloud/space.rs: change
+ *  both). `Private` and `Restricted` because a device still in the layout
+ *  from before Library mounts the shared section at the workspace's top;
+ *  `Library` because a build from before it, run on a folder that has moved,
+ *  sends every shared file as moved under `Library/` — refused here, so no
+ *  other device follows. */
+export const RESERVED_FOLDERS: ReadonlySet<string> = new Set([LIBRARY_FOLDER.toLowerCase(), "private", "restricted"]);
 
 /** Whether a path in the shared section is under one of the reserved names. */
 export const reservedTop = (path: string): boolean => RESERVED_FOLDERS.has(path.split("/", 1)[0].toLowerCase());

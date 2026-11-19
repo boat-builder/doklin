@@ -133,8 +133,10 @@
         return null;
       };
       // The shared section's files, in the folder `dir`.
+      // `__finderDirs`: folders somebody made in the shared section outside the app.
       const sharedNodes = (dir, all) => [
         ...(window.__sections?.projectsGone ? [] : [projectsNode(dir)]),
+        ...(window.__finderDirs ?? []).map((name) => ({ kind: "dir", name, path: `${dir}/${name}`, children: [] })),
         ...window.__treeFiles.map((f) => ({ kind: "file", name: f, path: `${dir}/${f}` })),
         ...(all ? window.__otherFiles.map((f) => ({ kind: "file", name: f, path: `${dir}/${f}`, supported: false })) : []),
       ];

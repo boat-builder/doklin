@@ -837,8 +837,12 @@ impl<R: Remote> Engine<R> {
             self.set_status(Phase::Error, Some(why));
             return Ok(());
         }
-        if !self.shared().root.is_dir() {
-            self.mend_library();
+        if !self.shared().root.is_dir() && !self.mend_library() {
+            self.set_status(
+                Phase::Error,
+                Some("Something called “Library” that isn't a folder is at the top of this workspace's folder. Move it away, and Doklin brings Library back.".into()),
+            );
+            return Ok(());
         }
         // A folder dropped under `Restricted/` becomes a space before the
         // section it came from reads its files as gone, so that they leave it
@@ -1458,14 +1462,19 @@ impl<R: Remote> Engine<R> {
     /// folder (`reconcile_spaces`), it is a section to bring back whole, never
     /// a folder whose every file was deleted: what the shared unit had synced
     /// is forgotten, and its next cycle downloads everything into a new one.
-    fn mend_library(&mut self) {
+    /// False when the folder cannot be made — a file has its name — and then
+    /// nothing is forgotten.
+    fn mend_library(&mut self) -> bool {
+        if std::fs::create_dir_all(self.cfg.root.join(LIBRARY_DIR)).is_err() {
+            return false;
+        }
         let _ = std::fs::remove_file(self.cfg.state_dir.join("state.json"));
         let _ = std::fs::remove_dir_all(self.cfg.state_dir.join("base"));
-        let _ = std::fs::create_dir_all(self.cfg.root.join(LIBRARY_DIR));
         self.units.insert(SHARED.to_string(), Self::shared_unit(&self.cfg, &self.remote));
         if let Some(tell) = &self.cfg.on_spaces {
             tell(SpacesChanged::default());
         }
+        true
     }
 
     /* ----- restricted folders, by hand ----- */

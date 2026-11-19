@@ -4,9 +4,13 @@
 //! shared section is `Library/`, a person's Private is `Private/`, and each
 //! restricted folder they are in is a folder under `Restricted/`. Anything
 //! else at the top is in no section: it stays on this device and syncs
-//! nowhere. Inside Library, `Private` and `Restricted` stay reserved at its
-//! own top, so a device that still mounts the shared section at the
-//! workspace's root never meets a shared file under either name.
+//! nowhere. Inside Library, the three names are reserved at its own top:
+//! the shared section holds nothing under `Library`, `Private` or
+//! `Restricted`. A device that still mounts the shared section at the
+//! workspace's root would put a shared `Private/x.md` in its own Private —
+//! and a build from before the Library layout that is run on a moved folder
+//! reads every shared file as moved under `Library/`, which the worker then
+//! refuses instead of telling every device.
 //!
 //! A folder says it is a space by the marker inside it,
 //! `<folder>/.doklin/space.json`. The marker is the only record of which
@@ -32,21 +36,20 @@ pub const LIBRARY_DIR: &str = "Library";
 pub const PRIVATE_DIR: &str = "Private";
 /// What holds the restricted folders, at the top of the workspace.
 pub const RESTRICTED_DIR: &str = "Restricted";
-/// The names a section's folder has at the top of the workspace, whatever
-/// their case.
-pub const SECTION_DIRS: [&str; 3] = [LIBRARY_DIR, PRIVATE_DIR, RESTRICTED_DIR];
-/// The names the shared section never holds anything under at its own top,
+/// The names a section's folder has at the top of the workspace, and so the
+/// names the shared section never holds anything under at its own top,
 /// whatever their case (`RESERVED_FOLDERS`, cloud-worker/src/layout.ts:
 /// change both).
-pub const RESERVED_DIRS: [&str; 2] = [PRIVATE_DIR, RESTRICTED_DIR];
+pub const RESERVED_DIRS: [&str; 3] = [LIBRARY_DIR, PRIVATE_DIR, RESTRICTED_DIR];
 /// The shared section's id among an engine's units, and what a tombstone's
 /// `to` says of a file that moved to it.
 pub const SHARED: &str = "";
 
 const SPACE_MARKER_FILE: &str = "space.json";
 
-/// The reserved name a path inside the shared section is under, if it is
-/// under one.
+/// The section's name a path starts with, if it starts with one: the
+/// reserved name a path inside the shared section is under, or what an
+/// entry at the top of the workspace is.
 pub fn reserved_top(rel: &str) -> Option<&'static str> {
     let top = rel.split('/').next().unwrap_or_default();
     RESERVED_DIRS.into_iter().find(|name| name.eq_ignore_ascii_case(top))

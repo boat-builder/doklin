@@ -1086,6 +1086,14 @@ pub async fn cloud_connect(
             ));
         }
     }
+    // Asked before the domain is bound: a folder that could not move into the
+    // Library layout (`layout::begin`) is not connected.
+    if read_marker(&root_path).is_none_or(|marker| marker.layout.is_none()) && layout::holds_library(&root_path) {
+        return Err(
+            "This folder already holds something called “Library”, which is the folder Doklin keeps what everyone shares in. Rename it, then connect again."
+                .to_string(),
+        );
+    }
     let folder_name = root_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let name = clean_name(&name, if folder_name.is_empty() { "Notes" } else { &folder_name });
 

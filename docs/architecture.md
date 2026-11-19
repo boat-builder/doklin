@@ -109,8 +109,8 @@ Its sign-in and the worker's routes: [cloud-people-agents.md](cloud-people-agent
   app would put the same file: `/<Name>/Library/…` for the shared section
   (`LIBRARY_FOLDER`, `cloud-worker/src/layout.ts`), `/<Name>/Private/…`,
   `/<Name>/Restricted/<name>/…`. **A path outside the three is in no
-  section** (`place` answers null), and so is one under `Library/Private`
-  or `Library/Restricted`; the browser changes nothing there. What it sends
+  section** (`place` answers null), and so is one under `Library/Library`,
+  `Library/Private` or `Library/Restricted`; the browser changes nothing there. What it sends
   is a section's id and the path inside it, never a UI path. It asks the
   worker by attention with the engine's numbers (`poll_gap`): change both.
 - It reads the worker's answers with the worker's own types:

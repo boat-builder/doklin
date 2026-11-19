@@ -102,7 +102,7 @@ const optionalText = (v: unknown, max: number): boolean =>
 const isAuthor = (v: unknown): boolean => typeof v === "string" && (MEMBER_ID_RE.test(v) || AGENT_ID_RE.test(v));
 
 /** What a shared manifest naming a file under a reserved folder is told. */
-export const RESERVED_SENTENCE = "Private and Restricted are kept for a person's own and restricted folders";
+export const RESERVED_SENTENCE = "Library, Private and Restricted are the names of a workspace's sections: no shared folder is called one";
 
 /** What a manifest naming a file outside `syncs` is told. */
 const unsynced = (path: string): string => `${UNSYNCED_SENTENCE} — "${path}" is neither`;
