@@ -332,6 +332,25 @@ const COMMENTS_VISIBLE_STORAGE_KEY = "doklin:comments-visible";
 const SIDEBAR_OPEN_STORAGE_KEY = "doklin:sidebar-open";
 const SESSION_STORAGE_KEY = "doklin:session";
 const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
+const FULL_WIDTH_STORAGE_KEY = "doklin:full-width";
+
+/* ---------- Full width (Settings → Appearance) ----------
+   The note reads in a 672px column (--doc-measure); full width lifts that
+   cap so the note spans its pane, side padding kept — Notion's "Full width",
+   Obsidian's readable line length turned off. Per app, like zoom: it's about
+   the reader's screen, not the file. Applied as data-full-width on <html>,
+   which App.css keys on. */
+function readStoredFullWidth(): boolean {
+  try {
+    return localStorage.getItem(FULL_WIDTH_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function applyFullWidth(on: boolean) {
+  document.documentElement.toggleAttribute("data-full-width", on);
+}
 
 /* ---------- Document zoom (⌘+ / ⌘- / ⌘0) ----------
    One factor scales BOTH versions of a document, so switching MD↔HTML never
@@ -433,9 +452,10 @@ const THEME_LABEL: Record<Theme, string> = {
   dark: "Dark",
 };
 
-// Paint the stored theme before the first render, not after it.
+// Paint the stored theme and width before the first render, not after it.
 if (typeof document !== "undefined") {
   applyTheme(readStoredTheme());
+  applyFullWidth(readStoredFullWidth());
 }
 
 function readStoredSidebarOpen(): boolean {
@@ -639,6 +659,7 @@ export default function App() {
   // needs no editor internals. In-memory only — a fresh launch starts at top.
   const scrollPositionsRef = useRef<Map<string, number>>(new Map());
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
+  const [fullWidth, setFullWidth] = useState<boolean>(() => readStoredFullWidth());
   const [docZoom, setDocZoom] = useState<number>(() => readStoredDocZoom());
 
   // md/html rendition state for the ACTIVE document. `hasHtml` = an html
@@ -1124,6 +1145,15 @@ export default function App() {
     query.addEventListener("change", onScheme);
     return () => query.removeEventListener("change", onScheme);
   }, [theme]);
+
+  useEffect(() => {
+    applyFullWidth(fullWidth);
+    try {
+      localStorage.setItem(FULL_WIDTH_STORAGE_KEY, fullWidth ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [fullWidth]);
 
   // The markdown editor reads the factor straight off <html> (App.css); the
   // html rendition gets it as a prop, since only the bridge can reach inside
@@ -5251,6 +5281,8 @@ export default function App() {
       docked={showSidebar}
       theme={theme}
       onTheme={setTheme}
+      fullWidth={fullWidth}
+      onToggleFullWidth={() => setFullWidth((w) => !w)}
       onNewNote={onNewNote}
       onOpenFile={onPickFile}
       onOpenFolder={onPickFolder}
@@ -6370,6 +6402,8 @@ function Settings({
   docked,
   theme,
   onTheme,
+  fullWidth,
+  onToggleFullWidth,
   onNewNote,
   onOpenFile,
   onOpenFolder,
@@ -6387,6 +6421,8 @@ function Settings({
   docked: boolean;
   theme: Theme;
   onTheme: (t: Theme) => void;
+  fullWidth: boolean;
+  onToggleFullWidth: () => void;
   // The File rows: each is shown only where the platform has what it opens
   // (a handler that is not passed is a row that is not there).
   onNewNote?: () => void;
@@ -6583,6 +6619,17 @@ function Settings({
               </button>
             ))}
           </div>
+          <button
+            role="menuitemcheckbox"
+            aria-checked={fullWidth}
+            className="settings-option"
+            data-testid="settings-full-width"
+            title="Let the note fill the window instead of a reading column"
+            onClick={onToggleFullWidth}
+          >
+            <span className="settings-option-check">{fullWidth ? <CheckIcon /> : null}</span>
+            <span className="settings-option-label">Full width</span>
+          </button>
           {update && <UpdateRows update={update} onOpenExternal={onOpenExternal} onDone={() => setOpen(false)} />}
         </div>
       )}
@@ -6767,6 +6814,25 @@ function ScratchEmptyState({
 }
 
 /* ---------- Icons ---------- */
+
+// The tick on a checked settings row ("Full width").
+function CheckIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
 
 function GearIcon() {
   return (

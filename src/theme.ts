@@ -1,4 +1,4 @@
-// The theme: the one appearance setting. Out of App.tsx so that a screen
+// The theme (Settings → Appearance). Out of App.tsx so that a screen
 // shown before the app is (the browser version's sign-in) wears it too.
 
 export type Theme = "system" | "light" | "paper" | "dark";

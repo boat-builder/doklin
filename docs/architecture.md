@@ -308,12 +308,16 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   (`cloud-worker/src/theme.ts`): keep it a flat list of rules with the
   `:root`, `:root, [data-theme="light"]` and `[data-theme="dark"]` blocks, or
   the worker tests fail.
-- The theme is the only appearance setting. The document's faces (serif
-  `--font-heading`, sans `--font-text`) and its 672px `--doc-measure` are
-  fixed tokens, not reader choices. Heading sizes are fixed px × zoom.
+- Appearance is the theme and Full width, both per app. The document's faces
+  (serif `--font-heading`, sans `--font-text`) are fixed tokens, not reader
+  choices. Its 672px `--doc-measure` is the column's cap: Full width
+  (`data-full-width` on `<html>`) lifts it and keeps the side padding, and
+  anything sized to the column (a drawing) holds to the measure instead of
+  the pane. Public pages always use the column. Heading sizes are fixed px ×
+  zoom.
 - Bundled fonts (Inter, Literata, Roboto Mono, OFL) are named in
   `src/styles/fonts.css`; the worker imports each file by name
   (`cloud-worker/src/theme.ts`) — change both.
 - Code block placeholders must match the mounted editor's height exactly
   (App.css "Code block placeholder parity"); the tools row floats out of flow.
-- `localStorage` key: `doklin:theme`.
+- `localStorage` keys: `doklin:theme`, `doklin:full-width`.
