@@ -81,6 +81,24 @@ class UITestCase: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
     }
 
+    /// Scroll a list until something further down it is on screen, clear
+    /// of the tab bar and the bar over it along the bottom edge. A row
+    /// half under the tab bar counts as hittable, and a tap on it lands on
+    /// the tab bar.
+    @discardableResult
+    func reveal(_ element: XCUIElement, _ what: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        for _ in 0..<8 where !reachable(element) {
+            app.swipeUp()
+        }
+        return expect(element, what, timeout: 5, file: file, line: line)
+    }
+
+    private func reachable(_ element: XCUIElement) -> Bool {
+        guard element.exists, element.isHittable else { return false }
+        let bar = app.tabBars.firstMatch
+        return !bar.exists || !bar.isHittable || element.frame.maxY < bar.frame.minY - 64
+    }
+
     /* ---------- Getting around ---------- */
 
     /// Back one screen by the navigation bar's back button: false when
