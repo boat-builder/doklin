@@ -6694,7 +6694,7 @@ function Settings({
             role="menuitem"
             className="settings-option"
             data-testid="settings-agent-instructions"
-            title="A few lines for Claude Code, Codex, Grok or OpenClaw: Doklin is your knowledge base, and doklin reaches it"
+            title="A few lines for any agent to keep in its instructions file: Doklin is your knowledge base, and doklin reaches it"
             onClick={() => {
               setOpen(false);
               onCopyAgentInstructions();

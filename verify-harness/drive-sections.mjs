@@ -465,10 +465,13 @@ const instructionsToast = (await page.locator(".toast").textContent()).trim();
 const instructions = await page.evaluate(() => navigator.clipboard.readText());
 await page.locator(".toast-close").click();
 await poll(async () => (await page.locator(".toast").count()) === 0);
-const note = instructions.split("## Doklin\n")[1] ?? "";
+const [ask, note = ""] = instructions.split("## Doklin\n");
 step(
-  "Settings → Copy instructions for agents: each agent's always-read file, then a note of a few lines that teaches dok and doklin",
-  ["~/.claude/CLAUDE.md", "~/.codex/AGENTS.md", "~/.grok/AGENTS.md", "OpenClaw"].every((s) => instructions.includes(s)) &&
+  "Settings → Copy instructions for agents: the agent's own instructions file, with known ones for reference, global or local as its person says; then a note of a few lines that teaches dok and doklin",
+  ["~/.claude/CLAUDE.md", "~/.codex/AGENTS.md", "~/.grok/AGENTS.md", "OpenClaw"].every((s) => ask.includes(s)) &&
+    ask.includes("Use whichever file you use") &&
+    ask.includes("ask me whether it should be global") &&
+    ask.includes("or local") &&
     note.includes("doks (one dok)") &&
     note.includes("`doklin help agent`") &&
     note.split("\n").length <= 3 &&

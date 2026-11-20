@@ -349,19 +349,20 @@ Then run \`doklin help agent\` to see what you can do.`;
 }
 
 /** What *Copy instructions for agents* (Settings) hands a person to paste
- *  into an agent's chat once: the agent saves the note at its end into the
- *  file it reads at the start of every session, and from then on knows what
- *  Doklin is, that a "dok" is one of its documents, and to reach it through
- *  `doklin`. That note rides along in every conversation the agent has, so
- *  it stays a few lines; `doklin help agent` is the briefing. The list names
- *  each agent's own always-read file — the agents doklin.cc says Doklin works
- *  with that run commands (a chat app cannot run `doklin`). */
-export const AGENT_INSTRUCTIONS = `Save the note below where you keep instructions you read at the start of every session, so you remember Doklin from now on. Add it as it is, and leave the rest of that file alone:
-- Claude Code: ~/.claude/CLAUDE.md
-- Codex: ~/.codex/AGENTS.md
-- Grok Build: ~/.grok/AGENTS.md
-- OpenClaw: AGENTS.md in your workspace
-- Any other agent: your own file of that kind
+ *  into any agent's chat once: the agent saves the note at its end into the
+ *  instructions file it loads into every conversation, and from then on
+ *  knows what Doklin is, that a "dok" is one of its documents, and to reach
+ *  it through `doklin`. The files listed are examples, not the whole list:
+ *  whatever the agent is, it uses its own. It asks its person first whether
+ *  the note is global (every project) or local (this one). The note rides
+ *  along in every conversation, so it stays a few lines; `doklin help agent`
+ *  is the briefing. */
+export const AGENT_INSTRUCTIONS = `Add the Doklin note below to the instructions file you load into every conversation, so it is part of every message from now on. Use whichever file you use; for reference:
+- Claude Code: CLAUDE.md (global: ~/.claude/CLAUDE.md)
+- Codex: AGENTS.md (global: ~/.codex/AGENTS.md)
+- Grok Build: AGENTS.md (global: ~/.grok/AGENTS.md)
+- OpenClaw: AGENTS.md in its workspace
+First ask me whether it should be global, for every project, or local, in this project's own file. If you cannot write the file yourself, tell me where to paste the note. Add the note as it is, and leave the rest of the file alone.
 
 ## Doklin
 Doklin is my knowledge base. Its documents are doks (one dok), named by paths that start with Library/, Private/ or Restricted/<folder>/. Use the \`doklin\` command for them (run \`doklin help agent\` once to learn it), and search Doklin when I mention a dok or ask about something it may hold.`;
