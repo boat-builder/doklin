@@ -471,13 +471,11 @@ export function placeOf(cloud: CloudStatus | null, rel: string): Place {
   return inLibrary !== undefined && RESERVED_TOP.has(inLibrary) ? { kind: "nowhere" } : { kind: "shared" };
 }
 
-/** Where a path inside a workspace's folder (`rel`, relative to it) is once
- *  the folder has moved into the Library layout: a path under a section's
- *  name or a hidden entry stays where it is, and anything else was the shared
- *  section's and is in Library now. The rule the engine's move follows
- *  (`moved_rel`, engine/src/cloud/layout.rs; `Sections.moved` on the
- *  iPhone: change all three), for the one-time
- *  stored-data migrations of the paths kept outside it. */
+/** Where a path inside a folder (`rel`, relative to it) is once connecting
+ *  the folder has moved its files into Library: a path under a section's
+ *  name or a hidden entry stays where it is, and anything else is in Library
+ *  now — the rule the engine's move follows (engine/src/cloud/layout.rs),
+ *  for the paths the app keeps outside the folder. */
 export function toLibraryLayout(rel: string): string {
   const top = rel.split("/", 1)[0];
   if (top === "" || top.startsWith(".") || RESERVED_TOP.has(top.toLowerCase())) return rel;

@@ -91,10 +91,6 @@ final class EngineLiveTests: XCTestCase {
         // container.
         let status = try XCTUnwrap(device.status(root))
         XCTAssertEqual(keychain.keys, [status.wsId])
-        // Joined in the Library layout, so what this iPhone keeps by path is
-        // never moved again.
-        XCTAssertTrue(Workspaces.inLibraryLayout(root))
-        XCTAssertEqual(remembered.stringArray(forKey: "moved-into-library"), [status.wsId])
         let cloud = try String(contentsOf: data.appendingPathComponent("cloud.json"), encoding: .utf8)
         XCTAssertFalse(cloud.contains(container.path), cloud)
         XCTAssertTrue(cloud.contains("\"Documents/"), cloud)

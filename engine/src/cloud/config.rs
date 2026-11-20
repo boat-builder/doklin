@@ -181,10 +181,10 @@ pub fn ensure_device(
 pub struct Marker {
     pub domain: String,
     pub ws_id: String,
-    /// Absent: the folder is still in the layout from before Library, the
-    /// shared section at its root. `"moving"`, then `"library"`: the move
-    /// (layout.rs). Anything else is a layout a later build made, which this
-    /// one does not know.
+    /// Absent: the folder's files are not in Library yet — connect writes
+    /// the marker before its move begins. `"moving"`, then `"library"`: the
+    /// move (layout.rs). Anything else is a layout a later build made, which
+    /// this one does not know.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
 }

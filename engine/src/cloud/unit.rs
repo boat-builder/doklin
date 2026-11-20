@@ -338,23 +338,20 @@ impl<R: Remote> Unit<R> {
 
     /// A path of this unit as the workspace spells it.
     pub(crate) fn ws_rel(&self, rel: &str) -> String {
-        match (self.prefix.is_empty(), rel.is_empty()) {
-            (true, _) => rel.to_string(),
-            (false, true) => self.prefix.clone(),
-            (false, false) => format!("{}/{}", self.prefix, rel),
+        if rel.is_empty() {
+            self.prefix.clone()
+        } else {
+            format!("{}/{}", self.prefix, rel)
         }
     }
 
     /// A workspace-relative path as this unit spells it, when it is this
     /// unit's: `Some("")` is the unit's own folder. Inside the shared
-    /// section, `Private` and `Restricted` at its top are nobody's.
+    /// section, a section's name at its top is nobody's.
     pub(crate) fn in_unit(&self, ws_rel: &str) -> Option<String> {
-        // The folder's own name compares the way the disk does. An empty
-        // prefix is a unit at the workspace's root: what the tests stand a
-        // device still in the layout from before Library in with.
+        // The folder's own name compares the way the disk does.
         let head = ws_rel.get(..self.prefix.len()).filter(|head| head.eq_ignore_ascii_case(&self.prefix))?;
         let rest = match &ws_rel[head.len()..] {
-            rest if head.is_empty() => rest,
             "" => "",
             rest => rest.strip_prefix('/')?,
         };

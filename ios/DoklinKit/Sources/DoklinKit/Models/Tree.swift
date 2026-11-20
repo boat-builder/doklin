@@ -100,13 +100,6 @@ public final class TreeModel {
         defaults.removeObject(forKey: key(wsId))
     }
 
-    /// One-time stored-data migration: what was open in a workspace's tree,
-    /// once its folder has moved into the Library layout (`Sections.moved`).
-    public static func moveIntoLibrary(_ wsId: String, in defaults: UserDefaults) {
-        guard let open = defaults.stringArray(forKey: key(wsId)) else { return }
-        defaults.set(Set(open.map { Sections.moved($0).lowercased() }).sorted(), forKey: key(wsId))
-    }
-
     public var isFiltering: Bool { !filter.trimmingCharacters(in: .whitespaces).isEmpty }
 
     public func isOpen(_ path: String) -> Bool { open.contains(path.lowercased()) }

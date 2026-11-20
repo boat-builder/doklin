@@ -134,7 +134,6 @@ public final class Workspaces {
     }
 
     private func take(_ all: [CloudStatus]) {
-        for status in all { movedIntoLibrary(status) }
         statuses = all
         defer { Task { await focus() } }
         if let selected, let status = all.first(where: { $0.root == selected }) {
@@ -149,33 +148,6 @@ public final class Workspaces {
     }
 
     private static let selectedKey = "selected-workspace"
-
-    /// One-time stored-data migration. The engine moves each workspace's
-    /// folder into the Library layout as it starts, before any screen
-    /// (engine/src/cloud/layout.rs); the paths this iPhone keeps of one —
-    /// what was open in its tree, what was read before it had a file id —
-    /// move with it, once, when its marker first says it has moved.
-    private func movedIntoLibrary(_ status: CloudStatus) {
-        var done = Set(remembered.stringArray(forKey: Self.movedKey) ?? [])
-        guard !done.contains(status.wsId), Self.inLibraryLayout(status.root) else { return }
-        TreeModel.moveIntoLibrary(status.wsId, in: remembered)
-        seen?.moveIntoLibrary(status.wsId)
-        done.insert(status.wsId)
-        remembered.set(done.sorted(), forKey: Self.movedKey)
-    }
-
-    /// The workspaces whose kept paths `movedIntoLibrary` has moved, by id.
-    private static let movedKey = "moved-into-library"
-
-    /// Whether the workspace at `root` has moved into the Library layout:
-    /// its marker (`<root>/.doklin/cloud.json`, engine/src/cloud/config.rs)
-    /// says `"layout": "library"`.
-    nonisolated static func inLibraryLayout(_ root: String) -> Bool {
-        let marker = URL(fileURLWithPath: root).appendingPathComponent(".doklin/cloud.json")
-        guard let data = try? Data(contentsOf: marker),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
-        return json["layout"] as? String == "library"
-    }
 
     /* ---------- Looking at one ---------- */
 

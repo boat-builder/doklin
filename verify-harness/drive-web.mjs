@@ -987,55 +987,6 @@ async function driveWriting(name) {
   say("and both are told what the one that asks was told", (await row(news).count()) === 1 && (await row(news, beside).count()) === 1);
   await beside.close();
 
-  /* 11 — a browser from before the Library layout */
-  stage = "a browser from before the Library layout";
-  // What a browser kept while the shared section was the tree's top: a draft
-  // of a tab that is gone, the tab itself and the open folder — every one of
-  // them under the path a shared document had then, `/Notes/<path>`.
-  const BEFORE = `${DIR}/Before Library.md`;
-  await put(BEFORE, { md: { text: "# Before Library\n\nWritten before.\n", ifRev: null } });
-  const was = await storedAt(BEFORE);
-  const { you, workspace } = await (await owner("/api/meta")).json();
-  const unsent = `${was.text}\nTyped before Library, never sent.\n`;
-  const earlier = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
-  const old = await earlier.newPage();
-  watch(old);
-  await old.goto(HOME);
-  const stored = {
-    [`doklin:web:draft:${workspace.id}:${you.memberId}:gonetab1:${ROOT_NAME}/${BEFORE}`]: JSON.stringify({ text: unsent, over: { fid: was.fid, rev: was.rev, hash: was.hash } }),
-    "doklin:session": JSON.stringify({ version: 2, lastRoot: ROOT_NAME, sessions: { [ROOT_NAME]: { tabs: [{ id: "t-before", kind: "file", path: `${ROOT_NAME}/${BEFORE}` }], activeId: "t-before" } } }),
-    "doklin:sidebar-tree": JSON.stringify({ [ROOT_NAME]: { open: [DIR, "Private"], folded: ["workspace"] } }),
-  };
-  await old.evaluate((all) => Object.entries(all).forEach(([key, value]) => localStorage.setItem(key, value)), stored);
-  await old.goto(`${ORIGIN}/app`);
-  await old.locator('[data-testid="web-invite"]').fill(`doklin-invite ${ORIGIN} ${await deviceCode()}`);
-  await old.click('[data-testid="web-sign-in"]');
-  const reopened = await editorHas("Typed before Library, never sent.", old, 60_000);
-  const landed = await until(async () => (await storedAt(BEFORE)).text === unsent, 20_000);
-  say("a draft kept from before is on the page, in the tab that was open, and sent", reopened && landed, landed ? "" : (await storedAt(BEFORE)).text.replace(/\s+/g, " "));
-  const after = await old.evaluate(() => ({
-    drafts: Object.keys(localStorage).filter((k) => k.startsWith("doklin:web:draft:")),
-    session: JSON.parse(localStorage.getItem("doklin:session") ?? "{}"),
-    tree: JSON.parse(localStorage.getItem("doklin:sidebar-tree") ?? "{}"),
-    done: localStorage.getItem("doklin:web:library-layout"),
-  }));
-  const tabs = after.session.sessions?.[ROOT_NAME]?.tabs ?? [];
-  const tree = after.tree[ROOT_NAME] ?? {};
-  say(
-    "the tabs and the tree kept from before are under Library, the shared section's fold among them, and that is done once",
-    tabs.some((t) => t.path === `${LIBRARY}/${BEFORE}`) &&
-      !tabs.some((t) => t.path === `${ROOT_NAME}/${BEFORE}`) &&
-      tree.open?.includes(`Library/${DIR}`) &&
-      tree.open?.includes("Private") &&
-      !tree.open?.includes(DIR) &&
-      tree.folded?.includes("library") &&
-      !tree.folded?.includes("workspace") &&
-      after.done === "1" &&
-      !after.drafts.some((k) => k.endsWith(`:${ROOT_NAME}/${BEFORE}`)),
-    JSON.stringify({ tabs: tabs.map((t) => t.path), tree, done: after.done }),
-  );
-  await earlier.close();
-
   say("the page's policy refused nothing, and the page threw nothing", trouble.length === 0, trouble.slice(0, 3).join(" | "));
   await other.close();
   await browser.close();

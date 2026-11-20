@@ -279,10 +279,6 @@ pub struct EngineConfig {
     pub device_name: String,
     /// `Mac`, `iPhone`, `iPad`: what the sentences about this device call it.
     pub device_kind: String,
-    /// Why this launch's move into the Library layout stopped, when it did
-    /// (`cloud::init`): what the status says of the unfinished move
-    /// (`layout::ready`).
-    pub unmoved: Option<String>,
     /// Where a real deletion goes: the platform's trash (`Host::trash`).
     /// None — the tests, and a platform with no trash — removes outright.
     pub trash: Option<Trash>,
@@ -832,8 +828,8 @@ impl<R: Remote> Engine<R> {
         }
         // A folder that is not in the Library layout is never synced: every
         // file would read as moved, and the manifest would tell every device.
-        // The move is the app's, at launch (`cloud::init`).
-        if let Err(why) = layout::ready(&self.cfg.root, self.cfg.unmoved.as_deref()) {
+        // The move is connect's and resume's (layout.rs).
+        if let Err(why) = layout::ready(&self.cfg.root) {
             self.set_status(Phase::Error, Some(why));
             return Ok(());
         }
@@ -1302,7 +1298,7 @@ impl<R: Remote> Engine<R> {
     pub(crate) async fn reconcile_spaces(&mut self) {
         let Some(mut list) = self.spaces.clone() else { return };
         let root = self.cfg.root.clone();
-        if !root.is_dir() || layout::ready(&root, None).is_err() {
+        if !root.is_dir() || layout::ready(&root).is_err() {
             return;
         }
         let ws_id = self.cfg.ws_id.clone();

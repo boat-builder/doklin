@@ -285,21 +285,19 @@ await poll(async () => (await dialog("Create a workspace").count()) === 0);
 
 /* 7b — the connect moved the folder's files into Library (the engine's
    move, as the wizard said it would): the open note follows them there, and
-   so does what is stored about the folder, once — the folder is recorded as
-   done. The tree is three lists, the shared files under Library. */
+   so does what is stored about the folder. The tree is three lists, the
+   shared files under Library. */
 await poll(async () => (await page.locator('[data-testid="section-library"] [data-tree-path="/docs/Library/notes.md"]').count()) === 1);
 const afterMove = await page.evaluate(() => ({
   tabs: JSON.parse(localStorage.getItem("doklin:session")).sessions["/docs"].tabs.map((t) => t.path),
-  done: localStorage.getItem("doklin:library-layout"),
   oldGone: !window.__fs.has("/docs/notes.md"),
 }));
 const writesAtMove = await page.evaluate(() => window.__writes.length);
 step(
-  "connect: the wizard says the files move into Library; after it the open note, the stored tabs and the tree are there, and the folder is recorded as moved",
+  "connect: the wizard says the files move into Library; after it the open note, the stored tabs and the tree are there",
   connectNote.includes("moves this folder’s files into a Library folder inside it") &&
     connectNote.includes("leaves hidden ones where they are") &&
     afterMove.tabs.join() === "/docs/Library/notes.md" &&
-    afterMove.done === '["/docs"]' &&
     afterMove.oldGone &&
     (await page.locator('[data-tree-path="/docs/notes.md"]').count()) === 0 &&
     (await page.locator(".tab.is-active .tab-label").textContent()) === "notes" &&
