@@ -348,6 +348,24 @@ You see what the person who gave you this sees. Every path starts with its secti
 Then run \`doklin help agent\` to see what you can do.`;
 }
 
+/** What *Copy instructions for agents* (Settings) hands a person to paste
+ *  into an agent's chat once: the agent saves the note at its end into the
+ *  file it reads at the start of every session, and from then on knows what
+ *  Doklin is, that a "dok" is one of its documents, and to reach it through
+ *  `doklin`. That note rides along in every conversation the agent has, so
+ *  it stays a few lines; `doklin help agent` is the briefing. The list names
+ *  each agent's own always-read file — the agents doklin.cc says Doklin works
+ *  with that run commands (a chat app cannot run `doklin`). */
+export const AGENT_INSTRUCTIONS = `Save the note below where you keep instructions you read at the start of every session, so you remember Doklin from now on. Add it as it is, and leave the rest of that file alone:
+- Claude Code: ~/.claude/CLAUDE.md
+- Codex: ~/.codex/AGENTS.md
+- Grok Build: ~/.grok/AGENTS.md
+- OpenClaw: AGENTS.md in your workspace
+- Any other agent: your own file of that kind
+
+## Doklin
+Doklin is my knowledge base. Its documents are doks (one dok), named by paths that start with Library/, Private/ or Restricted/<folder>/. Use the \`doklin\` command for them (run \`doklin help agent\` once to learn it), and search Doklin when I mention a dok or ask about something it may hold.`;
+
 export type TeardownPromptInput = { endpoint: string };
 
 /** Teardown: after the app's wipe emptied the bucket, remove the worker and

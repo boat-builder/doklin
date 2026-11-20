@@ -4,6 +4,7 @@ import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { Facepile } from "./Avatar";
 import {
   LIBRARY_DIR,
+  agentPath,
   isSectionName,
   pageUrl,
   placeOf,
@@ -167,6 +168,10 @@ type Props = {
   // *Copy link*: a link that opens a file in Doklin, for anybody who can see
   // it — published or not. Offered only in a connected workspace.
   onCopyPageLink?: (path: string) => void;
+  // *Copy path*: a file's or a folder's path as `doklin` names it
+  // (`agentPath`), for a person to hand an agent. Offered only in a
+  // connected workspace.
+  onCopyAgentPath?: (path: string) => void;
 };
 
 /** A workspace this Mac belongs to, as the menu lists it: where its copy is
@@ -347,6 +352,7 @@ export default function Sidebar({
   onStopPublishing,
   onCopyLink,
   onCopyPageLink,
+  onCopyAgentPath,
 }: Props) {
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1155,6 +1161,19 @@ export default function Sidebar({
     ) {
       items.push({ label: "Copy link", onClick: () => onCopyPageLink(target.path) });
     }
+    // Its path as an agent's `doklin` names it — a folder's too, which an
+    // agent can list, search in and publish.
+    const forAgent =
+      isRow &&
+      target.openable !== false &&
+      cloud &&
+      onCopyAgentPath &&
+      target.path.startsWith(`${root}/`)
+        ? agentPath(cloud, target.path.slice(root.length + 1), target.kind === "dir")
+        : null;
+    if (forAgent && onCopyAgentPath) {
+      items.push({ label: "Copy path", onClick: () => onCopyAgentPath(forAgent) });
+    }
     // Every document has a history, connected or not.
     if (target.kind === "file" && target.openable !== false && onHistory) {
       items.push({ label: "Version history…", onClick: () => onHistory(target.path) });
@@ -1278,6 +1297,7 @@ export default function Sidebar({
     onStopPublishing,
     onCopyLink,
     onCopyPageLink,
+    onCopyAgentPath,
     onNewRestricted,
     onManageAccess,
     onShareWith,

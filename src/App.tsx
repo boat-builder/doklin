@@ -33,6 +33,7 @@ import type {
   VersionsStatus,
 } from "./versions";
 import CloudSetup, { type CloudSetupMode } from "./CloudSetup";
+import { AGENT_INSTRUCTIONS } from "./cloudPrompts";
 import Toasts, { type Toast, type ToastAction, type ToastTone } from "./Toasts";
 import LiveChip from "./LiveChip";
 import SyncStatus from "./SyncStatus";
@@ -2340,6 +2341,28 @@ export default function App() {
     },
     [pushToast],
   );
+
+  // *Copy path*: what an agent's `doklin` names it by (`agentPath`), worked
+  // out in the sidebar with nothing to wait for — so the write starts inside
+  // the click.
+  const copyAgentPath = useCallback(
+    (path: string) => {
+      navigator.clipboard.writeText(path).then(
+        () => pushToast("done", `Path copied: ${path}`),
+        (e) => pushToast("error", `Couldn't copy the path: ${errText(e)}.`),
+      );
+    },
+    [pushToast],
+  );
+
+  // Settings → *Copy instructions for agents*: the few lines an agent saves
+  // into the file it reads every session (cloudPrompts.ts).
+  const copyAgentInstructions = useCallback(() => {
+    navigator.clipboard.writeText(AGENT_INSTRUCTIONS).then(
+      () => pushToast("done", "Instructions copied. Paste them into your agent’s chat, and it keeps Doklin in mind from then on."),
+      (e) => pushToast("error", `Couldn't copy the instructions: ${errText(e)}.`),
+    );
+  }, [pushToast]);
 
   // A link the reader clicked inside a note (see linkOpen.ts for which clicks
   // count as following one). Notion's split, applied to files: an external URL
@@ -5381,6 +5404,7 @@ export default function App() {
       update={update}
       onOpenExternal={openExternal}
       onOpenCloud={() => setCloudPanelOpen(true)}
+      onCopyAgentInstructions={copyAgentInstructions}
       cloudAttention={cloudNeedsAttention(cloudStatuses)}
       onOpenVersions={versionStore ? () => setVersionsSettingsOpen(true) : undefined}
     />
@@ -5574,6 +5598,7 @@ export default function App() {
           onStopPublishing={cloudForRoot ? stopPublishing : undefined}
           onCopyLink={(url) => void navigator.clipboard.writeText(url).catch(() => {})}
           onCopyPageLink={cloudForRoot ? (path) => void copyPageLink(path) : undefined}
+          onCopyAgentPath={cloudForRoot ? copyAgentPath : undefined}
           onHistory={onHistory}
           onWorkspaceHistory={versionStore ? (dir) => setHistoryRoot(dir ?? libraryDir) : undefined}
           deletedCount={deletedFiles.length}
@@ -6504,6 +6529,7 @@ function Settings({
   update,
   onOpenExternal,
   onOpenCloud,
+  onCopyAgentInstructions,
   cloudAttention,
   onOpenVersions,
 }: {
@@ -6528,6 +6554,8 @@ function Settings({
   // Open the Cloud panel; `cloudAttention` lights the item (and the gear)
   // when a connected domain's worker is behind this app.
   onOpenCloud: () => void;
+  /** Copy the note that tells an agent what Doklin is (`AGENT_INSTRUCTIONS`). */
+  onCopyAgentInstructions: () => void;
   cloudAttention: boolean;
   /** Open the Versions settings: the two horizons, the space each store
    *  uses, the export, and the folders whose history outlived them. */
@@ -6661,6 +6689,19 @@ function Settings({
               {cloudAttention ? <span className="settings-option-dot" aria-hidden /> : null}
             </span>
             <span className="settings-option-label">Cloud…</span>
+          </button>
+          <button
+            role="menuitem"
+            className="settings-option"
+            data-testid="settings-agent-instructions"
+            title="A few lines for Claude Code, Codex, Grok or OpenClaw: Doklin is your knowledge base, and doklin reaches it"
+            onClick={() => {
+              setOpen(false);
+              onCopyAgentInstructions();
+            }}
+          >
+            <span className="settings-option-check" />
+            <span className="settings-option-label">Copy instructions for agents</span>
           </button>
           {onOpenVersions && (
             <>

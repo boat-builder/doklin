@@ -419,6 +419,63 @@ step(
   [sharedLink.toast, financeLink.toast, privateLink.toast].join(" / "),
 );
 
+/* 3c — Copy path: what an agent's `doklin` names a note or a folder by —
+       its section first, no domain, a note without its extension, a folder
+       ending in "/". Nothing in no section has one. Settings copies the
+       note an agent saves into the file it reads every session. */
+const pathCopied = async (path) => {
+  await menuOn(row(path));
+  await pick("Copy path");
+  await poll(async () => (await page.locator(".toast").count()) === 1);
+  const toast = (await page.locator(".toast").textContent()).trim();
+  const clip = await page.evaluate(() => navigator.clipboard.readText());
+  await page.locator(".toast-close").click();
+  await poll(async () => (await page.locator(".toast").count()) === 0);
+  return { toast, clip };
+};
+const notePath = await pathCopied("/docs/Library/notes.md");
+const budgetPath = await pathCopied("/docs/Restricted/Finance/budget.md");
+const journalPath = await pathCopied("/docs/Private/journal.md");
+const projectsPath = await pathCopied("/docs/Library/Projects");
+const financePath = await pathCopied("/docs/Restricted/Finance");
+const strayPathMenu = await menuOn(row("/docs/Restricted/stray.md"));
+await closeMenu();
+const todoPathMenu = await menuOn(row("/docs/todo.md"));
+await closeMenu();
+const scratchPathMenu = await menuOn(row("/docs/Scratch"));
+await closeMenu();
+step(
+  "Copy path: a note's or a folder's path as doklin takes it — section first, no domain, no extension, a folder ending in /; none in no section",
+  notePath.clip === "Library/notes" &&
+    notePath.toast.includes("Path copied: Library/notes") &&
+    budgetPath.clip === "Restricted/Finance/budget" &&
+    journalPath.clip === "Private/journal" &&
+    projectsPath.clip === "Library/Projects/" &&
+    financePath.clip === "Restricted/Finance/" &&
+    !strayPathMenu.includes("Copy path") &&
+    !todoPathMenu.includes("Copy path") &&
+    !scratchPathMenu.includes("Copy path"),
+  [notePath.clip, budgetPath.clip, journalPath.clip, projectsPath.clip, financePath.clip].join(" · "),
+);
+await page.locator(".settings-fab").click();
+await poll(async () => (await tid("settings-agent-instructions").count()) === 1);
+await tid("settings-agent-instructions").click();
+await poll(async () => (await page.locator(".toast").count()) === 1);
+const instructionsToast = (await page.locator(".toast").textContent()).trim();
+const instructions = await page.evaluate(() => navigator.clipboard.readText());
+await page.locator(".toast-close").click();
+await poll(async () => (await page.locator(".toast").count()) === 0);
+const note = instructions.split("## Doklin\n")[1] ?? "";
+step(
+  "Settings → Copy instructions for agents: each agent's always-read file, then a note of a few lines that teaches dok and doklin",
+  ["~/.claude/CLAUDE.md", "~/.codex/AGENTS.md", "~/.grok/AGENTS.md", "OpenClaw"].every((s) => instructions.includes(s)) &&
+    note.includes("doks (one dok)") &&
+    note.includes("`doklin help agent`") &&
+    note.split("\n").length <= 3 &&
+    instructionsToast.includes("Instructions copied."),
+  `${note.length} characters in the note`,
+);
+
 /* 4 — New restricted folder…: a name, and who is in it. */
 await tid("section-restricted").hover();
 await tid("new-restricted").click();
