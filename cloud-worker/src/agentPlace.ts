@@ -36,6 +36,8 @@ import { LIBRARY_FOLDER, MAX_NAME_LEN } from "./layout";
 import { withDb } from "./schema";
 import { ensurePrivate, sharedEnv, spaceEnv, type Where } from "./spaces";
 
+/** How an agent spells the sections, which the app's *Copy path* writes for
+ *  one (`SECTION_DIRS`, src/cloud.ts) — change both. */
 export const PRIVATE_FOLDER = "Private";
 export const RESTRICTED_FOLDER = "Restricted";
 

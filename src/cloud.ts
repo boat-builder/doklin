@@ -446,11 +446,16 @@ export type Place =
  *  iPhone's Tree.swift (ios/DoklinKit) — change all four. */
 export const LIBRARY_DIR = "Library";
 
+/** The three section folders at the top of a connected workspace, spelled as
+ *  `doklin` spells them (`PRIVATE_FOLDER`, `RESTRICTED_FOLDER`,
+ *  cloud-worker/src/agentPlace.ts). */
+const SECTION_DIRS = [LIBRARY_DIR, "Private", "Restricted"];
+
 /** The names a section's folder has at the top of a connected workspace,
  *  compared without case — and so the names no folder at the top of Library
  *  has: the shared section holds nothing under them (`RESERVED_DIRS`,
  *  engine/src/cloud/space.rs). */
-const RESERVED_TOP = new Set([LIBRARY_DIR.toLowerCase(), "private", "restricted"]);
+const RESERVED_TOP = new Set(SECTION_DIRS.map((s) => s.toLowerCase()));
 
 /** Whether `name` is a section's own, whatever its case. */
 export const isSectionName = (name: string): boolean => RESERVED_TOP.has(name.toLowerCase());
@@ -469,6 +474,21 @@ export function placeOf(cloud: CloudStatus | null, rel: string): Place {
   if (top !== LIBRARY_DIR.toLowerCase()) return { kind: "nowhere" };
   // Library never holds anything under a section's name at its own top.
   return inLibrary !== undefined && RESERVED_TOP.has(inLibrary) ? { kind: "nowhere" } : { kind: "shared" };
+}
+
+/** What *Copy path* puts on the clipboard: `rel` (workspace-relative) as
+ *  `doklin` names it, for a person to hand an agent. Its section comes first,
+ *  spelled the CLI's way; a folder ends in `/`; a document loses its
+ *  extension, as its md and html versions are one document (`nameOf`,
+ *  cloud-worker/src/documents.ts): `Library/GTM/launch-plan`,
+ *  `Restricted/Finance/Q3/`. Null for a path in no section, which no agent
+ *  can reach. */
+export function agentPath(cloud: CloudStatus, rel: string, isDir: boolean): string | null {
+  if (placeOf(cloud, rel).kind === "nowhere") return null;
+  const [top, ...rest] = rel.split("/");
+  const section = SECTION_DIRS.find((s) => s.toLowerCase() === top.toLowerCase()) ?? top;
+  const path = [section, ...rest].join("/");
+  return isDir ? `${path}/` : path.replace(MD_EXT_RE, "").replace(/\.html$/i, "");
 }
 
 /** Where a path inside a folder (`rel`, relative to it) is once connecting
