@@ -617,7 +617,6 @@ struct DocumentView: View {
                 } label: {
                     Label(words, systemImage: "globe")
                 }
-                .accessibilityIdentifier("publish")
             }
         }
     }

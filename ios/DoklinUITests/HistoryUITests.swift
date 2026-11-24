@@ -34,11 +34,25 @@ final class HistoryUITests: UITestCase {
         if named.count > 0 {
             named.element(boundBy: named.count - 1).tap()
         } else if button == "Cancel" {
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)).tap()
+            tapAway(from: app.popovers.firstMatch)
+            expectGone(app.popovers.firstMatch, "the question, after a tap away from it")
         } else {
             record("no \(button) to answer with")
             XCTFail("the question has no \(button)")
         }
+    }
+
+    /// A tap outside a question drawn as a popover, which shuts it: in the
+    /// larger space above or below it, wherever iOS puts it — iOS 27 draws
+    /// it over the top of the screen.
+    private func tapAway(from popover: XCUIElement) {
+        let screen = app.windows.firstMatch.frame
+        var y = screen.height * 0.08
+        if popover.exists {
+            let shown = popover.frame
+            y = shown.minY > screen.maxY - shown.maxY ? shown.minY / 2 : (shown.maxY + screen.maxY) / 2
+        }
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: screen.midX, dy: y)).tap()
     }
 
     func testANotesVersionsTheWorkspacesMomentsAndWhatWasDeleted() throws {

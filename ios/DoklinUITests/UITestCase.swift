@@ -189,6 +189,22 @@ class UITestCase: XCTestCase {
         field.typeText(words)
     }
 
+    /// Answer the alert called `title` with one of its buttons, once its
+    /// field is typed into. On iOS 27 a tap made just after typing can be
+    /// lost: the alert stays up as it was, its action never run. Tap again
+    /// while it is.
+    func answerAlert(_ title: String, with button: String, file: StaticString = #filePath, line: UInt = #line) {
+        let alert = expect(app.alerts[title], "the \(title) alert", file: file, line: line)
+        for _ in 0..<3 where alert.exists {
+            alert.buttons[button].tap()
+            _ = alert.waitForNonExistence(timeout: 3)
+        }
+        if alert.exists {
+            record("still up — the \(title) alert")
+            XCTFail("the \(title) alert stayed up after \(button)", file: file, line: line)
+        }
+    }
+
     /// Edit the note on screen, with the caret after its last line. The
     /// editor opens with its caret on the block that was being read. A tap
     /// after the last line gives it the keyboard and moves the caret there —

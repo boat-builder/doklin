@@ -184,7 +184,7 @@ final class PeopleUITests: UITestCase {
         expect(app.buttons["Rename"], "Rename on the restricted folder").tap()
         let name = expect(app.alerts.textFields.firstMatch, "the new name's field")
         type(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 12) + "Money", into: name)
-        app.alerts.buttons["Rename"].tap()
+        answerAlert("Rename", with: "Rename")
         // Its access is the domain's: offered once the domain has the new name.
         let money = expect(marked("entry-Money"), "the folder, renamed")
         let manage = app.buttons["Manage access…"]
@@ -231,7 +231,7 @@ final class PeopleUITests: UITestCase {
         marked("new").tap()
         expect(app.buttons["New note"], "New note in the menu").tap()
         type("Draft", into: expect(app.alerts.textFields.firstMatch, "the note's name field"))
-        app.alerts.buttons["Create"].tap()
+        answerAlert("New note", with: "Create")
         expect(app.staticTexts["Draft"], "the new note's heading")
         let editor = editAtTheEnd()
         editor.typeText("\nNumbers nobody else may see.")
