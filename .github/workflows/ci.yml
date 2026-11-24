@@ -64,6 +64,15 @@ jobs:
       - name: Cloud worker tests
         run: node cloud-worker/test/run.mjs
 
+      # The widths a flowchart's words are measured with are read from the
+      # bundled fonts, never retyped.
+      - name: Inter's widths are what the fonts say
+        run: node scripts/inter-widths.mjs --check
+
+      # Every scene the flowchart renderer draws, against the shared cases.
+      - name: Flowcharts against the shared cases
+        run: node verify-harness/flowchart.test.mjs
+
       # The iPhone's port of the comment code reads the same cases (the ios
       # job runs its side): same input, same bytes in the meta file.
       - name: Comment code against the shared cases

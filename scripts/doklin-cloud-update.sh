@@ -40,7 +40,7 @@
 set -u
 
 BUNDLE_URL="https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-worker.js"
-# The files public pages ask for (fonts, icons, the mermaid module), which
+# The files public pages ask for (fonts, icons, the flowchart module), which
 # Cloudflare serves beside the worker without running it. The archive unpacks
 # to doklin-cloud-web/.
 WEB_URL="https://github.com/boat-builder/doklin/releases/latest/download/doklin-cloud-web.tar.gz"

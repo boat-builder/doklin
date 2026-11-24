@@ -33,7 +33,7 @@ routes = [{ pattern = "notes.example.com", custom_domain = true }]
 #   workers_dev = true
 #   (and no `routes` line)
 
-# The files public pages ask for — fonts, icons, the mermaid module — which
+# The files public pages ask for — fonts, icons, the flowchart module — which
 # Cloudflare serves without running the worker. The release archive unpacks
 # to this directory.
 [assets]

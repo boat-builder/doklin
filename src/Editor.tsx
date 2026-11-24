@@ -18,12 +18,8 @@ import { codeBlockConfig, CodeMirrorBlock } from "@milkdown/kit/component/code-b
 import { blockConfig } from "@milkdown/kit/plugin/block";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
-import {
-  isMermaidLanguage,
-  mermaidLanguage,
-  queueMermaidPreview,
-  MERMAID_PREVIEW_LOADING,
-} from "./mermaid";
+import { FLOWCHART_PREVIEW_WAITING, flowchartPreview, isMermaidLanguage, mermaidLanguage } from "./flowchartBlock";
+import { FRAME } from "./flowchart/index";
 import { drawingLanguage, drawingPreview, isDrawingLanguage } from "./drawing";
 import {
   searchKey,
@@ -91,9 +87,9 @@ import "./styles/docLinks.css";
    within 200px of the viewport and tears it back down 5s after it leaves,
    swapping a static <pre> placeholder back in. App.css gives that placeholder
    the mounted editor's exact metrics so the swap costs no height — but a
-   DIAGRAM block can't be matched that way: mounted it shows a rendered
-   mermaid SVG, torn down it shows the source text, and the two differ by
-   hundreds of pixels.
+   DIAGRAM block can't be matched that way: mounted it shows the picture,
+   torn down it shows the source text, and the two differ by hundreds of
+   pixels.
 
    That mismatch is enough to make the swap self-sustaining. With the block
    just off-screen, a teardown that grows it (source taller than diagram)
@@ -440,8 +436,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
           },
         },
         "block-edit": {
-          // "/diagram" → a mermaid code block; the preview panel below it
-          // renders the diagram live (see the codeBlockConfig update below).
+          // "/diagram" → a ```mermaid code block; its preview panel draws the
+          // flowchart live (see the codeBlockConfig update below).
           buildMenu: (builder) => {
             // "/callout" → a Note (callout.ts); the title picks another kind.
             builder.getGroup("text").addItem("callout", {
@@ -469,13 +465,13 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     // picker and chain their renderers in front of the stock preview handlers
     // (LaTeX et al) — registered after the Crepe constructor, so `prev`
     // already carries the feature-installed chain. Rendering itself lives in
-    // mermaid.ts (async: loading, theming, debouncing) and drawing.ts
-    // (synchronous: sanitize and show).
+    // flowchartBlock.ts (lay out and draw; a big flowchart answers after a
+    // pause) and drawing.ts (sanitize and show).
     crepe.editor.config((ctx) => {
       ctx.update(codeBlockConfig.key, (prev) => ({
         ...prev,
         languages: [...prev.languages, mermaidLanguage, drawingLanguage(prev.languages)],
-        previewLoading: MERMAID_PREVIEW_LOADING,
+        previewLoading: FLOWCHART_PREVIEW_WAITING,
         renderPreview: (language, content, applyPreview) => {
           if (isDrawingLanguage(language)) {
             if (!content.trim()) return null;
@@ -483,8 +479,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
           }
           if (isMermaidLanguage(language)) {
             if (!content.trim()) return null;
-            queueMermaidPreview(content, applyPreview);
-            return undefined; // async — the panel shows previewLoading meanwhile
+            return flowchartPreview(content, FRAME, applyPreview);
           }
           return prev.renderPreview(language, content, applyPreview);
         },

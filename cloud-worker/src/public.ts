@@ -15,7 +15,7 @@
 // from the web directory deployed beside it (scripts/bundle-worker.mjs),
 // free and uncounted —
 //
-//   /__web/<tag>/mermaid.js      the standalone mermaid module (immutable, content-tagged)
+//   /__web/<tag>/flowchart.js    the standalone flowchart module (immutable, content-tagged)
 //   /__web/fonts/<file>          the font files the app bundles (theme.ts)
 //   /og.png                      the site's static Open Graph image
 //   robots.txt, favicon.ico, apple-touch-icon.png
@@ -32,7 +32,7 @@ import type { Env } from "./env";
 import { RESERVED_SLUGS, SLUG_RE, validPath } from "./layout";
 import { dirTitle, htmlFile, notePage, rawRendition, tocPage, type Linked } from "./pages";
 import { PublicMap, nestedUrl, type DirPage, type Page } from "./publicMap";
-import { mermaidModulePath } from "./render";
+import { flowchartModulePath } from "./render";
 import { landingPage, notFoundPage } from "./static";
 import { spaceEnv } from "./spaces";
 import { isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
@@ -60,7 +60,7 @@ function cacheStore(): CacheLike | null {
   return c?.default ?? null;
 }
 
-// The web tag rides in the key too: a cached page names the mermaid module by
+// The web tag rides in the key too: a cached page names the flowchart module by
 // it, and a deploy that changes the module serves no page asking for one
 // that is gone. A space's page links into Library as well as into its own
 // section (pages.ts, `Linked`), so its key names both manifests.
@@ -81,12 +81,12 @@ function withCacheControl(res: Response, value: string): Response {
    A note's markdown may carry HTML of its own, and its page draws that as
    written — on the address the workspace's API answers on. So every page the
    worker draws goes out under a policy that lets it show and never act. The
-   one script it runs is the mermaid module, named by its whole address (a
+   one script it runs is the flowchart module, named by its whole address (a
    policy has no other way to say "this path, on this domain"): a script, a
    handler or a `javascript:` link written into a note does nothing. A form
    posts nowhere, a <base> re-points nothing, nothing is fetched or embedded
    as a plugin. Styles stay open — the page's sheet is inline, and stored
-   column widths and drawn diagrams are style attributes — and so do the
+   column widths are style attributes — and so do the
    pictures, media and frames a note shows from the web.
 
    The policy is set here, on the way out, and not where a page is drawn: it
@@ -99,7 +99,7 @@ const POLICY = "content-security-policy";
 const pagePolicy = (origin: string): string =>
   [
     "default-src 'none'",
-    `script-src ${origin}${mermaidModulePath(WEB_TAG)}`,
+    `script-src ${origin}${flowchartModulePath(WEB_TAG)}`,
     "style-src 'unsafe-inline'",
     "img-src * data:",
     "media-src *",

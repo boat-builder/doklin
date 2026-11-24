@@ -2,16 +2,17 @@
 // the app's own reading CSS, light and dark, column widths from the meta
 // sidecar as a <colgroup>, links between public notes rewritten, the folder
 // table of contents, the MD/HTML pill, the "back to the folder" crumb, and
-// the tag that names the mermaid module. Pure string work: what feeds it
+// the tag that names the flowchart module. Pure string work: what feeds it
 // (pages.ts) does the reading.
 //
 // Everything renders without JavaScript, and no page carries a script of its
-// own: the policy a page is served under (public.ts) runs the mermaid module
-// and nothing written into a page. A ```svg drawing is drawn here, through
-// the app's own sanitizer (src/drawingSvg.ts); a mermaid diagram keeps its
-// source as a code block until that module swaps the SVG in, and stays a
-// code block for a reader with scripts off. A callout (`> [!NOTE]`, GitHub's
-// alert) is drawn as the app draws it, from the app's own kinds
+// own: the policy a page is served under (public.ts) runs the flowchart
+// module and nothing written into a page. A ```svg drawing is drawn here,
+// through the app's own sanitizer (src/drawingSvg.ts); a ```mermaid flowchart
+// keeps its source as a code block until that module swaps the picture in,
+// and stays a code block for a reader with scripts off. Any other kind of
+// Mermaid diagram is a code block and nothing else. A callout (`> [!NOTE]`,
+// GitHub's alert) is drawn as the app draws it, from the app's own kinds
 // (src/calloutTypes.ts).
 
 import { Marked, Renderer, type Token, type Tokens } from "marked";
@@ -19,6 +20,7 @@ import { escapeHtml } from "./http";
 import { deriveId, type TableCols } from "../../src/metaFile";
 import { isDrawingLanguage, sanitizeDrawing } from "../../src/drawingSvg";
 import { CALLOUTS, calloutIconSvg, parseCalloutMarker, type CalloutKind } from "../../src/calloutTypes";
+import { isFlowchart } from "../../src/flowchart/kind";
 import { FONT_PRELOAD, PAGE_THEME } from "./theme";
 
 /* ---------- Words ---------- */
@@ -182,7 +184,12 @@ export function markdownHtml(md: string, inputs: MarkdownInputs): string {
         // A drawing: the app's sanitizer, with a namespace per drawing so two
         // on one page never share a marker. One that doesn't parse stays its
         // source, as the app shows it.
-        if (!isDrawingLanguage(String(token.lang ?? ""))) return base.code(token);
+        const lang = String(token.lang ?? "");
+        // A flowchart: its code block, marked so the page asks for the module that draws it.
+        if (/^(mermaid|mmd)$/i.test(lang.trim()) && isFlowchart(token.text)) {
+          return base.code({ ...token, lang: "mermaid" }).replace("<pre>", `<pre ${FLOWCHART_MARK}>`);
+        }
+        if (!isDrawingLanguage(lang)) return base.code(token);
         const drawn = sanitizeDrawing(token.text, `dg${++drawings}-`);
         if (!drawn.ok) return base.code(token);
         return `<figure class="dk-drawing">${drawn.svg}</figure>\n`;
@@ -282,8 +289,8 @@ export type NotePageInputs = {
   /** Whether the note has an html rendition — the pill shows when it does. */
   hasHtml: boolean;
   bodyHtml: string;
-  /** The tag the mermaid module is served under (/__web/<tag>/mermaid.js). */
-  mermaidTag: string;
+  /** The tag the flowchart module is served under (/__web/<tag>/flowchart.js). */
+  webTag: string;
 };
 
 export function notePageHtml(p: NotePageInputs): string {
@@ -301,7 +308,7 @@ ${p.hasHtml ? pillHtml(p.meta.pageUrl, "md") : ""}
 ${p.bodyHtml}
 </main>
 ${footerHtml(p.meta.hostname)}
-${p.bodyHtml.includes('class="language-mermaid"') ? mermaidScript(p.mermaidTag) : ""}
+${p.bodyHtml.includes(FLOWCHART_MARK) ? flowchartScript(p.webTag) : ""}
 </body>
 </html>`;
 }
@@ -448,19 +455,22 @@ ${footerHtml(p.meta.hostname)}
 </html>`;
 }
 
-/* ---------- Mermaid ---------- */
+/* ---------- Flowcharts ---------- */
 
-/** Where a domain serves the mermaid module of the web directory tagged `tag`. */
-export const mermaidModulePath = (tag: string): string => `/__web/${tag}/mermaid.js`;
+/** Where a domain serves the flowchart module of the web directory tagged `tag`. */
+export const flowchartModulePath = (tag: string): string => `/__web/${tag}/flowchart.js`;
+
+/** On the code block of a ```mermaid flowchart: what tells a page it has one. */
+const FLOWCHART_MARK = "data-dk-flowchart";
 
 /**
- * The diagram script, on pages whose markdown carries a ```mermaid block
- * and on no other: the module the domain serves
- * (cloud-worker/web/mermaid-entry.ts), which swaps each code block for its
+ * The flowchart script, on pages whose markdown carries a ```mermaid
+ * flowchart and on no other: the module the domain serves
+ * (cloud-worker/web/flowchart-entry.ts), which swaps each code block for its
  * drawn SVG. A tag that names an address, never a script written into the
  * page — a page's policy (public.ts) runs that one address and nothing else.
  */
-const mermaidScript = (tag: string): string => `<script type="module" src="${mermaidModulePath(tag)}"></script>`;
+const flowchartScript = (tag: string): string => `<script type="module" src="${flowchartModulePath(tag)}"></script>`;
 
 /* ---------- Styles ---------- */
 
@@ -477,7 +487,7 @@ const PAGE_CSS = `${PAGE_THEME}
    editor canvas. Wide blocks (code, tables) scroll within themselves. */
 html, body { margin: 0; padding: 0; background: var(--sheet); overflow-x: hidden; }
 /* Sticky footer: the body fills the viewport and the footer rides its bottom
-   edge. The body is the UI face: mermaid measures its labels against it. */
+   edge. */
 body {
   min-height: 100dvh;
   display: flex;
@@ -599,30 +609,11 @@ main.doc {
 .doc pre code { padding: 0; border-radius: 0; background: none; font-size: 0.875em; line-height: 1.5; }
 .doc img { max-width: 100%; vertical-align: bottom; border-radius: 4px; }
 .doc hr { border: none; border-top: 1px solid var(--border-strong); margin: 1.4em 0; }
-/* Figures: a drawing fills the column (its 760 frame scales to fit) and a
-   mermaid diagram (the hydrator swaps it in for its fenced code block) is
-   centred. Their words are the UI face, as in the app. Mermaid measures its
-   labels against the body, so a diagram is set in the body's face and size,
-   never the document's — and the label sizes the theme draws must already
-   apply there, globally (the same rules as App.css's "Mermaid labels"). */
-.doc .dk-drawing { margin: 0.6em 0; }
-.doc .dk-drawing > svg { display: block; width: 100%; height: auto; font-family: var(--font-ui); }
-.doc .dk-mermaid {
-  display: flex;
-  justify-content: safe center;
-  margin: 0.6em 0;
-  overflow-x: auto;
-  font-family: var(--font-ui);
-  font-size: var(--fs-md);
-  line-height: 1.5;
-}
-.doc .dk-mermaid > svg { max-width: 100%; flex: none; }
-.doc .dk-mermaid p { font-size: inherit; line-height: inherit; margin: 0; padding: 0; }
-.nodeLabel, .edgeLabel { font-size: 13px; line-height: 18px; }
-.nodeLabel:has(b), .edgeLabel, .cluster-label .nodeLabel { font-size: 11.5px; line-height: 16px; }
-.nodeLabel b { font-size: 13px; font-weight: 600; }
-.cluster-label .nodeLabel { font-weight: 600; }
-.nodeLabel p, .edgeLabel p { margin: 0; padding: 0; line-height: inherit; }
+/* Figures: a drawing or a flowchart (the page's module swaps it in for its
+   fenced code block) fills the column: its 760 frame scales to fit. Their
+   words are the UI face, as in the app. */
+.doc .dk-drawing, .doc .dk-flowchart { margin: 0.6em 0; }
+.doc .dk-drawing > svg, .doc .dk-flowchart > svg { display: block; width: 100%; height: auto; font-family: var(--font-ui); }
 /* Tables: as wide as their content, a step smaller than the text, warm
    hairlines and a tinted header row in the body weight; a cell wraps past
    42ch. */

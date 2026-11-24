@@ -6,7 +6,7 @@
 // running the worker, so they cost none of the day's requests. It is
 // doklin-cloud-web/, beside the worker file:
 //
-//   __web/<tag>/mermaid.js   the standalone mermaid module (cloud-worker/web/mermaid-entry.ts)
+//   __web/<tag>/flowchart.js the standalone flowchart module (cloud-worker/web/flowchart-entry.ts)
 //   __web/fonts/<file>       the fonts src/styles/fonts.css names, from src/assets/fonts/
 //   favicon.ico, apple-touch-icon.png   the app's own, from public/
 //   og.png, robots.txt, _headers        from cloud-worker/web/
@@ -15,7 +15,7 @@
 //   app/gate.js              what the page runs first (src/web/gate.js), as written
 //   app/frame.html           the page an html document is shown in, served at /app/frame
 //
-// The tag is a short content hash of the mermaid module, spliced into the
+// The tag is a short content hash of the flowchart module, spliced into the
 // worker (cloud-worker/src/assets.ts) so its pages ask for the module at the
 // path this build wrote it to.
 //
@@ -32,9 +32,8 @@
 //
 //   node scripts/bundle-worker.mjs [outfile]   (default: cloud-worker/dist/doklin-cloud-worker.js;
 //                                               doklin-cloud-web/ goes beside it)
-//   node scripts/bundle-worker.mjs --no-mermaid   a quick local build without the mermaid
-//                                                 module (pages ask for /__web/dev/mermaid.js)
-//   node scripts/bundle-worker.mjs --no-app       … without the browser version (/app answers 404)
+//   node scripts/bundle-worker.mjs --no-app    a quick local build without the browser version
+//                                              (/app answers 404)
 //
 // Prints the sizes, and fails the build past Cloudflare's free-plan cap of
 // 3 MB compressed for the worker rather than letting the deploy be the first
@@ -51,9 +50,6 @@ const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workerDir = path.join(repoRoot, "cloud-worker");
 
 const GZIP_CEILING = 3 * 1024 * 1024;
-
-/** The tag of a build without the mermaid module — what a source compile says too. */
-export const DEV_TAG = "dev";
 
 /** The web directory's name, beside the worker file — wrangler.toml's
  *  `[assets] directory`, and what the release's archive unpacks to. */
@@ -87,10 +83,10 @@ async function bundle(entry, fileName, plugins = []) {
   return chunk.code;
 }
 
-// The standalone mermaid module (cloud-worker/web/mermaid-entry.ts): the npm
-// package plus the app's palette derivation, flattened to one ES file.
-async function buildMermaidModule() {
-  return bundle(path.join(workerDir, "web", "mermaid-entry.ts"), "mermaid");
+// The standalone flowchart module (cloud-worker/web/flowchart-entry.ts): the
+// app's flowchart renderer and the layout engine it uses, as one ES file.
+async function buildFlowchartModule() {
+  return bundle(path.join(workerDir, "web", "flowchart-entry.ts"), "flowchart");
 }
 
 /**
@@ -142,10 +138,10 @@ function fontFiles() {
 
 /**
  * Write the web directory to `dir` (emptied first) and return its tag: the
- * mermaid module's content hash, or DEV_TAG without one. `app: false` leaves
- * the browser version out.
+ * flowchart module's content hash. `app: false` leaves the browser version
+ * out.
  */
-export async function buildWeb(dir, { mermaid = true, app = true } = {}) {
+export async function buildWeb(dir, { app = true } = {}) {
   fs.rmSync(dir, { recursive: true, force: true });
   const put = (rel, bytes) => {
     const dest = path.join(dir, rel);
@@ -154,12 +150,9 @@ export async function buildWeb(dir, { mermaid = true, app = true } = {}) {
   };
   const copy = (rel, from) => put(rel, fs.readFileSync(from));
 
-  let tag = DEV_TAG;
-  if (mermaid) {
-    const module = await buildMermaidModule();
-    tag = createHash("sha256").update(module).digest("hex").slice(0, 12);
-    put(`__web/${tag}/mermaid.js`, module);
-  }
+  const module = await buildFlowchartModule();
+  const tag = createHash("sha256").update(module).digest("hex").slice(0, 12);
+  put(`__web/${tag}/flowchart.js`, module);
   for (const [family, file] of fontFiles()) {
     copy(`__web/fonts/${file}`, path.join(repoRoot, "src", "assets", "fonts", family, file));
   }
@@ -206,13 +199,12 @@ function listFiles(dir, prefix = "") {
 // buildWeb and bundleWorker without running a build at import time.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const args = process.argv.slice(2);
-  const withMermaid = !args.includes("--no-mermaid");
   const withApp = !args.includes("--no-app");
   const outArg = args.find((a) => !a.startsWith("--"));
   const dest = path.resolve(outArg ?? path.join(workerDir, "dist", "doklin-cloud-worker.js"));
   const webDir = path.join(path.dirname(dest), WEB_DIR);
 
-  const tag = await buildWeb(webDir, { mermaid: withMermaid, app: withApp });
+  const tag = await buildWeb(webDir, { app: withApp });
   const code = await bundleWorker(tag);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, code);

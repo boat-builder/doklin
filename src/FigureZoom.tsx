@@ -1,8 +1,8 @@
-// A zoomable / pannable canvas for a single figure: a mermaid diagram or an
-// svg drawing.
+// A zoomable / pannable canvas for a single figure: a flowchart or an svg
+// drawing.
 //
-// A rendered figure in the doc is a self-contained <svg> (mermaid inlines its
-// own styles; drawings name the page's tokens), so the "expand" chip on a
+// A rendered figure in the doc is a self-contained <svg> (its colours are the
+// page's tokens, named inside it), so the "expand" chip on a
 // figure (src/figureBlock.ts) hands us that SVG's outerHTML through a
 // `dk-figure-expand` CustomEvent; App mounts this
 // full-screen canvas with it. No pan/zoom library — the diagram is one node,
@@ -48,7 +48,7 @@ const CloseIcon = (
   </svg>
 );
 
-export default function MermaidModal({ svg, onClose }: { svg: string; onClose: () => void }) {
+export default function FigureZoom({ svg, onClose }: { svg: string; onClose: () => void }) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   // The diagram's intrinsic size (viewBox units — CSS px at 100%). A ref read
@@ -89,7 +89,7 @@ export default function MermaidModal({ svg, onClose }: { svg: string; onClose: (
       if (w && h) svgEl.setAttribute("viewBox", `0 0 ${w} ${h}`);
     }
     nat.current = { w, h };
-    // Inline, so it beats mermaid's own inline max-width. The wrapper box and
+    // Inline, so it beats any size the figure's own stylesheet gave it. The wrapper box and
     // the viewBox share an aspect ratio by construction, so 100%/100% maps the
     // drawing exactly — no letterboxing.
     svgEl.style.width = "100%";

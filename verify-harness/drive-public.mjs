@@ -3,12 +3,15 @@
 // serve-worker.mjs over the seed workspace (cloud-worker/test/seed.mjs):
 // a note's page, the MD/HTML pill and the sandboxed rendition, a folder's
 // table of contents, a nested note with its crumb, a note whose frontmatter
-// is left off its page, a diagram hydrating in light and in dark, the app's
-// own type and palettes, HTML written into a note refused by the page's
-// policy, links between notes, the root page, a picture in the workspace
-// shown as its alt text, an html document by its exact path, and a 404. Run:
+// is left off its page, a flowchart drawn by the page's module (the same
+// picture in light and in dark, laid out for the column on a phone, its
+// source with scripts off) beside another kind of diagram left as its
+// source, the app's own type and palettes, HTML written into a note refused
+// by the page's policy, links between notes, the root page, a picture in the
+// workspace shown as its alt text, an html document by its exact path, and a
+// 404. Run:
 //
-//   node verify-harness/serve-worker.mjs &     # bundles the worker (mermaid included), seeds, serves :8787
+//   node verify-harness/serve-worker.mjs --no-app &     # bundles the worker, seeds, serves :8787
 //   node verify-harness/drive-public.mjs
 import { chromium } from "playwright";
 import { existsSync, mkdirSync } from "node:fs";
@@ -123,33 +126,123 @@ step(
 );
 await page.screenshot({ path: SHOTS + "public-05-frontmatter.png" });
 
-/* 6 — a diagram hydrates, and takes the page's palette in light and in dark */
+/* 6 — a flowchart: the page's module swaps its code block for the picture,
+   and the picture takes the page's palette in light and in dark */
+const flowchartLook = (p) =>
+  p.evaluate(() => {
+    const doc = document.querySelector("main.doc");
+    const cs = getComputedStyle(doc);
+    const svg = document.querySelector("figure.dk-flowchart > svg");
+    const rect = svg.querySelector("rect[stroke]");
+    // What the stroke's token is on this page, read off an element of the page's own.
+    const probe = document.body.appendChild(document.createElement("span"));
+    probe.style.color = rect.getAttribute("stroke");
+    const token = getComputedStyle(probe).color;
+    probe.remove();
+    return {
+      drew: document.documentElement.dataset.flowcharts,
+      module: [...document.querySelectorAll("script")].map((el) => el.getAttribute("src")).filter(Boolean),
+      marked: document.querySelectorAll("pre[data-dk-flowchart]").length,
+      markup: svg.outerHTML,
+      viewBox: svg.getAttribute("viewBox"),
+      role: svg.getAttribute("role"),
+      tags: [...new Set([...svg.querySelectorAll("*")].map((el) => el.tagName))].sort().join(),
+      words: [...svg.querySelectorAll("text")].map((t) => t.textContent).join(),
+      width: Math.round(svg.getBoundingClientRect().width),
+      column: Math.round(doc.getBoundingClientRect().width - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)),
+      stroke: getComputedStyle(rect).stroke,
+      token,
+      background: getComputedStyle(document.body).backgroundColor,
+      // Every ```mermaid block still a code block: its first line, and whether it is on show.
+      sources: [...document.querySelectorAll("pre > code.language-mermaid")].map((code) => ({
+        first: code.textContent.split("\n")[0],
+        shown: code.getClientRects().length > 0,
+        marked: code.parentElement.hasAttribute("data-dk-flowchart"),
+      })),
+    };
+  });
 await page.goto(`${BASE}/diagram`);
-await poll(async () => (await page.locator(".dk-mermaid svg").count()) === 1, 20000);
-const lightSvg = await page.locator(".dk-mermaid svg").innerHTML();
-const lightBg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
-await page.screenshot({ path: SHOTS + "public-06-diagram-light.png" });
+await poll(async () => (await page.locator("figure.dk-flowchart > svg").count()) === 1);
+const lightChart = await flowchartLook(page);
+await page.screenshot({ path: SHOTS + "public-06-flowchart-light.png" });
 const dark = await pageIn({ colorScheme: "dark" });
 await dark.goto(`${BASE}/diagram`);
-await poll(async () => (await dark.locator(".dk-mermaid svg").count()) === 1, 20000);
-const darkSvg = await dark.locator(".dk-mermaid svg").innerHTML();
-const darkBg = await dark.evaluate(() => getComputedStyle(document.body).backgroundColor);
-await dark.screenshot({ path: SHOTS + "public-06-diagram-dark.png" });
+await poll(async () => (await dark.locator("figure.dk-flowchart > svg").count()) === 1);
+const darkChart = await flowchartLook(dark);
+await dark.screenshot({ path: SHOTS + "public-06-flowchart-dark.png" });
 await dark.context().close();
 step(
-  "a diagram: the code block becomes an SVG in light and in dark, and the two are drawn with different palettes",
-  lightSvg.length > 200 &&
-    darkSvg.length > 200 &&
-    lightSvg !== darkSvg &&
-    lightBg === "rgb(255, 255, 255)" &&
-    darkBg === "rgb(11, 11, 11)" &&
-    (await page.locator("code.language-mermaid").count()) === 0,
-  `${lightBg} / ${darkBg}`,
+  "a flowchart: the page names the flowchart module, which swaps the code block for one picture across the column and says how many it drew",
+  lightChart.drew === "1" &&
+    lightChart.module.length === 1 &&
+    /^\/__web\/[^/]+\/flowchart\.js$/.test(lightChart.module[0]) &&
+    lightChart.marked === 0 &&
+    lightChart.role === "img" &&
+    /^0 0 \d+ \d+$/.test(lightChart.viewBox) &&
+    lightChart.tags.split(",").every((t) => ["rect", "path", "text", "tspan"].includes(t)) &&
+    lightChart.words === "Write,Publish" &&
+    lightChart.width === lightChart.column,
+  `${lightChart.module[0]} · ${lightChart.viewBox} → ${lightChart.width}px of ${lightChart.column} · <${lightChart.tags}> ${lightChart.words}`,
+);
+step(
+  "a flowchart is the same picture in light and in dark, coloured by each page's own tokens",
+  darkChart.drew === "1" &&
+    darkChart.markup === lightChart.markup &&
+    lightChart.stroke === lightChart.token &&
+    darkChart.stroke === darkChart.token &&
+    lightChart.stroke !== darkChart.stroke &&
+    lightChart.background === "rgb(255, 255, 255)" &&
+    darkChart.background === "rgb(11, 11, 11)",
+  `${lightChart.stroke} on ${lightChart.background} / ${darkChart.stroke} on ${darkChart.background}`,
+);
+step(
+  "another kind of diagram is not drawn: its ```mermaid block stays a code block with its source showing",
+  lightChart.sources.length === 1 &&
+    lightChart.sources[0].first === "sequenceDiagram" &&
+    lightChart.sources[0].shown &&
+    !lightChart.sources[0].marked,
+  JSON.stringify(lightChart.sources),
+);
+
+// With scripts off the page still shows the flowchart, as its source.
+const plain = await pageIn({ javaScriptEnabled: false });
+await plain.goto(`${BASE}/diagram`);
+const unscripted = await plain.evaluate(() => ({
+  drew: document.documentElement.dataset.flowcharts ?? null,
+  figures: document.querySelectorAll(".dk-flowchart").length,
+  sources: [...document.querySelectorAll("pre > code.language-mermaid")].map(
+    (code) => `${code.parentElement.hasAttribute("data-dk-flowchart") ? "flowchart" : "other"}: ${code.textContent.split("\n")[0]}`,
+  ),
+}));
+await plain.context().close();
+step(
+  "with scripts off a flowchart is its source: the worker serves the code block, marked for the module, beside the other diagram's unmarked one",
+  unscripted.drew === null &&
+    unscripted.figures === 0 &&
+    unscripted.sources.join(" | ") === "flowchart: flowchart LR | other: sequenceDiagram",
+  unscripted.sources.join(" | "),
+);
+
+// On a phone the flowchart is laid out for the column itself, so its words
+// are drawn at their own size.
+const phone = await pageIn({ viewport: { width: 390, height: 844 } });
+await phone.goto(`${BASE}/diagram`);
+await poll(async () => (await phone.locator("figure.dk-flowchart > svg").count()) === 1);
+const phoneChart = await flowchartLook(phone);
+await phone.screenshot({ path: SHOTS + "public-06-flowchart-phone.png" });
+await phone.context().close();
+step(
+  "on a phone a flowchart is laid out for the column: its frame is the column's width, not the page's, so nothing is scaled",
+  phoneChart.drew === "1" &&
+    phoneChart.viewBox.split(" ")[2] === String(phoneChart.column) &&
+    phoneChart.width === phoneChart.column &&
+    phoneChart.viewBox !== lightChart.viewBox,
+  `${phoneChart.viewBox} → ${phoneChart.width}px of ${phoneChart.column}`,
 );
 
 /* 6c — the same page carries HTML written into its markdown. It is drawn as
    written and does nothing: the page's policy runs the one script that drew
-   the diagram above and refuses the rest */
+   the flowchart above and refuses the rest */
 const written = async () => ({
   ran: await page.evaluate(() => document.documentElement.dataset.ran ?? null),
   base: await page.evaluate(() => document.baseURI),

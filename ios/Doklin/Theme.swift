@@ -25,6 +25,21 @@ enum Theme {
     static let errorInk = Color("error-ink")
     static let live = Color("live")
 
+    /// A figure's colour: the drawing palette (`--dg-*`), or the page it is drawn on.
+    static func figure(_ paint: FlowchartScene.Paint) -> Color {
+        switch paint {
+        case .ink: return Color("dg-ink")
+        case .ink2: return Color("dg-ink-2")
+        case .rule: return Color("dg-rule")
+        case .grid: return Color("dg-grid")
+        case .accent: return Color("dg-accent")
+        case .good: return Color("dg-good")
+        case .warn: return Color("dg-warn")
+        case .bad: return Color("dg-bad")
+        case .sheet: return sheet
+        }
+    }
+
     /// A callout's ink — its title and icon, 4.5:1 or better on its tint.
     static func calloutInk(_ kind: CalloutKind) -> Color {
         switch kind {

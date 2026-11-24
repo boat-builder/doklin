@@ -42,7 +42,7 @@ const codeBlock = (lines: number, tag: string) =>
   ) +
   "\n```";
 
-const MERMAID = `\`\`\`mermaid
+const FLOWCHART = `\`\`\`mermaid
 flowchart TD
   A[Client] --> B[Gateway]
   B --> C[Planner]
@@ -57,7 +57,7 @@ const DOC = `# Idle blink harness
 
 ${paras(6, "intro")}
 
-${MERMAID}
+${FLOWCHART}
 
 ${paras(6, "after-diagram")}
 
@@ -65,7 +65,7 @@ ${codeBlock(30, "alpha")}
 
 ${paras(6, "middle")}
 
-${MERMAID}
+${FLOWCHART}
 
 ${paras(6, "tail")}
 
@@ -84,7 +84,7 @@ const blockInfo = (el: Element) => {
   return {
     idx: blocks.indexOf(el),
     lang: el.getAttribute("data-language") ?? lang,
-    mermaid: !!el.querySelector("svg[id^='mermaid'], .mermaid-preview, .dk-mermaid"),
+    flowchart: !!el.querySelector(".dk-flowchart"),
   };
 };
 

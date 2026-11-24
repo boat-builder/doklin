@@ -23,7 +23,7 @@
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "mermaid": "^11.16.0",
+    "dagre-d3-es": "7.0.14",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
@@ -36,6 +36,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "eslint": "^10.7.0",
     "eslint-plugin-react-hooks": "^7.1.1",
+    "fontkit": "3.0.0",
     "marked": "16.4.2",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"

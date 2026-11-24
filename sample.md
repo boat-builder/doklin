@@ -20,7 +20,7 @@ function hello(name) {
 
 ## Diagrams
 
-A ```` ```mermaid ```` code block (or `/diagram`) renders live as you type:
+A ```` ```mermaid ```` flowchart (or `/diagram`) is drawn live as you type:
 
 ```mermaid
 flowchart LR

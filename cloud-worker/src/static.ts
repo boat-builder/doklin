@@ -1,7 +1,7 @@
 // Responses that need no workspace: the landing page and the 404 page. Out
 // of public.ts so pages.ts (which answers 404 for a file that is gone) can use
 // them without an import cycle. The files a page asks for — fonts, icons,
-// og.png, robots.txt, the mermaid module — are not the worker's: Cloudflare
+// og.png, robots.txt, the flowchart module — are not the worker's: Cloudflare
 // serves them from the web directory beside it (scripts/bundle-worker.mjs).
 
 import { escapeHtml } from "./http";

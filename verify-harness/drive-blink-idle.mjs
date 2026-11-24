@@ -60,7 +60,7 @@ if (DOC_PATH) {
 await page.goto(`http://localhost:${PORT}/verify-harness/blink-idle.html`);
 await poll(() => page.evaluate(() => !!document.querySelector(".milkdown .ProseMirror")));
 
-// Settle: wait until scrollHeight stops moving (fonts, first mounts, mermaid).
+// Settle: wait until scrollHeight stops moving (fonts, first mounts).
 let stable = 0;
 let lastH = 0;
 await poll(async () => {

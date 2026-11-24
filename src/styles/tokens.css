@@ -20,10 +20,10 @@
    file a flat list of rules (no @media or nesting): the worker's tests fail
    on a block it can't find.
 
-   Keep colour values hex or rgb()/rgba(): mermaidTheme.ts parses tokens with
-   a hex/rgb reader, and an oklch() or color-mix() VALUE here would make
-   diagrams silently fall back to body colours. (color-mix() is fine in
-   component rules that consume tokens — just not as a token's value.)
+   Keep colour values hex or rgb()/rgba(): scripts/ios-colors.mjs reads the
+   tokens the iPhone app uses with a hex/rgb reader, and fails on an oklch()
+   or color-mix() VALUE. (color-mix() is fine in component rules that consume
+   tokens — just not as a token's value.)
 
    The look is the Claude Docs viewer's: warm neutrals, #0b0b0b dark, one
    blue accent. Everything keyed to the accent reads --accent (fills) or
@@ -31,7 +31,7 @@
    without touching components.
 
    --dg-* is the drawing palette: ```svg blocks in documents (drawing.ts)
-   and restyled Mermaid name these tokens inside their SVG. Documents depend
+   and flowcharts (src/flowchart/) name these tokens inside their SVG. Documents depend
    on the names, so they are a contract: never rename one, only add. */
 
 /* ---------- Type, radius, motion, sizing (theme-independent) ---------- */

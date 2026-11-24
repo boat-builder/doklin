@@ -12,7 +12,7 @@
   X-Robots-Tag: noindex
 
 # Content-tagged: a new build is a new path.
-/__web/:tag/mermaid.js
+/__web/:tag/flowchart.js
   Cache-Control: public, max-age=31536000, immutable
 
 # Addressed by name: kept a week.
