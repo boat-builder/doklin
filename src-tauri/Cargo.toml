@@ -1,6 +1,6 @@
 [package]
 name = "doklin"
-version = "0.1.137"
+version = "0.1.138"
 description = "Markdown editor"
 authors = ["Sherin"]
 edition = "2021"
