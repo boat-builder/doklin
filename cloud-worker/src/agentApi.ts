@@ -19,6 +19,8 @@
 //              GET    /api/agent/doc?path=&v=[&clean=1][&info=1]
 //              GET    /api/agent/comments?path=
 //              GET    /api/agent/search?q=&dir=&limit=
+//              GET    /api/agent/find?workspace=&space=&file=
+//              GET    /api/agent/links?path=[&from=1][&to=1]
 //              GET    /api/agent/pages
 //   edit       PUT    /api/agent/doc?path=&v=[&force=1][&dry=1]      if-rev: <n> | *
 //              DELETE /api/agent/doc?path=&v=[&dry=1]
@@ -51,6 +53,7 @@
 import { inSection, refuse, type AgentCaller, type Call } from "./agentCall";
 import { deleteComment, getComments, postComment } from "./agentComments";
 import { deleteDoc, getDoc, getFind, getSearch, getTree, postMove, putDoc } from "./agentDocs";
+import { getLinks } from "./agentLinks";
 import { deletePage, getPages, putPage } from "./agentPages";
 import { Places } from "./agentPlace";
 import {
@@ -148,6 +151,7 @@ const ROUTES: Record<string, Partial<Record<string, [Scope, Handler, PathIn]>>> 
     DELETE: ["comment", deleteComment, "query"],
   },
   search: { GET: ["read", getSearch, "self"] },
+  links: { GET: ["read", getLinks, "query"] },
   pages: { GET: ["read", getPages, "self"], PUT: ["publish", putPage, "body"], DELETE: ["publish", deletePage, "self"] },
 };
 

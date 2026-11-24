@@ -26,8 +26,8 @@
 //!
 //! The page's address, the scheme and the key names are also in
 //! site/public/open.html, the address and the key names in
-//! src/web/address.ts (the browser version makes a link, follows one, and
-//! reads one in its own address), the scheme in src-tauri/Info.plist and
+//! src/pageLink.ts (the browser version makes and follows a link with it, and
+//! the worker's public pages read one), the scheme in src-tauri/Info.plist and
 //! ios/Info.plist, and the address in ios/Doklin.entitlements: **change
 //! all of them together.**
 
@@ -207,11 +207,13 @@ mod tests {
         let page = include_str!("../../../site/public/open.html");
         assert!(page.contains(&format!("\"{}://open\"", SCHEME)), "open.html hands a link on as {}://open", SCHEME);
         assert!(page.contains("\"/app#\""), "open.html sends a browser to the domain's /app");
-        let browser = include_str!("../../../src/web/address.ts");
-        assert!(browser.contains(&format!("const PAGE = \"{}\";", PAGE)), "the browser version makes a link at {}", PAGE);
+        let browser = include_str!("../../../src/pageLink.ts");
+        assert!(browser.contains(&format!("const PAGE = \"{}\";", PAGE)), "the browser version and the worker make a link at {}", PAGE);
+        for key in ["\"d\"", "\"w\"", "\"s\"", "\"f\""] {
+            assert!(browser.contains(&format!("link.get({})", key)), "the browser version and the worker read {}", key);
+        }
         for key in ["\"d\"", "\"w\"", "\"f\""] {
             assert!(page.contains(&format!("link.get({})", key)), "open.html reads {}", key);
-            assert!(browser.contains(&format!("link.get({})", key)), "the browser version reads {}", key);
         }
         let scheme = format!("<string>{}</string>", SCHEME);
         assert!(include_str!("../../../src-tauri/Info.plist").contains(&scheme), "the Mac app is registered for it");

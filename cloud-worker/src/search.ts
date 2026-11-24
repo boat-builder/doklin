@@ -37,18 +37,26 @@
 //
 // It is the database or nothing: a database that cannot answer is a 503 to a
 // search, and costs nothing else.
+//
+// The same catch-up keeps the `links` index: for each note it reads, the
+// files it links to (`targetsOf`), so "which documents link to this one" is
+// one query too (`linkersOf`, for `doklin links --to`).
 
 import { Refusal, type Committed } from "./commit";
 import { Index, nameOf, type Entry } from "./documents";
 import type { Env } from "./env";
 import { textOf } from "./htmlText";
-import { SEARCH_LIMIT_MAX, blobKey } from "./layout";
+import { LIBRARY_FOLDER, SEARCH_LIMIT_MAX, blobKey } from "./layout";
 import type { Manifest } from "./manifest";
+import { PRIVATE_FOLDER, RESTRICTED_FOLDER } from "./agentPlace";
+import { linksIn } from "./noteLinks";
 import { ensureSchema } from "./schema";
-import { MAX_SECTIONS_READ, spaceOf, type Where } from "./spaces";
+import { MAX_SECTIONS_READ, sharedEnv, spaceOf, type Where } from "./spaces";
 import { basename, isHtmlPath, isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 import { stripComments } from "../../src/criticMarkup";
+import { keyTarget, linkKey } from "../../src/docLinks";
 import { META_SUFFIX, parseEntityMeta } from "../../src/metaFile";
+import { pageLinkOf } from "../../src/pageLink";
 
 /** A document whose text and comments together pass this is not mirrored —
  *  D1 holds a row of two megabytes at most — and is listed as not searchable. */
@@ -119,6 +127,84 @@ function folded(path: string, text: string, metaText: string | null): string {
   return [said, ...bodies].join("\n").toLowerCase();
 }
 
+/* ---------- What a note links to ---------- */
+
+/** What a note's links are read against: Library's manifest, as it stores
+ *  its paths, and the workspace's id, which a *Copy link* to one of its
+ *  pages names. */
+type Around = { library: Manifest | null; workspace: string | null };
+
+/** A manifest's files by their path, lower-cased: the workspace lives on a
+ *  case-insensitive disk. */
+function lowerPaths(m: Manifest): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const [fid, f] of Object.entries(m.files)) if (!out.has(f.path.toLowerCase())) out.set(f.path.toLowerCase(), fid);
+  return out;
+}
+
+/**
+ * The files the note at `path` in `space` links to, for the `links` index.
+ * A link with a record names its file; so does a *Copy link* to a page of
+ * this workspace. A link without either goes by its path, under rule 3 of
+ * what a save writes (`linksToSave`, src/docLinks.ts): only into the note's
+ * own section or into Library, never from outside into a Private or a
+ * restricted folder. A restricted folder's name is each person's own
+ * (agentPlace.ts), so a path that names one, the note's own included, is
+ * not followed.
+ */
+function targetsOf(
+  space: string,
+  path: string,
+  text: string,
+  metaText: string | null,
+  own: () => Map<string, string>,
+  library: () => Map<string, string> | null,
+  workspace: string | null,
+): string[] {
+  const records = metaText === null ? [] : parseEntityMeta(metaText).links;
+  const mount = space === "" ? LIBRARY_FOLDER : space.startsWith("p-") ? PRIVATE_FOLDER : `${RESTRICTED_FOLDER}/\u0000`;
+  const out = new Set<string>();
+  for (const link of linksIn(text)) {
+    const page = pageLinkOf(link.href);
+    if (page) {
+      if (workspace !== null && page.workspace === workspace && page.file !== "") out.add(page.file);
+      continue;
+    }
+    const key = linkKey(link.href);
+    if (key === null) continue;
+    const record = records.find((r) => r.id === key);
+    if (record) {
+      out.add(record.file);
+      continue;
+    }
+    const target = keyTarget(key, `${mount}/${path}`)?.toLowerCase();
+    if (target === undefined) continue;
+    const inOwn = target.startsWith(`${mount.toLowerCase()}/`);
+    const inLibrary = !inOwn && target.startsWith(`${LIBRARY_FOLDER.toLowerCase()}/`);
+    const fid = inOwn
+      ? own().get(target.slice(mount.length + 1))
+      : inLibrary
+        ? library()?.get(target.slice(LIBRARY_FOLDER.length + 1))
+        : undefined;
+    if (fid !== undefined) out.add(fid);
+  }
+  return [...out];
+}
+
+/** Rows of the `links` index, a statement for each 33 (D1 binds at most a
+ *  hundred values). */
+function linkRows(db: D1Database, space: string, rows: readonly { fid: string; targets: readonly string[] }[]): D1PreparedStatement[] {
+  const all = rows.flatMap((r) => r.targets.filter((t) => t !== r.fid).map((t) => [space, r.fid, t]));
+  const out: D1PreparedStatement[] = [];
+  for (let i = 0; i < all.length; i += 33) {
+    const chunk = all.slice(i, i + 33);
+    out.push(
+      db.prepare(`INSERT OR IGNORE INTO links (space_id, fid, target) VALUES ${chunk.map(() => "(?, ?, ?)").join(", ")}`).bind(...chunk.flat()),
+    );
+  }
+  return out;
+}
+
 const readHeld = (etag: string, raw: string): State => {
   try {
     const held: unknown = JSON.parse(raw);
@@ -142,8 +228,9 @@ async function readStates(db: D1Database, spaces: readonly string[]): Promise<Ma
 /**
  * Bring the mirror of the space `env` is scoped to towards its manifest:
  * read what is stale, drop what is gone, and record what the rows now hold —
- * in one batch, so a row and the record of it never disagree. Answers how
- * many documents are still stale and how many blobs this round read.
+ * text and links alike, in one batch, so a row and the record of it never
+ * disagree. Answers how many documents are still stale and how many blobs
+ * this round read. `around` is asked for once, when a note is read.
  */
 async function catchUp(
   env: Env,
@@ -152,6 +239,7 @@ async function catchUp(
   m: Manifest,
   state: State,
   maxReads: number,
+  around: () => Promise<Around>,
 ): Promise<{ pending: number; reads: number }> {
   const space = spaceOf(env);
   const want = searchable(m);
@@ -184,17 +272,26 @@ async function catchUp(
     round.push(item);
   }
 
+  const context = round.some(([, w]) => isMarkdownPath(w.text.file.path)) ? await around() : { library: null, workspace: null };
+  let ownPaths: Map<string, string> | undefined;
+  let libraryPaths: Map<string, string> | null | undefined;
+  const own = () => (ownPaths ??= lowerPaths(m));
+  const library = () => (libraryPaths ??= context.library ? lowerPaths(context.library) : null);
   const rows = await mapLimited(round, READ_CONCURRENCY, async ([fid, w]) => {
-    if (w.text.file.size + (w.meta?.file.size ?? 0) > MAX_MIRRORED_BYTES) return { fid, w, text: null as string | null };
+    if (w.text.file.size + (w.meta?.file.size ?? 0) > MAX_MIRRORED_BYTES) return { fid, w, text: null as string | null, targets: [] as string[] };
     const [text, metaText] = await Promise.all([blobText(env, w.text), w.meta ? blobText(env, w.meta) : Promise.resolve(null)]);
     // A blob that is not there yet is a sync still in flight: leave the row
     // stale, and the next catch-up reads it.
-    return text === null ? null : { fid, w, text: folded(w.text.file.path, text, metaText) };
+    if (text === null) return null;
+    const path = w.text.file.path;
+    const targets = isMarkdownPath(path) ? targetsOf(space, path, text, metaText, own, library, context.workspace) : [];
+    return { fid, w, text: folded(path, text, metaText), targets };
   });
 
   const held: Held = { ...state.held };
   for (const fid of dead) delete held[fid];
   const statements: D1PreparedStatement[] = [];
+  const read: { fid: string; targets: string[] }[] = [];
   let missed = 0;
   for (const row of rows) {
     if (row === null) {
@@ -202,10 +299,20 @@ async function catchUp(
       continue;
     }
     held[row.fid] = row.w.signature;
+    read.push(row);
     statements.push(
       db.prepare("INSERT OR REPLACE INTO search_text (space_id, fid, folded) VALUES (?, ?, ?)").bind(space, row.fid, row.text),
     );
   }
+  // What a note read again links to replaces what it did; a note gone links to nothing.
+  const forgotten = [...dead, ...read.map((r) => r.fid)];
+  for (let i = 0; i < forgotten.length; i += 50) {
+    const chunk = forgotten.slice(i, i + 50);
+    statements.push(
+      db.prepare(`DELETE FROM links WHERE space_id = ? AND fid IN (${chunk.map(() => "?").join(",")})`).bind(space, ...chunk),
+    );
+  }
+  statements.push(...linkRows(db, space, read));
   for (let i = 0; i < dead.length; i += 50) {
     const chunk = dead.slice(i, i + 50);
     statements.push(
@@ -237,13 +344,70 @@ export async function mirrorAfter(c: { env: Env; ctx: ExecutionContext | undefin
       if ((await ensureSchema(c.env)) == null) return;
       const state = (await readStates(db, [spaceOf(c.env)])).get(spaceOf(c.env));
       if (!state) return; // nobody has searched here: there is no mirror to keep
-      await catchUp(c.env, db, done.etag, done.manifest, state, INLINE_READS);
+      await catchUp(c.env, db, done.etag, done.manifest, state, INLINE_READS, () => aroundOf(c.env, spaceOf(c.env) === "" ? done.manifest : null));
     } catch {
       // the next search catches up instead
     }
   })();
   if (c.ctx) c.ctx.waitUntil(work);
   else await work;
+}
+
+/** What a section's notes are read against (`Around`): Library's manifest —
+ *  `library` when it is in hand — and the workspace's id. */
+async function aroundOf(env: Env, library: Manifest | null): Promise<Around> {
+  const shared = await openWorkspace(sharedEnv(env));
+  return { library: library ?? shared?.manifest ?? null, workspace: shared?.record?.id ?? null };
+}
+
+/** A section opened for reading its mirror: its tree and the documents in it. */
+type Opened = { section: Where; ws: Workspace; want: Map<string, Searchable> };
+
+/**
+ * Open `sections` — as many as a request opens, `left` the rest — and catch
+ * their mirrors up. `{ indexing }` when there was more to read than one
+ * request reads; `reads` is what this one read.
+ */
+async function caughtUp(
+  env: Env,
+  sections: readonly Where[],
+): Promise<{ open: Opened[]; left: Where[]; reads: number; db: D1Database } | { indexing: number } | Refusal> {
+  const unavailable = (): Refusal => new Refusal(503, "search needs this domain's database, which isn't answering — try again in a moment");
+  const covered = sections.slice(0, 1 + MAX_SECTIONS_READ);
+  const left = sections.slice(covered.length);
+  const open: Opened[] = [];
+  for (const section of covered) {
+    const ws = await openWorkspace(section.env);
+    if (ws) open.push({ section, ws, want: searchable(ws.manifest) });
+    else if (section.space === "") return new Refusal(404, "this domain holds no workspace yet");
+  }
+  const db = env.DB;
+  if (!db) return unavailable();
+  const shared = open.find((o) => o.section.space === "")?.ws;
+  let around: Promise<Around> | undefined;
+  const aroundOnce = (): Promise<Around> =>
+    (around ??= shared ? Promise.resolve({ library: shared.manifest, workspace: shared.record?.id ?? null }) : aroundOf(env, null));
+  try {
+    if ((await ensureSchema(env)) == null) return unavailable();
+    let reads = 0;
+    if (open.length > 0) {
+      const states = await readStates(db, open.map((o) => o.section.space));
+      let pending = 0;
+      for (const { section, ws } of open) {
+        const state = states.get(section.space) ?? { etag: "", held: {} };
+        if (state.etag === ws.etag) continue;
+        const round = await catchUp(section.env, db, ws.etag, ws.manifest, state, CATCH_UP_READS - reads, aroundOnce);
+        pending += round.pending;
+        reads += round.reads;
+      }
+      // A round that read more than a handful has used this request's
+      // budget; the answer comes on the next one.
+      if (pending > 0 || reads > INLINE_READS) return { indexing: pending };
+    }
+    return { open, left, reads, db };
+  } catch {
+    return unavailable();
+  }
 }
 
 export type Match = { line?: number; text: string };
@@ -329,37 +493,14 @@ export async function searchIn(
 ): Promise<Searched | { indexing: number } | Refusal> {
   const needle = query.toLowerCase();
   const unavailable = (): Refusal => new Refusal(503, "search needs this domain's database, which isn't answering — try again in a moment");
-  const covered = sections.slice(0, 1 + MAX_SECTIONS_READ);
-  const left = sections.slice(covered.length);
+  const up = await caughtUp(env, sections);
+  if (up instanceof Refusal || "indexing" in up) return up;
+  const { open, left, db } = up;
 
-  const open: { section: Where; ws: Workspace; want: Map<string, Searchable> }[] = [];
-  for (const section of covered) {
-    const ws = await openWorkspace(section.env);
-    if (ws) open.push({ section, ws, want: searchable(ws.manifest) });
-    else if (section.space === "") return new Refusal(404, "this domain holds no workspace yet");
-  }
-  const db = env.DB;
-  if (!db) return unavailable();
-
-  let spent = 2 * open.length;
+  const spent = 2 * open.length + up.reads;
   let rows: { space_id: string; fid: string; big: number }[] = [];
   try {
-    if ((await ensureSchema(env)) == null) return unavailable();
     if (open.length > 0) {
-      const states = await readStates(db, open.map((o) => o.section.space));
-      let pending = 0;
-      let reads = 0;
-      for (const { section, ws } of open) {
-        const state = states.get(section.space) ?? { etag: "", held: {} };
-        if (state.etag === ws.etag) continue;
-        const round = await catchUp(section.env, db, ws.etag, ws.manifest, state, CATCH_UP_READS - reads);
-        pending += round.pending;
-        reads += round.reads;
-      }
-      // A round that read more than a handful has used this request's
-      // budget; the lines are cut on the next one.
-      if (pending > 0 || reads > INLINE_READS) return { indexing: pending };
-      spent += reads;
       const found = await db
         .prepare(
           `SELECT space_id, fid, folded IS NULL AS big FROM search_text
@@ -426,4 +567,44 @@ export async function searchIn(
     notSearched: inDir.filter((r) => r.row === "big" && !r.named).map((r) => ({ space: r.section.space, path: r.path })),
     left,
   };
+}
+
+/**
+ * The documents in `sections` that link to any of `targets` — the files of
+ * one document — from the `links` index, caught up first, by the path their
+ * caller names them by. A document gone since is none, and so is the one
+ * whose files `targets` are.
+ */
+export async function linkersOf(
+  env: Env,
+  sections: readonly Where[],
+  targets: readonly string[],
+): Promise<{ paths: string[]; left: Where[] } | { indexing: number } | Refusal> {
+  const up = await caughtUp(env, sections);
+  if (up instanceof Refusal || "indexing" in up) return up;
+  const { open, left, db } = up;
+  if (open.length === 0 || targets.length === 0) return { paths: [], left };
+  let rows: { space_id: string; fid: string }[];
+  try {
+    const found = await db
+      .prepare(
+        `SELECT DISTINCT space_id, fid FROM links
+          WHERE target IN (${targets.map(() => "?").join(",")}) AND space_id IN (${open.map(() => "?").join(",")})`,
+      )
+      .bind(...targets, ...open.map((o) => o.section.space))
+      .all<{ space_id: string; fid: string }>();
+    rows = found.results;
+  } catch {
+    return new Refusal(503, "this needs the domain's database, which isn't answering — try again in a moment");
+  }
+  const bySpace = new Map(open.map((o) => [o.section.space, o]));
+  const paths: string[] = [];
+  for (const r of rows) {
+    const from = bySpace.get(r.space_id);
+    const doc = from?.want.get(r.fid);
+    if (!from || !doc || targets.includes(r.fid)) continue;
+    paths.push(under(from.section.mount, doc.text.file.path));
+  }
+  paths.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  return { paths, left };
 }

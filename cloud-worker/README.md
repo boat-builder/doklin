@@ -211,18 +211,23 @@ GET tree?dir=&deep=1  {dir, folders, documents: [{path, md?, html?, htmlBehind?}
     version is {file, rev, size, changed, by}; 404 empty
 GET doc?path=&v=md|html[&clean=1][&info=1]  bytes + x-doklin-kind: document, -path, -file, -rev,
     -version, -html-behind: 1; values percent-encoded. clean=1 strips markers; info=1 → JSON
-    row + {kind, comments, public?, linkTo: {workspace, space, file}}, byName
+    row + {kind, comments, public?, linkTo: {workspace, space, file}}, byName. Markdown with link
+    records: each such link where its document is now, as this agent's person can open it
 GET comments?path=  {path, threads: [{id, version, on, line?|tag?, orphaned?, comments: [{author, at, body}]}]}
 GET find?workspace=&space=&file=  {path}: where a link to a page leads (space "" = shared), the
     document by its stem. 404 for every page this agent cannot open, alike
 GET search?q=&dir=&limit=  {query, dir, results: [{path, version, matches: [{line?, text}],
     moreLines?, inName?, inComments?}], total, truncated?, notSearched?, sectionsNotSearched?} | 202
     {indexing, pending}; limit ≤ 30; named documents first
+GET links?path=[&from=1][&to=1]  {path, from?: [{words, path} | {words, closed: true}], to?: [{path}],
+    sectionsNotSearched?} | 202 {indexing, pending}; neither flag = both. from: the markdown's links to
+    documents; to: the documents this agent's person can open that link here (D1 `links`)
 GET pages  {pages: [{slug, url, kind: document|folder, path, title?, desc?, home?, by?, byName?,
     at, missing?}], notListed?}
 edit:
 PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → {kind, path, version,
-       file, rev, size, created, unchanged?, htmlBehind?}; 409 {rev}; 413 > 25 MB
+       file, rev, size, created, unchanged?, htmlBehind?}; 409 {rev}; 413 > 25 MB. Markdown: the
+       sidecar's link records in the same commit (cloud-people-agents.md, *Links between documents*)
 DELETE doc?path=&v=[&dry=1]  document, or one version → {kind, path, versions, stillPublic, threadsRemoved?}
 POST   move {from, to, dryRun?}  document/folder; to ending in /, or a section's own folder,
        = into → {kind, from, to, files, unpublished?}. A section's own folder
@@ -440,7 +445,7 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   every read (`src/workspace.ts`) treats them as absent.
 - Other `version` → `426`, sentence names which side is behind.
 
-## D1 (`src/schema.ts`, schema 10)
+## D1 (`src/schema.ts`, schema 11)
 
 ```sql
 meta         (key PK, schema_version)          survives wipe
@@ -455,7 +460,8 @@ agents       (id a-…, name, scopes, created_at, last_used_at, member_id)
 agent_codes  (hash PK, id c-…, agent_id → agents CASCADE, created_at, expires_at)
 agent_tokens (hash PK, id t-…, agent_id → agents CASCADE, host, created_at)
 search_text  ((space_id, fid) PK, folded)   space_id '' = shared; md file id, else html; NULL past 1 MB
-search_state (space_id PK, etag, held)      held = {"<fid>": "<text hash>.<sidecar hash>"}
+search_state (space_id PK, etag, held)      held = {"<fid>": "<text hash>.<sidecar hash>"}, for both tables
+links        ((space_id, fid, target) PK)  a note's md file id → each file it links to; '' shared; by target
 superadmin     (id = 1 PK, member_id)   who last traded the key; one row or none
 spent_keys     (hash PK, spent_at)      keys already traded; a wipe keeps it
 removed_tokens (hash PK, removed_at)    credentials an owner took away; emptied by a wipe

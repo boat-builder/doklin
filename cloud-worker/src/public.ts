@@ -30,7 +30,7 @@ import { spaceAt } from "./addresses";
 import { WEB_TAG } from "./assets";
 import type { Env } from "./env";
 import { RESERVED_SLUGS, SLUG_RE, validPath } from "./layout";
-import { dirTitle, htmlFile, notePage, rawRendition, tocPage } from "./pages";
+import { dirTitle, htmlFile, notePage, rawRendition, tocPage, type Linked } from "./pages";
 import { PublicMap, nestedUrl, type DirPage, type Page } from "./publicMap";
 import { mermaidModulePath } from "./render";
 import { landingPage, notFoundPage } from "./static";
@@ -62,9 +62,10 @@ function cacheStore(): CacheLike | null {
 
 // The web tag rides in the key too: a cached page names the mermaid module by
 // it, and a deploy that changes the module serves no page asking for one
-// that is gone.
-const cacheKey = (ws: Workspace, url: URL): string =>
-  `https://cache.doklin/${WEB_TAG}/${ws.etag}${ws.space ? `@${ws.space}` : ""}${url.pathname}${url.search}`;
+// that is gone. A space's page links into Library as well as into its own
+// section (pages.ts, `Linked`), so its key names both manifests.
+const cacheKey = (ws: Workspace, shared: Workspace, url: URL): string =>
+  `https://cache.doklin/${WEB_TAG}/${ws.etag}${ws.space ? `@${ws.space}+${shared.etag}` : ""}${url.pathname}${url.search}`;
 
 const cacheable = (res: Response): boolean =>
   (res.status === 200 || res.status === 404) && !res.headers.has("set-cookie");
@@ -135,12 +136,12 @@ export async function handlePublic(
   if (!ws) return deliver(notFoundPage(), request, url);
 
   const cache = cacheStore();
-  const key = cacheKey(ws, url);
+  const key = cacheKey(ws, shared, url);
   if (cache) {
     const hit = await cache.match(key);
     if (hit) return deliver(withCacheControl(hit, "no-cache"), request, url);
   }
-  const res = await route(ws, url);
+  const res = await route(ws, shared, url);
   if (cache && cacheable(res)) {
     const put = cache.put(key, withCacheControl(res.clone(), `public, max-age=${CACHE_TTL_S}`));
     if (ctx) ctx.waitUntil(put);
@@ -186,8 +187,15 @@ function decodeSegments(pathname: string): string[] | null {
   return out;
 }
 
-async function route(ws: Workspace, url: URL): Promise<Response> {
+async function route(ws: Workspace, shared: Workspace, url: URL): Promise<Response> {
   const pub = new PublicMap(ws);
+  const linked: Linked = {
+    ws,
+    pub,
+    library: ws.space === "" ? null : { ws: shared, pub: new PublicMap(shared) },
+    workspace: shared.record?.id ?? null,
+    host: url.host.toLowerCase(),
+  };
   const segs = decodeSegments(url.pathname);
   if (!segs) return notFoundPage();
   const view = url.searchParams.get("v") === "md" ? "md" : "auto";
@@ -198,7 +206,7 @@ async function route(ws: Workspace, url: URL): Promise<Response> {
     // 404ing the whole site (the page itself still 404s under its slug).
     const dangling = pub.root?.entry.kind === "file" && !ws.file(pub.root.entry.file);
     if (!pub.root || dangling) return landingPage(ws.name);
-    return pageResponse(ws, pub, pub.root, [], url, view, true);
+    return pageResponse(linked, pub.root, [], url, view, true);
   }
   // The root page's own rendition: `/raw` is reserved, so it can't be a slug.
   if (segs.length === 1 && segs[0] === "raw") {
@@ -208,26 +216,26 @@ async function route(ws: Workspace, url: URL): Promise<Response> {
   }
   const page = pub.page(segs[0]);
   if (!page) return notFoundPage();
-  return pageResponse(ws, pub, page, segs.slice(1), url, view, false);
+  return pageResponse(linked, page, segs.slice(1), url, view, false);
 }
 
 /** A public entry at `/<slug>` (or at `/`, when it is the root page), plus whatever comes after. */
 async function pageResponse(
-  ws: Workspace,
-  pub: PublicMap,
+  linked: Linked,
   page: Page,
   rest: string[],
   url: URL,
   view: "auto" | "md",
   atRoot: boolean,
 ): Promise<Response> {
+  const { ws } = linked;
   const own = atRoot ? "/" : `/${page.slug}`;
   if (page.entry.kind === "file") {
     // The entry outlives its file by design: while the file is gone, so is the page.
     const loc = ws.file(page.entry.file);
     if (!loc) return notFoundPage();
     if (rest.length === 0) {
-      return notePage(ws, pub, loc, {
+      return notePage(linked, loc, {
         url,
         pagePath: own,
         dirSlug: null,
@@ -254,7 +262,7 @@ async function pageResponse(
   const note = ws.noteAt(full) ?? (isMarkdownPath(full) ? ws.fileAt(full) : null);
   if (note) {
     if (wantRaw) return rawRendition(ws, note);
-    return notePage(ws, pub, note, {
+    return notePage(linked, note, {
       url,
       pagePath: nestedUrl(dir, note.file.path),
       dirSlug: dir.slug,

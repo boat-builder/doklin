@@ -2,7 +2,8 @@
 // one to a path on disk, what deliberately doesn't resolve and what a ".."
 // may not reach; and in a workspace, the record a link to a document is
 // filed under, the path between two notes, resolving by id or by path, the
-// words a named link shows, and what a save writes. Run:
+// words a named link shows, and what a save writes; and a *Copy link* as
+// src/pageLink.ts makes and reads one. Run:
 //
 //   node verify-harness/doclinks.test.mjs
 //
@@ -46,6 +47,14 @@ const {
   pickNotice,
   documentsFor,
 } = await import(`data:text/javascript,${encodeURIComponent(chunk.code)}`);
+// A *Copy link* (src/pageLink.ts), which the worker's pages read too.
+const pageOut = await build({
+  configFile: false,
+  logLevel: "warn",
+  build: { write: false, target: "es2022", lib: { entry: path.join(repoRoot, "src", "pageLink.ts"), formats: ["es"], fileName: "pl" } },
+});
+const pageChunk = (Array.isArray(pageOut) ? pageOut[0] : pageOut).output.find((o) => o.type === "chunk");
+const { pageLinkOf, pageLinkUrl } = await import(`data:text/javascript,${encodeURIComponent(pageChunk.code)}`);
 
 const NOTE = "/Users/me/notes/projects/plan.md";
 
@@ -354,6 +363,21 @@ const NOTE_IN = "Library/Roadmap/q1.md";
   assert.deepEqual(names("").slice(0, 1), ["q2"], "with nothing typed, the note's own folder first, never the note itself");
   assert.deepEqual(names("", ["Library/Plans/budget.md"])[1], "budget", "then what changed lately");
   assert.deepEqual(names("zzz"), []);
+}
+
+/* ---------- a Copy link ---------- */
+{
+  const shared = { domain: "notes.example.com", workspace: "w-0a1b2c3d4e5f", space: "", file: "f-9c8b7a6d5e4f" };
+  const deal = { ...shared, space: "s-1a2b3c4d" };
+  assert.equal(pageLinkUrl(shared), "https://doklin.cc/open#d=notes.example.com&w=w-0a1b2c3d4e5f&f=f-9c8b7a6d5e4f", "no s for the shared workspace");
+  assert.equal(pageLinkUrl(deal), "https://doklin.cc/open#d=notes.example.com&w=w-0a1b2c3d4e5f&s=s-1a2b3c4d&f=f-9c8b7a6d5e4f");
+  for (const link of [shared, deal]) assert.deepEqual(pageLinkOf(pageLinkUrl(link)), link, "it reads back what it wrote");
+  assert.deepEqual(pageLinkOf("https://doklin.cc/open/#d=Notes.Example.com&w=w-1&f=f-2"), { domain: "notes.example.com", workspace: "w-1", space: "", file: "f-2" }, "a trailing slash, a domain in any case");
+  assert.deepEqual(pageLinkOf("https://doklin.cc/open#d=127.0.0.1%3A8787&w=w-1&f=f-2").domain, "127.0.0.1:8787");
+  assert.deepEqual(pageLinkOf("https://doklin.cc/open#d=notes.example.com&w=w-1"), { domain: "notes.example.com", workspace: "w-1", space: "", file: "" }, "cut short: the ids it has");
+  for (const not of ["https://doklin.cc/open", "https://doklin.cc/open#w=w-1&f=f-2", "https://doklin.cc/other#d=x&w=w-1&f=f-2", "https://doklin.cc:8443/open#d=x&w=w-1&f=f-2", "https://example.com/open#d=x&w=w-1&f=f-2", "ftp://doklin.cc/open#d=x", "../plan.md", "not a url"]) {
+    assert.equal(pageLinkOf(not), null, not);
+  }
 }
 
 console.log("PASS doclinks.test.mjs");

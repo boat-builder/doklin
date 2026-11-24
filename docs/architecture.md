@@ -138,7 +138,7 @@ Its sign-in and the worker's routes: [cloud-people-agents.md](cloud-people-agent
   and resolved in the manifests held (`address.ts`). A page link of this
   domain that the app hands to `openExternal` becomes that address, so it
   opens here. *Copy link* makes the link the engine makes
-  (`engine/src/cloud/link.rs`, whose test holds `address.ts` to it).
+  (`engine/src/cloud/link.rs`, whose test holds `src/pageLink.ts` to it).
 - What a browser has not got is no group at all: `setup`, `sync`, `domain`,
   `windows`, `untitled`, `localFiles`, `versions`, `pdf`, `updater`. What it
   has that a Mac has not is `session`: the sign-out, which sends what waits,

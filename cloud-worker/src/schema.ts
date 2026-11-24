@@ -282,6 +282,25 @@ const STEPS: readonly Step[] = [
        )`,
     ],
   },
+  {
+    // Which document links to which (search.ts, `targetsOf`): a row per
+    // note and file it links to, in the section the note is in, so "what
+    // links to this" is one look-up by target, filtered by the sections the
+    // asker can see. Derived, like the search mirror beside it: the same
+    // catch-up fills both, `search_state.held` says what is current for
+    // both, and a wipe empties it.
+    to: 11,
+    tables: ["links"],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS links (
+         space_id TEXT NOT NULL,                -- '' the shared workspace: the section the linking note is in
+         fid      TEXT NOT NULL,                -- the linking note's markdown file
+         target   TEXT NOT NULL,                -- a file it links to, in whichever section
+         PRIMARY KEY (space_id, fid, target)
+       )`,
+      `CREATE INDEX IF NOT EXISTS links_by_target ON links(target)`,
+    ],
+  },
 ];
 
 /** What a fully migrated database reports. */

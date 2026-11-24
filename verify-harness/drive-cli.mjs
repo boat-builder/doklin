@@ -256,7 +256,7 @@ async function macWrites(files, { mtime = Date.now() } = {}) {
 /* ---------- Running the binary ---------- */
 
 const COMMANDS = [
-  "login", "logout", "whoami", "ls", "info", "read", "search", "comments", "comment", "reply",
+  "login", "logout", "whoami", "ls", "info", "read", "search", "links", "comments", "comment", "reply",
   "write", "edit", "mv", "rm", "publish", "unpublish", "published", "open",
 ];
 
@@ -487,6 +487,7 @@ await check("bad usage is exit 2 before anything is asked of a domain: a missing
     "search with no text": ["search"],
     "search --limit 0": ["search", "x", "--limit", "0"],
     "search --limit that is no number": ["search", "x", "--limit", "many"],
+    "links with no document": ["links"],
     "publish with nothing": ["publish"],
     "unpublish with nothing": ["unpublish"],
     "whoami with an argument": ["whoami", "me"],
@@ -501,7 +502,7 @@ await check("not logged in: every command that needs the workspace exits 6 and s
   const from = calls.length;
   const facts = {};
   const all = [
-    ["whoami"], ["ls"], ["info", "Library/Home"], ["read", "Library/Home"], ["search", "x"], ["comments", "Library/Home"], ["published"],
+    ["whoami"], ["ls"], ["info", "Library/Home"], ["read", "Library/Home"], ["search", "x"], ["links", "Library/Home"], ["comments", "Library/Home"], ["published"],
     ["write", "Library/Home"], ["edit", "Library/Home", "--find", "a", "--replace", "b"], ["mv", "Library/Home", "Library/Away"], ["rm", "Library/Home"],
     ["comment", "Library/Home", "--on", "a", "-m", "b"], ["reply", "Library/Home", "t", "-m", "b"], ["comment", "rm", "Library/Home", "t"],
     ["publish", "Library/Home"], ["unpublish", "Library/Home"], ["logout"],
@@ -1372,13 +1373,36 @@ await check("search: whatever its case; a phrase, quoted or not; --in a folder; 
   };
 });
 
+await check("links: a link written through the CLI keeps its document when that is renamed — a read shows where it is now; links says what a document links to and what links to it, to a program and to a person", async () => {
+  await doklin(editorBox, ["write", "Library/Links/b"], { input: "# B\n" });
+  await doklin(editorBox, ["write", "Library/Links/a"], { input: "# A\n\nSee [b](b.md) and [nowhere](gone.md).\n" });
+  await doklin(editorBox, ["mv", "Library/Links/b", "Library/Links/c"]);
+  const read = await doklin(editorBox, ["read", "Library/Links/a"]);
+  const from = calls.length;
+  const both = await doklin(editorBox, ["links", "Library/Links/a"]);
+  const wire = asked(from);
+  const to = (await doklin(editorBox, ["links", "Library/Links/c", "--to"])).json;
+  const onlyFrom = (await doklin(editorBox, ["links", "Library/Links/a", "--from"])).json;
+  const words = (await doklin(editorBox, ["links", "Library/Links/a"], { tty: true })).out;
+  const none = await doklin(editorBox, ["links", "Library/Links/nothing"]);
+  return {
+    "a read shows the link where its document is now, by its name now": read.out === "# A\n\nSee [c](c.md) and [nowhere](gone.md).\n",
+    "with neither flag, both": both.code === 0 && same(both.json, { path: "Library/Links/a", to: [], from: [{ words: "c", path: "Library/Links/c" }, { words: "nowhere", closed: true }] }),
+    "asked of links, and asked again while the index was read": wire.length >= 1 && wire.every((w) => w.startsWith("GET links")) && wire.at(-1) === "GET links → 200",
+    "--to": same(to, { path: "Library/Links/c", to: [{ path: "Library/Links/a" }] }),
+    "--from": same(onlyFrom, { path: "Library/Links/a", from: [{ words: "c", path: "Library/Links/c" }, { words: "nowhere", closed: true }] }),
+    "a person reads it as sentences": /Library\/Links\/a links to:\r?\n  "c" → Library\/Links\/c\r?\n  "nowhere" → can't be opened/.test(words) && /No document links to Library\/Links\/a\./.test(words),
+    "a document that isn't there is exit 3": refused(none, 3),
+  };
+});
+
 /* ====================================================================== */
 /* 9 — what an agent may do                                               */
 /* ====================================================================== */
 
 await check("permissions: an agent that may only read reads everything and changes nothing — each refusal is exit 4 and names the permission it lacks", async () => {
   const facts = {};
-  for (const args of [["whoami"], ["ls"], ["info", "Library/Home"], ["read", "Library/Home"], ["comments", "Library/Review"], ["published"], ["search", "halyard"]]) {
+  for (const args of [["whoami"], ["ls"], ["info", "Library/Home"], ["read", "Library/Home"], ["links", "Library/Home"], ["comments", "Library/Review"], ["published"], ["search", "halyard"]]) {
     facts[`may ${args.join(" ")}`] = (await doklin(readerBox, args)).code === 0;
   }
   const denied = {
