@@ -120,6 +120,7 @@ pub async fn call(core: &Arc<Core>, name: &str, args: Value) -> Result<Value, St
         "cloud_follow_link" => json(cloud::cloud_follow_link(core, a.get("url")?).await?),
         "cloud_link_target" => json(cloud::cloud_link_target(core, a.get("url")?)?),
         "cloud_recent" => json(cloud::cloud_recent(core, a.get("root")?, a.get("limit")?).await?),
+        "cloud_documents" => json(cloud::cloud_documents(core, a.get("root")?).await?),
         "cloud_pages" => json(cloud::cloud_pages(core, a.get("root")?).await?),
         "cloud_page_take_down" => json(cloud::cloud_page_take_down(core, a.get("root")?, a.get("slug")?).await?),
         "cloud_wipe" => json(cloud::cloud_wipe(core, a.get("root")?).await?),

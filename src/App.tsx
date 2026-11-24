@@ -102,6 +102,7 @@ import {
   type EntityMeta,
   type MdThread,
   type ForeignRecord,
+  type LinkRecord,
   type TableCols,
 } from "./metaFile";
 import { tableWidthsKey } from "./tableWidths";
@@ -272,6 +273,7 @@ type CompanionDoc = {
   mdThreads: MdThread[];
   mdOrphans: MdThread[];
   tcols: TableCols[];
+  metaLinks: LinkRecord[];
   metaForeign: ForeignRecord[];
   // The pane document's frontmatter block, split off the same way the active
   // document's is: `contents` above is the BODY, so promoting this pane must
@@ -742,6 +744,9 @@ export default function App() {
   // else here. See tableWidths.ts for how a record finds its table.
   const [tableWidths, setTableWidths] = useState<TableCols[]>([]);
   const tableWidthsRef = useRef<TableCols[]>([]);
+  // The document's link records (src/docLinks.ts), carried through every
+  // meta write as they were read.
+  const metaLinksRef = useRef<LinkRecord[]>([]);
   const metaForeignRef = useRef<ForeignRecord[]>([]);
   // The hybrid markdown as last read from / written to disk — lets a
   // body-only comment edit skip the (byte-identical) markdown write. This is
@@ -1115,6 +1120,7 @@ export default function App() {
           ...base.mthreads.filter((t) => !rooted.has(t.id) && !ids.has(t.id)),
         ],
         tcols: base.tcols,
+        links: base.links,
         foreign: base.foreign,
       };
       return metaIsEmpty(out) && !exists ? undefined : serializeEntityMeta(out);
@@ -1266,6 +1272,7 @@ export default function App() {
       hthreads: htmlThreadsRef.current,
       mthreads: [...mdThreadsRef.current, ...mdOrphansRef.current],
       tcols: tableWidthsRef.current,
+      links: metaLinksRef.current,
       foreign: metaForeignRef.current,
     }),
     [],
@@ -1455,6 +1462,7 @@ export default function App() {
       htmlSidecarExistsRef.current = metaExists;
       applyHtmlThreads(meta.hthreads);
       adoptTableWidths(meta.tcols);
+      metaLinksRef.current = meta.links;
       metaForeignRef.current = meta.foreign;
       if (md !== null) {
         const ids = markerIds(md);
@@ -1691,6 +1699,7 @@ export default function App() {
       mdThreads: mdThreadsRef.current,
       mdOrphans: mdOrphansRef.current,
       tcols: tableWidthsRef.current,
+      metaLinks: metaLinksRef.current,
       metaForeign: metaForeignRef.current,
       head: frontmatterRef.current,
       conflict: conflictRef.current,
@@ -1721,6 +1730,7 @@ export default function App() {
           mdThreads: [],
           mdOrphans: [],
           tcols: [],
+          metaLinks: [],
           metaForeign: [],
           head: "",
           conflict: null,
@@ -1783,6 +1793,7 @@ export default function App() {
             ? meta.mthreads
             : meta.mthreads.filter((t) => !ids.has(t.id)),
           tcols: meta.tcols,
+          metaLinks: meta.links,
           metaForeign: meta.foreign,
           head: htmlOnly ? "" : fm.head,
           conflict: null,
@@ -2813,6 +2824,7 @@ export default function App() {
       // this only re-points the meta writer at the incoming document's
       // records — the widths on screen are already the ones it mounted with.
       adoptTableWidths(incoming.tcols);
+      metaLinksRef.current = incoming.metaLinks;
       metaForeignRef.current = incoming.metaForeign;
       setConflict(incoming.conflict);
       applyDocView(incomingView);
@@ -4217,6 +4229,7 @@ export default function App() {
                   sidecarExists: metaExists,
                   mdThreads: meta.mthreads.filter((t) => ids.has(t.id)),
                   mdOrphans: meta.mthreads.filter((t) => !ids.has(t.id)),
+                  metaLinks: meta.links,
                   metaForeign: meta.foreign,
                 },
               });
@@ -4252,6 +4265,7 @@ export default function App() {
             // records now also means our next meta write echoes them back
             // rather than resurrecting what we loaded.
             adoptTableWidths(meta.tcols);
+            metaLinksRef.current = meta.links;
             metaForeignRef.current = meta.foreign;
             if (pathRef.current) {
               const ids = markerIds(currentMarkdownRef.current);

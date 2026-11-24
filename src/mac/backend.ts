@@ -47,6 +47,7 @@ import {
   type Windows,
 } from "../backend";
 import type { CloudRemovedEvent, CloudStatus } from "../cloud";
+import { documentsOf, type WorkspaceDocument } from "../docLinks";
 import {
   HTML_EXT_RE,
   MD_EXT_RE,
@@ -197,6 +198,18 @@ const documents: Documents = {
 
   exists,
   tree: (root, all) => invoke<TreeNode>("list_md_tree", { path: root, all }),
+  async documents(root) {
+    const synced = await invoke<WorkspaceDocument[] | null>("cloud_documents", { root });
+    if (synced) return synced;
+    // A folder that doesn't sync: its tree, which lists documents only.
+    const found: WorkspaceDocument[] = [];
+    const walk = (node: TreeNode) => {
+      if (node.kind === "dir") node.children.forEach(walk);
+      else found.push({ path: node.path.slice(root.length + 1), fileId: null, section: null });
+    };
+    walk(await invoke<TreeNode>("list_md_tree", { path: root, all: false }));
+    return documentsOf(found);
+  },
   create: (path, kind) => invoke<void>(kind === "file" ? "create_file" : "create_dir", { path }),
 
   async move(from, to, kind) {

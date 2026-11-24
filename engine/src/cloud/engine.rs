@@ -39,8 +39,8 @@ use super::scan::{hash16, now_ms, read_file_checked, rel_path};
 use super::layout;
 use super::space::{self, SpaceMarker, LIBRARY_DIR, PRIVATE_DIR, SHARED};
 use super::status::{
-    emit_statuses, CloudStatus, DirectoryPerson, Events, LeaseHolder, Phase, PresenceDevice, PublicPage, RecentFiles,
-    SpaceStatus, StatusTable, UsageStatus, VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT,
+    documents_of, emit_statuses, CloudStatus, DirectoryPerson, Events, LeaseHolder, Phase, PresenceDevice, PublicPage,
+    RecentFiles, SpaceStatus, StatusTable, UsageStatus, VersionsMirror, WorkspaceDocument, EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT,
 };
 use super::unit::{lock, Ctx, MovedOut, PendingPublic, PublicOp, Survey, Unit, UnitConfig};
 use super::versions::{VersionsIndex, MIRROR_EVERY};
@@ -223,6 +223,9 @@ pub enum EngineCmd {
     Recent {
         limit: usize,
         reply: oneshot::Sender<Result<RecentFiles, String>>,
+    },
+    Documents {
+        reply: oneshot::Sender<Result<Vec<WorkspaceDocument>, String>>,
     },
     Shutdown,
 }
@@ -599,6 +602,16 @@ impl<R: Remote> Engine<R> {
             .map(|(id, name)| DirectoryPerson { id: id.clone(), name: name.clone(), person: self.owners.get(id).cloned() })
             .collect();
         RecentFiles { files, people, me: self.me.clone() }
+    }
+
+    /// `cloud_documents`: every section's documents on this device, by path,
+    /// each with its file id once a manifest carries it.
+    pub(crate) fn documents(&self) -> Vec<WorkspaceDocument> {
+        documents_of(self.units.values().flat_map(|unit| unit.recent("")).map(|file| WorkspaceDocument {
+            path: file.path,
+            file_id: file.file_id,
+            section: file.section,
+        }))
     }
 
     /* ----- status ----- */
@@ -1140,6 +1153,7 @@ impl<R: Remote> Engine<R> {
             .collect();
         let moved_in: HashMap<String, String> =
             moves.iter().filter(|m| m.to == unit.id).map(|m| (m.path.clone(), m.fid.clone())).collect();
+        let elsewhere: HashSet<String> = self.units.values().flat_map(|other| other.state.manifest.files.keys().cloned()).collect();
         let ws_root = self.root_key();
         let own_edits: HashSet<String> =
             self.touched.iter().filter_map(|p| unit.in_unit(p)).filter(|rel| !rel.is_empty()).collect();
@@ -1152,6 +1166,7 @@ impl<R: Remote> Engine<R> {
             releasing: &releasing,
             moved_out: &moved_out,
             moved_in: &moved_in,
+            elsewhere: &elsewhere,
             pacer: &self.pacer,
             touched: &own_edits,
             hold_new,
@@ -2295,6 +2310,9 @@ impl<R: Remote> Engine<R> {
                     }
                     Some(EngineCmd::Recent { limit, reply }) => {
                         let _ = reply.send(Ok(self.recent(limit)));
+                    }
+                    Some(EngineCmd::Documents { reply }) => {
+                        let _ = reply.send(Ok(self.documents()));
                     }
                     Some(EngineCmd::Follow { space, file, reply }) => {
                         if self.follow(space.as_deref(), &file).is_none() && self.can_cycle() {

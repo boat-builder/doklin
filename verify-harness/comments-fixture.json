@@ -1,5 +1,5 @@
 {
-  "about": "Cases the comment code of the Mac (src/criticMarkup.ts, src/metaFile.ts, and the worker's placement rule in cloud-worker/src/agentComments.ts) and of the iPhone (ios/DoklinKit/Sources/DoklinKit/Comments/) must answer alike, byte for byte. Read by verify-harness/comments.test.mjs and ios/DoklinKit/Tests/DoklinKitTests/CommentsTests.swift; mergeMeta, how a sidecar changed in two places is merged, by src/web/merge.ts and the engine (engine/src/sidecar.rs, its tests). Times are milliseconds since 1970.",
+  "about": "Cases the comment code of the Mac (src/criticMarkup.ts, src/metaFile.ts, and the worker's placement rule in cloud-worker/src/agentComments.ts) and of the iPhone (ios/DoklinKit/Sources/DoklinKit/Comments/) must answer alike, byte for byte. Read by verify-harness/comments.test.mjs and ios/DoklinKit/Tests/DoklinKitTests/CommentsTests.swift; mergeMeta, how a sidecar changed in two places is merged, by src/web/merge.ts and the engine (engine/src/sidecar.rs, its tests); a case's `files` are the file ids the workspace holds. Times are milliseconds since 1970.",
   "metaFile": [
     {
       "path": "/a/notes.md",
@@ -738,6 +738,12 @@
       "about": "half a character: kept, and written as JavaScript writes it",
       "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\uD83D\"},\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"a lone low \\ude00, a pair \\ud83d\\ude00 written as escapes\"}]}\n{\"t\":\"mthread\",\"id\":\"m\\ud800\",\"comments\":[{\"author\":\"A\",\"at\":2000,\"body\":\"an id with half a character\"}]}\n{\"t\":\"note\\udfff\",\"id\":\"x\",\"said\":\"\\ud83d\"}\n",
       "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hs1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\ud83d\"},\"comments\":[{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1000,\"body\":\"a lone low \\ude00, a pair 😀 written as escapes\"}]}\n{\"t\":\"mthread\",\"id\":\"m\\ud800\",\"comments\":[{\"author\":\"A\",\"at\":2000,\"body\":\"an id with half a character\"}]}\n{\"t\":\"note\\udfff\",\"id\":\"x\",\"said\":\"\\ud83d\"}\n",
+      "empty": false
+    },
+    {
+      "about": "links: one per destination, sorted, keys in order, bad ones passed over",
+      "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"../b.md\",\"file\":\"f-2\"}\n{\"t\":\"link\",\"id\":\"a.md\"}\n{\"file\":\"f-9\",\"t\":\"link\",\"id\":\"Notes/c d.md\"}\n{\"t\":\"link\",\"id\":\"\",\"file\":\"f-3\"}\n{\"t\":\"link\",\"id\":\"x.md\",\"file\":7}\n{\"t\":\"tcols\",\"id\":\"t1\",\"cols\":[10]}\n{\"t\":\"link\",\"id\":\"../b.md\",\"file\":\"f-8\"}\n{\"t\":\"mthread\",\"id\":\"m1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"../b.md\",\"file\":\"f-2\"}\n{\"t\":\"link\",\"id\":\"Notes/c d.md\",\"file\":\"f-9\"}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n{\"t\":\"mthread\",\"id\":\"m1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"tcols\",\"id\":\"t1\",\"cols\":[10]}\n",
       "empty": false
     }
   ],
@@ -2040,6 +2046,56 @@
       "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n",
       "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n",
       "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n"
+    },
+    {
+      "about": "links added on both sides, to two destinations",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n{\"t\":\"link\",\"id\":\"b.md\",\"file\":\"f-2\"}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n{\"t\":\"link\",\"id\":\"c.md\",\"file\":\"f-3\"}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n{\"t\":\"link\",\"id\":\"b.md\",\"file\":\"f-2\"}\n{\"t\":\"link\",\"id\":\"c.md\",\"file\":\"f-3\"}\n"
+    },
+    {
+      "about": "a link dropped on one side and kept on the other is dropped",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n{\"t\":\"link\",\"id\":\"b.md\",\"file\":\"f-2\"}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n{\"t\":\"link\",\"id\":\"b.md\",\"file\":\"f-2\"}\n{\"t\":\"mthread\",\"id\":\"m1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n{\"t\":\"mthread\",\"id\":\"m1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n"
+    },
+    {
+      "about": "one destination moved to another file on one side only: that side's",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n{\"t\":\"mthread\",\"id\":\"m1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-2\"}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-2\"}\n{\"t\":\"mthread\",\"id\":\"m1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n"
+    },
+    {
+      "about": "one destination, two files: the one whose file exists",
+      "base": null,
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-2\"}\n",
+      "files": [
+        "f-2"
+      ],
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-2\"}\n"
+    },
+    {
+      "about": "one destination, two files, neither there: the lowest id",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-9\"}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-2\"}\n",
+      "files": [],
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-2\"}\n"
+    },
+    {
+      "about": "one destination, two files, both there: the lowest id, whichever side",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-2\"}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-9\"}\n",
+      "files": [
+        "f-2",
+        "f-9"
+      ],
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-2\"}\n"
     }
   ]
 }

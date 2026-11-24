@@ -1,6 +1,6 @@
 //! A document's sidecar, `<stem>.meta.jsonl`: what the document owns that
-//! isn't its prose (comment-thread bodies, table widths, and records a newer
-//! app writes). The app writes it (src/metaFile.ts); the engine only merges
+//! isn't its prose (comment-thread bodies, table widths, the file each link
+//! to another document means, and records a newer app writes). The app writes it (src/metaFile.ts); the engine only merges
 //! it, and does so by its records rather than its lines.
 //!
 //! A line merge of a sorted list of records calls two records added next to
@@ -78,6 +78,14 @@ struct Cols {
     cols: Vec<String>,
 }
 
+/// A link to another document: its destination as the note writes it
+/// (`id`), and the file it means.
+#[derive(Clone, Debug, PartialEq)]
+struct Link {
+    id: String,
+    file: String,
+}
+
 /// A record this engine doesn't know, carried as it was written.
 #[derive(Clone, Debug, PartialEq)]
 struct Foreign {
@@ -91,6 +99,7 @@ struct Meta {
     hthreads: Vec<Thread>,
     mthreads: Vec<Thread>,
     tcols: Vec<Cols>,
+    links: Vec<Link>,
     foreign: Vec<Foreign>,
 }
 
@@ -212,6 +221,10 @@ fn parse(raw: &str) -> Meta {
                 let Some(cols) = cols(r.get("cols")).filter(|_| !id.is_empty()) else { continue };
                 meta.tcols.push(Cols { id, cols });
             }
+            "link" => {
+                let Some(file) = r.get("file").and_then(Value::as_str).filter(|f| !f.is_empty() && !id.is_empty()) else { continue };
+                meta.links.push(Link { id, file: file.to_string() });
+            }
             _ => meta.foreign.push(Foreign { t: t.to_string(), id, raw: trimmed.to_string() }),
         }
         seen.insert(key);
@@ -261,6 +274,10 @@ fn serialize(meta: &Meta) -> String {
     for c in &meta.tcols {
         let line = format!(r#"{{"t":"tcols","id":{},"cols":[{}]}}"#, js_string(&c.id), c.cols.join(","));
         rows.push((format!("tcols {}", c.id), line));
+    }
+    for l in &meta.links {
+        let line = format!(r#"{{"t":"link","id":{},"file":{}}}"#, js_string(&l.id), js_string(&l.file));
+        rows.push((format!("link {}", l.id), line));
     }
     for f in &meta.foreign {
         rows.push((format!("{} {} {}", f.t, f.id, f.raw), f.raw.clone()));
@@ -360,9 +377,34 @@ fn merge_keyed<T: Clone + PartialEq>(base: &[T], ours: &[T], theirs: &[T], key: 
     out
 }
 
+/// Links, three ways, as whole records by their destination (`mergeLinks`).
+/// When both sides changed one destination to two different files, which
+/// only a path reused between two saves does, the one whose file `exists` is
+/// kept, else the lowest id: every device merging the two keeps the same one.
+fn merge_links(base: &[Link], ours: &[Link], theirs: &[Link], exists: &dyn Fn(&str) -> bool) -> Vec<Link> {
+    let was: HashMap<&str, &Link> = base.iter().map(|l| (l.id.as_str(), l)).collect();
+    let other: HashMap<&str, &Link> = theirs.iter().map(|l| (l.id.as_str(), l)).collect();
+    merge_keyed(base, ours, theirs, |l| l.id.as_str())
+        .into_iter()
+        .map(|l| {
+            let Some(o) = other.get(l.id.as_str()).filter(|o| o.file != l.file) else { return l };
+            if was.get(l.id.as_str()).is_some_and(|b| b.file == o.file) {
+                return l;
+            }
+            let (mine, theirs) = (exists(&l.file), exists(&o.file));
+            if mine != theirs {
+                return if mine { l } else { (*o).clone() };
+            }
+            if l.file < o.file { l } else { (*o).clone() }
+        })
+        .collect()
+}
+
 /// Two versions of a sidecar in one, against the one both started from
 /// (None: it had none). Never fails: a sidecar never gets a conflict copy.
-pub fn merge(base: Option<&str>, ours: &str, theirs: &str) -> String {
+/// `exists` says whether a file id is one of the workspace's, in any
+/// section (`merge_links`).
+pub fn merge(base: Option<&str>, ours: &str, theirs: &str, exists: &dyn Fn(&str) -> bool) -> String {
     if ours == theirs {
         return ours.to_string();
     }
@@ -373,6 +415,7 @@ pub fn merge(base: Option<&str>, ours: &str, theirs: &str) -> String {
         hthreads: merge_threads(&b.hthreads, &o.hthreads, &t.hthreads),
         mthreads: merge_threads(&b.mthreads, &o.mthreads, &t.mthreads),
         tcols: merge_keyed(&b.tcols, &o.tcols, &t.tcols, |c| c.id.as_str()),
+        links: merge_links(&b.links, &o.links, &t.links, exists),
         foreign: merge_keyed(&b.foreign, &o.foreign, &t.foreign, |f| f.raw.as_str()),
     })
 }
@@ -391,6 +434,7 @@ pub fn with_records_of(current: Option<&str>, other: &str) -> String {
     add(&mut now.hthreads, &then.hthreads, |t| t.id.clone());
     add(&mut now.mthreads, &then.mthreads, |t| t.id.clone());
     add(&mut now.tcols, &then.tcols, |c| c.id.clone());
+    add(&mut now.links, &then.links, |l| l.id.clone());
     add(&mut now.foreign, &then.foreign, |f| format!("{} {}", f.t, f.id));
     serialize(&now)
 }
@@ -428,7 +472,8 @@ mod tests {
         assert!(!cases.is_empty());
         for case in cases {
             let base = case["base"].as_str();
-            let out = merge(base, text(&case["ours"]), text(&case["theirs"]));
+            let files: Vec<&str> = case["files"].as_array().map(|f| f.iter().map(text).collect()).unwrap_or_default();
+            let out = merge(base, text(&case["ours"]), text(&case["theirs"]), &|fid| files.contains(&fid));
             assert_eq!(out, text(&case["out"]), "{}", text(&case["about"]));
         }
     }
@@ -438,7 +483,7 @@ mod tests {
         let odd = r#"{"t":"mthread","id":"m1","comments":[{"author":"A","at":1,"body":"half \ud83d"}]}"#;
         let ours = format!("{HEADER}\n{odd}\n");
         let theirs = format!("{HEADER}\n{}\n", r#"{"t":"mthread","id":"m2","comments":[{"author":"B","at":2,"body":"x"}]}"#);
-        let merged = merge(Some(&format!("{HEADER}\n")), &ours, &theirs);
+        let merged = merge(Some(&format!("{HEADER}\n")), &ours, &theirs, &|_| false);
         assert!(merged.contains(odd), "{merged}");
         assert!(merged.contains(r#""id":"m2""#), "{merged}");
     }

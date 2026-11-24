@@ -328,6 +328,25 @@ public struct RecentFile: Decodable, Hashable, Sendable {
     }
 }
 
+/// `cloud_documents`: a document of the workspace on this device, in any
+/// section — what a link to a document is resolved against. A note's html
+/// rendition is part of the note. Mirrors `WorkspaceDocument`
+/// (engine/src/cloud/status.rs ⇄ src/docLinks.ts): change all three.
+public struct WorkspaceDocument: Decodable, Hashable, Sendable {
+    /// Workspace-relative.
+    public let path: String
+    /// Null for a file no manifest carries yet.
+    public let fileId: String?
+    /// The space it is in; null for Library.
+    public let section: String?
+
+    public init(path: String, fileId: String?, section: String?) {
+        self.path = path
+        self.fileId = fileId
+        self.section = section
+    }
+}
+
 /// `cloud_link_target`: which workspace a link to a page is in, and its
 /// folder here when this device has joined it. Mirrors `LinkTarget`
 /// (engine/src/cloud/status.rs).

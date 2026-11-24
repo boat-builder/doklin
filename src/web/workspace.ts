@@ -38,6 +38,7 @@ import type {
   PresenceDevice,
   PublicPage,
 } from "../cloud";
+import { documentsOf, type WorkspaceDocument } from "../docLinks";
 import { HTML_EXT_RE, MD_EXT_RE, META_SUFFIX, htmlSiblingOf, metaFileOf } from "../metaFile";
 import { Refused, Unreachable, ask, askJson, deviceId, deviceName, nextDay, send, usedToday } from "./http";
 import { tabs, type Tabs } from "./tabs";
@@ -412,6 +413,18 @@ export class Workspace {
     for (const path of this.placed()) add(dirIn(path));
     for (const dir of this.made) add(dir);
     return dirs;
+  }
+
+  /** Every document of the workspace, in every section this person is in,
+   *  by workspace-relative path, with its file id (`Documents.documents`). */
+  documents(): WorkspaceDocument[] {
+    const all: WorkspaceDocument[] = [];
+    for (const section of this.sections.values()) {
+      for (const [path, entry] of section.files) {
+        all.push({ path: join(section.mount, path), fileId: entry.fid, section: section.id === "" ? null : section.id });
+      }
+    }
+    return documentsOf(all);
   }
 
   /** The documents under a folder, as the Mac's tree lists them (`walk`,

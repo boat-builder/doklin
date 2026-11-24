@@ -49,6 +49,7 @@ import type {
   CloudStatus,
   EveryPage,
 } from "./cloud";
+import type { WorkspaceDocument } from "./docLinks";
 import type { StoredTab } from "./tabs";
 import type {
   DeletedFile,
@@ -164,6 +165,11 @@ export interface Documents {
   exists(path: string): Promise<boolean>;
   /** The documents under `root`; with `all`, every file. */
   tree(root: string, all?: boolean): Promise<TreeNode>;
+  /** Every document of the workspace at `root`, in every section, by its
+   *  workspace-relative path, each with its file id where it has one: what a
+   *  link to a document is resolved against. A folder that doesn't sync
+   *  lists its tree, with no ids. */
+  documents(root: string): Promise<WorkspaceDocument[]>;
   /** An empty document, or a folder. */
   create(path: string, kind: EntryKind): Promise<void>;
   /** Move or rename; a document's parts go with it. Rejects when nothing moved. */

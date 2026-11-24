@@ -435,7 +435,7 @@ export class Saving {
       if (h.out !== ours) continue;
       let merged: string;
       if (kind === "meta") {
-        merged = mergeMeta(base, ours, theirs);
+        merged = mergeMeta(base, ours, theirs, (fid) => this.ws.pathOfFile("", fid) !== null);
       } else {
         const both = ours === theirs ? ours : base === null ? null : mergeText(base, ours, theirs);
         if (both === null && doc.copied !== stored.file.hash) {

@@ -103,6 +103,7 @@ function documentsOf(ws: Workspace, saving: Saving): Documents {
     exists: async (path) => saving.exists(path),
     // A manifest names documents and nothing else, so every file is the same list.
     tree: async (root) => ws.tree(root),
+    documents: async () => ws.documents(),
     create: said((path, kind) => saving.create(path, kind)),
     move: said((from, to, kind) => saving.move(from, to, kind)),
     copy: said((from, to, kind) => saving.copy(from, to, kind)),

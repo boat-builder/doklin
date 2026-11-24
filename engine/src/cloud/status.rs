@@ -225,6 +225,50 @@ pub struct RecentFile {
     pub section: Option<String>,
 }
 
+/// `cloud_documents`: a document of the workspace on this device, in any
+/// section: what a link to a document is resolved against, and what the
+/// editor's `@` list picks from. A markdown note's html rendition is part of
+/// the note, not a document of its own. Mirrored in src/docLinks.ts and
+/// ios/DoklinKit (`Payloads.swift`), both `WorkspaceDocument`: change all
+/// three.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDocument {
+    /// Workspace-relative, as this device's folders spell it.
+    pub path: String,
+    /// Null for a file no manifest carries yet, and in a folder that
+    /// doesn't sync.
+    pub file_id: Option<String>,
+    /// The space it is in; null for the shared workspace.
+    pub section: Option<String>,
+}
+
+/// Which of `files` are documents: markdown, and html that is not a markdown
+/// note's rendition (`<stem>.html` beside `<stem>.md`), sorted by path. The
+/// app's rule (`documentsOf`, src/docLinks.ts): change both.
+pub fn documents_of(files: impl IntoIterator<Item = WorkspaceDocument>) -> Vec<WorkspaceDocument> {
+    const MARKDOWN: [&str; 4] = [".md", ".markdown", ".mdown", ".mkd"];
+    let stem = |path: &str, ext: &str| path[..path.len() - ext.len()].to_lowercase();
+    let files: Vec<WorkspaceDocument> = files.into_iter().collect();
+    let notes: std::collections::HashSet<String> = files
+        .iter()
+        .filter_map(|f| {
+            let lower = f.path.to_lowercase();
+            MARKDOWN.iter().find(|ext| lower.ends_with(*ext)).map(|ext| stem(&f.path, ext))
+        })
+        .collect();
+    let mut out: Vec<WorkspaceDocument> = files
+        .into_iter()
+        .filter(|f| {
+            let lower = f.path.to_lowercase();
+            MARKDOWN.iter().any(|ext| lower.ends_with(ext))
+                || (lower.ends_with(".html") && !notes.contains(&stem(&f.path, ".html")))
+        })
+        .collect();
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
 /// `cloud_link_target`: which workspace a link to a page is in, and where
 /// this device holds it — what an app needs to say "it is on its way" rather
 /// than "you are not in that workspace" before the file is here.

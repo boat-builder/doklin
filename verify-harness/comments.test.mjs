@@ -155,7 +155,11 @@ for (const c of fx.operations) {
 }
 
 // A sidecar changed in two places, merged by its records: the browser's
-// merge here, the engine's in engine/src/sidecar.rs's tests.
-for (const c of fx.mergeMeta) same(mg.mergeMeta(c.base, c.ours, c.theirs), c.out, `mergeMeta: ${c.about}`);
+// merge here, the engine's in engine/src/sidecar.rs's tests. `files` are
+// the file ids the workspace holds, where a case asks which link's exists.
+for (const c of fx.mergeMeta) {
+  const files = new Set(c.files ?? []);
+  same(mg.mergeMeta(c.base, c.ours, c.theirs, (fid) => files.has(fid)), c.out, `mergeMeta: ${c.about}`);
+}
 
 console.log(`comments.test.mjs: ${checked} checks passed`);

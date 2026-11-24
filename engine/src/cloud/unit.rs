@@ -197,6 +197,9 @@ pub(crate) struct Ctx<'a> {
     /// their path here, and the id they had there, which they keep. Links
     /// and *Copy link*s name a file by its id, so a move never breaks one.
     pub moved_in: &'a HashMap<String, String>,
+    /// Every file id the other sections on this device last applied: with
+    /// this unit's own, whether a link's file exists (`sidecar::merge`).
+    pub elsewhere: &'a HashSet<String>,
     /// The workspace's bulk lane (pace.rs).
     pub pacer: &'a Mutex<Pacer>,
     /// Paths of this unit the app itself wrote since they last went up: a
@@ -950,7 +953,7 @@ impl<R: Remote> Unit<R> {
         // Conflict copies made in this pass, beside the document each is of.
         let mut copies: Vec<(String, String)> = Vec::new();
         for (fid, rf) in express {
-            if !self.apply_file(&fid, &rf, ctx, &mut touched, &mut copies).await? {
+            if !self.apply_file(&fid, &rf, remote, ctx, &mut touched, &mut copies).await? {
                 self.state.owed.insert(fid);
             }
         }
@@ -967,7 +970,7 @@ impl<R: Remote> Unit<R> {
                 left -= 1;
                 bytes += rf.size;
             }
-            if self.apply_file(&fid, &rf, ctx, &mut touched, &mut copies).await? {
+            if self.apply_file(&fid, &rf, remote, ctx, &mut touched, &mut copies).await? {
                 self.state.owed.remove(&fid);
             } else {
                 self.state.owed.insert(fid);
@@ -998,6 +1001,7 @@ impl<R: Remote> Unit<R> {
         &mut self,
         fid: &str,
         rf: &ManifestFile,
+        remote: &Manifest,
         ctx: &Ctx<'_>,
         touched: &mut Vec<String>,
         copies: &mut Vec<(String, String)>,
@@ -1096,7 +1100,8 @@ impl<R: Remote> Unit<R> {
         let base = std::fs::read(self.base_path(&fid)).ok();
         let merged = if crate::sidecar::is_sidecar(&rf.path) {
             let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-            MergeOutcome::Clean(crate::sidecar::merge(base.as_deref().map(text).as_deref(), &text(&ours), &text(&theirs)))
+            let exists = |file: &str| remote.files.contains_key(file) || self.state.files.contains_key(file) || ctx.elsewhere.contains(file);
+            MergeOutcome::Clean(crate::sidecar::merge(base.as_deref().map(text).as_deref(), &text(&ours), &text(&theirs), &exists))
         } else {
             merge_texts(base.as_deref(), &ours, &theirs)
         };

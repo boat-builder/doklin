@@ -161,6 +161,7 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
     mthreads: [...meta.mthreads].reverse(),
     hthreads: [...meta.hthreads].reverse(),
     tcols: [...meta.tcols].reverse(),
+    links: [...meta.links].reverse(),
     foreign: [...meta.foreign].reverse(),
   };
   assert.equal(serializeEntityMeta(shuffled), ser);
@@ -195,7 +196,8 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
     ...emptyMeta(),
     mthreads: [thread("gone1", "dropped by this save"), thread("kept1", "as it was")],
     tcols: [{ id: "old", cols: [100] }],
-    foreign: [{ t: "link", sortId: "../a.md", raw: '{"t":"link","id":"../a.md","file":"f-111111111111"}' }],
+    links: [{ id: "../a.md", file: "f-111111111111" }],
+    foreign: [{ t: "board", sortId: "b1", raw: '{"t":"board","id":"b1"}' }],
   });
   const next = serializeEntityMeta({ ...emptyMeta(), mthreads: [thread("kept1", "edited"), thread("new1", "added")] });
   const meanwhile = parseEntityMeta(sidecarWhileWriting(disk, next));
@@ -205,7 +207,8 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
     "every record either text uses, the new one's where both have it",
   );
   assert.deepEqual(meanwhile.tcols.map((c) => c.id), ["old"]);
-  assert.deepEqual(meanwhile.foreign.map((f) => f.sortId), ["../a.md"], "records it doesn't know too");
+  assert.deepEqual(meanwhile.links, [{ id: "../a.md", file: "f-111111111111" }], "the old text's links keep their files");
+  assert.deepEqual(meanwhile.foreign.map((f) => f.sortId), ["b1"], "records it doesn't know too");
   assert.equal(sidecarWhileWriting(null, next), next, "no sidecar on disk: the new one");
   assert.equal(sidecarWhileWriting(next, next), next, "nothing dropped: the new one, byte for byte");
 }

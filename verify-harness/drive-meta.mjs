@@ -104,14 +104,16 @@ await poll(async () =>
 step("reload expands marker + meta back into the full thread", true);
 
 // 6. A meta record whose marker is gone (external edit elsewhere) surfaces
-//    as an orphan card — kept, labeled, never silently dropped.
-await page.evaluate(() => {
+//    as an orphan card — kept, labeled, never silently dropped. The sidecar
+//    also files a link's file (step 7 checks it survives).
+const LINK = `{"t":"link","id":"other.md","file":"f-0123456789ab"}`;
+await page.evaluate((link) => {
   const p = "/docs/notes.meta.jsonl";
   const line =
     `{"t":"mthread","id":"orphmm1","comments":[{"author":"Ghost","at":1,"body":"orphan body"}]}`;
-  window.__fs.set(p, window.__fs.get(p) + line + "\n");
+  window.__fs.set(p, window.__fs.get(p) + link + "\n" + line + "\n");
   sessionStorage.setItem("harness-fs", JSON.stringify([...window.__fs]));
-});
+}, LINK);
 await page.reload();
 const orphanCard = page.locator(".comment-card:has(.comment-orphan-note)");
 await poll(async () => (await orphanCard.count()) === 1);
@@ -130,6 +132,7 @@ await poll(async () => {
   return m !== undefined && !m.includes("orphmm1");
 });
 step("orphan delete scrubs its meta record", true);
+step("a link record rides through the app's own sidecar write", (await fsGet("/docs/notes.meta.jsonl")).includes(LINK));
 
 // 8. A save is the sidecar first, then the text, and fails whole. With the
 //    markdown's write refused, deleting the thread writes the sidecar and

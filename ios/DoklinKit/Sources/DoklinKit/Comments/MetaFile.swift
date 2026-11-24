@@ -5,13 +5,16 @@
 //                                                its marker is in the markdown
 //   {"t":"hthread","id","anchor","comments"}     an html thread, wholly here
 //   {"t":"tcols","id","cols"}                    a table's column widths
+//   {"t":"link","id","file"}                     the file a link to another
+//                                                document means, by the
+//                                                link's destination
 //   anything else                                kept as it is
 //
-// One record a line, sorted, keys in a fixed order: sync merges the file
-// line by line with what the Mac writes (engine/src/cloud/merge.rs), so two
-// devices holding the same threads must write the same bytes — which is why
-// what a record says is kept as `JSString`s. A port of src/metaFile.ts —
-// change both; verify-harness/comments-fixture.json holds them to it.
+// One record a line, sorted, keys in a fixed order: two devices holding the
+// same records write the same bytes, and sync merges the file by its
+// records (engine/src/sidecar.rs) — which is why what a record says is kept
+// as `JSString`s. A port of src/metaFile.ts — change both;
+// verify-harness/comments-fixture.json holds them to it.
 
 import Foundation
 
@@ -41,6 +44,13 @@ struct TableCols: Equatable, Sendable {
     var cols: [Double]
 }
 
+/// The file a link to another document means: `id` is the link's
+/// destination as the note writes it (`DocLinks.key`), `file` the file's id.
+public struct LinkRecord: Equatable, Sendable {
+    public var id: JSString
+    public var file: JSString
+}
+
 /// A record of a kind this version does not know, kept line for line.
 struct ForeignRecord: Equatable, Sendable {
     var t: JSString
@@ -52,12 +62,13 @@ public struct EntityMeta: Equatable, Sendable {
     public var mthreads: [MdThread] = []
     public var hthreads: [HtmlThread] = []
     var tcols: [TableCols] = []
+    public var links: [LinkRecord] = []
     var foreign: [ForeignRecord] = []
 
     public init() {}
 
     /// Nothing worth a file.
-    public var isEmpty: Bool { mthreads.isEmpty && hthreads.isEmpty && tcols.isEmpty && foreign.isEmpty }
+    public var isEmpty: Bool { mthreads.isEmpty && hthreads.isEmpty && tcols.isEmpty && links.isEmpty && foreign.isEmpty }
 }
 
 public enum MetaFile {
@@ -122,6 +133,10 @@ public enum MetaFile {
                 guard cols.count == items.count else { continue }
                 seen.insert(key)
                 meta.tcols.append(TableCols(id: id, cols: cols.map { $0.rounded(.toNearestOrAwayFromZero) }))
+            case "link":
+                guard !id.isEmpty, let file = value["file"]?.string, !file.isEmpty else { continue }
+                seen.insert(key)
+                meta.links.append(LinkRecord(id: id, file: file))
             default:
                 seen.insert(key)
                 meta.foreign.append(ForeignRecord(t: t, sortId: id, raw: trimmed))
@@ -152,6 +167,10 @@ public enum MetaFile {
         for table in meta.tcols {
             let line = JSValue.object([("t", .string("tcols")), ("id", .string(table.id)), ("cols", .array(table.cols.map(JSValue.number)))]).json
             rows.append(("tcols " + table.id, line))
+        }
+        for link in meta.links {
+            let line = JSValue.object([("t", .string("link")), ("id", .string(link.id)), ("file", .string(link.file))]).json
+            rows.append(("link " + link.id, line))
         }
         for record in meta.foreign {
             rows.append((record.t + " " + record.sortId + " " + JSString(record.raw), record.raw))

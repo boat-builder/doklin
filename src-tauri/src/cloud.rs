@@ -9,7 +9,7 @@ use doklin_engine::cloud::invite::Pasted;
 use doklin_engine::cloud::remote::{AgentRecord, EveryPages, MemberRecord};
 use doklin_engine::cloud::status::{
     AgentAdded, AgentLogin, CloudStatus, DeviceCode, HeldWorkspace, Invited, PageLinkCopy, People, Probe, RecentFiles,
-    Redeemed, Removed, SpaceStatus,
+    Redeemed, Removed, SpaceStatus, WorkspaceDocument,
 };
 use tauri::{AppHandle, Manager};
 
@@ -318,6 +318,13 @@ pub(crate) async fn cloud_wipe(app: AppHandle, root: String) -> Result<u64, Stri
 #[tauri::command]
 pub(crate) async fn cloud_recent(app: AppHandle, root: String, limit: Option<usize>) -> Result<RecentFiles, String> {
     cloud::cloud_recent(&core(&app)?, root, limit).await
+}
+
+/// Every document of a workspace on this Mac, in every section, with its
+/// file id; None for a folder that doesn't sync (the app lists its tree).
+#[tauri::command]
+pub(crate) async fn cloud_documents(app: AppHandle, root: String) -> Result<Option<Vec<WorkspaceDocument>>, String> {
+    cloud::cloud_documents(&core(&app)?, root).await
 }
 
 /// *Copy link*. Following one is the app's own (links.rs): a link reaches

@@ -35,13 +35,15 @@ extension EnvironmentValues {
 
 /// A link inside a note, as the URL a tap on it carries. A web address is
 /// itself; anything else — a path to another note, a `#heading`, the words a
-/// comment is on — rides in a URL of the app's own, read back by `tap`.
+/// comment is on, a link that opens nothing here — rides in a URL of the
+/// app's own, read back by `tap`.
 enum NoteLink {
     private static let scheme = "doklin-note"
 
     enum Tap {
         case href(String)
         case thread(String)
+        case closed
     }
 
     static func url(href: String) -> URL? {
@@ -55,6 +57,9 @@ enum NoteLink {
         make("thread", thread)
     }
 
+    /// A link to a document this person can't open (`Inline.closedLink`).
+    static var closed: URL? { make("closed", "") }
+
     private static func make(_ host: String, _ value: String) -> URL? {
         var parts = URLComponents()
         parts.scheme = scheme
@@ -66,7 +71,11 @@ enum NoteLink {
     static func tap(_ url: URL) -> Tap? {
         guard url.scheme == scheme, let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
         let value = parts.queryItems?.first?.value ?? ""
-        return parts.host == "thread" ? .thread(value) : .href(value)
+        switch parts.host {
+        case "thread": return .thread(value)
+        case "closed": return .closed
+        default: return .href(value)
+        }
     }
 }
 
@@ -367,10 +376,16 @@ struct InlineText: View {
             if let href = run.link, let url = NoteLink.url(href: href) {
                 piece.link = url
             }
+            if run.closed {
+                // A link to a document this person can't open: its words,
+                // greyed, and a tap says so.
+                piece.link = NoteLink.closed
+                piece.foregroundColor = Theme.text3
+            }
             if run.highlighted {
                 // Words under a comment: marked, and a tap opens the thread.
                 piece.backgroundColor = Theme.mark
-                if run.link == nil, let thread = run.thread, let url = NoteLink.url(thread: thread) {
+                if run.link == nil, !run.closed, let thread = run.thread, let url = NoteLink.url(thread: thread) {
                     piece.link = url
                     piece.foregroundColor = Theme.text1
                 }

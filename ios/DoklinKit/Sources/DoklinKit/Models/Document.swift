@@ -19,8 +19,11 @@ public final class DocumentModel {
     public let kind: FileKind
     /// The markdown, as the file has it.
     public private(set) var text: String?
-    /// The markdown, read into blocks.
+    /// The markdown, read into blocks, each link to a document resolved
+    /// (`DocLinks.resolving`).
     public private(set) var document: MarkdownDocument?
+    /// The files the note's links mean, from its sidecar.
+    private var links: [LinkRecord] = []
     /// The html: a page's own, or a note's rendition beside it.
     public private(set) var html: String?
     /// Any other file, as bytes.
@@ -79,7 +82,8 @@ public final class DocumentModel {
             case .markdown:
                 let source = try workspace.files.text(path)
                 text = source
-                document = MarkdownDocument.parse(source)
+                links = (try? workspace.files.text(DocLinks.metaFile(of: path))).map { MetaFile.parse($0).links } ?? []
+                document = reading(source)
                 html = try htmlPath.map { try workspace.files.text($0) }
             case .html:
                 html = try workspace.files.text(path)
@@ -92,6 +96,19 @@ public final class DocumentModel {
         } catch {
             phase = .failed(error.localizedDescription)
         }
+    }
+
+    /// The note as the reader shows it: its links to documents lead where
+    /// their files are now, as the workspace last listed them.
+    private func reading(_ source: String) -> MarkdownDocument {
+        DocLinks.resolving(MarkdownDocument.parse(source), in: path, records: links, documents: workspace.documents)
+    }
+
+    /// The workspace's documents changed: read the links again.
+    public func relink() {
+        guard isNote, let text else { return }
+        let next = reading(text)
+        if next != document { document = next }
     }
 
     /* ---------- What was read ---------- */
@@ -123,7 +140,7 @@ public final class DocumentModel {
             let read: String = try await Engine.shared.call(
                 "versions_read", ["root": .string(history.root), "hash": .string(version.hash)]
             )
-            let marks = ChangeMarks.between(MarkdownDocument.parse(read), document)
+            let marks = ChangeMarks.between(reading(read), document)
             sinceRead = marks.isEmpty ? nil : marks
             readAt = version.ts
         } catch {
@@ -152,7 +169,7 @@ public final class DocumentModel {
         guard now == expected || now == source else { throw ChangedElsewhere() }
         try workspace.files.write(path, Data(source.utf8))
         text = source
-        document = MarkdownDocument.parse(source)
+        document = reading(source)
         await workspace.wrote([path])
     }
 

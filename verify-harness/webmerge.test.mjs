@@ -23,6 +23,8 @@ const out = await build({
 });
 const chunk = (Array.isArray(out) ? out[0] : out).output.find((o) => o.type === "chunk");
 const { mergeText, mergeMeta, conflictCopyNames } = await import(`data:text/javascript,${encodeURIComponent(chunk.code)}`);
+/** No file is any section's: these cases have no links. */
+const none = () => false;
 
 let passed = 0;
 const test = (name, fn) => {
@@ -111,7 +113,7 @@ test("a sidecar: a reply on each side of one thread is kept, where a line merge 
   const base = meta(thread("m1", "Ada: first"));
   const ours = meta(JSON.stringify({ t: "mthread", id: "m1", comments: [{ author: "Ada", at: 1782900000000, body: "Ada: first" }, { author: "Bob", at: 1782900000500, body: "Bob: mine" }] }));
   const theirs = meta(JSON.stringify({ t: "mthread", id: "m1", comments: [{ author: "Ada", at: 1782900000000, body: "Ada: first" }, { author: "Cy", at: 1782900000700, body: "Cy: theirs" }] }));
-  const merged = mergeMeta(base, ours, theirs);
+  const merged = mergeMeta(base, ours, theirs, none);
   const bodies = JSON.parse(merged.split("\n")[1]).comments.map((c) => c.body);
   assert.deepEqual(bodies.sort(), ["Ada: first", "Bob: mine", "Cy: theirs"]);
 });
@@ -120,11 +122,11 @@ test("a sidecar: a thread made on each side, a thread deleted on one, and a docu
   const base = meta(thread("m1", "Ada: one"), thread("m2", "Ada: two"));
   const ours = meta(thread("m1", "Ada: one"), thread("m2", "Ada: two"), thread("m3", "Bob: mine"));
   const theirs = meta(thread("m2", "Ada: two"), thread("m4", "Cy: theirs"));
-  const ids = mergeMeta(base, ours, theirs).split("\n").slice(1, -1).map((l) => JSON.parse(l).id);
+  const ids = mergeMeta(base, ours, theirs, none).split("\n").slice(1, -1).map((l) => JSON.parse(l).id);
   assert.deepEqual(ids, ["m2", "m3", "m4"], "m1 was deleted there, and stays deleted");
-  const fresh = mergeMeta(null, meta(thread("m3", "Bob: mine")), meta(thread("m4", "Cy: theirs")));
+  const fresh = mergeMeta(null, meta(thread("m3", "Bob: mine")), meta(thread("m4", "Cy: theirs")), none);
   assert.deepEqual(fresh.split("\n").slice(1, -1).map((l) => JSON.parse(l).id), ["m3", "m4"]);
-  assert.equal(mergeMeta(base, ours, ours), ours);
+  assert.equal(mergeMeta(base, ours, ours, none), ours);
 });
 
 test("a sidecar: table widths and records this version does not know follow the side that changed them", () => {
@@ -132,7 +134,7 @@ test("a sidecar: table widths and records this version does not know follow the 
   const base = meta(cols("t1", 100, 200), '{"t":"future","id":"x","n":1}');
   const ours = meta(cols("t1", 100, 200), '{"t":"future","id":"x","n":1}', cols("t2", 50, 0));
   const theirs = meta(cols("t1", 120, 200));
-  const lines = mergeMeta(base, ours, theirs).split("\n").slice(1, -1);
+  const lines = mergeMeta(base, ours, theirs, none).split("\n").slice(1, -1);
   assert.deepEqual(lines, [cols("t1", 120, 200), cols("t2", 50, 0)], "their width, our new table, and the record they removed is gone");
 });
 

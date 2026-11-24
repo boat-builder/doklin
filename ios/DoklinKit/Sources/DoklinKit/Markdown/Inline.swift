@@ -14,6 +14,9 @@ public indirect enum Inline: Equatable, Sendable {
     case strong([Inline])
     case strikethrough([Inline])
     case link(destination: String, children: [Inline])
+    /// A link to a document this person can't open here: deleted, in a
+    /// section they are not in, or never there (`DocLinks.resolving`).
+    case closedLink([Inline])
     case image(source: String, alt: String)
     /// Words a comment thread is on. `thread` is nil for a marker with no id.
     case highlight(thread: String?, children: [Inline])
@@ -28,6 +31,8 @@ public struct InlineRun: Equatable, Sendable {
     public var code = false
     public var strike = false
     public var link: String?
+    /// In a link that opens nothing here (`Inline.closedLink`).
+    public var closed = false
     /// Carries a comment thread's highlight.
     public var highlighted = false
     public var thread: String?
@@ -36,7 +41,7 @@ public struct InlineRun: Equatable, Sendable {
 
     fileprivate func sameStyle(as other: InlineRun) -> Bool {
         bold == other.bold && italic == other.italic && code == other.code && strike == other.strike
-            && link == other.link && highlighted == other.highlighted && thread == other.thread
+            && link == other.link && closed == other.closed && highlighted == other.highlighted && thread == other.thread
     }
 }
 
@@ -47,7 +52,7 @@ public extension Array where Element == Inline {
             switch node {
             case .text(let s), .code(let s): return s
             case .emphasis(let c), .strong(let c), .strikethrough(let c): return c.plainText
-            case .link(_, let c), .highlight(_, let c): return c.plainText
+            case .link(_, let c), .highlight(_, let c), .closedLink(let c): return c.plainText
             case .image(_, let alt): return alt
             case .lineBreak: return " "
             }
@@ -84,6 +89,9 @@ public extension Array where Element == Inline {
                 case .link(let destination, let c):
                     next.link = destination
                     walk(c, next)
+                case .closedLink(let c):
+                    next.closed = true
+                    walk(c, next)
                 case .highlight(let thread, let c):
                     next.highlighted = true
                     next.thread = thread
@@ -108,7 +116,7 @@ public extension Array where Element == Inline {
         flatMap { node -> [String] in
             switch node {
             case .highlight(let thread, let c): return (thread.map { [$0] } ?? []) + c.threads
-            case .emphasis(let c), .strong(let c), .strikethrough(let c), .link(_, let c): return c.threads
+            case .emphasis(let c), .strong(let c), .strikethrough(let c), .link(_, let c), .closedLink(let c): return c.threads
             default: return []
             }
         }

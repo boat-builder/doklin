@@ -1797,6 +1797,7 @@ pub fn run() {
             cloud::cloud_take_over,
             cloud::cloud_link,
             cloud::cloud_recent,
+            cloud::cloud_documents,
             cloud::cloud_publish,
             cloud::cloud_unpublish,
             cloud::cloud_set_root,

@@ -106,6 +106,20 @@ final class EngineLiveTests: XCTestCase {
         XCTAssertEqual(row.html, "Library/Projects/plan.html")
         XCTAssertFalse(try workspace.files.list("Library").contains { $0.path.hasSuffix(".meta.jsonl") })
 
+        // What links to documents resolve against: every document, by id,
+        // the page beside a note part of it (`cloud_documents`).
+        await workspace.loadDocuments()
+        let listed = workspace.documents.documents.map(\.path)
+        XCTAssertNotNil(workspace.documents.document(at: "Library/Projects/plan.md")?.fileId, "\(listed)")
+        XCTAssertFalse(listed.contains("Library/Projects/plan.html"), "the page is the note's: \(listed)")
+        XCTAssertFalse(listed.contains { $0.hasSuffix(".meta.jsonl") }, "\(listed)")
+        XCTAssertEqual(listed, listed.sorted(), "by path")
+        if let home = workspace.documents.document(at: "Library/Home.md")?.fileId {
+            XCTAssertEqual(workspace.documents.document(id: home)?.path, "Library/Home.md")
+        } else {
+            XCTFail("Home has no id: \(listed)")
+        }
+
         // A note made here reaches the domain: write it, say so, sync. New
         // things land in Library, where everyone sees them.
         let before = try XCTUnwrap(device.status(root)?.lastSyncMs)

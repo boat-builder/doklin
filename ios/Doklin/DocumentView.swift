@@ -61,6 +61,8 @@ struct DocumentView: View {
                 model.load()
                 comments.load()
             }
+            .task { await workspace.loadDocuments() }
+            .onChange(of: workspace.documents) { model.relink() }
             .task(id: model.phase == .loaded) {
                 guard model.phase == .loaded else { return }
                 markFound()
@@ -206,6 +208,11 @@ struct DocumentView: View {
             switch tap {
             case .thread(let id): commentStart = CommentStart(version: .md, thread: id)
             case .href(let href): follow(href)
+            // The engine's sentence for a link that finds nothing (`Follow`):
+            // a deleted page and one in a folder this person is not in are
+            // never told apart.
+            case .closed:
+                model.problem = "That page isn't one you can open in \(workspace.name): it may have been deleted, or moved where you can't see it."
             }
             return .handled
         })

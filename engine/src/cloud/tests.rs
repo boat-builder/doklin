@@ -7084,6 +7084,42 @@ async fn what_changed_lately_is_every_document_newest_first_with_who_changed_it(
     assert_eq!(moved.mtime, before, "a move is not an edit");
 }
 
+/// `cloud_documents`: every document on this device, in every section, by
+/// path: a note's rendition and sidecar are the note's, a file that is not
+/// a document is not listed, and one no manifest carries yet has no id.
+#[tokio::test]
+async fn the_documents_a_link_can_lead_to_are_every_sections_with_their_ids() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    alice.sync().await;
+    std::fs::create_dir_all(alice.abs("Restricted/Finance")).unwrap();
+    alice.cycle().await;
+    let finance = folder_called(&be, "Finance");
+    alice.write("GTM/launch-plan.md", "# Launch\n");
+    alice.write("GTM/launch-plan.html", "<h1>Launch</h1>");
+    alice.write("GTM/launch-plan.meta.jsonl", "{\"doklin\":\"meta\",\"v\":1}\n");
+    alice.write("GTM/page.html", "<p>a page</p>");
+    alice.write("GTM/chart.png", "png");
+    alice.write("Restricted/Finance/budget.md", "the numbers\n");
+    alice.sync().await;
+    alice.write("GTM/new.md", "not synced yet\n");
+
+    let docs = alice.engine.documents();
+    let rows: Vec<(&str, bool, Option<&str>)> =
+        docs.iter().map(|d| (d.path.as_str(), d.file_id.is_some(), d.section.as_deref())).collect();
+    assert_eq!(
+        rows,
+        [
+            ("Library/GTM/launch-plan.md", true, None),
+            ("Library/GTM/new.md", false, None),
+            ("Library/GTM/page.html", true, None),
+            ("Restricted/Finance/budget.md", true, Some(finance.as_str())),
+        ]
+    );
+    let launch = docs[0].file_id.clone().unwrap();
+    assert_eq!(alice.engine.follow(None, &launch).as_deref(), Some("Library/GTM/launch-plan.md"), "the id the engine follows");
+}
+
 /* ---------- One copy of a workspace a device ---------- */
 
 /// The app, as far as a command run on a whole `Core` needs one: nothing is
