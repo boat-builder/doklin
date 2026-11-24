@@ -61,6 +61,11 @@ struct DocumentView: View {
                 model.load()
                 comments.load()
             }
+            .task { await workspace.loadDocuments() }
+            .onChange(of: workspace.documents) {
+                model.relink()
+                session?.documentsChanged()
+            }
             .task(id: model.phase == .loaded) {
                 guard model.phase == .loaded else { return }
                 markFound()
@@ -206,6 +211,11 @@ struct DocumentView: View {
             switch tap {
             case .thread(let id): commentStart = CommentStart(version: .md, thread: id)
             case .href(let href): follow(href)
+            // The engine's sentence for a link that finds nothing (`Follow`):
+            // a deleted page and one in a folder this person is not in are
+            // never told apart.
+            case .closed:
+                model.problem = "That page isn't one you can open in \(workspace.name): it may have been deleted, or moved where you can't see it."
             }
             return .handled
         })
@@ -452,9 +462,16 @@ struct DocumentView: View {
         case .external(let address):
             guard let url = URL(string: address) else { return }
             // A link to a page opens here, not in a browser that would only
-            // hand it back.
+            // hand it back: one of this workspace's on this note's stack,
+            // as a link by its path does; any other as from outside.
             if Workspaces.isPageLink(url) {
-                Task { await device.follow(url) }
+                Task {
+                    if let path = await workspace.page(url) {
+                        route.append(.document(path))
+                    } else {
+                        await device.follow(url)
+                    }
+                }
             } else {
                 openInSystem(url)
             }

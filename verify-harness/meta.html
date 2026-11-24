@@ -73,6 +73,8 @@
                 : Promise.resolve({ contents: c, snapshot: snap(c) });
             }
             case "write_file": {
+              // A disk that refuses one file: a save stopped between its writes.
+              if (args.path === window.__failWrite) return Promise.reject(`write ${args.path}: no space left`);
               window.__fs.set(args.path, args.contents);
               window.__writes.push(args.path);
               return Promise.resolve(snap(args.contents));

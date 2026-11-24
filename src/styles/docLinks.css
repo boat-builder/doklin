@@ -1,0 +1,84 @@
+/* Links to documents in the editor (src/linkMark.ts, src/mentionMenu.ts),
+   on the Mac, in a browser and on the iPhone alike. */
+
+/* A link whose file can't be opened here: its words as they were saved,
+   greyed. */
+.milkdown a .doc-link-closed,
+.milkdown .doc-link-closed {
+  color: var(--text-3);
+  text-decoration-color: var(--border-strong);
+  cursor: default;
+}
+
+/* The list `@` opens. */
+.doc-mention-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 260px;
+  max-width: min(420px, calc(100vw - 16px));
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--text-1);
+}
+
+.doc-mention-menu[hidden] {
+  display: none;
+}
+
+.doc-mention-menu .row {
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.doc-mention-menu .row.selected {
+  background: var(--hover);
+}
+
+.doc-mention-menu .line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.doc-mention-menu .name {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.doc-mention-menu .where {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}
+
+.doc-mention-menu .section {
+  flex: 0 0 auto;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.doc-mention-menu .who {
+  margin-top: 2px;
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+}
+
+.doc-mention-menu .none {
+  padding: 6px 10px;
+  color: var(--text-2);
+}

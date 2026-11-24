@@ -45,7 +45,7 @@ import HistoryRail from "./HistoryRail";
 import VersionPreview, { momentLabel } from "./VersionPreview";
 import WorkspaceHistory from "./WorkspaceHistory";
 import VersionsSettings from "./VersionsSettings";
-import RecentlyDeleted from "./RecentlyDeleted";
+import RecentlyDeleted, { deletedDocuments } from "./RecentlyDeleted";
 import { dragWindowFromGap } from "./windowDrag";
 import { keys } from "./keys";
 import Editor, { type EditorHandle } from "./Editor";
@@ -63,8 +63,13 @@ import {
   isUntitled,
   noteHasText,
   noteTitle,
+  remapSteps,
+  stepOnto,
   tabLabel,
   toStoredTab,
+  type DocTab,
+  type Step,
+  type Steps,
   type StoredTab,
   type Tab,
   type TabKind,
@@ -102,10 +107,19 @@ import {
   type EntityMeta,
   type MdThread,
   type ForeignRecord,
+  type LinkRecord,
   type TableCols,
 } from "./metaFile";
 import { tableWidthsKey } from "./tableWidths";
-import { linkTargetPath } from "./docLinks";
+import {
+  indexDocuments,
+  linkTargetPath,
+  sectionOf,
+  splitLinkRecords,
+  type DocumentIndex,
+  type WorkspaceDocument,
+} from "./docLinks";
+import type { LinkContext } from "./linkMark";
 import { useDismiss } from "./dismiss";
 import { splitFrontmatter } from "./frontmatter";
 import {
@@ -174,6 +188,21 @@ const PART_LABEL: Record<DocumentPart, string> = { rendition: "HTML version", me
 
 // A sidecar's text as the records it holds; null (the document has none yet)
 // is no records.
+const NO_RECENT: string[] = [];
+const NO_STEPS: Steps = { back: [], forward: [] };
+
+// Two lists of link records as one, a destination's record once: `next`'s
+// where both have one.
+const unionRecords = (prev: LinkRecord[], next: LinkRecord[]): LinkRecord[] => {
+  const have = new Set(next.map((r) => r.id));
+  return [...next, ...prev.filter((r) => !have.has(r.id))];
+};
+
+// The same documents, in the same places, under the same ids.
+const sameDocuments = (a: WorkspaceDocument[], b: WorkspaceDocument[]): boolean =>
+  a.length === b.length &&
+  a.every((d, i) => d.path === b[i].path && d.fileId === b[i].fileId && d.section === b[i].section);
+
 const metaOf = (text: string | null): { meta: EntityMeta; metaExists: boolean } =>
   text === null
     ? { meta: emptyMeta(), metaExists: false }
@@ -272,6 +301,7 @@ type CompanionDoc = {
   mdThreads: MdThread[];
   mdOrphans: MdThread[];
   tcols: TableCols[];
+  metaLinks: LinkRecord[];
   metaForeign: ForeignRecord[];
   // The pane document's frontmatter block, split off the same way the active
   // document's is: `contents` above is the BODY, so promoting this pane must
@@ -391,6 +421,22 @@ function readStoredDocZoom(): number {
 function stepDocZoom(current: number, dir: 1 | -1): number {
   const i = DOC_ZOOM_STEPS.indexOf(nearestZoomStep(current));
   return DOC_ZOOM_STEPS[Math.min(DOC_ZOOM_STEPS.length - 1, Math.max(0, i + dir))];
+}
+
+// Scroll a pane to `top` once it is tall enough to be there: Crepe lays a
+// long note out over several frames after it mounts, and a scroll set before
+// then is cut short to what has height yet. Set again each frame for a
+// moment; a scroll the reader makes meanwhile wins.
+function settleScroll(wrap: HTMLElement, top: number) {
+  const until = performance.now() + 800;
+  let set = -1;
+  const apply = () => {
+    if (set >= 0 && Math.abs(wrap.scrollTop - set) > 1) return;
+    wrap.scrollTop = top;
+    set = wrap.scrollTop;
+    if (set < top - 1 && performance.now() < until) requestAnimationFrame(apply);
+  };
+  apply();
 }
 
 const uuid = () =>
@@ -742,6 +788,13 @@ export default function App() {
   // else here. See tableWidths.ts for how a record finds its table.
   const [tableWidths, setTableWidths] = useState<TableCols[]>([]);
   const tableWidthsRef = useRef<TableCols[]>([]);
+  // The active document's link records as its sidecar holds them for the
+  // text on disk: what a meta-only write (the rail's) writes, so it never
+  // drops a record that text uses. A save replaces them with the editor's
+  // (src/linkMark.ts). State for the editor's mount-time prop, as the
+  // widths are.
+  const metaLinksRef = useRef<LinkRecord[]>([]);
+  const [linkRecords, setLinkRecords] = useState<LinkRecord[]>([]);
   const metaForeignRef = useRef<ForeignRecord[]>([]);
   // The hybrid markdown as last read from / written to disk — lets a
   // body-only comment edit skip the (byte-identical) markdown write. This is
@@ -972,6 +1025,42 @@ export default function App() {
   // Where something new lands when nothing says where, and whose version
   // history the folder's own is (a connected top has none).
   const libraryDir = workspaceRoot && cloudForRoot ? libraryDirOf(workspaceRoot) : workspaceRoot;
+  // The workspace's documents, for links between them: what a link to one
+  // opens and shows (src/linkMark.ts) and what the `@` list offers, with
+  // what changed lately first. Read again whenever the tree is
+  // (`treeRefreshToken`: a sync applied, a move, the window's focus); an
+  // unchanged list keeps its index, so open notes relink only for a change.
+  const [listedDocs, setListedDocs] = useState<{ root: string; index: DocumentIndex; recent: string[] } | null>(null);
+  const syncsHere = cloudForRoot != null;
+  useEffect(() => {
+    if (!workspaceRoot) return;
+    let live = true;
+    const root = workspaceRoot;
+    void Promise.all([
+      backend.documents.documents(root),
+      syncsHere && backend.sync
+        ? backend.sync
+            .recent(root, 50)
+            .then((r) => r.files.map((f) => f.path))
+            .catch((): string[] => [])
+        : [],
+    ])
+      .then(([list, recent]) => {
+        if (!live) return;
+        setListedDocs((prev) =>
+          prev && prev.root === root && sameDocuments(prev.index.list, list) && prev.recent.join("\n") === recent.join("\n")
+            ? prev
+            : { root, index: prev && prev.root === root && sameDocuments(prev.index.list, list) ? prev.index : indexDocuments(list), recent },
+        );
+      })
+      .catch((e) => console.error("listing the documents failed", e));
+    return () => {
+      live = false;
+    };
+  }, [workspaceRoot, treeRefreshToken, syncsHere]);
+  const workspaceDocs = listedDocs && listedDocs.root === workspaceRoot ? listedDocs.index : null;
+  const recentDocs = listedDocs && listedDocs.root === workspaceRoot ? listedDocs.recent : NO_RECENT;
+
   // The workspaces this Mac belongs to — every connected one has an engine,
   // so the statuses are the list. What the sidebar's switcher shows.
   const myWorkspaces = useMemo(
@@ -1021,6 +1110,8 @@ export default function App() {
   // section of it — its folder is what `historyRoot` and `deletedFor` hold.
   const [historyRoot, setHistoryRoot] = useState<string | null>(null);
   const [deletedFiles, setDeletedFiles] = useState<DeletedFile[]>([]);
+  // A document's files are one row, and one in the count.
+  const deletedCount = useMemo(() => deletedDocuments(deletedFiles).length, [deletedFiles]);
   const [deletedFor, setDeletedFor] = useState<string | null>(null);
   const [sectionDeleted, setSectionDeleted] = useState<DeletedFile[]>([]);
   // Every store's status — the settings surface's whole model, the same way
@@ -1094,17 +1185,17 @@ export default function App() {
     return () => window.removeEventListener("dk-figure-expand", onExpand);
   }, []);
 
-  // Land a markdown save's thread bodies in the entity meta of a document
-  // that is NOT the active one (a background flush after a focus swap, a
-  // web-edit pull): a guarded read-modify-write preserving the sections this
-  // write doesn't own — html threads, table widths, foreign records — and
-  // any orphaned bodies whose marker is still missing from the given hybrid
-  // markdown.
-  const writeMdThreadsToMeta = useCallback(
-    async (target: string, hybridMd: string, mthreads: MdThread[]) => {
-      const { meta: base, metaExists: exists } = metaOf(
-        await backend.documents.meta(target).catch(() => null),
-      );
+  // The entity meta a markdown save carries for a document that is NOT the
+  // active one (a background flush after a focus swap, a web-edit pull), so
+  // that it goes in the same save as the text: its own meta as the disk has
+  // it, with this save's thread bodies, keeping the sections this save
+  // doesn't own — html threads, table widths, foreign records — and any
+  // orphaned bodies whose marker is still missing from the given hybrid
+  // markdown. Its link records are this save's (`links`, from the editor).
+  // Undefined for a document that has no meta and needs none.
+  const metaWithMdThreads = useCallback(
+    async (target: string, hybridMd: string, mthreads: MdThread[], links: LinkRecord[]): Promise<string | undefined> => {
+      const { meta: base, metaExists: exists } = metaOf(await backend.documents.meta(target));
       const rooted = new Set(mthreads.map((t) => t.id));
       const ids = markerIds(hybridMd);
       const out: EntityMeta = {
@@ -1114,12 +1205,10 @@ export default function App() {
           ...base.mthreads.filter((t) => !rooted.has(t.id) && !ids.has(t.id)),
         ],
         tcols: base.tcols,
+        links,
         foreign: base.foreign,
       };
-      if (metaIsEmpty(out) && !exists) return;
-      await backend.documents
-        .save(target, { meta: serializeEntityMeta(out) }, null)
-        .catch((e) => console.error("meta save failed", target, e));
+      return metaIsEmpty(out) && !exists ? undefined : serializeEntityMeta(out);
     },
     [],
   );
@@ -1268,19 +1357,22 @@ export default function App() {
       hthreads: htmlThreadsRef.current,
       mthreads: [...mdThreadsRef.current, ...mdOrphansRef.current],
       tcols: tableWidthsRef.current,
+      links: metaLinksRef.current,
       foreign: metaForeignRef.current,
     }),
     [],
   );
 
 
-  // `contents` is the editor's serialization — FULL CriticMarkup. What is
-  // saved is the hybrid split: markers-only markdown plus thread-body records
-  // in the entity meta (see metaFile.ts), the two as ONE save. A body-only
+  // `contents` is the editor's serialization — FULL CriticMarkup, and the
+  // records line of its links (src/linkMark.ts). What is saved is the
+  // hybrid split: markers-only markdown plus thread-body and link records in
+  // the entity meta (see metaFile.ts), the two as ONE save. A body-only
   // edit (a reply typed in the rail) leaves the hybrid markdown
   // byte-identical and its text is not sent at all — only the meta moves.
   const writeToDisk = useCallback(async (target: string, contents: string): Promise<void> => {
-    const { md: hybrid, mthreads } = extractMarkdown(contents);
+    const { md: noteMd, records: links } = splitLinkRecords(contents);
+    const { md: hybrid, mthreads } = extractMarkdown(noteMd);
     const isActive = pathRef.current === target;
     // The editor never saw the document's frontmatter block; put it back,
     // byte for byte, in front of what it did see. Captured now, because the
@@ -1302,14 +1394,20 @@ export default function App() {
     // meta rather than leaving it stale; a document that never had one never
     // gets one.
     let meta: string | undefined;
-    if (isActive) {
-      const next: EntityMeta = {
-        ...composeActiveMeta(),
-        mthreads: [...mthreads, ...mdOrphansRef.current.filter(stillOrphan)],
-      };
-      if (!metaIsEmpty(next) || htmlSidecarExistsRef.current) meta = serializeEntityMeta(next);
-    }
     try {
+      if (isActive) {
+        const next: EntityMeta = {
+          ...composeActiveMeta(),
+          mthreads: [...mthreads, ...mdOrphansRef.current.filter(stillOrphan)],
+          links,
+        };
+        if (!metaIsEmpty(next) || htmlSidecarExistsRef.current) meta = serializeEntityMeta(next);
+        // Until this save is down, a meta-only write keeps the records of
+        // both texts: whichever is on disk then has its own.
+        metaLinksRef.current = unionRecords(metaLinksRef.current, links);
+      } else {
+        meta = await metaWithMdThreads(target, hybrid, mthreads, links);
+      }
       const saved =
         mdUnchanged && meta === undefined
           ? null
@@ -1334,18 +1432,13 @@ export default function App() {
             doc: { ...s.doc, snapshot: newSnapshot, contents, dirty: false },
           });
         }
-        // A document that was not the active one when this began had no meta
-        // composed for it: its thread bodies still land in ITS meta — a
-        // guarded read-modify-write that preserves the sections this save
-        // doesn't own (html threads, foreign records) and any orphaned
-        // bodies.
-        if (!isActive) await writeMdThreadsToMeta(target, hybrid, mthreads);
         return;
       }
       if (newSnapshot) {
         snapshotRef.current = newSnapshot;
         lastDiskMdRef.current = hybrid;
       }
+      if (saved || meta === undefined) metaLinksRef.current = links;
       lastSavedRef.current = contents;
       mdThreadsRef.current = mthreads;
       // Read again, not kept from above: the rail may have changed the
@@ -1355,7 +1448,7 @@ export default function App() {
         mdOrphansRef.current = remaining;
         setMdOrphans(remaining);
       }
-      if (meta !== undefined && saved?.meta) {
+      if (meta !== undefined && saved) {
         const isNew = !htmlSidecarExistsRef.current;
         htmlSidecarExistsRef.current = true;
         if (isNew) await refreshWatchSet();
@@ -1386,7 +1479,7 @@ export default function App() {
         console.error("autosave failed", e);
       }
     }
-  }, [setSplitState, refreshMirror, writeMdThreadsToMeta, composeActiveMeta, refreshWatchSet]);
+  }, [setSplitState, refreshMirror, metaWithMdThreads, composeActiveMeta, refreshWatchSet]);
 
   const scheduleAutosave = useCallback(() => {
     if (autosaveTimerRef.current != null) {
@@ -1442,6 +1535,13 @@ export default function App() {
     setTableWidths(cols);
   }, []);
 
+  // Adopt a document's link records as the active one's: the ref the meta
+  // writers read, and the editor's next mount.
+  const adoptLinkRecords = useCallback((records: LinkRecord[]) => {
+    metaLinksRef.current = records;
+    setLinkRecords(records);
+  }, []);
+
   // Read an entity's meta from disk WITHOUT touching the active-doc refs
   // (missing file = no comments yet). Never writes.
   const readEntityMeta = useCallback(
@@ -1461,6 +1561,7 @@ export default function App() {
       htmlSidecarExistsRef.current = metaExists;
       applyHtmlThreads(meta.hthreads);
       adoptTableWidths(meta.tcols);
+      adoptLinkRecords(meta.links);
       metaForeignRef.current = meta.foreign;
       if (md !== null) {
         const ids = markerIds(md);
@@ -1474,7 +1575,7 @@ export default function App() {
         setMdOrphans([]);
       }
     },
-    [applyHtmlThreads, adoptTableWidths],
+    [applyHtmlThreads, adoptTableWidths, adoptLinkRecords],
   );
 
   // Read an entity's meta and install it as the active one's (no document =
@@ -1612,18 +1713,13 @@ export default function App() {
     if (wrap) scrollPositionsRef.current.set(id, wrap.scrollTop);
   }, []);
 
-  // Restore the active tab's scroll offset. Runs from the editor's onReady; the
-  // rAF re-apply covers Crepe finishing layout a frame after mount (a too-early
-  // set gets clamped to 0 by a document that has no height yet).
+  // Restore the active tab's scroll offset. Runs from the editor's onReady
+  // (`settleScroll` covers Crepe finishing layout after mount).
   const restoreActiveScroll = useCallback(() => {
     const id = activeIdRef.current;
     const wrap = wrapElsRef.current[focusedSideOf(splitRef.current)];
     if (!wrap) return;
-    const saved = (id ? scrollPositionsRef.current.get(id) : 0) ?? 0;
-    wrap.scrollTop = saved;
-    requestAnimationFrame(() => {
-      wrap.scrollTop = saved;
-    });
+    settleScroll(wrap, (id ? scrollPositionsRef.current.get(id) : 0) ?? 0);
   }, []);
 
   // Same pair for the companion pane (its editor remounts on external
@@ -1641,11 +1737,7 @@ export default function App() {
     if (!s) return;
     const wrap = wrapElsRef.current[s.side];
     if (!wrap) return;
-    const saved = scrollPositionsRef.current.get(companionScrollKey(s)) ?? 0;
-    wrap.scrollTop = saved;
-    requestAnimationFrame(() => {
-      wrap.scrollTop = saved;
-    });
+    settleScroll(wrap, scrollPositionsRef.current.get(companionScrollKey(s)) ?? 0);
   }, []);
 
   // Remount the FOCUSED pane's editor from the live machinery content.
@@ -1697,6 +1789,7 @@ export default function App() {
       mdThreads: mdThreadsRef.current,
       mdOrphans: mdOrphansRef.current,
       tcols: tableWidthsRef.current,
+      metaLinks: metaLinksRef.current,
       metaForeign: metaForeignRef.current,
       head: frontmatterRef.current,
       conflict: conflictRef.current,
@@ -1727,6 +1820,7 @@ export default function App() {
           mdThreads: [],
           mdOrphans: [],
           tcols: [],
+          metaLinks: [],
           metaForeign: [],
           head: "",
           conflict: null,
@@ -1789,6 +1883,7 @@ export default function App() {
             ? meta.mthreads
             : meta.mthreads.filter((t) => !ids.has(t.id)),
           tcols: meta.tcols,
+          metaLinks: meta.links,
           metaForeign: meta.foreign,
           head: htmlOnly ? "" : fm.head,
           conflict: null,
@@ -2072,21 +2167,22 @@ export default function App() {
     [captureActiveScroll, flushPendingAutosave, loadActiveContent, materializeSameDocSplit],
   );
 
+  // The path a file's tab goes by. An html file whose markdown sibling
+  // exists is a rendition of THAT document — the pair is one tab keyed on
+  // the markdown path, starting on the view the user actually asked for.
+  const tabPathOf = useCallback(async (p: string): Promise<string> => {
+    if (!isHtmlPath(p)) return p;
+    const md = mdSiblingOf(p);
+    if (!(await backend.documents.exists(md).catch(() => false))) return p;
+    viewPrefsRef.current.set(md, "html");
+    return md;
+  }, []);
+
   // Open a file in a tab (dedupe by path): from the picker, the sidebar, a
-  // link, the CLI.
+  // link in an untitled note, the CLI.
   const openTab = useCallback(
-    async (p: string) => {
-      // An html file whose markdown sibling exists is a rendition of THAT
-      // document — open the pair as one tab keyed on the markdown path,
-      // starting on the view the user actually asked for.
-      if (isHtmlPath(p)) {
-        const md = mdSiblingOf(p);
-        const paired = await backend.documents.exists(md).catch(() => false);
-        if (paired) {
-          viewPrefsRef.current.set(md, "html");
-          p = md;
-        }
-      }
+    async (path: string) => {
+      const p = await tabPathOf(path);
       const existing = tabsRef.current.find((t) => t.path === p);
       if (existing) {
         if (existing.id === activeIdRef.current) {
@@ -2100,7 +2196,7 @@ export default function App() {
       }
       await appendAndActivate({ id: uuid(), kind: "file", path: p });
     },
-    [switchTab, appendAndActivate, loadActiveContent],
+    [tabPathOf, switchTab, appendAndActivate, loadActiveContent],
   );
 
   // ⌘N: a new untitled note, in a new tab. Nothing is written for it until
@@ -2298,7 +2394,8 @@ export default function App() {
   // contrast, always copies clean (markers stripped) via the editor's copy hook.
   const copyWithComments = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(currentMarkdownRef.current);
+      // The editor's records line is the app's, never a clipboard's.
+      await navigator.clipboard.writeText(splitLinkRecords(currentMarkdownRef.current).md);
     } catch (e) {
       console.error("copy with comments failed", e);
     }
@@ -2364,33 +2461,201 @@ export default function App() {
     );
   }, [pushToast]);
 
-  // A link the reader clicked inside a note (see linkOpen.ts for which clicks
-  // count as following one). Notion's split, applied to files: an external URL
-  // leaves for the browser or mail client, an internal one — a markdown/html
-  // file next to the note — opens in a tab right here. Anything else is left
-  // alone: a link to a .png or a missing file does nothing rather than
-  // guessing, and a foreign scheme (javascript:, data:, a custom app scheme)
-  // is never handed to the OS.
-  const followDocLink = useCallback(
-    async (href: string, fromPath: string | null) => {
-      const url = href.trim();
-      if (/^(https?:|mailto:)/i.test(url)) {
-        openExternal(url);
-        return;
-      }
-      const target = linkTargetPath(url, fromPath);
-      if (!target || !(MD_EXT_RE.test(target) || HTML_EXT_RE.test(target))) return;
-      try {
-        if (await backend.documents.exists(target)) {
-          await openTab(target);
-        }
-      } catch (e) {
-        console.error("open linked document failed", e);
-      }
+  /* ---------- Following links ----------
+     A link to a document clicked in a pane (linkOpen.ts says which clicks
+     are one; an html document's come through its bridge) goes there in that
+     pane's own tab, as a browser goes to a page; ⌘-click opens it in a new
+     tab beside it instead, and nothing here moves. A web address goes to
+     the browser or mail client, and a link that leads nowhere does nothing
+     rather than guess. Each tab keeps the documents it showed (`Steps`,
+     tabs.ts) for Back and Forward. One tab per file still holds: a document
+     already open in another tab brings that tab forward, taking the way back
+     here with it, so its Back returns to where the link was clicked. */
+
+  // Navigations run one after another, each from where the last one left
+  // its tab.
+  const steppingRef = useRef<Promise<void>>(Promise.resolve());
+  const inTurn = useCallback((run: () => Promise<void>) => {
+    steppingRef.current = steppingRef.current.then(run).catch((e) => console.error("following a link failed", e));
+  }, []);
+
+  const replaceTab = useCallback((next: Tab) => {
+    const list = tabsRef.current.map((t) => (t.id === next.id ? next : t));
+    tabsRef.current = list;
+    setTabs(list);
+    writeStoredSession(list, activeIdRef.current);
+  }, []);
+
+  // A same-document split whose `clicked` pane goes somewhere else in its
+  // tab: the other pane keeps the document, in a tab of its own beside this
+  // one. The tab is leaving the file, so the file still has one tab.
+  const splitOffSameDoc = useCallback(
+    (clicked: PaneSide) => {
+      const s = splitRef.current;
+      const id = activeIdRef.current;
+      const at = tabsRef.current.findIndex((t) => t.id === id);
+      const tab = tabsRef.current[at];
+      if (!s || s.doc || s.tabId !== id || !tab) return;
+      const stays = otherSide(clicked);
+      const view = stays === s.side ? s.view : docViewRef.current;
+      const kept: DocTab = { id: uuid(), kind: "file", path: tab.path };
+      const wrap = wrapElsRef.current[stays];
+      if (wrap && view === "md") scrollPositionsRef.current.set(kept.id, wrap.scrollTop);
+      const list = [...tabsRef.current.slice(0, at + 1), kept, ...tabsRef.current.slice(at + 1)];
+      tabsRef.current = list;
+      setTabs(list);
+      setSplitState({ side: stays, tabId: kept.id, view, doc: stashActiveDoc() });
+      companionMdRef.current = {
+        md: currentMarkdownRef.current,
+        baseline: lastSavedRef.current,
+        baselined: true,
+      };
     },
-    [openExternal, openTab],
+    [setSplitState, stashActiveDoc],
   );
 
+  // Take the active tab to `to`, in the pane on the `clicked` side: a link
+  // followed, or a step Back or Forward. Answers whether it went.
+  const goTo = useCallback(
+    async (to: Step, how: "follow" | "back" | "forward", clicked: PaneSide): Promise<boolean> => {
+      const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      if (!tab || tab.kind !== "file" || (how === "follow" && to.path === tab.path)) return false;
+      captureActiveScroll();
+      const here: Step = { path: tab.path, scroll: scrollPositionsRef.current.get(tab.id) ?? 0 };
+      const { back, forward } = tab.steps ?? NO_STEPS;
+      // This tab's steps, less the one being taken.
+      const left: Steps =
+        how === "back"
+          ? { back: back.slice(0, -1), forward }
+          : how === "forward"
+            ? { back, forward: forward.slice(0, -1) }
+            : { back, forward };
+      const holder = tabsRef.current.find(
+        (t): t is DocTab => t.id !== tab.id && t.kind === "file" && t.path === to.path,
+      );
+      if (holder) {
+        if (how !== "follow") replaceTab({ ...tab, steps: left });
+        const theirs = holder.steps ?? NO_STEPS;
+        replaceTab({
+          ...holder,
+          steps:
+            how === "back"
+              ? { back: theirs.back, forward: stepOnto(theirs.forward, here) }
+              : { back: stepOnto(theirs.back, here), forward: theirs.forward },
+        });
+        await switchTab(holder.id);
+        return true;
+      }
+      const steps: Steps =
+        how === "back"
+          ? { back: left.back, forward: stepOnto(left.forward, here) }
+          : { back: stepOnto(left.back, here), forward: how === "follow" ? [] : left.forward };
+      flushPendingAutosave(); // the note being left lands first
+      splitOffSameDoc(clicked);
+      const next: DocTab = { id: tab.id, kind: "file", path: to.path, steps };
+      replaceTab(next);
+      scrollPositionsRef.current.set(tab.id, to.scroll);
+      await loadActiveContent(next);
+      return true;
+    },
+    [captureActiveScroll, replaceTab, switchTab, flushPendingAutosave, splitOffSameDoc, loadActiveContent],
+  );
+
+  // ⌘-click: the document in a new tab beside the one the link is in, and
+  // nothing here moves. Several in a row line up after each other, as a
+  // browser's do. One that has a tab already keeps it.
+  const besideRef = useRef<{ from: string; last: string } | null>(null);
+  const openBeside = useCallback((path: string, fromId: string | null) => {
+    const list = tabsRef.current;
+    if (list.some((t) => t.path === path)) return;
+    const tab: DocTab = { id: uuid(), kind: "file", path };
+    const prior = besideRef.current;
+    const after = prior && prior.from === fromId && list.some((t) => t.id === prior.last) ? prior.last : fromId;
+    const at = list.findIndex((t) => t.id === after);
+    const next = at < 0 ? [...list, tab] : [...list.slice(0, at + 1), tab, ...list.slice(at + 1)];
+    besideRef.current = fromId ? { from: fromId, last: tab.id } : null;
+    tabsRef.current = next;
+    setTabs(next);
+    writeStoredSession(next, activeIdRef.current);
+  }, []);
+
+  // A link clicked in the pane on `side`, with ⌘ (`newTab`) or without.
+  const followLink = useCallback(
+    (href: string, side: PaneSide, newTab: boolean) =>
+      inTurn(async () => {
+        const url = href.trim();
+        const s = splitRef.current;
+        const fromId = s && side === s.side ? s.tabId : activeIdRef.current;
+        const from = tabsRef.current.find((t) => t.id === fromId) ?? null;
+        let target: string | null;
+        if (/^(https?:|mailto:)/i.test(url)) {
+          // A link to a page (*Copy link*) of this window's workspace is
+          // followed here; one of another workspace goes to that one's
+          // window, and the web to the browser.
+          let page: string | null;
+          try {
+            page = await backend.cloud.follow(url);
+          } catch (e) {
+            pushToast("info", errText(e));
+            return;
+          }
+          if (page === null || !workspaceRoot || !page.startsWith(`${workspaceRoot}/`)) {
+            openExternal(url);
+            return;
+          }
+          target = page;
+        } else {
+          target = linkTargetPath(url, from?.path ?? null);
+          if (!target || !(MD_EXT_RE.test(target) || HTML_EXT_RE.test(target))) return;
+          if (!(await backend.documents.exists(target).catch(() => false))) return;
+        }
+        const path = await tabPathOf(target);
+        if (newTab) {
+          openBeside(path, fromId);
+          return;
+        }
+        // An untitled note stays where it is: following in its tab would
+        // close it.
+        if (from?.kind !== "file") {
+          await openTab(path);
+          return;
+        }
+        // The other pane of a two-document split takes the focus first (a
+        // press there already began it).
+        if (s?.doc && side === s.side && splitRef.current?.side === side) await swapFocusRef.current();
+        if (activeIdRef.current !== fromId) return;
+        if (await goTo({ path, scroll: 0 }, "follow", side)) backend.browserHistory?.took();
+      }),
+    [inTurn, pushToast, workspaceRoot, openExternal, tabPathOf, openBeside, openTab, goTo],
+  );
+
+  // One step Back (-1) or Forward (1) for the active tab.
+  const stepActive = useCallback(
+    (by: -1 | 1) =>
+      inTurn(async () => {
+        const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+        if (tab?.kind !== "file") return;
+        const list = (by < 0 ? tab.steps?.back : tab.steps?.forward) ?? [];
+        const to = list[list.length - 1];
+        if (to) await goTo(to, by < 0 ? "back" : "forward", focusedSideOf(splitRef.current));
+      }),
+    [inTurn, goTo],
+  );
+
+  // Back and Forward as the person asks for them: ⌘[ ⌘], the arrows at the
+  // left of the tab bar. In a browser they go through its history while it
+  // has an entry of the app's that way, and the step comes back through
+  // `onStep`, so the browser's own Back and the app's stay one.
+  const goStep = useCallback(
+    (by: -1 | 1) => {
+      const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      if (!(by < 0 ? tab?.steps?.back : tab?.steps?.forward)?.length) return;
+      if (backend.browserHistory?.go(by)) return;
+      stepActive(by);
+    },
+    [stepActive],
+  );
+  useEffect(() => backend.browserHistory?.onStep(stepActive), [stepActive]);
 
   const reloadFromDisk = useCallback(async () => {
     const target = pathRef.current;
@@ -2819,6 +3084,7 @@ export default function App() {
       // this only re-points the meta writer at the incoming document's
       // records — the widths on screen are already the ones it mounted with.
       adoptTableWidths(incoming.tcols);
+      adoptLinkRecords(incoming.metaLinks);
       metaForeignRef.current = incoming.metaForeign;
       setConflict(incoming.conflict);
       applyDocView(incomingView);
@@ -2845,6 +3111,7 @@ export default function App() {
       captureActiveScroll,
       stashActiveDoc,
       adoptTableWidths,
+      adoptLinkRecords,
       applyDocView,
       scheduleAutosave,
       setSplitState,
@@ -3065,6 +3332,15 @@ export default function App() {
   // machinery picks it up (the swap hydration compares the edited content
   // against the stashed baseline and schedules the save). The mount-time
   // serialization is the baseline.
+  // The split pane's editor showed its links anew: the same as for the
+  // focused one (onActiveRelinked), for the pane's own record.
+  const onCompanionRelinked = useCallback((md: string) => {
+    const t = companionMdRef.current;
+    if (!t.baselined) return;
+    if (t.md === t.baseline) t.baseline = md;
+    t.md = md;
+  }, []);
+
   const onCompanionMarkdownChange = useCallback((md: string) => {
     const t = companionMdRef.current;
     if (!t.baselined) {
@@ -3296,7 +3572,7 @@ export default function App() {
         autosaveTimerRef.current = null;
       }
       const contents = currentMarkdownRef.current;
-      const hybrid = extractMarkdown(contents).md;
+      const hybrid = extractMarkdown(splitLinkRecords(contents).md).md;
       // The rendition beside the chosen name, if one is already there — probed
       // before the write, because its meta is adopted below.
       const sibling = htmlSiblingOf(chosen);
@@ -3633,11 +3909,13 @@ export default function App() {
     async (remap: (path: string) => string) => {
       const activeBefore = tabsRef.current.find((t) => t.id === activeIdRef.current);
       let tabsChanged = false;
-      const nextTabs = tabsRef.current.map((t) => {
+      const nextTabs = tabsRef.current.map((t): Tab => {
         const np = remap(t.path);
-        if (np === t.path) return t;
+        // Back and Forward still find a file that moved.
+        const steps = t.kind === "file" ? remapSteps(t.steps, remap) : undefined;
+        if (np === t.path && steps === t.steps) return t;
         tabsChanged = true;
-        return { ...t, path: np };
+        return t.kind === "file" ? { ...t, path: np, steps } : { ...t, path: np };
       });
       if (tabsChanged) {
         tabsRef.current = nextTabs;
@@ -4165,6 +4443,7 @@ export default function App() {
                   missing: false,
                   head: htmlOnly ? cur.doc.head : fm.head,
                   contents: full,
+                  metaLinks: meta.links,
                   snapshot: htmlOnly ? null : r.rev,
                   htmlContent: htmlOnly ? r.text : cur.doc.htmlContent,
                   dirty: false,
@@ -4223,6 +4502,7 @@ export default function App() {
                   sidecarExists: metaExists,
                   mdThreads: meta.mthreads.filter((t) => ids.has(t.id)),
                   mdOrphans: meta.mthreads.filter((t) => !ids.has(t.id)),
+                  metaLinks: meta.links,
                   metaForeign: meta.foreign,
                 },
               });
@@ -4258,11 +4538,12 @@ export default function App() {
             // records now also means our next meta write echoes them back
             // rather than resurrecting what we loaded.
             adoptTableWidths(meta.tcols);
+            adoptLinkRecords(meta.links);
             metaForeignRef.current = meta.foreign;
             if (pathRef.current) {
               const ids = markerIds(currentMarkdownRef.current);
               const theirs = meta.mthreads.filter((t) => ids.has(t.id));
-              const mine = extractMarkdown(currentMarkdownRef.current).mthreads;
+              const mine = extractMarkdown(splitLinkRecords(currentMarkdownRef.current).md).mthreads;
               const mergedLive = mergeMdThreads(mdThreadsRef.current, mine, theirs);
               mdThreadsRef.current = mergedLive;
               editorRef.current?.refreshThreadBodies(
@@ -4330,6 +4611,7 @@ export default function App() {
     reloadFromDisk,
     applyHtmlThreads,
     adoptTableWidths,
+    adoptLinkRecords,
     captureCompanionScroll,
     bumpEditorSeq,
     setSplitState,
@@ -4451,6 +4733,28 @@ export default function App() {
     [scheduleAutosave, syncUntitledTab],
   );
 
+  // The focused editor showed its links where their files are now (a rename
+  // while the note is open). With nothing unsaved that is the note's new
+  // baseline: there is nothing to save until the person edits. With unsaved
+  // text it goes with it, and must never become the baseline, or that text
+  // would read as saved. The editor brought this copy up to date first.
+  const onActiveRelinked = useCallback(
+    (editorKey: string, md: string) => {
+      const loaded = loadedIdRef.current;
+      if (loaded === null || editorKey !== `${loaded}:${editorSeqRef.current.get(loaded) ?? 0}`) return;
+      if (!baselineCapturedRef.current) return;
+      const clean = currentMarkdownRef.current === lastSavedRef.current;
+      currentMarkdownRef.current = md;
+      if (clean) {
+        lastSavedRef.current = md;
+        return;
+      }
+      setDirty(true);
+      scheduleAutosave();
+    },
+    [scheduleAutosave],
+  );
+
   // The focused editor's table columns were resized (or a header edit moved a
   // record to a new id — see tableWidths.ts). Widths never reach the markdown,
   // so this is their only save path: straight into the entity meta, on the
@@ -4543,6 +4847,22 @@ export default function App() {
   const nudgeDocZoom = useCallback((dir: number) => {
     setDocZoom((z) => (dir === 0 ? DOC_ZOOM_DEFAULT : stepDocZoom(z, dir > 0 ? 1 : -1)));
   }, []);
+
+  // ⌘[ and ⌘]: Back and Forward, wherever focus is. Taken in the capture
+  // phase, before the editor's own bindings for the two (Milkdown's list
+  // indent and table cells, CodeMirror's indent in a code block) can act:
+  // Tab and ⇧Tab still do those.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      if (e.code !== "BracketLeft" && e.code !== "BracketRight") return;
+      e.preventDefault();
+      e.stopPropagation();
+      goStep(e.code === "BracketLeft" ? -1 : 1);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [goStep]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -5108,6 +5428,30 @@ export default function App() {
   const effectiveSplit = split && splitTab ? split : null;
   const focusedSide: PaneSide = effectiveSplit ? otherSide(effectiveSplit.side) : "left";
   const canSplit = activeTab != null && !activeNoDoc;
+
+  // What each pane's editor knows of its note's links: where the note is in
+  // the workspace, and the workspace's documents. One object per note and
+  // list, so an editor relinks only when one of them changed.
+  const workspaceName = cloudForRoot?.name ?? "this workspace";
+  const notifyLink = useCallback((message: string) => pushToast("info", message), [pushToast]);
+  const linkContextOf = useCallback(
+    (path: string | null): LinkContext => {
+      const rel = path && workspaceRoot ? relPathIn(workspaceRoot, path) : null;
+      return {
+        note: rel ? { path: rel, section: workspaceDocs ? sectionOf(rel, workspaceDocs) : null } : null,
+        docs: workspaceDocs,
+        recent: recentDocs,
+        workspace: workspaceName,
+        placement: "caret",
+        notify: notifyLink,
+      };
+    },
+    [workspaceRoot, workspaceDocs, recentDocs, workspaceName, notifyLink],
+  );
+  const activeLinks = useMemo(() => linkContextOf(activeFilePath), [linkContextOf, activeFilePath]);
+  const companionPath = split?.doc?.kind === "file" ? split.doc.path : null;
+  const companionLinks = useMemo(() => linkContextOf(companionPath), [linkContextOf, companionPath]);
+
   // No hooks below this line: a hook after the early return crashes React
   // ("rendered more hooks than during the previous render") the moment
   // `ready` flips, unmounting the whole app.
@@ -5292,8 +5636,26 @@ export default function App() {
               onTableWidths={focused ? onTableWidthsChange : undefined}
               // Relative links resolve against the document this pane is
               // showing, so a note in another folder links to its own
-              // neighbours correctly.
-              onOpenLink={(href) => void followDocLink(href, paneTab?.path ?? null)}
+              // neighbours correctly, and the pane follows it in its own tab.
+              // One whose file can't be opened here is never followed by its
+              // path, which may be another's file.
+              onOpenLink={(href, link) =>
+                link.closed
+                  ? pushToast(
+                      "info",
+                      `That page isn't one you can open in ${workspaceName}: it may have been deleted, or moved where you can't see it.`,
+                    )
+                  : followLink(href, side, link.newTab)
+              }
+              links={focused || isMirror ? activeLinks : companionLinks}
+              linkRecords={focused || isMirror ? linkRecords : doc!.metaLinks}
+              onRelinked={
+                focused
+                  ? (md) => onActiveRelinked(editorKey, md)
+                  : isMirror
+                    ? undefined
+                    : onCompanionRelinked
+              }
             />
           )}
           {previewHere && versionPreview && versionStore && (
@@ -5341,6 +5703,8 @@ export default function App() {
               }
               zoom={docZoom}
               onZoomKey={nudgeDocZoom}
+              onFollowLink={(href, newTab) => followLink(href, side, newTab)}
+              onStepKey={goStep}
               onScrollRatio={side === "left" ? htmlRatioLeft : htmlRatioRight}
               onGesture={
                 side === effectiveSplit?.side && !focused
@@ -5455,6 +5819,11 @@ export default function App() {
         onDragOutCancel={handleTabDragCancel}
         onHistory={onHistory}
         live={livePaths}
+        onStep={goStep}
+        steps={{
+          back: activeTab?.kind === "file" && !!activeTab.steps?.back.length,
+          forward: activeTab?.kind === "file" && !!activeTab.steps?.forward.length,
+        }}
         leading={showSidebar ? undefined : titleLead}
         trailing={
           activeTab && !activeNoDoc ? (
@@ -5601,7 +5970,7 @@ export default function App() {
           onCopyAgentPath={cloudForRoot ? copyAgentPath : undefined}
           onHistory={onHistory}
           onWorkspaceHistory={versionStore ? (dir) => setHistoryRoot(dir ?? libraryDir) : undefined}
-          deletedCount={deletedFiles.length}
+          deletedCount={deletedCount}
           onRecentlyDeleted={
             versionStore
               ? (dir) => {
@@ -5875,12 +6244,12 @@ export default function App() {
         // in words.
         <div className="side-footer">
           {settingsMenu}
-          {showSidebar && workspaceRoot && deletedFiles.length > 0 && (
+          {showSidebar && workspaceRoot && deletedCount > 0 && (
             <button
               className="side-footer-btn"
               data-testid="recently-deleted-button"
               aria-pressed={sidebarMode === "deleted"}
-              aria-label={`Recently deleted (${deletedFiles.length})`}
+              aria-label={`Recently deleted (${deletedCount})`}
               title="Recently deleted — files this folder's history still holds"
               onClick={() => {
                 setDeletedFor(null);
@@ -5888,7 +6257,7 @@ export default function App() {
               }}
             >
               <TrashIcon />
-              <span className="side-footer-count">{deletedFiles.length}</span>
+              <span className="side-footer-count">{deletedCount}</span>
             </button>
           )}
           {showSidebar && cloudForRoot && (

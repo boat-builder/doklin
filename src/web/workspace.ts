@@ -38,6 +38,7 @@ import type {
   PresenceDevice,
   PublicPage,
 } from "../cloud";
+import { documentsOf, type WorkspaceDocument } from "../docLinks";
 import { HTML_EXT_RE, MD_EXT_RE, META_SUFFIX, htmlSiblingOf, metaFileOf } from "../metaFile";
 import { Refused, Unreachable, ask, askJson, deviceId, deviceName, nextDay, send, usedToday } from "./http";
 import { tabs, type Tabs } from "./tabs";
@@ -315,12 +316,21 @@ export class Workspace {
 
   /** The document a file id names, by its absolute path; null when no
    *  section this person is in holds it. `space` is the section's id, ""
-   *  the shared workspace. */
+   *  the shared workspace.
+   *
+   *  A file keeps its id when it moves to another section, so the id is
+   *  looked for in every section, `space` first. While a move is half done
+   *  one id is in two sections: then `space` wins, else the lowest section
+   *  id, which is the shared workspace's. The engine looks the same way
+   *  (`follow`, engine/src/cloud/engine.rs): change both. */
   pathOfFile(space: string, fid: string): string | null {
-    const section = this.sections.get(space);
-    const file = section?.manifest.files?.[fid];
-    if (!section || !file || !section.files.has(file.path)) return null;
-    return `${this.root}/${join(section.mount, file.path)}`;
+    const ids = [...this.sections.keys()].sort();
+    for (const id of [space, ...ids.filter((id) => id !== space)]) {
+      const section = this.sections.get(id);
+      const file = section?.manifest.files?.[fid];
+      if (section && file && section.files.has(file.path)) return `${this.root}/${join(section.mount, file.path)}`;
+    }
+    return null;
   }
 
   /* ---------- Reading ---------- */
@@ -403,6 +413,18 @@ export class Workspace {
     for (const path of this.placed()) add(dirIn(path));
     for (const dir of this.made) add(dir);
     return dirs;
+  }
+
+  /** Every document of the workspace, in every section this person is in,
+   *  by workspace-relative path, with its file id (`Documents.documents`). */
+  documents(): WorkspaceDocument[] {
+    const all: WorkspaceDocument[] = [];
+    for (const section of this.sections.values()) {
+      for (const [path, entry] of section.files) {
+        all.push({ path: join(section.mount, path), fileId: entry.fid, section: section.id === "" ? null : section.id });
+      }
+    }
+    return documentsOf(all);
   }
 
   /** The documents under a folder, as the Mac's tree lists them (`walk`,

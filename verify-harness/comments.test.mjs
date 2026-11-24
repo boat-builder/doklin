@@ -1,7 +1,8 @@
 // The comment code of the Mac and of the iPhone, held to one set of cases:
 // verify-harness/comments-fixture.json. This side checks the TypeScript —
-// src/criticMarkup.ts, src/metaFile.ts, and the worker's reading and placing
-// of threads (cloud-worker/src/agentComments.ts) — and
+// src/criticMarkup.ts, src/metaFile.ts, the worker's reading and placing of
+// threads (cloud-worker/src/agentComments.ts) and the merge of a sidecar
+// (src/web/merge.ts, which the engine's must answer alike) — and
 // ios/DoklinKit/Tests/DoklinKitTests/CommentsTests.swift checks the Swift
 // port against the same file. A change to either side's rule fails here or
 // there until both say the same again. Run:
@@ -29,6 +30,7 @@ async function load(rel) {
 const cm = await load("src/criticMarkup.ts");
 const mf = await load("src/metaFile.ts");
 const ac = await load("cloud-worker/src/agentComments.ts");
+const mg = await load("src/web/merge.ts");
 const fx = JSON.parse(readFileSync(path.join(repoRoot, "verify-harness/comments-fixture.json"), "utf8"));
 
 let checked = 0;
@@ -150,6 +152,14 @@ for (const c of fx.operations) {
     const resaved = mf.serializeEntityMeta({ ...meta, mthreads: [...back.mthreads, ...orphans] });
     same([back.md, resaved], [done.outMd, done.outMeta], `operation, settled: ${c.about}`);
   }
+}
+
+// A sidecar changed in two places, merged by its records: the browser's
+// merge here, the engine's in engine/src/sidecar.rs's tests. `files` are
+// the file ids the workspace holds, where a case asks which link's exists.
+for (const c of fx.mergeMeta) {
+  const files = new Set(c.files ?? []);
+  same(mg.mergeMeta(c.base, c.ours, c.theirs, (fid) => files.has(fid)), c.out, `mergeMeta: ${c.about}`);
 }
 
 console.log(`comments.test.mjs: ${checked} checks passed`);

@@ -17,6 +17,7 @@ declare global {
   interface Window {
     __md: string;
     __opened: string[];
+    __newTabs: string[];
     __pwned?: boolean;
     __openInBrowserTab: (href: string) => void;
   }
@@ -57,6 +58,7 @@ ${filler("Below")}
 
 window.__md = DOC;
 window.__opened = [];
+window.__newTabs = [];
 // The plain host behavior — what the editor falls back to without a host.
 // Exposed so the driver can check which schemes it is willing to hand a
 // browser tab.
@@ -67,8 +69,9 @@ function Harness() {
   const onChange = useCallback((md: string) => {
     window.__md = md;
   }, []);
-  const onOpenLink = useCallback((url: string) => {
+  const onOpenLink = useCallback((url: string, link: { newTab: boolean }) => {
     window.__opened.push(url);
+    if (link.newTab) window.__newTabs.push(url);
   }, []);
 
   useEffect(() => {

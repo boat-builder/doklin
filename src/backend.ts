@@ -49,6 +49,7 @@ import type {
   CloudStatus,
   EveryPage,
 } from "./cloud";
+import type { WorkspaceDocument } from "./docLinks";
 import type { StoredTab } from "./tabs";
 import type {
   DeletedFile,
@@ -101,8 +102,6 @@ export class SaveConflict extends Error {
 export type Saved = {
   /** What the text is at now; null when the save carried no text. */
   rev: Rev | null;
-  /** Whether the sidecar that came with the text landed too. */
-  meta: boolean;
 };
 
 /** The parts of a document that travel with it. */
@@ -157,13 +156,20 @@ export interface Documents {
   meta(path: string): Promise<string | null>;
   /** Write a document's text, its sidecar, or both as one save. The text
    *  lands only over `over` (null: over whatever is there) and rejects with
-   *  `SaveConflict` otherwise. The sidecar is last writer wins. Rejects when
-   *  nothing landed. */
+   *  `SaveConflict` otherwise. The sidecar is last writer wins. Both land, or
+   *  the save rejects: the sidecar is written before the text, and on a
+   *  rejection it may hold the new text's records beside the old ones, which
+   *  nothing uses until a text does. */
   save(path: string, parts: { text?: string; meta?: string }, over: Rev | null): Promise<Saved>;
   /** Whether a file or a folder is at `path`. */
   exists(path: string): Promise<boolean>;
   /** The documents under `root`; with `all`, every file. */
   tree(root: string, all?: boolean): Promise<TreeNode>;
+  /** Every document of the workspace at `root`, in every section, by its
+   *  workspace-relative path, each with its file id where it has one: what a
+   *  link to a document is resolved against. A folder that doesn't sync
+   *  lists its tree, with no ids. */
+  documents(root: string): Promise<WorkspaceDocument[]>;
   /** An empty document, or a folder. */
   create(path: string, kind: EntryKind): Promise<void>;
   /** Move or rename; a document's parts go with it. Rejects when nothing moved. */
@@ -221,6 +227,11 @@ export interface Cloud {
   /** The link to the document at `path`. Waits for one made a moment ago,
    *  which has no id until the workspace has taken it in. */
   link(path: string): Promise<CloudPageLink>;
+  /** Where a link to a page (`link`'s) leads on this device: the file's
+   *  path. Null for an address that is no such link, which is the web's to
+   *  open. Rejects, with the reason as a sentence, for one that opens
+   *  nothing here. */
+  follow(url: string): Promise<string | null>;
 
   /** Publish a file or a folder (the path decides); resolves to the slug.
    *  Rejects when the address asked for is another page's, where the backend
@@ -463,6 +474,20 @@ export interface Shows {
   onArrive(cb: () => void): Unsubscribe;
 }
 
+/** A browser's own Back and Forward. Each step a tab takes by a link
+ *  followed in it is an entry in the browser's history, so the browser's
+ *  Back — its button, a swipe, a key — takes the tab in front back a step. */
+export interface BrowserHistory {
+  /** The tab in front took a step: the browser gets an entry for it. */
+  took(): void;
+  /** Go back (-1) or forward (1) through the browser, when it has an entry
+   *  of the app's that way: the step then comes back through `onStep`.
+   *  False when it has none, and the app takes the step itself. */
+  go(by: -1 | 1): boolean;
+  /** The browser moved an entry of the app's back (-1) or forward (1). */
+  onStep(cb: (by: -1 | 1) => void): Unsubscribe;
+}
+
 /** A page that can go at any moment, with no window of the app's own to
  *  ask first (`Windows` has that): a browser's tab. */
 export interface Leaving {
@@ -591,6 +616,7 @@ export interface Backend {
   readonly versions?: Versions;
   readonly shows?: Shows;
   readonly leaving?: Leaving;
+  readonly browserHistory?: BrowserHistory;
   readonly windows?: Windows;
   readonly untitled?: UntitledNotes;
   readonly localFiles?: LocalFiles;

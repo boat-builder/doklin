@@ -86,6 +86,9 @@ const documents: Documents = {
     return { rev: parts.text === undefined ? null : revOf(need(path)), meta: true };
   },
   exists: async (path) => path === ROOT || docs.has(path) || (path.endsWith(".html") && ownerOf(path)?.html != null),
+  // A folder that doesn't sync: its documents, with no ids.
+  documents: async (root) =>
+    [...docs.keys()].sort().map((path) => ({ path: path.slice(root.length + 1), fileId: null, section: null })),
   tree: async (root) => ({
     kind: "dir",
     name: "docs",

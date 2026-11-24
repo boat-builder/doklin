@@ -539,15 +539,6 @@ pub fn mv(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         if !unpublished.is_empty() {
             out.push_str(&format!(" It is no longer public at {} — publish it again.", list(&unpublished)));
         }
-        // A section of its own gives it new file ids, and so new links.
-        if v.get("newLinks").and_then(Value::as_bool) == Some(true) {
-            out.push_str(match (text(&v, "kind") == "folder", ctx.dry_run) {
-                (false, false) => " It is in another section now, so links to it from before the move no longer open it — doklin info gives its new link.",
-                (true, false) => " It is in another section now, so links to what is in it from before the move no longer open anything — doklin info gives each document's new link.",
-                (false, true) => " It would go to another section, so links to it from before the move would stop opening it.",
-                (true, true) => " It would go to another section, so links to what is in it would stop opening anything.",
-            });
-        }
         out
     });
     Ok(())
@@ -810,6 +801,71 @@ pub fn reply(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
             text(&v, "path"),
             plural(v["comments"].as_u64().unwrap_or(0) as usize, "comment", "comments")
         )
+    });
+    Ok(())
+}
+
+/* ---------- links ---------- */
+
+/// How many times `links --to` asks again while the domain reads documents
+/// into its index, as a search does.
+const LINK_ROUNDS: usize = 200;
+
+pub fn links(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
+    let path = args.need(0, "which document — doklin links <doc>")?;
+    args.at_most(1)?;
+    let s = session(ctx)?;
+    let mut query = vec![("path", path)];
+    if args.has("from") {
+        query.push(("from", "1"));
+    }
+    if args.has("to") {
+        query.push(("to", "1"));
+    }
+    let mut v = Value::Null;
+    for round in 0..LINK_ROUNDS {
+        let reply = s.client.send("GET", "links", &query, &[], None)?;
+        v = reply.json()?;
+        if reply.status != 202 {
+            break;
+        }
+        if round == 0 && !ctx.json {
+            eprintln!("Reading the workspace into its index of links — this happens after documents change…");
+        }
+        if round + 1 == LINK_ROUNDS {
+            return Err(Failure::other("the index of links is still being built — try again in a moment"));
+        }
+    }
+
+    ctx.answer(&v, || {
+        let doc = text(&v, "path");
+        let mut lines = Vec::new();
+        if let Some(from) = v["from"].as_array() {
+            if from.is_empty() {
+                lines.push(format!("{} links to no other document.", doc));
+            } else {
+                lines.push(format!("{} links to:", doc));
+                for l in from {
+                    let to = if l.get("closed").is_some() { "can't be opened" } else { text(l, "path") };
+                    lines.push(format!("  \"{}\" → {}", text(l, "words"), to));
+                }
+            }
+        }
+        if let Some(to) = v["to"].as_array() {
+            if to.is_empty() {
+                lines.push(format!("No document links to {}.", doc));
+            } else {
+                lines.push(format!("Linked from {}:", plural(to.len(), "document", "documents")));
+                for l in to {
+                    lines.push(format!("  {}", text(l, "path")));
+                }
+            }
+            let unsearched = strings(&v["sectionsNotSearched"]);
+            if !unsearched.is_empty() {
+                lines.push(format!("Not looked in: {}.", unsearched.join(", ")));
+            }
+        }
+        lines.join("\n")
     });
     Ok(())
 }

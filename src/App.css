@@ -204,6 +204,42 @@ body,
   padding-left: 0;
 }
 
+/* Back and Forward in the active tab, before the tabs (a browser's place
+   for them). Greyed when the tab has nowhere to go that way. */
+.tab-steps {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 0;
+  margin-right: 4px;
+}
+
+.tab-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+
+.tab-step:hover:not(:disabled) {
+  color: var(--text-1);
+  background: var(--hover);
+}
+
+.tab-step:disabled {
+  color: var(--text-3);
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* The tabs scroll inside the strip; the overflow chevron (if any) stays put
    at the bar's right edge. The strip fills the row's height, so the stretch
    after the last tab is a gap that drags the window. */

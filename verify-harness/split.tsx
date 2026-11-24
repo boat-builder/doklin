@@ -1,6 +1,7 @@
 // Mounts the REAL App (same StrictMode wrapper as src/main.tsx) on top of
-// the IPC stub in split.html — the split-view drive walks actual tabs,
-// panes, promotion, autosave, and scroll sync.
+// the page's IPC stub: split.html, where the split-view drive walks actual
+// tabs, panes, promotion, autosave and scroll sync, and follow.html, where
+// drive-follow.mjs follows links in them.
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "../src/App";

@@ -504,6 +504,10 @@ public final class Workspace: Identifiable {
     public private(set) var left: FolderLeft?
     /// What changed lately, as the engine last said (`cloud_recent`).
     public private(set) var recent: RecentFiles?
+    /// Every document here, in every section, as the engine last listed
+    /// them (`cloud_documents`): what links to documents are resolved
+    /// against.
+    public private(set) var documents = DocumentIndex([])
     /// Moves whenever something is marked read here, so the dots follow.
     public private(set) var reads = 0
 
@@ -527,6 +531,13 @@ public final class Workspace: Identifiable {
     /// Ask the engine what changed lately.
     public func loadRecent() async throws {
         recent = try await Engine.shared.call("cloud_recent", ["root": .string(root), "limit": 400])
+    }
+
+    /// Ask the engine for every document here, in every section.
+    public func loadDocuments() async {
+        guard let listed: [WorkspaceDocument]? = try? await Engine.shared.call("cloud_documents", ["root": .string(root)]) else { return }
+        let index = DocumentIndex(listed ?? [])
+        if index != documents { documents = index }
     }
 
     /// Every document by when it last changed, newest first — Home's rows.
@@ -602,6 +613,8 @@ public final class Workspace: Identifiable {
     func changed(_ paths: [String]) {
         lastChanged = Set(paths.map { $0.lowercased() })
         changes += 1
+        // A rename or a move elsewhere changes where this note's links lead.
+        Task { await loadDocuments() }
     }
 
     /// The restricted folder at `folder` left this iPhone, its copy already
@@ -632,6 +645,18 @@ public final class Workspace: Identifiable {
     /// A file made a moment ago is synced first, so this can take a beat.
     public func link(to path: String) async throws -> PageLinkCopy {
         try await Engine.shared.call("cloud_link", ["path": .string(files.absolute(path))])
+    }
+
+    /// The document a link to a page leads to, when it is one of this
+    /// workspace's and is on this iPhone: its path here, for a tap in a note
+    /// to push onto the note's own stack. Nil for any other, which the app
+    /// follows as it follows a link from outside (`Workspaces.follow`),
+    /// saying why when it opens nothing.
+    public func page(_ url: URL) async -> String? {
+        guard let absolute: String = try? await Engine.shared.call("cloud_follow_link", ["url": .string(url.absoluteString)]),
+              let path = relative(absolute), !path.isEmpty, files.exists(path)
+        else { return nil }
+        return path
     }
 
     /// Who can open what is at a path.

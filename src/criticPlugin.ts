@@ -12,8 +12,10 @@
 //     marks are gone (delete, cut, undo) — no stale highlight can linger.
 //
 //   criticCopyPlugin — intercepts copy/cut so the clipboard gets the *clean*
-//     markdown (markers stripped). The verbatim "with comments" copy is a
-//     separate explicit action in the app's Settings menu.
+//     markdown (markers stripped, and the editor's link records line taken
+//     off). The verbatim "with comments" copy is a separate explicit action
+//     in the app's Settings menu. The links' records go beside it in a type
+//     of the app's own, for a paste into another note (src/linkMark.ts).
 
 import { $prose } from "@milkdown/kit/utils";
 import { serializerCtx, schemaCtx } from "@milkdown/kit/core";
@@ -23,6 +25,7 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import type { Node as ProseNode, Schema } from "@milkdown/kit/prose/model";
 import { stripComments } from "./criticMarkup";
 import { collectThreads } from "./criticMark";
+import { clipboardOf, linkContextCtx, LINKS_TYPE } from "./linkMark";
 
 /* ---------- Active thread highlight ---------- */
 
@@ -102,10 +105,11 @@ export const criticCopyPlugin = $prose((ctx) => {
     if (!data) return false;
     const serializer = ctx.get(serializerCtx);
     const schema = ctx.get(schemaCtx);
-    const clean = stripComments(selectionMarkdown(view, serializer, schema));
+    const { text, links } = clipboardOf(selectionMarkdown(view, serializer, schema), ctx.get(linkContextCtx.key));
     // Markdown's canonical clipboard form is text/plain; leaving text/html empty
     // makes paste targets (including Milkdown's own handlePaste) fall back to it.
-    data.setData("text/plain", clean);
+    data.setData("text/plain", stripComments(text));
+    if (links) data.setData(LINKS_TYPE, links);
     event.preventDefault();
     if (isCut) view.dispatch(view.state.tr.deleteSelection());
     return true;

@@ -872,6 +872,37 @@ fn restore_captures_the_state_it_leaves_then_the_state_it_made() {
     assert_eq!(applied["paths"][0], f.root.path().join("a.md").to_string_lossy().to_string());
 }
 
+/// A note restored to an earlier version gets the records its text had then
+/// — its comments' bodies, its links' ids — from the same snapshot, written
+/// before the text and beside the records the sidecar holds now.
+#[test]
+fn restoring_a_note_brings_back_its_sidecar_records_from_then() {
+    const HEAD: &str = "{\"doklin\":\"meta\",\"v\":1}\n";
+    let thread = |id: &str| format!("{{\"t\":\"mthread\",\"id\":\"{id}\",\"comments\":[{{\"author\":\"A\",\"at\":1,\"body\":\"hi\"}}]}}\n");
+    let mut f = fixture(T0);
+    f.write("a.md", "one {==x==}{>>#t1<<}\n");
+    f.write("a.meta.jsonl", &format!("{HEAD}{}", thread("t1")));
+    f.capture(Reason::Seed);
+    f.at(T0 + 60_000);
+    f.write("a.md", "two {==y==}{>>#t2<<}\n");
+    f.write("a.meta.jsonl", &format!("{HEAD}{}", thread("t2")));
+    f.capture(Reason::Interval);
+    f.at(T0 + 120_000);
+
+    let oldest = f.history("a.md").pop().unwrap();
+    f.restore("a.md", Some(oldest.ts), Some(oldest.hash.clone()));
+    assert_eq!(std::fs::read_to_string(f.root.path().join("a.md")).unwrap(), "one {==x==}{>>#t1<<}\n");
+    assert_eq!(
+        std::fs::read_to_string(f.root.path().join("a.meta.jsonl")).unwrap(),
+        format!("{HEAD}{}{}", thread("t1"), thread("t2")),
+        "then's record beside now's"
+    );
+    let applied = f.events.last(EV_APPLIED).expect("applied");
+    assert_eq!(applied["paths"][1], f.root.path().join("a.meta.jsonl").to_string_lossy().to_string());
+    let made = f.rows().last().unwrap().ts;
+    assert!(f.store().read_snapshot(made).unwrap().files.contains_key("a.meta.jsonl"), "one capture after both");
+}
+
 #[test]
 fn restore_names_its_source() {
     let mut f = with_unsaved_work();

@@ -1,0 +1,409 @@
+{
+  "about": "Cases the link rules of the Mac and browser (src/docLinks.ts) and of the iPhone's reader (DocLinks, ios/DoklinKit/Sources/DoklinKit/Markdown/Editing.swift) must answer alike: the key a link's record is filed under, the path between two notes, and what a link opens and shows. Read by verify-harness/doclinks.test.mjs and ios/DoklinKit/Tests/DoklinKitTests/LinksTests.swift. Paths are workspace-relative; a section of null is Library.",
+  "key": [
+    {
+      "href": "./a.md",
+      "key": "a.md"
+    },
+    {
+      "href": "a.md",
+      "key": "a.md"
+    },
+    {
+      "href": "sub/../a.md",
+      "key": "a.md"
+    },
+    {
+      "href": "../../x/./y.markdown",
+      "key": "../../x/y.markdown"
+    },
+    {
+      "href": "../GTM/launch-plan.md#friday",
+      "key": "../GTM/launch-plan.md"
+    },
+    {
+      "href": "plan.md?v=2",
+      "key": "plan.md"
+    },
+    {
+      "href": "my%20notes/a.md",
+      "key": "my notes/a.md"
+    },
+    {
+      "href": "my notes/a.md",
+      "key": "my notes/a.md"
+    },
+    {
+      "href": "100%.md",
+      "key": "100%.md"
+    },
+    {
+      "href": " page.HTML ",
+      "key": "page.HTML"
+    },
+    {
+      "href": "https://example.com/a.md",
+      "key": null
+    },
+    {
+      "href": "https://doklin.cc/open#w=w-1&f=f-1",
+      "key": null
+    },
+    {
+      "href": "mailto:a@example.com",
+      "key": null
+    },
+    {
+      "href": "file:///tmp/a.md",
+      "key": null
+    },
+    {
+      "href": "c:/a.md",
+      "key": null
+    },
+    {
+      "href": "//example.com/a.md",
+      "key": null
+    },
+    {
+      "href": "#heading",
+      "key": null
+    },
+    {
+      "href": "/Users/me/a.md",
+      "key": null
+    },
+    {
+      "href": "picture.png",
+      "key": null
+    },
+    {
+      "href": "",
+      "key": null
+    }
+  ],
+  "relativePath": [
+    {
+      "from": "Library/Roadmap/q1.md",
+      "to": "Restricted/Board/board-plan.md",
+      "path": "../../Restricted/Board/board-plan.md"
+    },
+    {
+      "from": "Library/Roadmap/q1.md",
+      "to": "Library/Roadmap/plan.md",
+      "path": "plan.md"
+    },
+    {
+      "from": "Library/Roadmap/q1.md",
+      "to": "Library/Roadmap/old/plan.md",
+      "path": "old/plan.md"
+    },
+    {
+      "from": "Library/Roadmap/q1.md",
+      "to": "Library/GTM/launch-plan.md",
+      "path": "../GTM/launch-plan.md"
+    },
+    {
+      "from": "Library/q1.md",
+      "to": "Library/Roadmap/x.md",
+      "path": "Roadmap/x.md"
+    },
+    {
+      "from": "Private/a/b/c.md",
+      "to": "Library/x.md",
+      "path": "../../../Library/x.md"
+    }
+  ],
+  "documents": [
+    {
+      "path": "Library/GTM/launch-plan-v2.md",
+      "fileId": "f-launch",
+      "section": null
+    },
+    {
+      "path": "Library/Roadmap/plan.md",
+      "fileId": "f-plan",
+      "section": null
+    },
+    {
+      "path": "Library/Roadmap/new.md",
+      "fileId": null,
+      "section": null
+    },
+    {
+      "path": "Private/todo.md",
+      "fileId": "f-todo",
+      "section": "p-me"
+    },
+    {
+      "path": "Restricted/Board/board-plan.md",
+      "fileId": "f-board",
+      "section": "s-board"
+    },
+    {
+      "path": "Restricted/Board/moving.md",
+      "fileId": "f-moving",
+      "section": "s-board"
+    },
+    {
+      "path": "Library/moving.md",
+      "fileId": "f-moving",
+      "section": null
+    }
+  ],
+  "resolve": [
+    {
+      "about": "renamed: found by its record, and a named link shows the name now",
+      "note": "Library/Roadmap/q1.md",
+      "records": [
+        {
+          "id": "../GTM/launch-plan.md",
+          "file": "f-launch"
+        },
+        {
+          "id": "plan.md",
+          "file": "f-gone"
+        },
+        {
+          "id": "moving.md",
+          "file": "f-moving"
+        },
+        {
+          "id": "../../Restricted/Board/board-plan.md",
+          "file": "f-board"
+        }
+      ],
+      "href": "../GTM/launch-plan.md",
+      "words": "launch-plan",
+      "by": "record",
+      "opens": "Library/GTM/launch-plan-v2.md",
+      "shown": "launch-plan-v2"
+    },
+    {
+      "about": "the author's words stay",
+      "note": "Library/Roadmap/q1.md",
+      "records": [
+        {
+          "id": "../GTM/launch-plan.md",
+          "file": "f-launch"
+        },
+        {
+          "id": "plan.md",
+          "file": "f-gone"
+        },
+        {
+          "id": "moving.md",
+          "file": "f-moving"
+        },
+        {
+          "id": "../../Restricted/Board/board-plan.md",
+          "file": "f-board"
+        }
+      ],
+      "href": "../GTM/launch-plan.md#friday",
+      "words": "the launch",
+      "by": "record",
+      "opens": "Library/GTM/launch-plan-v2.md",
+      "shown": "the launch"
+    },
+    {
+      "about": "a record whose file is gone opens nothing, not the file at its path",
+      "note": "Library/Roadmap/q1.md",
+      "records": [
+        {
+          "id": "../GTM/launch-plan.md",
+          "file": "f-launch"
+        },
+        {
+          "id": "plan.md",
+          "file": "f-gone"
+        },
+        {
+          "id": "moving.md",
+          "file": "f-moving"
+        },
+        {
+          "id": "../../Restricted/Board/board-plan.md",
+          "file": "f-board"
+        }
+      ],
+      "href": "./plan.md",
+      "words": "plan",
+      "by": "record",
+      "opens": null,
+      "shown": "plan"
+    },
+    {
+      "about": "one id in two sections: the shared section's",
+      "note": "Library/Roadmap/q1.md",
+      "records": [
+        {
+          "id": "../GTM/launch-plan.md",
+          "file": "f-launch"
+        },
+        {
+          "id": "plan.md",
+          "file": "f-gone"
+        },
+        {
+          "id": "moving.md",
+          "file": "f-moving"
+        },
+        {
+          "id": "../../Restricted/Board/board-plan.md",
+          "file": "f-board"
+        }
+      ],
+      "href": "moving.md",
+      "words": "moving",
+      "by": "record",
+      "opens": "Library/moving.md",
+      "shown": "moving"
+    },
+    {
+      "about": "into a restricted folder, by its record",
+      "note": "Library/Roadmap/q1.md",
+      "records": [
+        {
+          "id": "../GTM/launch-plan.md",
+          "file": "f-launch"
+        },
+        {
+          "id": "plan.md",
+          "file": "f-gone"
+        },
+        {
+          "id": "moving.md",
+          "file": "f-moving"
+        },
+        {
+          "id": "../../Restricted/Board/board-plan.md",
+          "file": "f-board"
+        }
+      ],
+      "href": "../../Restricted/Board/board-plan.md",
+      "words": "board-plan",
+      "by": "record",
+      "opens": "Restricted/Board/board-plan.md",
+      "shown": "board-plan"
+    },
+    {
+      "about": "no record: by its path",
+      "note": "Library/Roadmap/q1.md",
+      "records": [
+        {
+          "id": "../GTM/launch-plan.md",
+          "file": "f-launch"
+        },
+        {
+          "id": "plan.md",
+          "file": "f-gone"
+        },
+        {
+          "id": "moving.md",
+          "file": "f-moving"
+        },
+        {
+          "id": "../../Restricted/Board/board-plan.md",
+          "file": "f-board"
+        }
+      ],
+      "href": "new.md",
+      "words": "new",
+      "by": "path",
+      "opens": "Library/Roadmap/new.md",
+      "shown": "new"
+    },
+    {
+      "about": "no record, and nothing at its path",
+      "note": "Library/Roadmap/q1.md",
+      "records": [
+        {
+          "id": "../GTM/launch-plan.md",
+          "file": "f-launch"
+        },
+        {
+          "id": "plan.md",
+          "file": "f-gone"
+        },
+        {
+          "id": "moving.md",
+          "file": "f-moving"
+        },
+        {
+          "id": "../../Restricted/Board/board-plan.md",
+          "file": "f-board"
+        }
+      ],
+      "href": "missing.md",
+      "words": "missing",
+      "by": "path",
+      "opens": null,
+      "shown": "missing"
+    },
+    {
+      "about": "no record: a path is matched whatever its case",
+      "note": "Library/Roadmap/q1.md",
+      "records": [
+        {
+          "id": "../GTM/launch-plan.md",
+          "file": "f-launch"
+        },
+        {
+          "id": "plan.md",
+          "file": "f-gone"
+        },
+        {
+          "id": "moving.md",
+          "file": "f-moving"
+        },
+        {
+          "id": "../../Restricted/Board/board-plan.md",
+          "file": "f-board"
+        }
+      ],
+      "href": "../GTM/Launch-Plan-V2.md",
+      "words": "Launch-Plan-V2",
+      "by": "path",
+      "opens": "Library/GTM/launch-plan-v2.md",
+      "shown": "launch-plan-v2"
+    },
+    {
+      "about": "not a link to a document",
+      "note": "Library/Roadmap/q1.md",
+      "records": [
+        {
+          "id": "../GTM/launch-plan.md",
+          "file": "f-launch"
+        },
+        {
+          "id": "plan.md",
+          "file": "f-gone"
+        },
+        {
+          "id": "moving.md",
+          "file": "f-moving"
+        },
+        {
+          "id": "../../Restricted/Board/board-plan.md",
+          "file": "f-board"
+        }
+      ],
+      "href": "https://example.com",
+      "words": "web",
+      "by": null,
+      "opens": null,
+      "shown": "web"
+    },
+    {
+      "about": "no records at all",
+      "note": "Library/Roadmap/q1.md",
+      "records": [],
+      "href": "../GTM/launch-plan.md",
+      "words": "launch-plan",
+      "by": "path",
+      "opens": null,
+      "shown": "launch-plan"
+    }
+  ]
+}

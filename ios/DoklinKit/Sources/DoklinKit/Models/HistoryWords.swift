@@ -324,6 +324,8 @@ public struct DeletedDocument: Identifiable, Hashable, Sendable {
     }
 
     /// The deleted files of one store, as rows, the most recently seen first.
+    /// The Mac groups them alike (`deletedDocuments`, src/RecentlyDeleted.tsx):
+    /// change both.
     public static func group(_ files: [DeletedFile], store: String) -> [DeletedDocument] {
         var order: [String] = []
         var byKey: [String: [DeletedFile]] = [:]

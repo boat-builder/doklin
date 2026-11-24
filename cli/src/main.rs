@@ -81,7 +81,7 @@ const VERSION_FLAGS: &[&str] = &["md", "html"];
 
 /// The commands whose words name documents. Each also takes a link to a page
 /// there, and runs in the workspace the link is to (`commands::follow_links`).
-const TAKE_LINKS: &[&str] = &["info", "read", "comments", "comment", "reply", "write", "edit", "mv", "rm", "publish", "unpublish"];
+const TAKE_LINKS: &[&str] = &["info", "read", "links", "comments", "comment", "reply", "write", "edit", "mv", "rm", "publish", "unpublish"];
 
 pub const COMMANDS: &[Command] = &[
     Command {
@@ -132,6 +132,13 @@ pub const COMMANDS: &[Command] = &[
         about: "Documents whose name or text holds the text, whatever its case — named ones first, with the matching lines. With no --in, everywhere this agent can see.",
         accepts: Accepts { values: &["in", "limit"], switches: &[] },
         run: commands::search,
+    },
+    Command {
+        name: "links",
+        usage: "doklin links <doc> [--from | --to]",
+        about: "What a document links to (--from) and the documents that link to it (--to); with neither, both. A link to something this agent can't open says so, and a document it can't read is not listed.",
+        accepts: Accepts { values: &[], switches: &["from", "to"] },
+        run: commands::links,
     },
     Command {
         name: "comments",

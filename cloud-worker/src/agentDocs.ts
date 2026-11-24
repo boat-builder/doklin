@@ -22,7 +22,9 @@
 // A call is answered in the section its path is in (agentPlace.ts), with
 // every path under the folder that section is at. Three routes look at more
 // than one: a listing or a search of the workspace itself, or of
-// `Restricted`, and a move from one section to another.
+// `Restricted`, and a move from one section to another. A note's links are
+// read and written as they are now, wherever their documents are
+// (agentLinks.ts).
 
 import { change, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
 import type { Section } from "./agentPlace";
@@ -50,6 +52,7 @@ import {
   type Version,
 } from "./documents";
 import type { Env } from "./env";
+import { PersonDocs, linksWritten, sectionOfCall, shownNote } from "./agentLinks";
 import { anchorResolves, elementsOf } from "./htmlText";
 import { json, readJsonObject } from "./http";
 import { ID_RE, MAX_FILE_BYTES, SPACE_ID_RE, blobKey, contentTypeOf } from "./layout";
@@ -59,7 +62,7 @@ import { askOf, mirrorAfter, searchIn } from "./search";
 import { MAX_SECTIONS_READ, sharedEnv, spaceOf } from "./spaces";
 import { isHtmlPath } from "./workspace";
 import { CRITIC_BLOCK_RE, parseSpans, stripComments } from "../../src/criticMarkup";
-import { META_SUFFIX, parseEntityMeta } from "../../src/metaFile";
+import { META_SUFFIX, emptyMeta, metaFileOf, metaIsEmpty, parseEntityMeta, serializeEntityMeta, type LinkRecord } from "../../src/metaFile";
 
 /** A header value that survives the wire: paths are not always ASCII. */
 const headerText = (s: string): string => encodeURIComponent(s);
@@ -134,7 +137,7 @@ export async function getTree(c: Call): Promise<Response> {
  * Where a link to a page leads, as this agent's person names the path. A
  * link (engine/src/cloud/link.rs) names its workspace, the space its file is
  * in ("" the shared workspace) and the file's id — never a path, so that a
- * rename keeps it and no folder's name is in it. Only documents sync, so a
+ * rename or a move keeps it and no folder's name is in it. Only documents sync, so a
  * file found is one: it comes back as the tree names it, by its stem.
  *
  * A space this person is not in, a file deleted, one that never was and a
@@ -158,15 +161,22 @@ export async function getFind(c: Call): Promise<Response> {
   if (bound.id !== workspace) return nothing;
   const all = await c.places.all();
   if (all === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
-  const section = all.find((s) => s.space === space);
-  if (!section) return nothing;
-  const tree = await openTree(inSection(c, section));
-  if (!tree) return notBound();
-  const file = tree.manifest.files[fid];
-  if (!file || file.path.toLowerCase().endsWith(META_SUFFIX)) return nothing;
-  const { stem } = nameOf(file.path);
-  const alone = new Index(tree.manifest.files).doc(stem).mds.length <= 1;
-  return json({ path: alone ? stem : file.path });
+  // A file keeps its id when it moves to another section, so the id is
+  // looked for in every section, the one the link names first. While a move
+  // is half done one id is in two sections: then the named one wins, else
+  // the lowest section id, which is the shared workspace's — as on a Mac
+  // (`follow`, engine/src/cloud/engine.rs). Change both.
+  const order = [...all].sort((a, b) => (a.space === space ? -1 : b.space === space ? 1 : a.space < b.space ? -1 : 1));
+  for (const section of order) {
+    const tree = await openTree(inSection(c, section));
+    if (!tree) return notBound();
+    const file = tree.manifest.files[fid];
+    if (!file || file.path.toLowerCase().endsWith(META_SUFFIX)) continue;
+    const { stem } = nameOf(file.path);
+    const alone = new Index(tree.manifest.files).doc(stem).mds.length <= 1;
+    return json({ path: alone ? stem : file.path });
+  }
+  return nothing;
 }
 
 /** Which documents are called this or contain this text (search.ts). A
@@ -243,20 +253,38 @@ export async function getDoc(c: Call): Promise<Response> {
   }
   const picked = versionToRead(at, path);
   if (picked instanceof Refusal) return refuse(picked);
+  // A note whose links have records reads as they are now.
+  let show: ((text: string) => Promise<string>) | null = null;
+  if (picked.version === "md" && at.doc.meta) {
+    const records = parseEntityMeta((await blobText(env, at.doc.meta)) ?? "").links;
+    const note = picked.entry.file.path;
+    if (records.length > 0) {
+      const person = new PersonDocs(c).own(ws.manifest.files);
+      show = (text) => shownNote(person, note, text, records);
+    }
+  }
   return content(
     env,
     picked.entry,
     { path: at.doc.stem, version: picked.version, htmlBehind: htmlBehind(at.doc) },
     picked.version === "md" && url.searchParams.get("clean") === "1",
+    show,
   );
 }
 
-/** A version's bytes, with what the caller needs to know about them in headers. */
+const blobText = async (env: Env, e: Entry): Promise<string | null> => {
+  const obj = await env.DATA.get(blobKey(e.fid, e.file.hash));
+  return obj ? obj.text() : null;
+};
+
+/** A version's bytes, with what the caller needs to know about them in
+ *  headers — or its text, shown as `show` says. */
 async function content(
   env: Env,
   entry: Entry,
   what: { path: string; version: Version; htmlBehind: boolean },
   clean: boolean,
+  show: ((text: string) => Promise<string>) | null,
 ): Promise<Response> {
   const obj = await env.DATA.get(blobKey(entry.fid, entry.file.hash));
   if (!obj) return json({ error: "its content has not finished syncing — try again in a moment" }, 503);
@@ -270,8 +298,9 @@ async function content(
     "x-doklin-version": what.version,
   };
   if (what.htmlBehind) headers["x-doklin-html-behind"] = "1";
-  if (clean) return new Response(stripComments(await obj.text()), { headers });
-  return new Response(obj.body, { headers: { ...headers, "content-length": String(obj.size) } });
+  if (!clean && !show) return new Response(obj.body, { headers: { ...headers, "content-length": String(obj.size) } });
+  const text = show ? await show(await obj.text()) : await obj.text();
+  return new Response(clean ? stripComments(text) : text, { headers });
 }
 
 /** Display names for the ids a manifest signs with — empty when the database cannot say. */
@@ -358,13 +387,15 @@ export async function putDoc(c: Call): Promise<Response> {
   const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.byteLength > MAX_FILE_BYTES) return json({ error: "that is too large — a file may be 25 MB" }, 413);
 
+  // Read once for every attempt; the section written to is the change's own.
+  const person = new PersonDocs(c);
   const done = await change(
     c,
     async (tx) => {
       const index = new Index(tx.files);
       const at = locate(index, path, flag);
       if (at instanceof Refusal) return at;
-      const value = await writeVersion(tx, index, at, bytes, pre, force);
+      const value = await writeVersion(tx, index, at, bytes, pre, force, person.own(tx.files), sectionOfCall(c));
       if (!(value instanceof Refusal)) keepPublic(tx);
       return value;
     },
@@ -385,6 +416,8 @@ async function writeVersion(
   bytes: Uint8Array,
   pre: Precondition,
   force: boolean,
+  person: PersonDocs,
+  section: string | null,
 ): Promise<Written | Refusal> {
   const { doc } = at;
   let version: Version;
@@ -412,9 +445,46 @@ async function writeVersion(
   let now: string | null = "";
   if (current && (version === "md" || doc.meta)) now = await tx.readText(current.fid);
   if (now === null) return new Refusal(503, "its content has not finished syncing — try again in a moment");
-  const lost = version === "md" ? markersKept(now, text, doc.stem) : await anchorsKept(tx, doc, now, text);
-  if (lost) return lost;
+  if (version === "html") {
+    const lost = await anchorsKept(tx, doc, now, text);
+    if (lost) return lost;
+    return finish(tx, doc, version, current, target, bytes);
+  }
 
+  // A note's links as a read showed them, which is what an agent sends back.
+  const meta = doc.meta ? parseEntityMeta((await tx.readText(doc.meta.fid)) ?? "") : emptyMeta();
+  const shown = await shownNote(person, target, now, meta.links);
+  // Compared with what the agent read; the text as stored passes too.
+  const lost = markersKept(shown, text, doc.stem);
+  if (lost && (shown === now || markersKept(now, text, doc.stem))) return lost;
+  const written = await linksWritten(person, { path: target, section }, text, { text: now, records: meta.links });
+  const value = await finish(tx, doc, version, current, target, written.text === text ? bytes : new TextEncoder().encode(written.text));
+  // The sidecar in the same write: what a note is linked by never lands apart from its text.
+  if (!sameRecords(meta.links, written.records)) {
+    const next = { ...meta, links: written.records };
+    if (metaIsEmpty(next)) {
+      if (doc.meta) tx.remove(doc.meta.fid);
+    } else {
+      const metaPath = doc.meta?.file.path ?? metaFileOf(target);
+      await tx.write(doc.meta?.fid ?? newFileId(), metaPath, new TextEncoder().encode(serializeEntityMeta(next)), contentTypeOf(metaPath));
+    }
+  }
+  return value;
+}
+
+/** Whether two sets of link records say the same. */
+const sameRecords = (a: readonly LinkRecord[], b: readonly LinkRecord[]): boolean =>
+  a.length === b.length && a.every((r) => b.some((o) => o.id === r.id && o.file === r.file));
+
+/** Store a version's new bytes, and answer what the write did. */
+async function finish(
+  tx: Tx,
+  doc: Doc,
+  version: Version,
+  current: Entry | null,
+  target: string,
+  bytes: Uint8Array,
+): Promise<Written> {
   const before = current?.file.hash;
   const fid = current?.fid ?? newFileId();
   const file = await tx.write(fid, target, bytes, contentTypeOf(target));

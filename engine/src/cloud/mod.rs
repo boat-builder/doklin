@@ -78,7 +78,8 @@ use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
 use status::{
     emit_statuses, snapshot, AgentAdded, AgentLogin, CloudStatus, DeviceCode, HeldWorkspace, Invited, PageLinkCopy,
-    People, LinkTarget, Phase, Probe, RecentFiles, Redeemed, Removed, SpaceStatus, StatusTable, EV_REMOVED,
+    People, LinkTarget, Phase, Probe, RecentFiles, Redeemed, Removed, SpaceStatus, StatusTable, WorkspaceDocument,
+    EV_REMOVED,
 };
 
 /// The worker version this app was built against, parsed out of
@@ -1512,6 +1513,16 @@ pub async fn cloud_recent(core: &Arc<Core>, root: String, limit: Option<usize>) 
     let tx = engine_of(core, &root)?;
     let limit = limit.unwrap_or(200).clamp(1, 2000);
     ask(tx, |reply| EngineCmd::Recent { limit, reply }).await
+}
+
+/// Every document of the workspace at `root` on this device, in every
+/// section, with its file id where a manifest carries one: what links to
+/// documents are resolved against. Read off the synced state and the
+/// folders, so it works offline and asks the domain nothing. None for a
+/// folder that doesn't sync: the app lists its tree.
+pub async fn cloud_documents(core: &Arc<Core>, root: String) -> Result<Option<Vec<WorkspaceDocument>>, String> {
+    let Ok(tx) = engine_of(core, &root) else { return Ok(None) };
+    ask(tx, |reply| EngineCmd::Documents { reply }).await.map(Some)
 }
 
 /* ---------- Restricted folders ---------- */

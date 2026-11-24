@@ -10,7 +10,7 @@
 // would call them an overlap.
 
 import { mergeHtmlThreads, type HtmlThread } from "../htmlComments";
-import { parseEntityMeta, serializeEntityMeta, type MdThread } from "../metaFile";
+import { parseEntityMeta, serializeEntityMeta, type LinkRecord, type MdThread } from "../metaFile";
 
 /* ---------- Text ---------- */
 
@@ -174,6 +174,21 @@ function mergeKeyed<T>(base: T[], ours: T[], theirs: T[], key: (t: T) => string)
   return out;
 }
 
+/** Links, three ways, as whole records by their destination. When both
+ *  sides changed one destination to two different files, which only a path
+ *  reused between two saves does, the one whose file `exists` is kept, else
+ *  the lowest id: every device merging the two keeps the same one. */
+function mergeLinks(base: LinkRecord[], ours: LinkRecord[], theirs: LinkRecord[], exists: (file: string) => boolean): LinkRecord[] {
+  const was = new Map(base.map((l) => [l.id, l]));
+  const other = new Map(theirs.map((l) => [l.id, l]));
+  return mergeKeyed(base, ours, theirs, (l) => l.id).map((l) => {
+    const o = other.get(l.id);
+    if (o === undefined || o.file === l.file || was.get(l.id)?.file === o.file) return l;
+    if (exists(l.file) !== exists(o.file)) return exists(l.file) ? l : o;
+    return l.file < o.file ? l : o;
+  });
+}
+
 const NO_ANCHOR = { path: "", tag: "", text: "" };
 const anchored = (threads: MdThread[]): HtmlThread[] => threads.map((t) => ({ ...t, anchor: NO_ANCHOR }));
 
@@ -181,9 +196,10 @@ const anchored = (threads: MdThread[]): HtmlThread[] => threads.map((t) => ({ ..
  * Two versions of a document's sidecar in one, against the one both started
  * from (null: it had none). Threads fold as the open document's do when a
  * change arrives (`mergeHtmlThreads`): a reply on either side is kept, and a
- * deletion sticks.
+ * deletion sticks. `exists` says whether a file id is one of the
+ * workspace's, in any section (`mergeLinks`).
  */
-export function mergeMeta(base: string | null, ours: string, theirs: string): string {
+export function mergeMeta(base: string | null, ours: string, theirs: string, exists: (file: string) => boolean): string {
   if (ours === theirs) return ours;
   const b = parseEntityMeta(base ?? "");
   const o = parseEntityMeta(ours);
@@ -192,6 +208,7 @@ export function mergeMeta(base: string | null, ours: string, theirs: string): st
     hthreads: mergeHtmlThreads(b.hthreads, o.hthreads, t.hthreads),
     mthreads: mergeHtmlThreads(anchored(b.mthreads), anchored(o.mthreads), anchored(t.mthreads)).map(({ id, comments }) => ({ id, comments })),
     tcols: mergeKeyed(b.tcols, o.tcols, t.tcols, (c) => c.id),
+    links: mergeLinks(b.links, o.links, t.links, exists),
     foreign: mergeKeyed(b.foreign, o.foreign, t.foreign, (f) => f.raw),
   });
 }

@@ -1787,6 +1787,62 @@ async fn same_line_conflict_keeps_both_versions() {
     assert_eq!(a.read(&copies[0]).as_deref(), Some("alice's take on the line\n"));
 }
 
+/// A sidecar changed on two Macs at once is merged by its records: two
+/// threads added next to each other, which a merge by lines calls an
+/// overlap, are both kept, and no conflict copy is made — a copy named
+/// `doc.meta (conflict …).jsonl` would sync nowhere.
+#[tokio::test]
+async fn a_sidecar_changed_in_two_places_keeps_both_sides_records() {
+    const HEAD: &str = "{\"doklin\":\"meta\",\"v\":1}\n";
+    let thread = |id: &str, who: &str, at: u64| {
+        format!("{{\"t\":\"mthread\",\"id\":\"{id}\",\"comments\":[{{\"author\":\"{who}\",\"at\":{at},\"body\":\"hi\"}}]}}\n")
+    };
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "the text\n");
+    a.write("doc.meta.jsonl", &format!("{HEAD}{}", thread("aaaa0001", "Ada", 1)));
+    a.cycle().await;
+    b.cycle().await;
+
+    a.write("doc.meta.jsonl", &format!("{HEAD}{}{}", thread("aaaa0001", "Ada", 1), thread("aaaa0002", "Ada", 2)));
+    a.cycle().await;
+    b.write("doc.meta.jsonl", &format!("{HEAD}{}{}", thread("aaaa0001", "Ada", 1), thread("aaaa0003", "Bob", 3)));
+    b.cycle().await;
+
+    let both = format!("{HEAD}{}{}{}", thread("aaaa0001", "Ada", 1), thread("aaaa0002", "Ada", 2), thread("aaaa0003", "Bob", 3));
+    assert_eq!(b.read("doc.meta.jsonl").as_deref(), Some(both.as_str()));
+    assert_eq!(b.files(), ["doc.md", "doc.meta.jsonl"], "no conflict copy");
+    assert!(b.events.of(EV_CONFLICT).is_empty());
+    a.cycle().await;
+    assert_eq!(a.read("doc.meta.jsonl").as_deref(), Some(both.as_str()));
+}
+
+/// A note's conflict copy names the same threads and links its note does, so
+/// it gets a sidecar of its own: the note's, with both sides' records.
+#[tokio::test]
+async fn a_notes_conflict_copy_gets_its_sidecar() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "shared {==line==}{>>#c7k2x9<<}\n");
+    a.write("doc.meta.jsonl", THREAD);
+    a.cycle().await;
+    b.cycle().await;
+
+    a.write("doc.md", "alice's {==line==}{>>#c7k2x9<<}\n");
+    a.cycle().await;
+    b.write("doc.md", "bob's {==line==}{>>#c7k2x9<<} instead\n");
+    b.cycle().await;
+
+    let copy = b.files().into_iter().find(|p| p.contains("(conflict — Ada") && p.ends_with(".md")).expect("a copy");
+    let sidecar = copy.replace(".md", ".meta.jsonl");
+    assert_eq!(b.read(&sidecar).as_deref(), Some(THREAD), "the copy's threads have their bodies");
+    b.cycle().await;
+    a.cycle().await;
+    assert_eq!(a.read(&sidecar).as_deref(), Some(THREAD), "and it syncs like any sidecar");
+}
+
 #[tokio::test]
 async fn delete_propagates() {
     let be = fake_worker();
@@ -5895,10 +5951,11 @@ async fn a_file_moved_into_a_folder_stays_in_place_for_the_people_in_it() {
 }
 
 /// An agent's move between sections is the worker's doing, not a Mac's, and
-/// reads the same on every Mac: a new file where it went, written first, and
-/// a tombstone where it was that says where (`moveAcross`,
-/// cloud-worker/src/agentDocs.ts). In both sections, a Mac moves its copy and
-/// downloads nothing; in only the old one, it deletes its copy outright.
+/// reads the same on every Mac: the file where it went, under the id it had,
+/// written first, and a tombstone where it was that says where
+/// (`moveAcross`, cloud-worker/src/changes.ts). In both sections, a Mac moves
+/// its copy and downloads nothing; in only the old one, it deletes its copy
+/// outright.
 #[tokio::test]
 async fn a_document_an_agent_moves_to_another_section_moves_on_a_mac_in_both_and_leaves_the_others() {
     let be = fake_worker();
@@ -5914,8 +5971,8 @@ async fn a_document_an_agent_moves_to_another_section_moves_on_a_mac_in_both_and
     assert_eq!(bob.read("Docs/budget.md").as_deref(), Some("the numbers\n"));
 
     // Alice's agent: `doklin mv Docs/budget Restricted/Finance/`.
-    worker_writes_in(&be, &finance, |tx| tx.create("budget.md", "the numbers\n"));
     let was = fid_at(&be, "Docs/budget.md");
+    worker_writes_in(&be, &finance, |tx| tx.write(&was, "budget.md", "the numbers\n"));
     worker_writes(&be, |tx| tx.moved_to(&was, &finance));
     assert_eq!(manifest_of(&be).tombstones[&was].to.as_deref(), Some(finance.as_str()));
 
@@ -5925,8 +5982,9 @@ async fn a_document_an_agent_moves_to_another_section_moves_on_a_mac_in_both_and
     assert!(!alice.abs("Docs").exists(), "her copy moved, and left no empty folder behind");
     assert_eq!(be.lock().unwrap().blob_gets, fetched, "nothing was downloaded to do it");
     let there = manifest_in(&be, &finance);
-    let budget = there.files.values().find(|f| f.path == "budget.md").unwrap();
+    let budget = &there.files[&was];
     assert_eq!((budget.rev, budget.by.as_str()), (1, AGENT), "and her Mac wrote nothing back");
+    assert_eq!(alice.engine.follow(None, &was).as_deref(), Some("Restricted/Finance/budget.md"), "a link from before it moved");
 
     // Bob is not in Finance: the file was taken out of his reach.
     bob.engine.poll_for_test().await;
@@ -6422,6 +6480,88 @@ async fn a_link_opens_only_for_the_people_who_can_see_its_page() {
     let mut air = person_on(&be, "Alice", "Air").await;
     air.sync().await;
     assert_eq!(air.engine.follow(diary.space.as_deref(), &diary.file).as_deref(), Some("Private/diary.md"));
+}
+
+/// A file keeps its id when it moves to another section, so a link from
+/// before the move — which names the section it was in — opens it where it
+/// went, for whoever can open it there. Moved back, it has the same id again
+/// where it started, and the tombstone its first move left there is gone.
+#[tokio::test]
+async fn a_file_keeps_its_id_and_its_links_when_it_moves_between_sections() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    let mut carol = person(&be, "Carol").await;
+    alice.sync().await;
+    std::fs::create_dir_all(alice.abs("Restricted/Finance")).unwrap();
+    alice.cycle().await;
+    let finance = folder_called(&be, "Finance");
+    add_to(&be, &finance, &bob);
+    alice.write("Docs/budget.md", "the numbers\n");
+    alice.sync().await;
+    bob.sync().await;
+    carol.sync().await;
+    let link = alice.engine.linked("Library/Docs/budget.md").expect("a link");
+    assert_eq!(link.space, None);
+
+    alice.rename("Docs/budget.md", "Restricted/Finance/budget.md");
+    alice.sync().await;
+    let there = manifest_in(&be, &finance);
+    assert_eq!(there.files.get(&link.file).map(|f| f.path.as_str()), Some("budget.md"), "under the id it had");
+    assert_eq!(manifest_of(&be).tombstones[&link.file].to.as_deref(), Some(finance.as_str()));
+    let now = alice.engine.linked("Restricted/Finance/budget.md").expect("a link");
+    assert_eq!((now.space.as_deref(), now.file.as_str()), (Some(finance.as_str()), link.file.as_str()));
+    assert_eq!(alice.engine.follow(None, &link.file).as_deref(), Some("Restricted/Finance/budget.md"));
+
+    let fetched = be.lock().unwrap().blob_gets;
+    bob.sync().await;
+    assert_eq!(be.lock().unwrap().blob_gets, fetched, "his copy moved with it");
+    assert_eq!(bob.engine.follow(None, &link.file).as_deref(), Some("Restricted/Finance/budget.md"), "the old link");
+    carol.sync().await;
+    assert!(!carol.abs("Docs/budget.md").exists());
+    assert_eq!(carol.engine.follow(None, &link.file), None, "she isn't in Finance: the one answer");
+
+    // And back.
+    alice.rename("Restricted/Finance/budget.md", "Docs/budget.md");
+    alice.sync().await;
+    let shared = manifest_of(&be);
+    assert_eq!(shared.files.get(&link.file).map(|f| f.path.as_str()), Some("Docs/budget.md"));
+    assert!(!shared.tombstones.contains_key(&link.file), "it came back past its own tombstone");
+    assert_eq!(manifest_in(&be, &finance).tombstones[&link.file].to.as_deref(), Some(""), "the shared section");
+    bob.sync().await;
+    carol.sync().await;
+    assert_eq!(carol.read("Docs/budget.md").as_deref(), Some("the numbers\n"));
+    for d in [&bob, &carol] {
+        assert_eq!(d.engine.follow(Some(&finance), &link.file).as_deref(), Some("Library/Docs/budget.md"));
+    }
+}
+
+/// A move between sections writes where the file goes before it takes it out
+/// of where it was, so for a while — or for good, when the second write
+/// failed — one id is in two sections. A link then opens the one in the
+/// section it names, else the one in the lowest section id: the shared
+/// section's. Every device answers alike.
+#[tokio::test]
+async fn one_id_in_two_sections_opens_the_one_the_link_names() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    alice.sync().await;
+    std::fs::create_dir_all(alice.abs("Restricted/Finance")).unwrap();
+    alice.cycle().await;
+    let finance = folder_called(&be, "Finance");
+    alice.write("Docs/budget.md", "the numbers\n");
+    alice.sync().await;
+    let fid = fid_at(&be, "Docs/budget.md");
+    // The worker's move, stopped after its first write.
+    worker_writes_in(&be, &finance, |tx| tx.write(&fid, "budget.md", "the numbers\n"));
+    alice.sync().await;
+    bob.sync().await;
+
+    assert_eq!(alice.engine.follow(Some(&finance), &fid).as_deref(), Some("Restricted/Finance/budget.md"));
+    assert_eq!(alice.engine.follow(None, &fid).as_deref(), Some("Library/Docs/budget.md"));
+    assert_eq!(alice.engine.follow(Some("s-00000000"), &fid).as_deref(), Some("Library/Docs/budget.md"));
+    assert_eq!(bob.engine.follow(Some(&finance), &fid).as_deref(), Some("Library/Docs/budget.md"), "Bob isn't in Finance");
 }
 
 /* ---------- Release 1: what syncs, the runaway, pacing, the valves ---------- */
@@ -6942,6 +7082,42 @@ async fn what_changed_lately_is_every_document_newest_first_with_who_changed_it(
     a.cycle().await;
     let moved = a.engine.recent(50).files.into_iter().find(|f| f.path == "Library/Plans/plan.md").expect("moved");
     assert_eq!(moved.mtime, before, "a move is not an edit");
+}
+
+/// `cloud_documents`: every document on this device, in every section, by
+/// path: a note's rendition and sidecar are the note's, a file that is not
+/// a document is not listed, and one no manifest carries yet has no id.
+#[tokio::test]
+async fn the_documents_a_link_can_lead_to_are_every_sections_with_their_ids() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    alice.sync().await;
+    std::fs::create_dir_all(alice.abs("Restricted/Finance")).unwrap();
+    alice.cycle().await;
+    let finance = folder_called(&be, "Finance");
+    alice.write("GTM/launch-plan.md", "# Launch\n");
+    alice.write("GTM/launch-plan.html", "<h1>Launch</h1>");
+    alice.write("GTM/launch-plan.meta.jsonl", "{\"doklin\":\"meta\",\"v\":1}\n");
+    alice.write("GTM/page.html", "<p>a page</p>");
+    alice.write("GTM/chart.png", "png");
+    alice.write("Restricted/Finance/budget.md", "the numbers\n");
+    alice.sync().await;
+    alice.write("GTM/new.md", "not synced yet\n");
+
+    let docs = alice.engine.documents();
+    let rows: Vec<(&str, bool, Option<&str>)> =
+        docs.iter().map(|d| (d.path.as_str(), d.file_id.is_some(), d.section.as_deref())).collect();
+    assert_eq!(
+        rows,
+        [
+            ("Library/GTM/launch-plan.md", true, None),
+            ("Library/GTM/new.md", false, None),
+            ("Library/GTM/page.html", true, None),
+            ("Restricted/Finance/budget.md", true, Some(finance.as_str())),
+        ]
+    );
+    let launch = docs[0].file_id.clone().unwrap();
+    assert_eq!(alice.engine.follow(None, &launch).as_deref(), Some("Library/GTM/launch-plan.md"), "the id the engine follows");
 }
 
 /* ---------- One copy of a workspace a device ---------- */

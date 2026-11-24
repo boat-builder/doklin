@@ -39,8 +39,8 @@ use super::scan::{hash16, now_ms, read_file_checked, rel_path};
 use super::layout;
 use super::space::{self, SpaceMarker, LIBRARY_DIR, PRIVATE_DIR, SHARED};
 use super::status::{
-    emit_statuses, CloudStatus, DirectoryPerson, Events, LeaseHolder, Phase, PresenceDevice, PublicPage, RecentFiles,
-    SpaceStatus, StatusTable, UsageStatus, VersionsMirror, EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT,
+    documents_of, emit_statuses, CloudStatus, DirectoryPerson, Events, LeaseHolder, Phase, PresenceDevice, PublicPage,
+    RecentFiles, SpaceStatus, StatusTable, UsageStatus, VersionsMirror, WorkspaceDocument, EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT,
 };
 use super::unit::{lock, Ctx, MovedOut, PendingPublic, PublicOp, Survey, Unit, UnitConfig};
 use super::versions::{VersionsIndex, MIRROR_EVERY};
@@ -223,6 +223,9 @@ pub enum EngineCmd {
     Recent {
         limit: usize,
         reply: oneshot::Sender<Result<RecentFiles, String>>,
+    },
+    Documents {
+        reply: oneshot::Sender<Result<Vec<WorkspaceDocument>, String>>,
     },
     Shutdown,
 }
@@ -548,8 +551,9 @@ impl<R: Remote> Engine<R> {
 
     /// What a link to the file at `ws_rel` names, and who can open it. None
     /// for a path in no section, and for a file with no id yet. The browser
-    /// version says who in the same words (`linkTo`, src/web/address.ts):
-    /// change both.
+    /// version says who in the same words (`linkTo`, src/web/address.ts),
+    /// and so does the `@` list (`whoCanOpen`, src/docLinks.ts): change all
+    /// three.
     pub(crate) fn linked(&self, ws_rel: &str) -> Option<Linked> {
         let (id, rel) = self.place(ws_rel)?;
         let unit = self.units.get(&id)?;
@@ -568,10 +572,21 @@ impl<R: Remote> Engine<R> {
     /// this device holds and has on disk. A section this person is not in
     /// is no unit here, so a link into it finds nothing — the same as one to
     /// a page that was deleted, and as one to a page that never was.
+    ///
+    /// A file keeps its id when it moves to another section, so the id is
+    /// looked for in every section, the one the link names (`space`) first.
+    /// While a move is half done one id is in two sections: then the named
+    /// one wins, else the lowest section id, which is the shared section's.
+    /// The browser looks the same way (`pathOfFile`, src/web/workspace.ts):
+    /// change both.
     pub(crate) fn follow(&self, space: Option<&str>, file: &str) -> Option<String> {
-        let unit = self.units.get(space.unwrap_or(SHARED))?;
-        let synced = unit.state.files.get(file)?;
-        unit.root.join(&synced.path).is_file().then(|| unit.ws_rel(&synced.path))
+        let named = space.unwrap_or(SHARED);
+        let found = |unit: &Unit<R>| {
+            let synced = unit.state.files.get(file)?;
+            unit.root.join(&synced.path).is_file().then(|| unit.ws_rel(&synced.path))
+        };
+        // `units` is in section-id order.
+        self.units.get(named).and_then(found).or_else(|| self.units.values().find_map(found))
     }
 
     /// `cloud_recent`: every section's documents by when their content last
@@ -588,6 +603,16 @@ impl<R: Remote> Engine<R> {
             .map(|(id, name)| DirectoryPerson { id: id.clone(), name: name.clone(), person: self.owners.get(id).cloned() })
             .collect();
         RecentFiles { files, people, me: self.me.clone() }
+    }
+
+    /// `cloud_documents`: every section's documents on this device, by path,
+    /// each with its file id once a manifest carries it.
+    pub(crate) fn documents(&self) -> Vec<WorkspaceDocument> {
+        documents_of(self.units.values().flat_map(|unit| unit.recent("")).map(|file| WorkspaceDocument {
+            path: file.path,
+            file_id: file.file_id,
+            section: file.section,
+        }))
     }
 
     /* ----- status ----- */
@@ -1127,6 +1152,9 @@ impl<R: Remote> Engine<R> {
                 (m.fid.clone(), MovedOut { to: m.to.clone(), landed })
             })
             .collect();
+        let moved_in: HashMap<String, String> =
+            moves.iter().filter(|m| m.to == unit.id).map(|m| (m.path.clone(), m.fid.clone())).collect();
+        let elsewhere: HashSet<String> = self.units.values().flat_map(|other| other.state.manifest.files.keys().cloned()).collect();
         let ws_root = self.root_key();
         let own_edits: HashSet<String> =
             self.touched.iter().filter_map(|p| unit.in_unit(p)).filter(|rel| !rel.is_empty()).collect();
@@ -1138,6 +1166,8 @@ impl<R: Remote> Engine<R> {
             trash: self.cfg.trash.clone(),
             releasing: &releasing,
             moved_out: &moved_out,
+            moved_in: &moved_in,
+            elsewhere: &elsewhere,
             pacer: &self.pacer,
             touched: &own_edits,
             hold_new,
@@ -1192,7 +1222,7 @@ impl<R: Remote> Engine<R> {
                         let _ = std::fs::remove_file(&from);
                     }
                     Some(dest) => {
-                        match receive(dest, &from, &bytes, &held.hash, base.as_deref(), &who) {
+                        match receive(dest, &fid, &from, &bytes, &held.hash, base.as_deref(), &who) {
                             Received::Dropped => {}
                             Received::Placed(path) => touched.push(dest.ws_rel(&path)),
                             Received::Beside { path, copy } => {
@@ -2282,6 +2312,9 @@ impl<R: Remote> Engine<R> {
                     Some(EngineCmd::Recent { limit, reply }) => {
                         let _ = reply.send(Ok(self.recent(limit)));
                     }
+                    Some(EngineCmd::Documents { reply }) => {
+                        let _ = reply.send(Ok(self.documents()));
+                    }
                     Some(EngineCmd::Follow { space, file, reply }) => {
                         if self.follow(space.as_deref(), &file).is_none() && self.can_cycle() {
                             let _ = self.poll_and_maybe_cycle().await;
@@ -2562,13 +2595,15 @@ enum Received {
 /// folder. `bytes` is the copy at `from`, `synced` the hash it last synced
 /// at in the section it left, `base` those synced bytes.
 ///
-/// The file as `dest` holds it is found by name and content. An untouched
+/// The file as `dest` holds it is the one with its id `fid`, which a move
+/// keeps; failing that, it is found by name and content. An untouched
 /// copy takes its place, to be adopted by its hash with nothing downloaded.
 /// A copy edited here since carries on as an edit of the moved file when it
 /// was edited from exactly what `dest` holds; anything else lands beside it,
 /// so no edit is lost and none is pushed over somebody's work.
 fn receive<R: Remote>(
     dest: &mut Unit<R>,
+    fid: &str,
     from: &Path,
     bytes: &[u8],
     synced: &str,
@@ -2585,12 +2620,15 @@ fn receive<R: Remote>(
         }
         std::fs::rename(from, to).is_ok()
     };
-    let candidate = dest
-        .view()
-        .files
-        .iter()
-        .filter(|(_, f)| file_name(&f.path).eq_ignore_ascii_case(&name))
-        .max_by_key(|(_, f)| (f.hash == synced) as u8 * 2 + (f.hash == now) as u8)
+    let files = &dest.view().files;
+    let candidate = files
+        .get_key_value(fid)
+        .or_else(|| {
+            files
+                .iter()
+                .filter(|(_, f)| file_name(&f.path).eq_ignore_ascii_case(&name))
+                .max_by_key(|(_, f)| (f.hash == synced) as u8 * 2 + (f.hash == now) as u8)
+        })
         .map(|(fid, f)| (fid.clone(), f.clone()));
 
     let Some((fid, theirs)) = candidate else {

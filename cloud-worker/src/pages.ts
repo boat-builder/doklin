@@ -1,6 +1,7 @@
 // What a public URL resolves to, read from the synced tree and handed to the
 // renderer: a note (its blob, frontmatter left off, comments stripped, widths
-// from its sidecar, links resolved against the public map), its html
+// and link records from its sidecar, links resolved against the public
+// map), its html
 // rendition framed or raw, a folder's table of contents, or an html document
 // inside a published folder served by exact path. Nothing else is served:
 // a workspace holds only documents (`syncs`, layout.ts). public.ts decides
@@ -32,8 +33,10 @@ import {
   type Workspace,
 } from "./workspace";
 import { stripComments } from "../../src/criticMarkup";
-import { normalizePath } from "../../src/docLinks";
+import { documentName, isNamedLink, linkKey, normalizePath } from "../../src/docLinks";
 import { splitFrontmatter } from "../../src/frontmatter";
+import type { LinkRecord } from "../../src/metaFile";
+import { pageLinkOf } from "../../src/pageLink";
 
 const HTML_HEADERS = {
   "content-type": "text/html; charset=utf-8",
@@ -42,6 +45,21 @@ const HTML_HEADERS = {
 };
 
 const html = (body: string, status = 200): Response => new Response(body, { status, headers: HTML_HEADERS });
+
+/** What a page's links can lead to: the pages of its own section and of
+ *  Library. A page is drawn from those two trees, and kept in the cache
+ *  under their two manifests (public.ts), so a document in any other section
+ *  is a link's words, as an unpublished one is. */
+export type Linked = {
+  ws: Workspace;
+  pub: PublicMap;
+  /** Library's tree and map, for a page in another section; null for a page in Library. */
+  library: { ws: Workspace; pub: PublicMap } | null;
+  /** This workspace's id and the domain it answers on: a *Copy link* to one
+   *  of its pages is followed like a link with a record. */
+  workspace: string | null;
+  host: string;
+};
 
 export type NoteOptions = {
   url: URL;
@@ -62,7 +80,8 @@ export type NoteOptions = {
  * one beside it (`<stem>.html`), the markdown otherwise or on ?v=md; an html
  * file published on its own is framed the same way, with no pill.
  */
-export async function notePage(ws: Workspace, pub: PublicMap, loc: Located, o: NoteOptions): Promise<Response> {
+export async function notePage(linked: Linked, loc: Located, o: NoteOptions): Promise<Response> {
+  const { ws } = linked;
   const path = loc.file.path;
   const pageUrl = `${o.url.origin}${o.pagePath}`;
   const rawUrl = o.pagePath.endsWith("/") ? `${o.pagePath}raw` : `${o.pagePath}/raw`;
@@ -97,8 +116,9 @@ export async function notePage(ws: Workspace, pub: PublicMap, loc: Located, o: N
     return html(framedPageHtml({ meta, crumb: o.crumb, hasMd: true, rawUrl }));
   }
 
-  const tcols = (await ws.meta(stemOf(path)))?.tcols ?? [];
-  const bodyHtml = markdownHtml(body, { tcols, links: linkResolver(ws, pub, dirOf(path), o.dirSlug) });
+  const sidecar = await ws.meta(stemOf(path));
+  const links = linkResolver(linked, dirOf(path), o.dirSlug, sidecar?.links ?? []);
+  const bodyHtml = markdownHtml(body, { tcols: sidecar?.tcols ?? [], links });
   return html(notePageHtml({ meta, crumb: o.crumb, hasHtml, bodyHtml, mermaidTag: WEB_TAG }));
 }
 
@@ -123,14 +143,48 @@ function relativeTarget(href: string, fromDir: string): { path: string; fragment
   return { path, fragment };
 }
 
+/** The document a file id names in a tree, when it is one. */
+function documentOf(ws: Workspace, fid: string): Located | null {
+  const loc = ws.file(fid);
+  return loc && (isMarkdownPath(loc.file.path) || isHtmlPath(loc.file.path)) ? loc : null;
+}
+
 /**
- * A relative link in a public page is rewritten to the target's public URL
- * when the target is public — inside this published folder, on its own slug, or
- * inside another — and dropped to plain text otherwise. Anything that isn't
- * a path is left alone.
+ * A link in a public page is rewritten to its document's public URL when
+ * that is public — inside this published folder, on its own slug, or inside
+ * another — and dropped to its words otherwise. Anything that isn't a link
+ * to a document is left alone.
+ *
+ * A link with a record (`link`, src/metaFile.ts) goes by its file id, never
+ * by its path, and a named one shows its document's name now. So does a
+ * *Copy link* to a page of this workspace, by the ids it carries: an
+ * outsider is taken to the page, not to doklin.cc. A link without a record
+ * goes by its path, inside this page's own section.
  */
-function linkResolver(ws: Workspace, pub: PublicMap, fromDir: string, dirSlug: string | null) {
-  return (href: string): LinkOutcome => {
+function linkResolver(linked: Linked, fromDir: string, dirSlug: string | null, records: LinkRecord[]) {
+  const { ws, pub, library } = linked;
+  const byId = (fid: string): { path: string; url: string | null } | null => {
+    const own = documentOf(ws, fid);
+    if (own) return { path: own.file.path, url: pub.urlFor(own.file.path, dirSlug) };
+    const shared = library ? documentOf(library.ws, fid) : null;
+    return shared && library ? { path: shared.file.path, url: library.pub.urlFor(shared.file.path) } : null;
+  };
+  return (href: string, words: string): LinkOutcome => {
+    const page = pageLinkOf(href);
+    if (page) {
+      if (page.domain !== linked.host || page.workspace === "" || page.workspace !== linked.workspace) return { kind: "keep" };
+      const url = byId(page.file)?.url;
+      return url ? { kind: "rewrite", href: url } : { kind: "text" };
+    }
+    const key = linkKey(href);
+    const record = key === null ? undefined : records.find((r) => r.id === key);
+    if (key !== null && record) {
+      const found = byId(record.file);
+      if (!found?.url) return { kind: "text" };
+      const hash = href.indexOf("#");
+      const named = isNamedLink(words, key) ? { words: documentName(found.path) } : {};
+      return { kind: "rewrite", href: `${found.url}${hash >= 0 ? href.slice(hash) : ""}`, ...named };
+    }
     const target = relativeTarget(href, fromDir);
     if (!target) return { kind: "keep" };
     // A note linked without its extension, the way a wiki does.

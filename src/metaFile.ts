@@ -8,12 +8,12 @@
 //
 //   notes.md  +  notes.html  +  notes.meta.jsonl
 //
-// The file is JSON Lines — a header line, then ONE record per line —
-// because cloud sync merges files with a three-way *text* merge
-// (engine/src/cloud/merge.rs): two people adding threads concurrently
-// merge cleanly line-by-line. Records are sorted by (type, id) and
-// serialized with a fixed key order, so two devices writing the same
-// logical state produce the same bytes.
+// The file is JSON Lines — a header line, then ONE record per line. Sync
+// merges it by its records, never as text (engine/src/sidecar.rs, the
+// browser's mergeMeta in src/web/merge.ts): two people adding threads at
+// once keep both. Records are sorted by (type, id) and serialized with a
+// fixed key order, so two devices writing the same logical state produce
+// the same bytes — the engine writes them the same way.
 //
 // Record types:
 //   {"t":"hthread", id, anchor, comments}  — a rendition (html) thread,
@@ -23,6 +23,12 @@
 //       — a bare CriticMarkup reference. Text-embedded anchors survive
 //       edits, external editors, and content merges; only the
 //       conversations move out of the prose.
+//   {"t":"link", id, file}                 — a link to another document of
+//       the workspace: `id` is the link's destination as the note writes
+//       it (decoded, folded: `linkKey`, src/docLinks.ts), `file` the file
+//       id it means. The link itself stays an ordinary markdown link in the
+//       prose; the record only lets it find its file again after a rename
+//       or a move. One record per destination.
 //   {"t":"tcols", id, cols}                — one table's column widths in
 //       px (0 = auto). Unlike a thread this record has NO anchor in the
 //       prose: its id is derived from the table's own shape (see
@@ -58,6 +64,10 @@ export type MdThread = { id: string; comments: CommentEntry[] };
 // so the array's length doubles as a shape check against the live table.
 export type TableCols = { id: string; cols: number[] };
 
+// A link's file: `id` is the destination it is written with (`linkKey`),
+// `file` the id of the file it means.
+export type LinkRecord = { id: string; file: string };
+
 // A record this app version doesn't understand, carried through rewrites.
 // `sortId` is whatever `id` the line declared ("" when it had none).
 export type ForeignRecord = { t: string; sortId: string; raw: string };
@@ -66,6 +76,7 @@ export type EntityMeta = {
   mthreads: MdThread[];
   hthreads: HtmlThread[];
   tcols: TableCols[];
+  links: LinkRecord[];
   foreign: ForeignRecord[];
 };
 
@@ -73,6 +84,7 @@ export const emptyMeta = (): EntityMeta => ({
   mthreads: [],
   hthreads: [],
   tcols: [],
+  links: [],
   foreign: [],
 });
 
@@ -171,6 +183,10 @@ export function parseEntityMeta(raw: string): EntityMeta {
       if (id === "" || !isColWidths(r.cols)) continue;
       seen.add(key);
       meta.tcols.push({ id, cols: r.cols.map((n) => Math.round(n)) });
+    } else if (r.t === "link") {
+      if (id === "" || typeof r.file !== "string" || r.file === "") continue;
+      seen.add(key);
+      meta.links.push({ id, file: r.file });
     } else {
       seen.add(key);
       meta.foreign.push({ t: r.t, sortId: id, raw: trimmed });
@@ -215,6 +231,12 @@ export function serializeEntityMeta(meta: EntityMeta): string {
       line: JSON.stringify({ t: "tcols", id: t.id, cols: t.cols }),
     });
   }
+  for (const l of meta.links) {
+    rows.push({
+      key: `link ${l.id}`,
+      line: JSON.stringify({ t: "link", id: l.id, file: l.file }),
+    });
+  }
   for (const f of meta.foreign) {
     rows.push({ key: `${f.t} ${f.sortId} ${f.raw}`, line: f.raw });
   }
@@ -222,11 +244,47 @@ export function serializeEntityMeta(meta: EntityMeta): string {
   return [HEADER, ...rows.map((r) => r.line)].join("\n") + "\n";
 }
 
+/* ---------- add before, drop after ---------- */
+
+// What the sidecar holds while a save writes the text: every record of the
+// sidecar it is becoming (`next`), and every record of the one on disk that
+// `next` drops. Whichever text is on disk when a write fails or the app
+// stops, the one there before or the new one, every record it uses is
+// there. The save writes `next` itself once the text is down, which is when
+// a record goes. `next` when it drops nothing.
+export function sidecarWhileWriting(onDisk: string | null, next: string): string {
+  if (onDisk === null) return next;
+  const a = parseEntityMeta(next);
+  const b = parseEntityMeta(onDisk);
+  const missing = <T extends { id: string }>(mine: T[], theirs: T[]): T[] => {
+    const have = new Set(mine.map((x) => x.id));
+    return theirs.filter((x) => !have.has(x.id));
+  };
+  const foreignKey = (f: ForeignRecord) => `${f.t} ${f.sortId}`;
+  const haveForeign = new Set(a.foreign.map(foreignKey));
+  const extra: EntityMeta = {
+    mthreads: missing(a.mthreads, b.mthreads),
+    hthreads: missing(a.hthreads, b.hthreads),
+    tcols: missing(a.tcols, b.tcols),
+    links: missing(a.links, b.links),
+    foreign: b.foreign.filter((f) => !haveForeign.has(foreignKey(f))),
+  };
+  if (metaIsEmpty(extra)) return next;
+  return serializeEntityMeta({
+    mthreads: [...a.mthreads, ...extra.mthreads],
+    hthreads: [...a.hthreads, ...extra.hthreads],
+    tcols: [...a.tcols, ...extra.tcols],
+    links: [...a.links, ...extra.links],
+    foreign: [...a.foreign, ...extra.foreign],
+  });
+}
+
 // Does this meta carry anything worth a file on disk?
 export const metaIsEmpty = (meta: EntityMeta): boolean =>
   meta.mthreads.length === 0 &&
   meta.hthreads.length === 0 &&
   meta.tcols.length === 0 &&
+  meta.links.length === 0 &&
   meta.foreign.length === 0;
 
 /* ---------- entry / thread union (fold-ins) ---------- */

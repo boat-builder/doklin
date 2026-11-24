@@ -1,6 +1,7 @@
 // Drives click-to-follow for links in the editor (src/linkOpen.ts) in
-// Chromium: which clicks follow a link and which fall through to the caret,
-// that a follow never navigates the page out from under the app, that
+// Chromium: which clicks follow a link (⌘- and Ctrl-clicks into a new tab,
+// with the caret left alone) and which fall through to the caret, that a
+// follow never navigates the page out from under the app, that
 // in-document #anchors scroll here instead of reaching the host, and that a
 // read-only document still follows links. Needs the repo-root vite dev server
 // (port 1420).
@@ -164,18 +165,44 @@ step(
     ]),
 );
 
-/* ---------- Modifier / drag / double click stay editing gestures ---------- */
+/* ---------- ⌘-click: a new tab, and the note stays as it was ---------- */
 
-const before = (await opened()).length;
-
+// The caret is where the last plain click left it, in another link.
+const caretAt = () =>
+  page.evaluate(() => {
+    const s = document.getSelection();
+    return `${s?.anchorNode?.textContent}|${s?.anchorOffset}|${s?.isCollapsed}`;
+  });
+const caretBefore = await caretAt();
+const beforeNewTab = (await opened()).length;
 await link("example docs").click({ modifiers: ["Meta"] });
 await page.waitForTimeout(120);
-step("⌘-click does not follow", (await opened()).length === before);
-step("⌘-click puts the caret in the link text", await caretInLink());
+step(
+  "⌘-click follows, asking for a new tab",
+  (await opened()).length === beforeNewTab + 1 &&
+    JSON.stringify(await page.evaluate(() => window.__newTabs)) === JSON.stringify(["https://example.com/docs"]),
+  JSON.stringify(await page.evaluate(() => window.__newTabs)),
+);
+step("⌘-click leaves the caret where it was", (await caretAt()) === caretBefore, await caretAt());
+// Off a Mac, Ctrl is the new tab's key. On one, Ctrl-click is the context
+// menu, and no click arrives.
+if (process.platform !== "darwin") {
+  await link("example docs").click({ modifiers: ["Control"] });
+  await page.waitForTimeout(120);
+  step(
+    "Ctrl-click does the same, off a Mac",
+    (await page.evaluate(() => window.__newTabs)).length === 2 && (await opened()).length === beforeNewTab + 2,
+  );
+}
+
+/* ---------- ⌥ / drag / double click stay editing gestures ---------- */
+
+const before = (await opened()).length;
 
 await link("example docs").click({ modifiers: ["Alt"] });
 await page.waitForTimeout(120);
 step("⌥-click does not follow", (await opened()).length === before);
+step("⌥-click puts the caret in the link text", await caretInLink());
 
 // A double click opens its first (plain) click, same as double-clicking a
 // link on any web page — what must not happen is a SECOND follow behind the

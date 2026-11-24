@@ -79,7 +79,7 @@ export function tableSignature(colCount: number, headerTexts: string[]): string 
 // document, so ProseMirror's textContent for `R&amp;D` is "R&D". marked
 // leaves them alone and escapes on output instead — decode here so a header
 // written with an entity still matches its record.
-function decodeEntities(s: string): string {
+export function decodeEntities(s: string): string {
   return s
     .replace(/&#(\d+);/g, (_, n: string) => String.fromCodePoint(Number(n)))
     .replace(/&#x([0-9a-f]+);/gi, (_, n: string) => String.fromCodePoint(parseInt(n, 16)))
@@ -93,9 +93,12 @@ function decodeEntities(s: string): string {
 
 /* ---------- Links between notes ---------- */
 
-/** What becomes of a link's href: kept as written, rewritten to a public URL, or the link dropped to its text. */
-export type LinkOutcome = { kind: "keep" } | { kind: "rewrite"; href: string } | { kind: "text" };
-export type LinkResolver = (href: string) => LinkOutcome;
+/** What becomes of a link: kept as written, rewritten to a public URL, or
+ *  dropped to its words. `words`, when given, are the ones it shows instead
+ *  of its own: a named link's are its document's name now (src/docLinks.ts). */
+export type LinkOutcome = { kind: "keep" } | { kind: "rewrite"; href: string; words?: string } | { kind: "text" };
+/** What becomes of the link to `href` whose words read `words`. */
+export type LinkResolver = (href: string, words: string) => LinkOutcome;
 
 /* ---------- The markdown ---------- */
 
@@ -186,10 +189,13 @@ export function markdownHtml(md: string, inputs: MarkdownInputs): string {
       },
       link(this: Renderer, token: Tokens.Link): string {
         borrow(this);
-        const outcome = inputs.links(token.href);
+        const words = decodeEntities(this.parser.parseInline(token.tokens, this.parser.textRenderer));
+        const outcome = inputs.links(token.href, words);
         if (outcome.kind === "keep") return base.link(token);
-        if (outcome.kind === "rewrite") return base.link({ ...token, href: outcome.href });
-        return this.parser.parseInline(token.tokens);
+        if (outcome.kind === "text") return this.parser.parseInline(token.tokens);
+        if (outcome.words === undefined || outcome.words === words) return base.link({ ...token, href: outcome.href });
+        const said: Tokens.Text = { type: "text", raw: outcome.words, text: outcome.words, escaped: false };
+        return base.link({ ...token, href: outcome.href, tokens: [said] });
       },
       blockquote(this: Renderer, token: Tokens.Blockquote): string {
         borrow(this);
@@ -202,7 +208,7 @@ export function markdownHtml(md: string, inputs: MarkdownInputs): string {
         // A picture on the web is shown. One in the workspace is its alt
         // text: pictures stay on the device that has them (`syncs`,
         // layout.ts), so there is none to serve.
-        if (inputs.links(token.href).kind === "keep") return base.image(token);
+        if (inputs.links(token.href, token.text).kind === "keep") return base.image(token);
         return escapeHtml(token.text);
       },
     },

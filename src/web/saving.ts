@@ -288,7 +288,7 @@ export class Saving {
     }
     this.wait(path);
     this.ws.touch(path);
-    return Promise.resolve({ rev, meta: parts.meta !== undefined });
+    return Promise.resolve({ rev });
   }
 
   /** Something waits for a document: keep it, and send it when its turn comes. */
@@ -435,7 +435,7 @@ export class Saving {
       if (h.out !== ours) continue;
       let merged: string;
       if (kind === "meta") {
-        merged = mergeMeta(base, ours, theirs);
+        merged = mergeMeta(base, ours, theirs, (fid) => this.ws.pathOfFile("", fid) !== null);
       } else {
         const both = ours === theirs ? ours : base === null ? null : mergeText(base, ours, theirs);
         if (both === null && doc.copied !== stored.file.hash) {

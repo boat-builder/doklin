@@ -1,7 +1,7 @@
 // The comment code held to the cases the Mac's is held to:
 // verify-harness/comments-fixture.json, which verify-harness/comments.test.mjs
-// checks the TypeScript against. Same input, same bytes — the meta file is
-// merged line by line with what Macs write.
+// checks the TypeScript against. Same input, same bytes: two devices holding
+// the same records write the same meta file.
 
 import XCTest
 @testable import DoklinKit

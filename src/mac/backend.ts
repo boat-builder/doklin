@@ -47,6 +47,7 @@ import {
   type Windows,
 } from "../backend";
 import type { CloudRemovedEvent, CloudStatus } from "../cloud";
+import { documentsOf, type WorkspaceDocument } from "../docLinks";
 import {
   HTML_EXT_RE,
   MD_EXT_RE,
@@ -55,6 +56,7 @@ import {
   metaFileOf,
   parseEntityMeta,
   serializeEntityMeta,
+  sidecarWhileWriting,
 } from "../metaFile";
 import type { DeletedFile, FileHistory, SnapshotMeta, StoreInfo, VersionsStatus } from "../versions";
 
@@ -170,23 +172,44 @@ const documents: Documents = {
   read,
   meta: readMeta,
 
+  // The sidecar first, then the text, and a save fails whole: a sidecar
+  // that can't be written leaves the text unwritten too. While the text is
+  // written the sidecar holds the records of both the text on disk and the
+  // new one (`sidecarWhileWriting`), so a failure or a stop between the two
+  // writes never leaves a text without its records; the records it drops go
+  // once the text is down.
   async save(path, parts, over) {
-    const rev = parts.text === undefined ? null : await write(path, parts.text, over);
-    if (parts.meta === undefined) return { rev, meta: true };
-    try {
-      await write(metaFileOf(path), parts.meta, null);
-      return { rev, meta: true };
-    } catch (e) {
-      // The text is down: say so, or the next save would be made over a
-      // state the disk has already left.
-      if (rev === null) throw e;
-      console.error("comment save failed", e);
-      return { rev, meta: false };
+    const { text, meta } = parts;
+    if (meta === undefined) return { rev: text === undefined ? null : await write(path, text, over) };
+    const sidecar = metaFileOf(path);
+    if (text === undefined) {
+      await write(sidecar, meta, null);
+      return { rev: null };
     }
+    const meanwhile = sidecarWhileWriting(await readMeta(path), meta);
+    await write(sidecar, meanwhile, null);
+    const rev = await write(path, text, over);
+    if (meanwhile !== meta) {
+      // Only drops are left: failing them leaves records nothing uses.
+      await write(sidecar, meta, null).catch((e) => console.error("sidecar tidy failed", e));
+    }
+    return { rev };
   },
 
   exists,
   tree: (root, all) => invoke<TreeNode>("list_md_tree", { path: root, all }),
+  async documents(root) {
+    const synced = await invoke<WorkspaceDocument[] | null>("cloud_documents", { root });
+    if (synced) return synced;
+    // A folder that doesn't sync: its tree, which lists documents only.
+    const found: WorkspaceDocument[] = [];
+    const walk = (node: TreeNode) => {
+      if (node.kind === "dir") node.children.forEach(walk);
+      else found.push({ path: node.path.slice(root.length + 1), fileId: null, section: null });
+    };
+    walk(await invoke<TreeNode>("list_md_tree", { path: root, all: false }));
+    return documentsOf(found);
+  },
   create: (path, kind) => invoke<void>(kind === "file" ? "create_file" : "create_dir", { path }),
 
   async move(from, to, kind) {
@@ -298,6 +321,7 @@ const cloud: Cloud = {
   setActivity: (path) => invoke("cloud_set_activity", { path }),
   takeOver: (root, path) => invoke("cloud_take_over", { root, path }),
   link: (path) => invoke("cloud_link", { path }),
+  follow: (url) => invoke<string | null>("cloud_follow_link", { url }),
 
   publish: (path, opts = {}) =>
     invoke("cloud_publish", {

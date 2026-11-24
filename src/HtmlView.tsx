@@ -57,9 +57,11 @@ type Props = {
   threads: HtmlThread[];
   onThreadsChange: (next: HtmlThread[]) => void;
   commentAuthor: string;
-  // How external links leave the rendition. The desktop default routes them
-  // to the system browser via Tauri; a web host passes window.open instead.
-  onOpenExternal?: (url: string) => void;
+  // A link clicked in the rendition, as the app follows one in a note: a web
+  // address as the frame resolved it, anything else (a path to a document)
+  // as the markup writes it, and whether ⌘ or Ctrl asked for a new tab.
+  // Absent: a web address opens through the backend, and the rest is inert.
+  onFollowLink?: (href: string, newTab: boolean) => void;
   // False hides the whole comment layer (button, pins, cards). The split
   // view's unfocused pane uses this: comments there activate only after the
   // pane is promoted to the focused document.
@@ -79,6 +81,9 @@ type Props = {
   // A zoom chord pressed while focus is inside the frame (1 in, -1 out, 0
   // reset) — the app's own key handler can't see those.
   onZoomKey?: (dir: number) => void;
+  // ⌘[ or ⌘] pressed while focus is inside the frame: Back (-1) or Forward
+  // (1).
+  onStepKey?: (by: -1 | 1) => void;
   // Absolute path of the rendition on disk — presence enables the "PDF"
   // button (desktop only; web hosts omit it). The export itself runs in the
   // Rust backend against a pinned headless engine (see pdf_export.rs) and
@@ -120,12 +125,13 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
     threads,
     onThreadsChange,
     commentAuthor,
-    onOpenExternal,
+    onFollowLink,
     commentsEnabled = true,
     onScrollRatio,
     onGesture,
     zoom = 1,
     onZoomKey,
+    onStepKey,
     pdfExportPath,
     controlsSlot,
   }: Props,
@@ -163,8 +169,8 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   authorRef.current = commentAuthor;
   const onThreadsChangeRef = useRef(onThreadsChange);
   onThreadsChangeRef.current = onThreadsChange;
-  const onOpenExternalRef = useRef(onOpenExternal);
-  onOpenExternalRef.current = onOpenExternal;
+  const onFollowLinkRef = useRef(onFollowLink);
+  onFollowLinkRef.current = onFollowLink;
   const onScrollRatioRef = useRef(onScrollRatio);
   onScrollRatioRef.current = onScrollRatio;
   const onGestureRef = useRef(onGesture);
@@ -173,6 +179,8 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   zoomRef.current = zoom;
   const onZoomKeyRef = useRef(onZoomKey);
   onZoomKeyRef.current = onZoomKey;
+  const onStepKeyRef = useRef(onStepKey);
+  onStepKeyRef.current = onStepKey;
   const pdfPathRef = useRef(pdfExportPath);
   pdfPathRef.current = pdfExportPath;
 
@@ -265,12 +273,18 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
       } else if (msg.type === "activate") {
         setActiveId(msg.id);
         if (msg.id === null) setEditing(null);
-      } else if (msg.type === "open") {
-        // External links open outside the rendition; navigating the iframe
-        // would replace it (and this whole layer) with the site.
-        if (onOpenExternalRef.current) {
-          onOpenExternalRef.current(msg.url);
-        } else {
+      } else if (msg.type === "follow") {
+        // The app follows the link; navigating the iframe would replace it
+        // (and this whole layer) with what it leads to. The frame is
+        // untrusted: strings, or nothing.
+        if (typeof msg.href !== "string" || typeof msg.url !== "string") return;
+        // A path (or `file:`) is a document's: the frame resolved it against
+        // its own page, which is not where the document is.
+        const toDocument = !/^\s*(?!file:)([a-z][a-z0-9+.-]*:|\/\/)/i.test(msg.href);
+        const web = !toDocument && /^(https?:|mailto:)/i.test(msg.url);
+        if (onFollowLinkRef.current) {
+          if (toDocument || web) onFollowLinkRef.current(toDocument ? msg.href : msg.url, msg.newTab === true);
+        } else if (web) {
           void backend.openExternal(msg.url).catch((err) => console.error("open external failed", err));
         }
       } else if (msg.type === "scroll") {
@@ -282,6 +296,8 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
         onGestureRef.current?.();
       } else if (msg.type === "zoom-key") {
         onZoomKeyRef.current?.(msg.dir);
+      } else if (msg.type === "step-key") {
+        if (msg.by === -1 || msg.by === 1) onStepKeyRef.current?.(msg.by);
       } else if (msg.type === "canvas") {
         // The frame is untrusted: a single colour value or nothing, so the
         // string can never smuggle a url() into the app's own styles.

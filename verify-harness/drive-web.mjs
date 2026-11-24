@@ -1121,11 +1121,31 @@ async function driveRest(name) {
   await row(LINKS).click();
   await editorHas("to alpha");
   const pagesBefore = context.pages().length;
+  const tabs = () => page.locator(".tab .tab-label").allTextContents();
+  // Alpha in a tab of its own (the search opened it) would come forward
+  // instead: one tab per file.
+  const alphaTab = page.locator(".tab", { has: page.locator(".tab-label", { hasText: /^Alpha$/ }) });
+  if (await alphaTab.count()) await alphaTab.locator(".tab-close").click();
+  await page.waitForFunction(() => ![...document.querySelectorAll(".tab .tab-label")].some((l) => l.textContent === "Alpha"));
+  const tabsBefore = (await tabs()).length;
   await page.locator(".ProseMirror a", { hasText: "to alpha" }).click();
   say(
     "a link to a page of this workspace, clicked in a note, opens that page here",
     (await editorHas(`The quick ${WORD} jumps.`, 15_000)) && context.pages().length === pagesBefore && !new URL(page.url()).hash,
     `${context.pages().length} page(s), at ${page.url()}`,
+  );
+  say(
+    "in the note's own tab",
+    (await tabs()).length === tabsBefore && !(await tabs()).includes("Links"),
+    (await tabs()).join(", "),
+  );
+  await page.evaluate(() => history.back());
+  say("the browser's Back takes the tab back to the note the link was in", await editorHas("to alpha", 10_000), page.url());
+  await page.evaluate(() => history.forward());
+  say(
+    "and its Forward to the page again, at the app's own address",
+    (await editorHas(`The quick ${WORD} jumps.`, 10_000)) && page.url() === `${ORIGIN}/app`,
+    page.url(),
   );
   await row(LINKS).click();
   await editorHas("to nothing");

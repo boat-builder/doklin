@@ -20,24 +20,35 @@ export type TabKind = "file" | "untitled";
  *  window registry. Everything else about one is found again when it loads. */
 export type StoredTab = { id: string; kind: TabKind; path: string };
 
+/** A document a tab showed, and how far down it was read. */
+export type Step = { path: string; scroll: number };
+
+/** Where a tab can go Back and Forward to, nearest last in both. A link
+ *  followed in the tab adds a step; they last as long as the window and are
+ *  never stored. */
+export type Steps = { back: Step[]; forward: Step[] };
+
 /** `missing` marks a file whose path failed to read — the drive is
  *  unmounted, the file moved — kept visible as a "ghost" tab instead of being
  *  silently dropped. Every activation re-checks, so the flag heals itself. */
 export type DocTab = StoredTab & {
   kind: "file";
   missing?: boolean;
+  steps?: Steps;
   title?: never;
   unsaved?: never;
 };
 
 /** `title` is the note's first line ("" until it has one) and `unsaved`
  *  whether it has any text: both follow the text as it is typed, and are read
- *  back out of the buffer when a session is restored. */
+ *  back out of the buffer when a session is restored. An untitled note never
+ *  follows a link in its own tab, so it has no steps: it would be gone. */
 export type UntitledTab = StoredTab & {
   kind: "untitled";
   title: string;
   unsaved: boolean;
   missing?: never;
+  steps?: never;
 };
 
 export type Tab = DocTab | UntitledTab;
@@ -45,6 +56,31 @@ export type Tab = DocTab | UntitledTab;
 export const toStoredTab = ({ id, kind, path }: Tab): StoredTab => ({ id, kind, path });
 
 export const isUntitled = (t: Tab): t is UntitledTab => t.kind === "untitled";
+
+/** How many steps each way a tab keeps. */
+const STEPS_KEPT = 100;
+
+/** `steps` with `step` added to the end of one side, the oldest dropped past
+ *  what a tab keeps. */
+export function stepOnto(steps: Step[], step: Step): Step[] {
+  return [...steps, step].slice(-STEPS_KEPT);
+}
+
+/** A tab's steps with every path passed through `remap`: a file renamed or
+ *  moved is still where Back goes. The same object when nothing moved. */
+export function remapSteps(steps: Steps | undefined, remap: (path: string) => string): Steps | undefined {
+  if (!steps) return steps;
+  let moved = false;
+  const side = (list: Step[]) =>
+    list.map((s) => {
+      const path = remap(s.path);
+      if (path === s.path) return s;
+      moved = true;
+      return { ...s, path };
+    });
+  const next = { back: side(steps.back), forward: side(steps.forward) };
+  return moved ? next : steps;
+}
 
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
 const DOC_EXT_RE = /\.(md|markdown|mdown|mkd|html)$/i;

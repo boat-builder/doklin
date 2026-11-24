@@ -9,12 +9,14 @@
 // Notion's model, which this mirrors:
 //
 //   - A plain left click follows the link. External URLs leave for the system
-//     browser; an internal (in-workspace) target opens in the app.
+//     browser; an internal (in-workspace) target opens in the app, in the
+//     same tab. ⌘-click (Ctrl-click off a Mac) opens it in a new tab, the
+//     way a browser does, and leaves the caret where it was.
 //   - Hovering shows the link's own chrome, so editing a link never requires
 //     opening it first (Crepe's tooltip already does this half).
-//   - A modifier-click, a drag, or a double click is NOT a follow: it falls
-//     through to normal caret/selection behavior. That's the escape hatch for
-//     getting the caret *into* link text — same as arrowing in.
+//   - A drag, a double click, or a click with ⌥ or ⇧ held is NOT a follow:
+//     it falls through to normal caret/selection behavior. That's the way
+//     to get the caret *into* link text — same as arrowing in.
 //
 // Where a followed link goes is the host's business (the desktop app opens the
 // browser or another tab; a host-less mount opens a browser tab), so
@@ -25,11 +27,15 @@
 import { $prose } from "@milkdown/kit/utils";
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
+import { hasClosedLink, linkContextCtx } from "./linkMark";
 
 // What the host does with a followed link. The href is passed through
 // verbatim — exactly what the markdown says — so the host can tell an external
-// URL from a path to a note next door.
-export type LinkOpener = (href: string) => void;
+// URL from a path to a note next door. `closed`: a link to a document this
+// person can't open here (src/linkMark.ts), which must not be followed by
+// its path: that may be somebody else's file. `newTab`: the click asked for
+// a tab of its own (⌘ or Ctrl held).
+export type LinkOpener = (href: string, link: { closed: boolean; newTab: boolean }) => void;
 
 export const linkOpenKey = new PluginKey("doklin-link-open");
 
@@ -91,50 +97,62 @@ function scrollToAnchor(view: EditorView, fragment: string): boolean {
  * the host can swap its handler (or drop it) without remounting the editor.
  */
 export function linkOpenPlugin(getOpener: () => LinkOpener | undefined) {
-  return $prose(() => {
+  return $prose((ctx) => {
     let downX = Number.NaN;
     let downY = Number.NaN;
 
-    // A follow is a deliberate, unmodified, stationary left click. Everything
-    // else — modifier held, dragged, double click — is the user working with
-    // the *text*, and gets the editor's normal behavior.
+    // A follow is a deliberate, stationary left click, plain or with ⌘ or
+    // Ctrl (a new tab). Everything else — ⌥ or ⇧ held, dragged, double
+    // click — is the user working with the *text*, and gets the editor's
+    // normal behavior.
     const isFollow = (e: MouseEvent) =>
       e.button === 0 &&
       e.detail === 1 &&
-      !e.metaKey &&
-      !e.ctrlKey &&
       !e.altKey &&
       !e.shiftKey &&
       Math.abs(e.clientX - downX) <= DRAG_SLOP &&
       Math.abs(e.clientY - downY) <= DRAG_SLOP;
+    const asksNewTab = (e: MouseEvent) => e.metaKey || e.ctrlKey;
 
-    const follow = (view: EditorView, href: string) => {
+    const follow = (view: EditorView, href: string, newTab: boolean) => {
       if (!href) return;
       if (href.startsWith("#")) {
         scrollToAnchor(view, href.slice(1));
         return;
       }
-      getOpener()?.(href);
+      getOpener()?.(href, { closed: hasClosedLink(view, href, ctx.get(linkContextCtx.key)), newTab });
+    };
+
+    // The link under a press in the document, if any.
+    const linkAt = (view: EditorView, target: EventTarget | null) => {
+      const anchor = (target as HTMLElement | null)?.closest?.("a[href]");
+      return anchor && view.dom.contains(anchor) ? anchor : null;
     };
 
     return new Plugin({
       key: linkOpenKey,
       props: {
         handleDOMEvents: {
-          mousedown: (_view, event) => {
+          mousedown: (view, event) => {
             downX = event.clientX;
             downY = event.clientY;
+            // ⌘-press on a link: a new tab, and the note stays as it was.
+            // ProseMirror would otherwise take it as a node selection
+            // (⌘-click selects the block) and move the caret.
+            if (event.button === 0 && asksNewTab(event) && !event.altKey && !event.shiftKey && linkAt(view, event.target)) {
+              event.preventDefault();
+              return true;
+            }
             return false;
           },
           click: (view, event) => {
-            const target = event.target as HTMLElement | null;
-            const anchor = target?.closest?.("a[href]");
-            if (!anchor || !view.dom.contains(anchor)) return false;
+            const anchor = linkAt(view, event.target);
+            if (!anchor) return false;
             // Whatever happens next, the webview must not navigate: in the
             // desktop app that would replace Doklin itself with the site.
             event.preventDefault();
             if (!isFollow(event)) return false; // caret/selection, not a follow
-            follow(view, anchor.getAttribute("href") ?? "");
+            follow(view, anchor.getAttribute("href") ?? "", asksNewTab(event));
             return true;
           },
         },
@@ -151,7 +169,7 @@ export function linkOpenPlugin(getOpener: () => LinkOpener | undefined) {
           if (!anchor || view.dom.contains(anchor)) return; // in-document: handled above
           event.preventDefault();
           if (event.button !== 0) return;
-          follow(view, anchor.getAttribute("href") ?? "");
+          follow(view, anchor.getAttribute("href") ?? "", asksNewTab(event));
         };
         host?.addEventListener("click", onChromeClick);
         return {

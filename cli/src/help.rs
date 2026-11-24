@@ -33,6 +33,7 @@ Reading
   info <doc>                   a document's versions, comments, link and public addresses
   read <doc>                   a document's text              [--md|--html] [--clean] [-o file]
   search <text>                documents by name or text      [--in folder] [--limit n]
+  links <doc>                  what it links to, and what links to it   [--from|--to]
   comments <doc>               the comment threads on a document
   published                    everything that is public
 
@@ -408,7 +409,11 @@ What matters here
     doklin comment <doc> --on "<words in it>" -m "<what you think>"
   · To point your person at a document, give its link from doklin info, not its
     path: it opens in their Doklin app, for whoever can see the document. It is
-    not public — publishing is. A move to another section gives it a new link.
+    not public — publishing is. A rename or a move keeps the link.
+  · Inside a document, link to another one with an ordinary markdown link and
+    the path from this document's folder: [plan](../Projects/plan.md). It keeps
+    working when that document is renamed or moved. doklin links <doc> lists
+    what a document links to, and what links to it.
   · Publishing makes a document readable by anyone. Do it only when asked, and
     look at a folder with --dry-run first (doklin help publishing).
   · A diagram is a ```svg drawing you place by hand, in the theme's colours —
@@ -480,6 +485,7 @@ fn options_of(command: &str) -> &'static str {
             "  --on \"…\"       the words the thread is on (doklin help comments)\n  -m \"…\"         the comment\n  --md, --html   which version the words are in (default: the markdown, or the one the name's extension picks)"
         }
         "search" => "  --in <folder>  only under this folder\n  --limit <n>    how many documents to show (default 20, at most 30)",
+        "links" => "  --from         only what the document links to\n  --to           only the documents that link to it",
         "publish" => {
             "  --slug <s>     the last part of the address (default: a random one)\n  --title <t>    the page's title, where it differs from the document's\n  --desc <d>     its description, for link previews\n  --dry-run      list what would become public"
         }

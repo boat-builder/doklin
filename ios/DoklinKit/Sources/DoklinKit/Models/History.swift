@@ -416,7 +416,11 @@ extension DeletedDocument {
     @MainActor
     public func bringBack(in workspace: Workspace) async throws -> String {
         let targets = targets { FileManager.default.fileExists(atPath: $0) }
-        for (file, path) in targets {
+        // The sidecar first, as a save writes it: the note on disk always
+        // finds the records it uses.
+        let sidecarFirst = targets.filter { $0.path.lowercased().hasSuffix(".meta.jsonl") }
+            + targets.filter { !$0.path.lowercased().hasSuffix(".meta.jsonl") }
+        for (file, path) in sidecarFirst {
             try await Engine.shared.run("versions_restore_file", [
                 "root": .string(store),
                 "path": .string(path),
