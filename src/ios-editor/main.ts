@@ -53,7 +53,13 @@ import { toggleStrikethroughCommand } from "@milkdown/kit/preset/gfm";
 import { redoCommand, undoCommand } from "@milkdown/kit/plugin/history";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
-import { isMermaidLanguage, mermaidLanguage, queueMermaidPreview, MERMAID_PREVIEW_LOADING } from "../mermaid";
+import {
+  FLOWCHART_PREVIEW_WAITING,
+  flowchartPreview,
+  isMermaidLanguage,
+  mermaidLanguage,
+  relayFlowcharts,
+} from "../flowchartBlock";
 import { drawingLanguage, drawingPreview, isDrawingLanguage } from "../drawing";
 import { criticCommentSchema, criticRemark } from "../criticMark";
 import { inlineCodeNewlines } from "../inlineCodeNewlines";
@@ -160,6 +166,12 @@ function contextFor(note: string, documents: WorkspaceDocument[], recent: string
   };
 }
 
+/** How wide the editor's column is: a flowchart is laid out for it, so its words are their real size on a phone. */
+function column(): number {
+  return document.getElementById("editor")?.clientWidth ?? window.innerWidth;
+}
+window.addEventListener("resize", () => relayFlowcharts(column()));
+
 function view(): EditorView | null {
   if (!crepe) return null;
   try {
@@ -206,7 +218,7 @@ async function load(input: Load): Promise<void> {
       ctx.update(codeBlockConfig.key, (prev) => ({
         ...prev,
         languages: [...prev.languages, mermaidLanguage, drawingLanguage(prev.languages)],
-        previewLoading: MERMAID_PREVIEW_LOADING,
+        previewLoading: FLOWCHART_PREVIEW_WAITING,
         renderPreview: (language, content, applyPreview) => {
           if (isDrawingLanguage(language)) {
             if (!content.trim()) return null;
@@ -214,8 +226,7 @@ async function load(input: Load): Promise<void> {
           }
           if (isMermaidLanguage(language)) {
             if (!content.trim()) return null;
-            queueMermaidPreview(content, applyPreview);
-            return undefined;
+            return flowchartPreview(content, column(), applyPreview);
           }
           return prev.renderPreview(language, content, applyPreview);
         },

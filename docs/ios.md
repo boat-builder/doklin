@@ -95,4 +95,4 @@ The app reaches phones through TestFlight only, never the App Store.
 - A build expires 90 days after it is uploaded, and the app stops opening: a newer one goes up at least that often.
 - Export compliance is answered in the project (`ITSAppUsesNonExemptEncryption = NO`): the app's only encryption is HTTPS to its workers.
 
-To try the app in the simulator with no domain: `node verify-harness/serve-worker.mjs --no-mermaid`, mint a device line with the superadmin token it prints (`drive-ios.mjs` shows how), and paste it.
+To try the app in the simulator with no domain: `node verify-harness/serve-worker.mjs --no-app`, mint a device line with the superadmin token it prints (`drive-ios.mjs` shows how), and paste it.

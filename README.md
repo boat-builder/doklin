@@ -16,12 +16,13 @@ Notion-style WYSIWYG editor. Files stay as plain `.md` on disk — no lock-in.
   heading, `**bold**` bolds inline, `[ ] ` starts a GitHub-style checklist you
   tick by clicking the box, `/` opens a block menu, plus drag handles and a
   lossless markdown round-trip.
-- **Mermaid diagrams** — a ` ```mermaid ` code block (or `/diagram`) shows the
-  rendered diagram, not the code: flowcharts, sequence/state/class diagrams,
-  pies, gantts, … A *Source* chip (or just arrowing the caret in) flips the
-  block to its code; leaving it flips back to the diagram. Diagrams are drawn
-  in the app's own palette (all four themes), and the document stays plain
-  markdown.
+- **Flowcharts** — a ` ```mermaid ` code block (or `/diagram`) that holds a
+  flowchart shows the picture, not the code. Doklin draws it itself, in the
+  look of the document: boxes, pills, decisions, databases and groups, joined
+  by arrows that turn at right angles. A *Source* chip (or just arrowing the
+  caret in) flips the block to its code; leaving it flips back to the picture.
+  It follows the theme, and the document stays plain markdown. Other kinds of
+  Mermaid diagram are shown as their source.
 - **Links that go somewhere** — click a link to follow it, the way you would in
   Notion: a web address opens in your browser, an address next door
   (`[the plan](./plan.md)`) opens that note in a tab, and a `#heading` jumps

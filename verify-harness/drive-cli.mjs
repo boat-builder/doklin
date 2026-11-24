@@ -124,7 +124,7 @@ const WORKER_PORT = await freePort();
 const WORKER = `http://localhost:${WORKER_PORT}`;
 console.log(`starting the harness worker on ${WORKER}…`);
 await new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, [join(ROOT, "verify-harness/serve-worker.mjs"), "--no-mermaid", "--no-app"], {
+  const child = spawn(process.execPath, [join(ROOT, "verify-harness/serve-worker.mjs"), "--no-app"], {
     env: { ...process.env, PORT: String(WORKER_PORT) },
     stdio: ["ignore", "pipe", "pipe"],
   });

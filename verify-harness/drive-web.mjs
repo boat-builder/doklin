@@ -136,9 +136,7 @@ process.on("exit", cleanUp);
 const WORKER_PORT = await freePort();
 console.log(`starting the harness worker on http://localhost:${WORKER_PORT}…`);
 await new Promise((resolve, reject) => {
-  // --no-mermaid leaves out the public pages' diagram module, which nothing
-  // here loads: the app draws diagrams with its own.
-  const child = spawn(process.execPath, [join(ROOT, "verify-harness/serve-worker.mjs"), "--no-mermaid"], {
+  const child = spawn(process.execPath, [join(ROOT, "verify-harness/serve-worker.mjs")], {
     env: { ...process.env, PORT: String(WORKER_PORT) },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -609,9 +607,8 @@ async function driveApp(name) {
   say("a note's comments come with it, from its sidecar", true);
 
   await row("Diagram.md").click();
-  await page.locator("svg[aria-roledescription]").first().waitFor({ timeout: 60_000 });
-  await page.waitForTimeout(500);
-  say("a diagram draws under the page's policy", true);
+  await page.locator(".dk-flowchart > svg[role=img]").first().waitFor({ timeout: 60_000 });
+  say("a flowchart draws under the page's policy", true);
   say("and nothing a note carries runs as script", (await page.evaluate(() => document.documentElement.dataset.ran ?? null)) === null);
 
   /* 6 — what somebody else changes */

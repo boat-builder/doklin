@@ -19,8 +19,8 @@ export function readStoredTheme(): Theme {
 // OS appearance. <html data-theme> only ever carries a resolved name, so
 // tokens.css writes each palette exactly once — no prefers-color-scheme
 // copies to drift — and an OS flip is the same attribute change as a menu
-// pick (mermaid.ts re-renders diagrams off that attribute). The stored
-// choice rides along on data-theme-pref for anything that needs it.
+// pick. The stored choice rides along on data-theme-pref for anything that
+// needs it.
 export type ResolvedTheme = Exclude<Theme, "system">;
 export const darkSchemeQuery =
   typeof window !== "undefined" && window.matchMedia

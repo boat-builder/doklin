@@ -315,3 +315,12 @@ body {
   font: inherit;
   text-align: left;
 }
+
+/* A ```mermaid block that is not a flowchart is not drawn: one quiet line
+   under its source says so. */
+.milkdown .milkdown-code-block .preview .dk-figure-note {
+  white-space: normal;
+  text-align: left;
+  font: 13px/1.5 var(--font-ui);
+  color: var(--text-2);
+}

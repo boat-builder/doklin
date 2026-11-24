@@ -341,15 +341,29 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
 - The `@` list (`src/mentionMenu.ts`) opens on an `@` typed through
   `handleTextInput`, never on the caret landing after one, and the `@` is
   never stored.
-- Figure blocks (```` ```mermaid ```` in `src/mermaid.ts`, ```` ```svg ```` drawings
-  in `src/drawing.ts`): the block is picture *or* source, never both, driven
-  by `:focus-within` plus the `.dk-figure-editing` class (`src/figureBlock.ts`).
-  Any stylesheet that renders diagrams must reset page-level `p` styles inside
-  `.dk-mermaid`, and must also apply the Mermaid label sizes globally (App.css
-  "Mermaid labels", restated in the worker's page CSS): Mermaid measures labels
-  on `<body>` before its own stylesheet exists, so a size it didn't measure
-  clips the box. Mermaid's SVG is not well-formed XML (`<br>` in labels):
-  post-process it with an HTML parser.
+- Figure blocks (```` ```mermaid ```` flowcharts in `src/flowchartBlock.ts`,
+  ```` ```svg ```` drawings in `src/drawing.ts`): the block is picture *or*
+  source, never both, driven by `:focus-within` plus the `.dk-figure-editing`
+  class (`src/figureBlock.ts`). A ```` ```mermaid ```` block of any other kind
+  is not a figure: it stays a code block over a `.dk-figure-note`, which must
+  never match the `:has(.preview .dk-figure)` rules.
+- Flowcharts are drawn by `src/flowchart/` (pure: no DOM, nothing async; the
+  public pages' module runs it too): Mermaid's flowchart syntax in, a scene
+  out (`scene.ts`: rectangles, paths, lines of text), which `sceneSvg` writes
+  with nothing a drawing may not hold. What is drawn is what
+  `doklin help drawings` lists; `classDef`, `style`, `linkStyle`, `click` and
+  `init` are read and dropped. Every caller names the frame it lays out for:
+  760, or a phone column's own width. Change the renderer and
+  `verify-harness/flowchart-fixture.json` together
+  (`flowchart.test.mjs --write`, then look at the pictures).
+- `dagre-d3-es` is pinned to one exact version, and only its `src/dagre` and
+  `src/graphlib` are imported. It is the dagre Mermaid runs, so boxes land
+  where other Mermaid renderers put them, and it keeps the boxes of a rank in
+  written order (`@dagrejs/dagre` reverses them). An upgrade re-lays out every
+  flowchart people wrote. Its `d3` dependency must never reach a bundle.
+- A flowchart's words are measured with no page: `src/flowchart/interWidths.ts`
+  is written from the bundled Inter by `scripts/inter-widths.mjs` (`--check`
+  in CI). Run it when the fonts change.
 - Drawings go through `sanitizeDrawing` (`src/drawingSvg.ts`, pure, also run by
   the worker): an element/attribute allowlist re-serialized from its own
   parse, and every `id`/`url(#…)` prefixed per drawing so two drawings never
@@ -381,8 +395,6 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   serializes there. Subscribing to `markdownUpdated` has Milkdown serialize
   on that wait instead, and writing a paragraph asks for the view, which
   throws once the editor is gone.
-- Mermaid's `look` and `layout` are pinned (`mermaidConfig`): an upgrade that
-  changes either default would re-lay out every diagram people wrote.
 - Sidebar and tab drags are pointer-based: Tauri intercepts HTML5 drag.
 - Zoom (`⌘+`/`⌘-`/`⌘0`) scales the markdown editor through `--doc-zoom` and
   the html rendition through its frame's bridge; app chrome never scales.

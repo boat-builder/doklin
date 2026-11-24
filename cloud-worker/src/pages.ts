@@ -119,7 +119,7 @@ export async function notePage(linked: Linked, loc: Located, o: NoteOptions): Pr
   const sidecar = await ws.meta(stemOf(path));
   const links = linkResolver(linked, dirOf(path), o.dirSlug, sidecar?.links ?? []);
   const bodyHtml = markdownHtml(body, { tcols: sidecar?.tcols ?? [], links });
-  return html(notePageHtml({ meta, crumb: o.crumb, hasHtml, bodyHtml, mermaidTag: WEB_TAG }));
+  return html(notePageHtml({ meta, crumb: o.crumb, hasHtml, bodyHtml, webTag: WEB_TAG }));
 }
 
 /** Resolve a link written inside a note (`./plan.md`, `../x/y.md`) to a workspace path, or null when it isn't one. */

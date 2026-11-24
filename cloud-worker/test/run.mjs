@@ -15,7 +15,7 @@
 // the same suite runs against a bundle scripts/bundle-worker.mjs wrote, with
 // the web directory it wrote beside it served in front of the worker the way
 // Cloudflare serves it (test/assets.mjs): the fonts, icons, og.png and the
-// mermaid module then answer instead of 404ing.
+// flowchart module then answer instead of 404ing.
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -44,7 +44,7 @@ let worker;
 let anotherIsolate;
 /** The web directory beside the bundle (scripts/bundle-worker.mjs), or null for a source compile. */
 const webDir = bundlePath ? path.join(path.dirname(path.resolve(bundlePath)), "doklin-cloud-web") : null;
-/** The tag the worker's pages carry: the web directory's mermaid build, or "dev". */
+/** The tag the worker's pages carry: the web directory's flowchart build, or "dev". */
 const webTag = webDir ? (readdirSync(path.join(webDir, "__web")).find((d) => d !== "fonts") ?? "dev") : "dev";
 if (bundlePath) {
   const href = pathToFileURL(path.resolve(bundlePath)).href;
@@ -2283,23 +2283,24 @@ async function webDirectory(fonts) {
   assert.ok(og.bytes.length > 10000, "the real image, not a placeholder");
   assert.equal((await pub("/_headers")).status, 404, "the rules file is read, never served");
 
-  // The mermaid module, at the tag the worker's pages carry (the diagram
+  // The flowchart module, at the tag the worker's pages carry (the diagram
   // test below checks a page asks for it there) — and only there.
   const tags = readdirSync(path.join(webDir, "__web")).filter((d) => d !== "fonts");
-  assert.equal(tags.length, 1, "one mermaid build in the web directory");
+  assert.equal(tags.length, 1, "one flowchart build in the web directory");
   const [tag] = tags;
   assert.match(tag, /^[0-9a-f]{12}$/, "a content tag");
-  const mermaid = await pub(`/__web/${tag}/mermaid.js`);
-  assert.equal(mermaid.status, 200);
-  assert.match(mermaid.headers.get("content-type"), /javascript/);
-  assert.equal(mermaid.headers.get("cache-control"), "public, max-age=31536000, immutable", "one Cache-Control rule matches");
-  assert.equal(mermaid.headers.get("x-robots-tag"), "noindex");
-  assert.ok(mermaid.text.includes("mermaidConfig") && mermaid.text.includes("finishMermaidSvg"), "with the app's diagram grammar");
-  assert.ok(mermaid.text.includes("pre > code.language-mermaid"), "and it draws a page's diagrams itself: no page carries a script for it");
-  assert.equal(mermaid.headers.get("x-content-type-options"), "nosniff");
+  const module = await pub(`/__web/${tag}/flowchart.js`);
+  assert.equal(module.status, 200);
+  assert.match(module.headers.get("content-type"), /javascript/);
+  assert.equal(module.headers.get("cache-control"), "public, max-age=31536000, immutable", "one Cache-Control rule matches");
+  assert.equal(module.headers.get("x-robots-tag"), "noindex");
+  assert.ok(module.text.includes("layoutFlowchart") && module.text.includes("sceneSvg"), "with the app's flowchart renderer");
+  assert.ok(module.text.includes("pre[data-dk-flowchart] > code"), "and it draws a page's flowcharts itself: no page carries a script for it");
+  assert.ok(!/from\s*["']d3/.test(module.text) && !module.text.includes("d3-selection"), "the layout engine alone, without the drawing library it ships beside");
+  assert.equal(module.headers.get("x-content-type-options"), "nosniff");
   assert.equal(robots.headers.get("x-content-type-options"), "nosniff", "every file the web directory serves");
-  assert.equal(createHash("sha256").update(mermaid.bytes).digest("hex").slice(0, 12), tag, "the tag is the module's hash");
-  assert.equal((await pub("/__web/abc123/mermaid.js")).status, 404, "another tag names nothing");
+  assert.equal(createHash("sha256").update(module.bytes).digest("hex").slice(0, 12), tag, "the tag is the module's hash");
+  assert.equal((await pub("/__web/abc123/flowchart.js")).status, 404, "another tag names nothing");
 
   // The fonts the app bundles, byte for byte.
   for (const [family, file] of fonts) {
@@ -2364,7 +2365,7 @@ await test(`the browser version: ${bundlePath ? "its page, scripts and frame pag
   assert.ok(frame.text.includes("frame-html") && frame.text.includes("frame-ready"), "it asks for the markup and becomes it");
 });
 
-await test(`public: the landing page; robots, icons, the OG image, fonts and the mermaid module (${bundlePath ? "from the web directory" : "404s: a source compile has no web directory"}); an empty folder page; anything else a 404 page`, async () => {
+await test(`public: the landing page; robots, icons, the OG image, fonts and the flowchart module (${bundlePath ? "from the web directory" : "404s: a source compile has no web directory"}); an empty folder page; anything else a 404 page`, async () => {
   // The map the validation test left names a root page whose blob never
   // arrived: the domain root IS that page, and it is not there yet.
   const root = await pub("/");
@@ -2380,12 +2381,12 @@ await test(`public: the landing page; robots, icons, the OG image, fonts and the
     ["literata", "literata-latin-opsz-italic.woff2"],
     ["roboto-mono", "roboto-mono-latin-ext-wght-normal.woff2"],
   ];
-  const assetPaths = ["/robots.txt", "/favicon.ico", "/apple-touch-icon.png", "/og.png", "/__web/abc123/mermaid.js", ...fonts.map(([, f]) => `/__web/fonts/${f}`)];
+  const assetPaths = ["/robots.txt", "/favicon.ico", "/apple-touch-icon.png", "/og.png", "/__web/abc123/flowchart.js", ...fonts.map(([, f]) => `/__web/fonts/${f}`)];
   // What reaches the worker at those paths names nothing: the web directory
   // answers them on a domain, and the worker 404s without reading the bucket.
   const noBucket = { ...env, DATA: new Proxy({}, { get: () => () => { throw new Error("the bucket was read"); } }) };
   for (const p of [...assetPaths, "/__web/x/app.js"]) {
-    const served = bundlePath && p !== "/__web/abc123/mermaid.js" && p !== "/__web/x/app.js";
+    const served = bundlePath && p !== "/__web/abc123/flowchart.js" && p !== "/__web/x/app.js";
     assert.equal((await rawGet(p, {}, noBucket)).status, served ? 200 : 404, p);
   }
 
@@ -2570,14 +2571,14 @@ await test("public: every page wears the app's own theme — its tokens light an
   assert.ok(!(await pub("/plan")).text.includes('rel="preload"'), "a framed rendition sets no type of its own, so fetches none");
 });
 
-await test("public: column widths come from the meta sidecar under the app's own table identity; comment markers are stripped; the mermaid module is named only on pages with a diagram", async () => {
+await test("public: column widths come from the meta sidecar under the app's own table identity; comment markers are stripped; the flowchart module is named only on pages with a flowchart", async () => {
   const sizes = await pub("/sizes");
   assert.ok(
     sizes.text.includes('<table class="dk-cols"><colgroup><col style="width:260px"><col><col style="width:140px"></colgroup>'),
     "the record found its table — the same id the desktop derived (pinned in verify-harness/tablewidths.test.mjs)",
   );
   assert.ok(sizes.text.includes('class="dk-table-scroll"'));
-  assert.ok(!sizes.text.includes("mermaid.js"), "no diagram, no script");
+  assert.ok(!sizes.text.includes("flowchart.js"), "no flowchart, no script");
 
   const comments = await pub("/comments");
   assert.ok(comments.text.includes("A sentence with a highlighted phrase and more after it."), "the highlight unwrapped, the marker gone");
@@ -2585,11 +2586,18 @@ await test("public: column widths come from the meta sidecar under the app's own
   assert.ok(!comments.text.includes("Say it plainer"), "bodies never leave the sidecar");
 
   const diagram = await pub("/diagram");
-  assert.ok(diagram.text.includes('<code class="language-mermaid">flowchart LR'), "the source stays a code block for readers without scripts");
-  const asked = diagram.text.match(/<script type="module" src="(\/__web\/[a-z0-9]+\/mermaid\.js)"><\/script>\n<\/body>/)?.[1];
-  assert.ok(asked, "the page names the tagged module, which draws its diagrams");
+  assert.ok(
+    diagram.text.includes('<pre data-dk-flowchart><code class="language-mermaid">flowchart LR'),
+    "a flowchart's source stays a code block for readers without scripts, marked for the module",
+  );
+  assert.ok(
+    diagram.text.includes('<pre><code class="language-mermaid">sequenceDiagram'),
+    "another kind of Mermaid diagram is a plain code block: nothing draws it",
+  );
+  const asked = diagram.text.match(/<script type="module" src="(\/__web\/[a-z0-9]+\/flowchart\.js)"><\/script>\n<\/body>/)?.[1];
+  assert.ok(asked, "the page names the tagged module, which draws its flowcharts");
   if (bundlePath) assert.equal((await rawGet(asked)).status, 200, "at the path the web directory serves it");
-  else assert.equal(asked, "/__web/dev/mermaid.js", "a source compile tags its module dev");
+  else assert.equal(asked, "/__web/dev/flowchart.js", "a source compile tags its module dev");
 
   // Drawings are drawn by the worker itself, through the app's sanitizer:
   // no script needed, each with its own ids, nothing executable kept, and
@@ -2620,11 +2628,11 @@ await test("public: column widths come from the meta sidecar under the app's own
   assert.ok(ideas.text.includes(".doc .callout {"), "the page carries the callout look");
 });
 
-await test("public: every page the worker draws goes out under the page policy, which runs the mermaid module and nothing written into a note; an html document keeps its sandbox; every answer is nosniff", async () => {
+await test("public: every page the worker draws goes out under the page policy, which runs the flowchart module and nothing written into a note; an html document keeps its sandbox; every answer is nosniff", async () => {
   const policy = (origin) =>
     [
       "default-src 'none'",
-      `script-src ${origin}/__web/${webTag}/mermaid.js`,
+      `script-src ${origin}/__web/${webTag}/flowchart.js`,
       "style-src 'unsafe-inline'",
       "img-src * data:",
       "media-src *",
@@ -2657,7 +2665,7 @@ await test("public: every page the worker draws goes out under the page policy, 
   const diagram = await pub("/diagram");
   assert.deepEqual(
     diagram.text.match(/<script\b[^>]*>/g),
-    ["<script>", `<script type="module" src="/__web/${webTag}/mermaid.js">`],
+    ["<script>", `<script type="module" src="/__web/${webTag}/flowchart.js">`],
     "the note's own script tag, then the module's — and the policy names the second alone",
   );
   for (const written of ['onerror="document.documentElement.dataset.ran', 'href="javascript:void(', '<form id="written-form"', '<base href="https://example.com/">']) {

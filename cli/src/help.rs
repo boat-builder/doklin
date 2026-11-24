@@ -365,10 +365,23 @@ A journey: stages along one axis
   <text x="736" y="140" text-anchor="end" font-size="11.5" fill="var(--dg-ink-2)">ready to buy</text>
   </svg>
 
-A ```mermaid block is drawn in the same style, for diagrams people type by hand:
-write a box as "<b>Name</b><br/>a quieter line", and mark the one box that stands
-out with :::focus (A:::focus, or class A focus). Mermaid places the boxes itself,
-so when the arrangement matters, draw it."##;
+A ```mermaid block that holds a flowchart is drawn in the same style, with the
+boxes placed for you. Only flowcharts are drawn (flowchart or graph; TB, BT, LR,
+RL): any other kind of Mermaid diagram is shown as its source. What is drawn:
+
+    A["<b>Name</b><br/>a quieter line"]   a box: a label with a bold part is a
+                                          name over quiet lines
+    A(["pill"])  A[("database")]  A{"decision"}  A(("circle"))  A[["subroutine"]]
+    A --> B    A --- B    A -.-> B    A ==> B    A <--> B    A --o B    A --x B
+    A -->|label| B    A ---> B (one rank further)    A ~~~ B (placed, not drawn)
+    subgraph id [Title] … end             a group: it may hold groups, and name
+                                          a direction of its own
+    A:::focus    class A,B focus          a mark on a box: focus (the one that
+                                          stands out), good, warn or bad
+
+Colours and styles written in the source (classDef, style, linkStyle) are not
+used: the look is the document's. The boxes are placed for you, so when the
+arrangement itself matters, draw it."##;
 
 const AGENT: &str = r#"FOR AN AGENT
 

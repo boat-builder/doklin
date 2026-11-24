@@ -1567,7 +1567,7 @@ body,
    elements the placeholder parity rule (below) pairs — the live CodeMirror
    and its static placeholder — never to the whole block: the tools and the
    diagram preview must keep their geometry (sizing the block broke the
-   mermaid live-edit drive). */
+   flowchart live-edit drive). */
 .editor-wrap .milkdown .milkdown-code-block .cm-editor,
 .editor-wrap .milkdown .milkdown-code-block pre.milkdown-code-block-placeholder {
   font-size: 0.875em;
@@ -1798,8 +1798,8 @@ body,
    CM6 base theme, as restyled above): the .tools row floats out of flow,
    then .cm-content at inherited font-size, the mono face, line-height 1.5,
    no padding, no wrapping; each .cm-line unpadded. The `pre` type selector
-   outranks the crepe theme rule regardless of stylesheet order. Mermaid
-   blocks keep their own height dance (diagram ≠ source, inherently).
+   outranks the crepe theme rule regardless of stylesheet order. Figure
+   blocks keep their own height dance (picture ≠ source, inherently).
    Re-measure if crepe updates. */
 .milkdown .milkdown-code-block pre.milkdown-code-block-placeholder {
   margin: 0;
@@ -1822,12 +1822,11 @@ body,
   border-radius: 0;
 }
 
-/* ---------- Figure blocks (```mermaid diagrams, ```svg drawings) ----------
+/* ---------- Figure blocks (```mermaid flowcharts, ```svg drawings) ----------
    A figure block reads as the picture alone, set into the column like an
    image: no code card, no language chip or Copy row, full column width.
-   Mermaid colours its SVG from the drawing tokens at render time
-   (mermaidTheme.ts); drawings name the tokens themselves (drawing.ts). This
-   is layout and framing only.
+   Both kinds name the drawing tokens inside their SVG (flowchartBlock.ts,
+   drawing.ts), so this is layout and framing only.
 
    Two states, never both at once (figureBlock.ts): reading (nothing in the
    block focused) shows the picture; the Source chip — or arrowing the caret
@@ -1885,10 +1884,12 @@ body,
   font-family: var(--font-ui);
 }
 
-/* A drawing fills the column: its 760-wide frame scales to fit, as the
-   viewer scales its 760 frame to the 672 column. In full width it keeps
-   the reading column's size, centred, rather than growing with the pane. */
-.milkdown .milkdown-code-block .preview .dk-drawing > svg {
+/* A drawing or a flowchart fills the column: its 760-wide frame scales to
+   fit, as the viewer scales its 760 frame to the 672 column. In full width
+   it keeps the reading column's size, centred, rather than growing with the
+   pane. */
+.milkdown .milkdown-code-block .preview .dk-drawing > svg,
+.milkdown .milkdown-code-block .preview .dk-flowchart > svg {
   width: 100%;
   max-width: calc(var(--doc-measure) * var(--doc-zoom, 1));
   height: auto;
@@ -1939,50 +1940,7 @@ body,
   background: var(--hover);
 }
 
-/* The editor's paragraph styling (.ProseMirror p above) must not restyle the
-   HTML labels inside a diagram: mermaid measures them outside the editor
-   cascade, so any extra font-size/padding/margin here clips the label boxes. */
-.editor-wrap .milkdown .ProseMirror .dk-figure p {
-  font-size: inherit;
-  line-height: inherit;
-  padding: 0;
-  margin: 0;
-}
-
-/* Mermaid labels, globally: mermaid measures a label in a scratch node on
-   <body> before the diagram's own stylesheet exists, so the sizes its theme
-   CSS draws (mermaidTheme.ts) must already apply there, or boxes clip. A
-   name over a line ("<b>Name</b><br/>line") is 13/600 over 11.5; a plain
-   label is 13. */
-.nodeLabel,
-.edgeLabel {
-  font-size: 13px;
-  line-height: 18px;
-}
-
-.nodeLabel:has(b),
-.edgeLabel,
-.cluster-label .nodeLabel {
-  font-size: 11.5px;
-  line-height: 16px;
-}
-
-.nodeLabel b {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.cluster-label .nodeLabel {
-  font-weight: 600;
-}
-
-.nodeLabel p,
-.edgeLabel p {
-  margin: 0;
-  padding: 0;
-  line-height: inherit;
-}
-
+/* A big flowchart waiting for a pause in the typing. */
 .milkdown .milkdown-code-block .preview .dk-figure-loading {
   justify-content: center;
   font-size: var(--fs-md);
@@ -1991,7 +1949,7 @@ body,
 }
 
 /* A source that doesn't parse (the normal state mid-typing): a quiet card,
-   not an alarm — heading in muted ink, the parser's message in small mono. */
+   not an alarm — heading in muted ink, the reason in small mono. */
 .milkdown .milkdown-code-block .preview .dk-figure-error {
   display: block;
   /* The editor sets pre-wrap; the card's markup newlines are not text. */
@@ -2028,8 +1986,26 @@ body,
   right: 8px;
 }
 
-/* ---------- Mermaid zoom/pan canvas (MermaidModal.tsx) ----------
-   A full-screen surface for one rendered diagram: wheel to zoom (toward the
+/* A ```mermaid block that is not a flowchart is not drawn: it stays a code
+   block, and its preview is one quiet line saying so, without the stock
+   "PREVIEW" divider and toggle. */
+.milkdown .milkdown-code-block:has(.preview .dk-figure-note) .preview-toggle-button,
+.milkdown .milkdown-code-block:has(.preview .dk-figure-note) .preview-divider,
+.milkdown .milkdown-code-block:has(.preview .dk-figure-note) .preview-label {
+  display: none;
+}
+
+.milkdown .milkdown-code-block .preview .dk-figure-note {
+  white-space: normal;
+  text-align: left;
+  font-size: var(--fs-sm);
+  font-family: var(--font-ui);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+/* ---------- Figure zoom/pan canvas (FigureZoom.tsx) ----------
+   A full-screen surface for one rendered figure: wheel to zoom (toward the
    cursor), drag to pan, double-click to fit. The dot grid tracks the transform
    (size follows zoom, position follows pan) so it reads as one movable plane. */
 
@@ -2071,7 +2047,7 @@ body,
 }
 
 /* Zoom is the wrapper's layout size, not a scale() transform — WKWebView
-   rasterizes scaled layers and zooming would blur (see MermaidModal.tsx).
+   rasterizes scaled layers and zooming would blur (see FigureZoom.tsx).
    The transform only translates. */
 .dk-zoom-content {
   position: absolute;

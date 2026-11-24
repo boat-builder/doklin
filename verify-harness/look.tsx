@@ -1,7 +1,7 @@
 // Verification harness: the REAL Editor (Crepe + figure blocks) showing a
 // document with every block type, to judge the document look — type,
-// rhythm, palettes, drawings and restyled Mermaid — in each theme. Not part
-// of the app.
+// rhythm, palettes, drawings and flowcharts — in each theme. Not part of the
+// app.
 //
 //   ?theme=light|dark|paper        [data-theme] on <html>
 //   ?ro=1                          read-only mount
@@ -73,9 +73,19 @@ export function hello(name: string): string {
 \`\`\`
 
 \`\`\`mermaid
+---
+title: A flowchart states its finding first
+---
 flowchart LR
-  a["<b>Draft</b><br/>someone writes it"] --> b["<b>Review</b><br/>a teammate reads it"] --> c["<b>Publish</b><br/>everyone can read it"]
-  class c focus
+  a["<b>Draft</b><br/>someone writes it"] --> b{"Good enough?"}
+  b -- not yet --> a
+  b -- yes --> c["<b>Publish</b><br/>everyone can read it"]:::focus
+  subgraph Readers
+    d[(Workspace)]
+    e([Public page])
+  end
+  c --> d
+  c -.-> e
 \`\`\`
 `;
 

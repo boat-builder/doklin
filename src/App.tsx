@@ -77,7 +77,7 @@ import {
 } from "./tabs";
 import FindBar from "./FindBar";
 import WorkspaceSearch from "./WorkspaceSearch";
-import MermaidModal from "./MermaidModal";
+import FigureZoom from "./FigureZoom";
 import {
   THEMES,
   THEME_STORAGE_KEY,
@@ -1169,7 +1169,7 @@ export default function App() {
   );
 
 
-  // The SVG of a rendered figure (a mermaid diagram or an svg drawing) opened
+  // The SVG of a rendered figure (a flowchart or an svg drawing) opened
   // in the zoom/pan canvas; null when closed. Set by the `dk-figure-expand`
   // event a figure's expand chip fires (src/figureBlock.ts).
   const [zoomDiagramSvg, setZoomDiagramSvg] = useState<string | null>(null);
@@ -5804,7 +5804,7 @@ export default function App() {
     >
       {showSidebar && titleLead}
       {zoomDiagramSvg && (
-        <MermaidModal svg={zoomDiagramSvg} onClose={() => setZoomDiagramSvg(null)} />
+        <FigureZoom svg={zoomDiagramSvg} onClose={() => setZoomDiagramSvg(null)} />
       )}
       <TabBar
         tabs={tabs}

@@ -13,7 +13,8 @@
 //                                    and quotes that only look like them
 //   Sizes.md + Sizes.meta.jsonl      a table with stored column widths
 //   Comments.md + Comments.meta.jsonl  comment markers in the text, bodies in the sidecar
-//   Diagram.md                       a ```mermaid block and ```svg drawings (two
+//   Diagram.md                       a ```mermaid flowchart, a ```mermaid diagram of
+//                                    another kind, and ```svg drawings (two
 //                                    sharing a marker id, one that doesn't parse),
 //                                    then HTML written into the markdown that would
 //                                    act if its page let it: a script, a handler, a
@@ -108,6 +109,11 @@ flowchart LR
 \`\`\`
 
 Words after the diagram.
+
+\`\`\`mermaid
+sequenceDiagram
+  Ada->>Ben: A kind Doklin does not draw
+\`\`\`
 
 \`\`\`svg
 <svg viewBox="0 0 760 80" role="img" aria-label="One drawing">

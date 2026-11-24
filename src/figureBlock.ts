@@ -1,9 +1,9 @@
 // A figure block: a fenced code block that reads as the picture it draws —
-// ```mermaid (mermaid.ts) and ```svg drawings (drawing.ts). Both ride Crepe's
+// ```mermaid flowcharts (flowchartBlock.ts) and ```svg drawings (drawing.ts). Both ride Crepe's
 // code-block preview hook; this module owns what they share:
 //
 //   - the two chips a rendered figure carries: Source (switch to the source
-//     text) and Expand (the full-screen zoom/pan canvas, MermaidModal);
+//     text) and Expand (the full-screen zoom/pan canvas, FigureZoom);
 //   - the two-state switch. A figure block never shows source and picture
 //     stacked: reading (nothing in the block focused) is the picture alone;
 //     the Source chip, or arrowing the caret in, shows the source alone, and
@@ -34,7 +34,7 @@ export function figureChips(expandable: boolean): string {
   return (expandable ? EXPAND_BUTTON : "") + SOURCE_BUTTON;
 }
 
-/** The event the Expand chip sends; App mounts MermaidModal on it. */
+/** The event the Expand chip sends; App mounts FigureZoom on it. */
 export const FIGURE_EXPAND_EVENT = "dk-figure-expand";
 export type FigureExpandDetail = { svg: string; source: string };
 
@@ -66,7 +66,7 @@ export function ensureFigureHooks(): void {
     }
 
     // Expand: hand the rendered SVG (and the block's source) to App's
-    // MermaidModal. The SVG is self-contained, so the modal needs nothing
+    // FigureZoom. The SVG is self-contained, so the modal needs nothing
     // more to draw the zoom/pan canvas.
     const expand = target?.closest(".dk-figure-expand");
     if (expand) {
@@ -102,8 +102,8 @@ export function ensureFigureHooks(): void {
 }
 
 // The wrapper carries its source URI-encoded (attribute-safe, newline-proof)
-// in data-dk-figure-src, so a re-render (theme flip) and the zoom view can
-// read it back.
+// in data-dk-figure-src, so a relayout (flowchartBlock.ts) and the zoom view
+// can read it back.
 export function figureSourceAttr(source: string): string {
   return `data-dk-figure-src="${encodeURIComponent(source)}"`;
 }

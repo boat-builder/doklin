@@ -357,7 +357,7 @@ anything else            404 page
 ```
 
 Every page above goes out under the page policy — `default-src 'none'`, scripts only
-from `<origin>/__web/<tag>/mermaid.js`, no forms, no `<base>`
+from `<origin>/__web/<tag>/flowchart.js`, no forms, no `<base>`
 ([docs/cloud-publishing.md](../docs/cloud-publishing.md)) — except an html document,
 which keeps `sandbox allow-scripts allow-popups`. Every response of the worker's, the
 API's included, carries `X-Content-Type-Options: nosniff`.
@@ -366,8 +366,8 @@ Static assets, served by Cloudflare from `doklin-cloud-web/` without running
 the worker (free, uncounted; headers from its `_headers`, `cloud-worker/web/_headers`):
 
 ```
-/__web/<tag>/mermaid.js  immutable, content-tagged (the tag is spliced into the worker);
-                         the one script a public page runs
+/__web/<tag>/flowchart.js  immutable, content-tagged (the tag is spliced into the worker);
+                           the one script a public page runs
 /__web/fonts/<file>      the app's bundled fonts, a week
 /og.png · /favicon.ico · /apple-touch-icon.png   a week
 /robots.txt
@@ -519,7 +519,7 @@ Teardown: app wipe, then `wrangler delete`, `wrangler d1 delete`, `wrangler r2 b
 ```sh
 pnpm typecheck:worker
 pnpm test:worker       # node cloud-worker/test/run.mjs [--bundle <file>]; fake R2, D1 on node:sqlite
-pnpm bundle:worker     # node scripts/bundle-worker.mjs [--no-mermaid] [--no-app] → cloud-worker/dist/ (worker + doklin-cloud-web/)
+pnpm bundle:worker     # node scripts/bundle-worker.mjs [--no-app] → cloud-worker/dist/ (worker + doklin-cloud-web/)
 node verify-harness/serve-worker.mjs   # bundle over test/seed.mjs on :8787
 node verify-harness/drive-cli.mjs      # built cli/ against the worker
 node verify-harness/drive-web.mjs      # the browser version, built, in real browsers over https
