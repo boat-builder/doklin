@@ -2599,6 +2599,23 @@ await test("public: column widths come from the meta sidecar under the app's own
   const drawn = diagram.text.slice(diagram.text.indexOf('<figure class="dk-drawing">'), diagram.text.lastIndexOf("</figure>"));
   assert.ok(!drawn.includes("<script") && !drawn.includes("onclick") && !drawn.includes("alert("), "nothing executable survives");
   assert.ok(diagram.text.includes('<code class="language-svg">&lt;svg viewBox=&quot;0 0 760 80&quot;&gt;&lt;g&gt;&lt;/svg&gt;'), "a drawing that doesn't parse stays its source");
+
+  // Callouts: a top-level quote opening with a marker is drawn as the app
+  // draws it, the marker gone; one with a title after the marker, and one
+  // inside a list, stay quotes, as GitHub shows them.
+  const ideas = await pub("/ideas");
+  assert.ok(
+    ideas.text.includes('<div class="callout callout-warning" role="note"><p class="callout-title"><svg class="callout-icon"') &&
+      ideas.text.includes('Warning</p><div class="callout-body"><p>Both need <em>fuel</em>.</p>'),
+    "a callout: its title, then its body without the marker",
+  );
+  assert.ok(ideas.text.includes('<div class="callout callout-note" role="note">') && ideas.text.includes("<p>A marker in lowercase.</p>"), "a marker in any case");
+  assert.equal((ideas.text.match(/class="callout /g) ?? []).length, 2, "two callouts, no more");
+  assert.ok(ideas.text.includes("<blockquote>\n<p>[!NOTE] A title after the marker</p>"), "a title after the marker leaves a quote");
+  assert.ok(/<li>[\s\S]*<blockquote>\n<p>\[!TIP\]/.test(ideas.text), "a quote in a list stays a quote");
+  const description = ideas.text.match(/<meta name="description" content="([^"]*)"/)?.[1] ?? "";
+  assert.ok(description.includes("Both need fuel") && !description.includes("[!WARNING]"), "a callout's words in the page's description, its marker not");
+  assert.ok(ideas.text.includes(".doc .callout {"), "the page carries the callout look");
 });
 
 await test("public: every page the worker draws goes out under the page policy, which runs the mermaid module and nothing written into a note; an html document keeps its sandbox; every answer is nosniff", async () => {

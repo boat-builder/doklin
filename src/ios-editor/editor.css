@@ -71,6 +71,10 @@ body {
   line-height: 1.45;
 }
 
+/* Headings as the reader sets them (Theme.swift docHeading — change both):
+   H1 and H2 in the serif at a medium weight, H3 and below in the text face
+   at semibold, with the reader's extra room above (18pt over H1/H2, 10pt
+   over the rest). */
 .milkdown .ProseMirror h1,
 .milkdown .ProseMirror h2,
 .milkdown .ProseMirror h3,
@@ -78,10 +82,21 @@ body {
 .milkdown .ProseMirror h5,
 .milkdown .ProseMirror h6 {
   margin: 0;
-  padding: 0;
-  font-family: var(--font-heading);
-  font-weight: 400;
+  padding: 10px 0 0;
+  font-family: var(--font-text);
+  font-weight: 600;
   color: var(--text-1);
+}
+
+.milkdown .ProseMirror h1,
+.milkdown .ProseMirror h2 {
+  padding-top: 18px;
+  font-family: var(--font-heading);
+  font-weight: 500;
+}
+
+.milkdown .ProseMirror > :first-child {
+  padding-top: 0;
 }
 
 .milkdown .ProseMirror h1 {
@@ -90,9 +105,8 @@ body {
 }
 
 .milkdown .ProseMirror h2 {
-  font-size: 22px;
-  line-height: 1.27;
-  padding-top: 8px;
+  font-size: 28px;
+  line-height: 1.22;
 }
 
 .milkdown .ProseMirror h3 {
@@ -102,13 +116,11 @@ body {
 
 .milkdown .ProseMirror h4 {
   font-size: 17px;
-  font-weight: 600;
 }
 
 .milkdown .ProseMirror h5,
 .milkdown .ProseMirror h6 {
   font-size: 15px;
-  font-weight: 600;
 }
 
 .milkdown .ProseMirror a {
@@ -145,4 +157,161 @@ body {
 
 .milkdown .crepe-placeholder::before {
   color: var(--text-3);
+}
+
+/* Callouts: the Mac's box (App.css "Callouts" — change all three, with the
+   public page's), at the phone's sizes. The reader draws the same box
+   (ios/Doklin/MarkdownView.swift CalloutView). */
+.callout-note { --co: var(--callout-note); --co-tint: var(--callout-note-tint); }
+.callout-tip { --co: var(--callout-tip); --co-tint: var(--callout-tip-tint); }
+.callout-important { --co: var(--callout-important); --co-tint: var(--callout-important-tint); }
+.callout-warning { --co: var(--callout-warning); --co-tint: var(--callout-warning-tint); }
+.callout-caution { --co: var(--callout-caution); --co-tint: var(--callout-caution-tint); }
+
+.milkdown .ProseMirror .callout {
+  position: relative;
+  padding: 12px 14px 13px;
+  border-radius: 10px;
+  background: var(--co-tint);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--co) 13%, transparent);
+  color: var(--text-1);
+}
+
+.milkdown .ProseMirror .callout-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px -2px;
+  padding: 2px 6px 2px 2px;
+  border-radius: 6px;
+  color: var(--co);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.milkdown .ProseMirror .callout-icon {
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+
+.milkdown .ProseMirror .callout-chevron {
+  width: 11px;
+  height: 11px;
+  opacity: 0.8;
+}
+
+.milkdown .ProseMirror[contenteditable="false"] .callout-chevron {
+  display: none;
+}
+
+.milkdown .ProseMirror .callout-head.is-open {
+  background: color-mix(in srgb, var(--co) 12%, transparent);
+}
+
+.milkdown .ProseMirror .callout-body {
+  position: relative;
+}
+
+.milkdown .ProseMirror .callout-body > * + * {
+  margin-top: 10px;
+}
+
+.milkdown .ProseMirror .callout code {
+  background: color-mix(in srgb, var(--co) 11%, transparent);
+}
+
+.milkdown .ProseMirror .callout .milkdown-code-block {
+  background: color-mix(in srgb, var(--sheet) 70%, transparent);
+}
+
+.milkdown .ProseMirror .callout.is-empty .callout-body::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  top: 0;
+  left: 0;
+  color: var(--text-3);
+  pointer-events: none;
+}
+
+/* The picker (main.ts): rows a finger can hit. */
+.callout-picker {
+  position: absolute;
+  z-index: 10;
+  width: min(320px, calc(100vw - 16px));
+  padding: 6px;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-pop);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.25;
+  color: var(--text-1);
+}
+
+.callout-picker-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 16px;
+  column-gap: 10px;
+  align-items: center;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.callout-picker-row:active,
+.callout-picker-remove:active {
+  background: var(--hover);
+}
+
+.callout-picker-icon {
+  width: 20px;
+  height: 20px;
+  color: var(--co);
+}
+
+.callout-picker-name {
+  font-weight: 600;
+}
+
+.callout-picker-check {
+  width: 16px;
+  height: 16px;
+  color: var(--text-2);
+}
+
+.callout-picker-meaning {
+  grid-column: 2;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.callout-picker-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+.callout-picker-remove {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 10px 6px 42px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  text-align: left;
 }

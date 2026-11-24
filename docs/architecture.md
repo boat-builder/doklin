@@ -286,6 +286,23 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   on: never rename one, only add. The drawing grammar agents follow is
   `doklin help drawings` (`cli/src/help.rs`); `verify-harness/drive-drawing.mjs`
   renders its examples, so change the two together.
+- Callouts (`src/callout.ts`; the kinds, meanings and icons in
+  `src/calloutTypes.ts`, which the worker, the iPhone and `doklin help
+  writing` share): GitHub's `> [!NOTE]` alerts. Only a top-level quote whose
+  first line is the marker alone becomes one; anything else stays a quote,
+  as GitHub shows it. The stringify handler writes the marker itself — left
+  to remark it is text and comes back `\[!NOTE]` — and writes it as it was
+  read (case, a blank line after it); a new or re-picked one is uppercase.
+  Milkdown has already turned the marker's line ending into a `break` node
+  when the transform runs. The title is a node-view widget, never text; a
+  click on it sends `dk-callout-pick`, which `CalloutPicker.tsx` answers (the
+  iPhone's page has its own). `verify-harness/drive-callouts.mjs` opens and
+  saves the help's examples byte for byte, so change the two together.
+- The outline (`src/DocOutline.tsx`) reads headings off the document, never
+  the DOM (Crepe's block handle sits first among the editor's children), and
+  is fixed to the window at the pane's box, measured on the comment rail's
+  tick. It sits right, or left while the comment rail holds the right, or
+  nowhere when neither side has room.
 - Mermaid's `look` and `layout` are pinned (`mermaidConfig`): an upgrade that
   changes either default would re-lay out every diagram people wrote.
 - Sidebar and tab drags are pointer-based: Tauri intercepts HTML5 drag.
@@ -314,7 +331,7 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   the worker tests fail.
 - Appearance is the theme and Full width, both per app. The document's faces
   (serif `--font-heading`, sans `--font-text`) are fixed tokens, not reader
-  choices. Its 672px `--doc-measure` is the column's cap: Full width
+  choices. Its 680px `--doc-measure` is the column's cap: Full width
   (`data-full-width` on `<html>`) lifts it and keeps the side padding, and
   anything sized to the column (a drawing) holds to the measure instead of
   the pane. Public pages always use the column. Heading sizes are fixed px ×

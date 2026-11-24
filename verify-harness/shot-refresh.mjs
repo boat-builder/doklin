@@ -150,7 +150,7 @@ for (const c of cases) {
   const narrowAgain = (await docLook()).measure;
   const checks = {
     serifHeadingsSansText: /Inter/.test(before.text) && /Literata/.test(before.head),
-    columnIs672: before.measure === 672 + 128,
+    columnIs680: before.measure === 680 + 128,
     themeTilesThenFullWidth:
       appearance.items.join() === "settings-tiles,settings-option" &&
       appearance.tiles.join() === "settings-theme-system,settings-theme-light,settings-theme-paper,settings-theme-dark",
@@ -163,7 +163,7 @@ for (const c of cases) {
     facesFixed: after.text === before.text && after.head === before.head,
     fullWidthSpansPane: wide.open === 1 && wide.checked === "true" && wide.measure === wide.pane,
     fullWidthSurvivesReload: after.measure === wide.measure,
-    fullWidthOffIs672: narrowAgain === 672 + 128,
+    fullWidthOffIs680: narrowAgain === 680 + 128,
   };
   const bad = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k);
   if (bad.length || errors.length) failed = true;

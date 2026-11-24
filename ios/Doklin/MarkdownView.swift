@@ -236,7 +236,9 @@ struct BlockView: View {
         case .heading(let level, let content):
             InlineText(content, container: Find.container(node.id))
                 .font(.docHeading(level))
-                .padding(.top, level <= 2 ? 8 : 2)
+                // Room above a heading, none over the note's first block —
+                // as the editor's sheet sets it (src/ios-editor/editor.css).
+                .padding(.top, node.id == 0 ? 0 : level <= 2 ? 18 : 10)
         case .paragraph(let content):
             InlineText(content, container: Find.container(node.id))
                 .font(.body)
@@ -252,6 +254,12 @@ struct BlockView: View {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(Theme.quoteBar)
                     .frame(width: 3)
+            }
+        case .callout(let kind, let blocks):
+            CalloutView(kind: kind) {
+                ForEach(blocks) { inner in
+                    BlockView(node: inner, file: file, workspace: workspace, actions: actions)
+                }
             }
         case .list(let list):
             ListView(list: list, file: file, workspace: workspace, actions: actions)
@@ -269,6 +277,53 @@ struct BlockView: View {
         case .thematicBreak:
             Divider()
                 .padding(.vertical, 4)
+        }
+    }
+}
+
+/// A callout (`> [!NOTE]`), as the Mac draws it: a tinted box with a hairline
+/// edge in its kind's colour, the kind's icon and name over the body, which
+/// keeps the text's own size and colour. The editor's sheet draws the same box
+/// (src/ios-editor/editor.css — change both).
+private struct CalloutView<Content: View>: View {
+    let kind: CalloutKind
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: kind.symbol)
+                Text(kind.name)
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Theme.calloutInk(kind))
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 10) {
+                content
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
+        .padding(.bottom, 13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.calloutTint(kind), in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Theme.calloutInk(kind).opacity(0.13), lineWidth: 1)
+        }
+    }
+}
+
+private extension CalloutKind {
+    /// The SF Symbol of the Mac's icon (src/calloutTypes.ts): the same shapes.
+    var symbol: String {
+        switch self {
+        case .note: return "info.circle"
+        case .tip: return "lightbulb"
+        case .important: return "exclamationmark.bubble"
+        case .warning: return "exclamationmark.triangle"
+        case .caution: return "exclamationmark.octagon"
         }
     }
 }

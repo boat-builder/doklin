@@ -15,6 +15,7 @@ import {
   codeBlockSchema,
 } from "@milkdown/kit/preset/commonmark";
 import { codeBlockConfig, CodeMirrorBlock } from "@milkdown/kit/component/code-block";
+import { blockConfig } from "@milkdown/kit/plugin/block";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import {
@@ -56,6 +57,18 @@ import {
   type CommentEntry,
 } from "./criticMark";
 import CommentsRail, { type RailThread, type EditTarget } from "./CommentsRail";
+import DocOutline from "./DocOutline";
+import CalloutPicker from "./CalloutPicker";
+import {
+  CALLOUT_NODE,
+  CALLOUT_PICK_EVENT,
+  calloutMenuIcon,
+  calloutPlugins,
+  removeCallout,
+  runInsertCallout,
+  setCalloutKind,
+  type CalloutPickDetail,
+} from "./callout";
 
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
@@ -268,6 +281,15 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   const [threads, setThreads] = useState<RailThread[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [editing, setEditing] = useState<EditTarget>(null);
+  // Bumped on the rail's tick (every update, resize, comment layer change):
+  // the outline re-reads the headings and re-measures its place on it.
+  const [outlineTick, setOutlineTick] = useState(0);
+  const getView = useCallback(() => viewRef.current, []);
+  // The callout type picker, open under one callout's title. `pickClosed`
+  // remembers the title a press just closed it from, so that press's own
+  // click (on the title) doesn't open it again: a click on the title toggles.
+  const [pick, setPick] = useState<CalloutPickDetail | null>(null);
+  const pickClosed = useRef<{ anchor: HTMLElement; at: number } | null>(null);
   // The pending recompute tick: rAF while the window paints, a timeout when
   // it's hidden (rAF never fires in hidden windows, and the rail must not
   // stall until the next paint).
@@ -306,6 +328,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     if (rafRef.current != null) return;
     const run = () => {
       rafRef.current = null;
+      setOutlineTick((t) => t + 1);
       const view = viewRef.current;
       const wrap = view?.dom.closest(".editor-wrap") as HTMLElement | null;
       if (!view || !wrap) {
@@ -389,6 +412,12 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
           // "/diagram" → a mermaid code block; the preview panel below it
           // renders the diagram live (see the codeBlockConfig update below).
           buildMenu: (builder) => {
+            // "/callout" → a Note (callout.ts); the title picks another kind.
+            builder.getGroup("text").addItem("callout", {
+              label: "Callout",
+              icon: calloutMenuIcon,
+              onRun: (ctx) => runInsertCallout(ctx),
+            });
             builder.getGroup("advanced").addItem("diagram", {
               label: "Diagram",
               icon: diagramIcon,
@@ -437,6 +466,18 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     // at parse time so the code pill doesn't render as a stacked two-line box
     // (see inlineCodeNewlines.ts).
     crepe.editor.use([...inlineCodeNewlines]);
+    // Callouts: GitHub's `> [!NOTE]` alerts as a block (callout.ts).
+    crepe.editor.use(calloutPlugins);
+    // Crepe's block handle stays off the blocks inside a callout, as it
+    // stays off those inside a quote: the callout is the block it moves.
+    crepe.editor.config((ctx) => {
+      ctx.update(blockConfig.key, (prev) => ({
+        filterNodes: (pos, node) => {
+          for (let d = pos.depth; d > 0; d--) if (pos.node(d).type.name === CALLOUT_NODE) return false;
+          return prev.filterNodes(pos, node);
+        },
+      }));
+    });
     crepe.editor.use(searchPlugin);
     // Click-to-follow for links (linkOpen.ts). Registered for read-only views
     // too — following a link is reading, not editing. Hosts that don't say
@@ -504,6 +545,14 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
             setActiveThread(v, null);
             setActiveId(null);
           }
+        });
+        // A callout's title asks for the type picker.
+        view.dom.addEventListener(CALLOUT_PICK_EVENT, (e) => {
+          const detail = (e as CustomEvent<CalloutPickDetail>).detail;
+          const closed = pickClosed.current;
+          pickClosed.current = null;
+          if (closed && closed.anchor === detail.anchor && Date.now() - closed.at < 400) return;
+          setPick(detail);
         });
         // Content height changes without an edit transaction (image loads,
         // fonts) move the anchors — keep the rail aligned.
@@ -764,6 +813,30 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   return (
     <>
       <Milkdown />
+      <DocOutline getView={getView} tick={outlineTick} />
+      {pick && (
+        <CalloutPicker
+          anchor={pick.anchor}
+          kind={pick.kind}
+          onPick={(kind) => {
+            const view = viewRef.current;
+            setPick(null);
+            if (!view) return;
+            setCalloutKind(view, pick.pos, kind);
+            view.focus();
+          }}
+          onRemove={() => {
+            const view = viewRef.current;
+            setPick(null);
+            if (view) removeCallout(view, pick.pos);
+          }}
+          onClose={() => {
+            pickClosed.current = { anchor: pick.anchor, at: Date.now() };
+            setPick(null);
+            viewRef.current?.focus();
+          }}
+        />
+      )}
       {commentsVisible && (
         <CommentsRail
           threads={threads}

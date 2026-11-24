@@ -10,12 +10,15 @@
 // and nothing written into a page. A ```svg drawing is drawn here, through
 // the app's own sanitizer (src/drawingSvg.ts); a mermaid diagram keeps its
 // source as a code block until that module swaps the SVG in, and stays a
-// code block for a reader with scripts off.
+// code block for a reader with scripts off. A callout (`> [!NOTE]`, GitHub's
+// alert) is drawn as the app draws it, from the app's own kinds
+// (src/calloutTypes.ts).
 
-import { Marked, Renderer, type Tokens } from "marked";
+import { Marked, Renderer, type Token, type Tokens } from "marked";
 import { escapeHtml } from "./http";
 import { deriveId, type TableCols } from "../../src/metaFile";
 import { isDrawingLanguage, sanitizeDrawing } from "../../src/drawingSvg";
+import { CALLOUTS, calloutIconSvg, parseCalloutMarker, type CalloutKind } from "../../src/calloutTypes";
 import { FONT_PRELOAD, PAGE_THEME } from "./theme";
 
 /* ---------- Words ---------- */
@@ -24,6 +27,7 @@ import { FONT_PRELOAD, PAGE_THEME } from "./theme";
 export function deriveDescription(md: string): string {
   const text = md
     .replace(/```[\s\S]*?```/g, " ")
+    .replace(/^[ \t]*>[ \t]*\[![A-Za-z]+\][ \t]*$/gm, " ")
     .replace(/`([^`]*)`/g, "$1")
     .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
     .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
@@ -101,6 +105,31 @@ export type MarkdownInputs = {
   links: LinkResolver;
 };
 
+/* ---------- Callouts ----------
+
+   A top-level quote whose first line is a marker (`[!NOTE]` alone, any
+   case) is a callout, as in the app (src/callout.ts): only top level, as
+   GitHub requires. Found before rendering — a renderer can't tell a quote's
+   depth — and its body lexed again without the marker line. */
+
+type CalloutToken = Tokens.Blockquote & { callout?: { kind: CalloutKind; body: Token[] } };
+
+function markCallouts(tokens: Token[], lex: (md: string) => Token[]): void {
+  for (const token of tokens) {
+    if (token.type !== "blockquote") continue;
+    const text = (token as Tokens.Blockquote).text;
+    const nl = text.indexOf("\n");
+    const found = parseCalloutMarker(nl === -1 ? text : text.slice(0, nl));
+    if (!found) continue;
+    (token as CalloutToken).callout = { kind: found.kind, body: nl === -1 ? [] : lex(text.slice(nl + 1)) };
+  }
+}
+
+/** The app's callout markup (App.css restated in PAGE_CSS): the title, then the body. */
+function calloutHtml(kind: CalloutKind, body: string): string {
+  return `<div class="callout callout-${kind}" role="note"><p class="callout-title">${calloutIconSvg(kind)}${CALLOUTS[kind].name}</p><div class="callout-body">${body}</div></div>\n`;
+}
+
 /**
  * A note's body as HTML. The overrides are a plain object, not a Renderer
  * subclass: marked merges overrides with `for (const prop in renderer)`, and
@@ -162,6 +191,12 @@ export function markdownHtml(md: string, inputs: MarkdownInputs): string {
         if (outcome.kind === "rewrite") return base.link({ ...token, href: outcome.href });
         return this.parser.parseInline(token.tokens);
       },
+      blockquote(this: Renderer, token: Tokens.Blockquote): string {
+        borrow(this);
+        const callout = (token as CalloutToken).callout;
+        if (!callout) return base.blockquote(token);
+        return calloutHtml(callout.kind, this.parser.parse(callout.body));
+      },
       image(this: Renderer, token: Tokens.Image): string {
         borrow(this);
         // A picture on the web is shown. One in the workspace is its alt
@@ -172,7 +207,9 @@ export function markdownHtml(md: string, inputs: MarkdownInputs): string {
       },
     },
   });
-  return instance.parse(md, { async: false }) as string;
+  const tokens = instance.lexer(md);
+  markCallouts(tokens, (body) => instance.lexer(body));
+  return instance.parser(tokens);
 }
 
 /* ---------- Page chrome ---------- */
@@ -447,8 +484,8 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 ::selection { background: var(--selection); }
-/* The document: the app's 672px column plus its side padding, sans text at
-   the text size, serif headings at fixed sizes. */
+/* The document: the app's 680px column plus its side padding, sans text at
+   the text size, headings at fixed sizes. */
 main.doc {
   width: 100%;
   max-width: calc(var(--doc-measure) + 128px);
@@ -468,19 +505,20 @@ main.doc {
   font-weight: var(--doc-heading-weight);
   color: var(--text-1);
 }
-.doc h1 { font-size: var(--doc-h1); line-height: 1.2; letter-spacing: var(--doc-h1-track); margin: 0 0 0.25em; }
-.doc h2 { font-size: var(--doc-h2); line-height: 1.3; margin: 1.6em 0 0.5em; }
-.doc h3 { font-size: var(--doc-h3); line-height: 1.35; margin: 1.4em 0 0.4em; }
-.doc h4, .doc h5, .doc h6 { font-family: var(--font-text); font-weight: 600; }
-.doc h4 { font-size: var(--doc-h4); line-height: 1.4; margin: 1.3em 0 0.3em; }
-.doc h5, .doc h6 { font-size: var(--doc-h5); line-height: 1.45; margin: 1.2em 0 0.25em; }
+.doc h1 { font-size: var(--doc-h1); line-height: 1.15; letter-spacing: var(--doc-h1-track); margin: 1.5em 0 0.45em; }
+.doc h2 { font-size: var(--doc-h2); line-height: 1.25; letter-spacing: var(--doc-h2-track); margin: 2.1em 0 0.4em; }
+.doc h3, .doc h4, .doc h5, .doc h6 { font-family: var(--font-text); font-weight: 600; }
+.doc h3 { font-size: var(--doc-h3); line-height: 1.35; letter-spacing: var(--doc-h3-track); margin: 1.9em 0 0.35em; }
+.doc h4 { font-size: var(--doc-h4); line-height: 1.45; margin: 1.6em 0 0.25em; }
+.doc h5, .doc h6 { font-size: var(--doc-h5); line-height: 1.45; margin: 1.4em 0 0.2em; }
 .doc h6 { font-weight: 500; color: var(--text-2); }
-.doc > :first-child, .doc > h1 + * { margin-top: 0; }
-.doc p { margin: 0.6em 0; padding: 0; }
+.doc :is(h1, h2, h3) code { font-size: 0.8em; }
+.doc > :first-child, .doc > :is(h1, h2, h3, h4, h5, h6) + * { margin-top: 0; }
+.doc p { margin: 1.15em 0; padding: 0; }
 .doc strong { font-weight: 600; }
-.doc ul, .doc ol { margin: 0.6em 0; padding-left: 1.855em; }
+.doc ul, .doc ol { margin: 1.15em 0; padding-left: 1.855em; }
 .doc li ul, .doc li ol { margin: 0; }
-.doc li + li, .doc li > ul, .doc li > ol { margin-top: 0.25em; }
+.doc li + li, .doc li > ul, .doc li > ol { margin-top: 0.5em; }
 .doc li > p { margin: 0; }
 .doc input[type="checkbox"] { accent-color: var(--accent); margin: 0 0.45em 0 0; }
 .doc li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.2em; }
@@ -491,6 +529,43 @@ main.doc {
   border-left: 3px solid var(--quote-bar);
 }
 .doc blockquote p { margin: 0.3em 0; }
+/* Callouts: the app's box (App.css "Callouts") — a tint with a hairline
+   edge in the kind's colour, the title in the UI face and the kind's ink,
+   the body in the text's own size and ink. */
+.callout-note { --co: var(--callout-note); --co-tint: var(--callout-note-tint); }
+.callout-tip { --co: var(--callout-tip); --co-tint: var(--callout-tip-tint); }
+.callout-important { --co: var(--callout-important); --co-tint: var(--callout-important-tint); }
+.callout-warning { --co: var(--callout-warning); --co-tint: var(--callout-warning-tint); }
+.callout-caution { --co: var(--callout-caution); --co-tint: var(--callout-caution-tint); }
+.doc .callout {
+  margin: 1.4em 0;
+  padding: 0.8em 1.1em 0.9em 1.05em;
+  border-radius: var(--r-lg);
+  background: var(--co-tint);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--co) 13%, transparent);
+}
+.doc .callout-title {
+  display: flex;
+  align-items: center;
+  gap: 0.42em;
+  margin: 0 0 0.4em;
+  color: var(--co);
+  font-family: var(--font-ui);
+  font-size: 0.9em;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.005em;
+}
+.doc .callout-icon { width: 1.12em; height: 1.12em; flex: none; }
+.doc .callout-body > p { margin: 0.55em 0; }
+.doc .callout-body > :first-child { margin-top: 0; }
+.doc .callout-body > :last-child { margin-bottom: 0; }
+.doc .callout code { background: color-mix(in srgb, var(--co) 11%, transparent); }
+.doc .callout pre { background: color-mix(in srgb, var(--sheet) 70%, transparent); }
+.doc .callout pre code { background: none; }
+@media (max-width: 720px) {
+  .doc .callout { padding: 0.7em 0.9em 0.8em; }
+}
 /* Links: the accent as text, underlined on hover only. */
 .doc a {
   color: var(--link);

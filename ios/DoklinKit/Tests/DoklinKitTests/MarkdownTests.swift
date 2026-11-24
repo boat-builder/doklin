@@ -153,6 +153,25 @@ final class BlockTests: XCTestCase {
         )
     }
 
+    // GitHub's alerts, as the Mac reads them (src/callout.ts): a top-level
+    // quote whose first line is a marker alone, any case. A title after the
+    // marker, an unknown kind, or a quote inside a list stays a quote.
+    func testCallout() {
+        XCTAssertEqual(
+            blocks("> [!WARNING]\n> Both need *fuel*.\n\nout"),
+            [.callout(kind: .warning, blocks: [BlockNode(id: 0, line: 1, block: .paragraph([.text("Both need "), .emphasis([.text("fuel")]), .text(".")]))]), .paragraph([.text("out")])]
+        )
+        XCTAssertEqual(blocks("> [!tip]  \n>\n> After a blank line."), [.callout(kind: .tip, blocks: [BlockNode(id: 0, line: 2, block: .paragraph([.text("After a blank line.")]))])])
+        XCTAssertEqual(blocks("> [!IMPORTANT]"), [.callout(kind: .important, blocks: [])])
+        if case .blockquote = blocks("> [!NOTE] A title")[0] {} else { XCTFail("a title after the marker leaves a quote") }
+        if case .blockquote = blocks("> [!info]\n> unknown")[0] {} else { XCTFail("an unknown kind leaves a quote") }
+        guard case .list(let l) = blocks("- item\n\n  > [!NOTE]\n  > nested")[0], case .blockquote = l.items[0].blocks.last?.block else {
+            return XCTFail("a quote inside a list stays a quote")
+        }
+        XCTAssertEqual(MarkdownDocument.parse("> [!CAUTION]\n> # Inside").headings.map(\.title), ["Inside"])
+        XCTAssertEqual(CalloutKind.important.name, "Important")
+    }
+
     private func list(_ s: String) -> ListBlock? {
         if case .list(let l)? = blocks(s).first { return l }
         return nil
@@ -242,7 +261,7 @@ final class BlockTests: XCTestCase {
             for n in nodes {
                 XCTAssertTrue(seen.insert(n.id).inserted)
                 switch n.block {
-                case .blockquote(let inner): walk(inner)
+                case .blockquote(let inner), .callout(_, let inner): walk(inner)
                 case .list(let l): l.items.forEach { walk($0.blocks) }
                 default: break
                 }

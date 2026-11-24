@@ -60,6 +60,7 @@ More
   doklin help comments         how a comment attaches to text
   doklin help publishing       what public means
   doklin help sections         Library, Private and Restricted: who sees what
+  doklin help writing          how a document reads well: sections, callouts
   doklin help drawings         diagrams: how to draw one that reads well
   doklin help agent            a short brief for an AI agent using this
   doklin help <command>
@@ -197,6 +198,51 @@ and `doklin search` with no folder searches all of it. `doklin ls Private` or
 You cannot make a restricted folder or change who is in one — people do that in the
 Doklin app. A section itself — Library, Private, a restricted folder — is not a
 folder to move or rename."#;
+
+// The callout kinds and their meanings are src/calloutTypes.ts's (the app's
+// type picker shows the same lines): change both. The examples are the
+// fixture verify-harness/callouts.tsx opens and saves byte for byte.
+const WRITING: &str = r#"WRITING
+
+How a document reads well in Doklin. Write plain markdown: the app, the iPhone
+and a public page all draw it the same way.
+
+Structure
+  · One # title, on the first line. Sections are ## and ###: the app's outline
+    ("On this page") is built from them, so a long document gets one for free.
+  · Short paragraphs, one idea each. Lists for parallel items.
+
+Callouts
+  A quote whose first line is a marker, alone on that line, is a callout: a box
+  with the kind's name and icon. It is GitHub's alert syntax, so the document
+  reads the same on GitHub.
+
+    > [!NOTE]
+    > Polling stays as the catch-up after a gap.
+
+  The five kinds:
+    NOTE        Worth knowing, even when skimming
+    TIP         A better or easier way to do it
+    IMPORTANT   Needed to get it right
+    WARNING     Needs attention to avoid a problem
+    CAUTION     A risk: what could go wrong
+
+    > [!WARNING]
+    > Workers Free allows 100,000 requests a day for the whole account.
+    >
+    > Past it, every request gets Cloudflare's 1027 page until 00:00 UTC.
+
+  · One or two in a document, never two in a row: a callout is for what must
+    not be missed.
+  · The body can hold paragraphs, lists, code and tables. Every line of it
+    keeps its "> ", the blank ones too.
+  · Top level only: never inside a list or another quote. Nothing follows the
+    marker on its line; "> [!NOTE] A title" stays a plain quote.
+
+Pictures and pages
+  · A diagram is a ```svg drawing: doklin help drawings.
+  · A designed page (layout, columns, colour) is the document's html version:
+    doklin help documents."#;
 
 const DRAWINGS: &str = r##"DRAWINGS
 
@@ -367,6 +413,8 @@ What matters here
     look at a folder with --dry-run first (doklin help publishing).
   · A diagram is a ```svg drawing you place by hand, in the theme's colours —
     follow doklin help drawings, and it reads like the rest of the document.
+  · To set something apart (a note, a warning), use a callout: "> [!NOTE]" on
+    its own line, the text on the "> " lines after it (doklin help writing).
   · Every command that changes something takes --dry-run.
 
 Output is JSON whenever it is not going to a terminal. A refusal is one sentence
@@ -391,10 +439,11 @@ pub fn print(topic: Option<&str>) -> Result<(), Failure> {
         "sections" | "private" | "restricted" => SECTIONS,
         "agent" | "agents" => AGENT,
         "drawings" | "drawing" | "diagrams" | "diagram" => DRAWINGS,
+        "writing" | "callouts" | "callout" => WRITING,
         name => {
             let Some(found) = COMMANDS.iter().find(|c| c.name == name) else {
                 return Err(Failure::usage(format!(
-                    "there is no help on \"{}\" — try: documents, comments, publishing, sections, drawings, agent, or a command's name",
+                    "there is no help on \"{}\" — try: documents, comments, publishing, sections, writing, drawings, agent, or a command's name",
                     name
                 )));
             };
