@@ -128,4 +128,24 @@ test("a flowchart laid out for a phone's width is no wider than one laid out for
   }
 });
 
+test("a flowchart that would be shown too small is turned the other way, and only then", () => {
+  const boxes = (frame, name, words) => {
+    const result = layoutFlowchart(fixture.cases.find((c) => c.name === name).source, frame);
+    assert.ok(result.ok, name);
+    return words.map((word) => result.scene.items.find((it) => it.t === "text" && it.runs[0].s === word));
+  };
+  const rising = (list) => list.every((v, i) => i === 0 || v > list[i - 1]);
+  const same = (list) => list.every((v) => v === list[0]);
+  // A row of boxes: across the page, down a phone.
+  const steps = ["Stranger", "Looker", "Shortlister", "Buyer"];
+  const page = boxes(FRAME, "chain", steps);
+  assert.ok(rising(page.map((it) => it.x)) && same(page.map((it) => it.y)), "left to right at the page's width");
+  const phone = boxes(360, "chain", steps);
+  assert.ok(rising(phone.map((it) => it.y)) && same(phone.map((it) => it.x)), "top to bottom at a phone's");
+  // Six boxes side by side: a column of them on a phone.
+  const desks = ["Billing", "Shipping", "Returns", "Repairs", "Sales"];
+  assert.ok(same(boxes(FRAME, "fan", desks).map((it) => it.y)), "side by side at the page's width");
+  assert.ok(rising(boxes(360, "fan", desks).map((it) => it.y)), "one under the other at a phone's");
+});
+
 console.log(`\n${passed} passed`);

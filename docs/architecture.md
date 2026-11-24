@@ -348,12 +348,18 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   is not a figure: it stays a code block over a `.dk-figure-note`, which must
   never match the `:has(.preview .dk-figure)` rules.
 - Flowcharts are drawn by `src/flowchart/` (pure: no DOM, nothing async; the
-  public pages' module runs it too): Mermaid's flowchart syntax in, a scene
-  out (`scene.ts`: rectangles, paths, lines of text), which `sceneSvg` writes
-  with nothing a drawing may not hold. What is drawn is what
-  `doklin help drawings` lists; `classDef`, `style`, `linkStyle`, `click` and
-  `init` are read and dropped. Every caller names the frame it lays out for:
-  760, or a phone column's own width. Change the renderer and
+  public pages' module and the iPhone app run it too): Mermaid's flowchart
+  syntax in, a scene out (`scene.ts`: rectangles, paths, lines of text), which
+  `sceneSvg` writes with nothing a drawing may not hold and the iPhone's
+  reader draws natively (`Scene.swift` mirrors it: **change both**). What is
+  drawn is what `doklin help drawings` lists; `classDef`, `style`,
+  `linkStyle`, `click` and `init` are read and dropped. Every caller names the
+  frame it lays out for: 760, or a phone column's own width. A flowchart that
+  would be shown under three quarters of its size is laid out again with
+  every part that does not fit its room (the whole, or a group laid out by
+  itself) turned the other way, and the narrower picture is kept
+  (`place.ts`): a row of boxes is a column on a phone, whatever direction the
+  source names. Change the renderer and
   `verify-harness/flowchart-fixture.json` together
   (`flowchart.test.mjs --write`, then look at the pictures).
 - `dagre-d3-es` is pinned to one exact version, and only its `src/dagre` and

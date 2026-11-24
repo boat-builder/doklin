@@ -1,14 +1,19 @@
 #!/bin/sh
-# Builds the iPhone app's note editor (src/ios-editor/: the Mac's own
-# Milkdown set-up, vite.ios-editor.config.ts) into ios/Editor/ (ignored), and,
-# run by Xcode as the app target's build phase, copies it into the app as
-# Editor/ — what ios/Doklin/NoteEditor.swift serves to its web view.
+# Builds what the iPhone app runs of the Mac's own frontend into ios/Editor/
+# (ignored), and, run by Xcode as the app target's build phase, copies it
+# into the app as Editor/:
+#   - the note editor (src/ios-editor/: the Mac's own Milkdown set-up,
+#     vite.ios-editor.config.ts), which ios/Doklin/NoteEditor.swift serves to
+#     its web view
+#   - flowchart.js, the flowchart renderer as one script
+#     (src/flowchart/phone.ts, vite.ios-flowchart.config.ts), which the
+#     reader runs to draw a note's flowcharts (ios/Doklin/FlowchartView.swift)
 #
 #   scripts/ios-editor.sh          build ios/Editor/
 #
 # Needs node and the frontend's dependencies (`pnpm install`). Xcode's PATH
 # has neither nvm's nor Homebrew's bin, so both are looked for. Without node,
-# an editor built before is used, and said so.
+# what was built before is used, and said so.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,10 +28,12 @@ export PATH
 if command -v node >/dev/null 2>&1 && [ -d "$ROOT/node_modules/vite" ]; then
   echo "building the note editor…"
   (cd "$ROOT" && node node_modules/vite/bin/vite.js build --config vite.ios-editor.config.ts)
-elif [ -f "$OUT/index.html" ]; then
-  echo "warning: node or the frontend's dependencies are missing — using the note editor built before (ios/Editor)" >&2
+  echo "building the flowchart renderer…"
+  (cd "$ROOT" && node node_modules/vite/bin/vite.js build --config vite.ios-flowchart.config.ts)
+elif [ -f "$OUT/index.html" ] && [ -f "$OUT/flowchart.js" ]; then
+  echo "warning: node or the frontend's dependencies are missing — using the note editor and the flowchart renderer built before (ios/Editor)" >&2
 else
-  echo "error: the note editor needs node and the frontend's dependencies: install node, then run pnpm install in $ROOT" >&2
+  echo "error: the note editor and the flowchart renderer need node and the frontend's dependencies: install node, then run pnpm install in $ROOT" >&2
   exit 1
 fi
 

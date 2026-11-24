@@ -5,7 +5,8 @@ name: ios
 # views need Xcode. So a push that touches it — or the engine it links
 # (engine/, built for iOS nowhere else) — is built here:
 #   - the engine for this Mac, and the core (ios/DoklinKit) linked against it
-#     on the Mac's own toolchain
+#     on the Mac's own toolchain, where its tests also run the flowchart
+#     script the app carries
 #   - the app for the simulator, unsigned: Xcode builds the engine for the
 #     simulator on the way (scripts/ios-engine.sh, the target's first phase)
 #   - and then the app itself is driven in a simulator, against the worker
@@ -27,9 +28,13 @@ on:
       - "scripts/ios-editor.sh"
       - "src/ios-editor/**"
       - "vite.ios-editor.config.ts"
+      # The flowchart renderer the reader runs as a script.
+      - "src/flowchart/**"
+      - "vite.ios-flowchart.config.ts"
       - "verify-harness/drive-ios.mjs"
-      # The comment cases the core's tests read, beside the Mac's.
+      # The comment and flowchart cases the core's tests read, beside the Mac's.
       - "verify-harness/comments-fixture.json"
+      - "verify-harness/flowchart-fixture.json"
       - ".github/workflows/ios.yml"
   workflow_dispatch:
 
@@ -66,14 +71,9 @@ jobs:
       - name: Build the engine for this Mac and for the device
         run: scripts/ios-engine.sh host && scripts/ios-engine.sh iphoneos
 
-      # Without a worker to talk to, the live tests skip themselves:
-      # verify-harness/drive-ios.mjs runs those, in ci.yml.
-      - name: Test the core
-        run: swift test --package-path ios/DoklinKit -Xlinker "-L$PWD/ios/Engine/host"
-
-      # The app's note editor is built from src/ (scripts/ios-editor.sh, a
-      # phase of the app), and the drive serves the cloud worker from
-      # source, through vite.
+      # The app's note editor and its flowchart script are built from src/
+      # (scripts/ios-editor.sh, a phase of the app), and the drive serves the
+      # cloud worker from source, through vite.
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -83,6 +83,16 @@ jobs:
           cache: pnpm
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      # The core's tests run the flowchart script the app carries: without
+      # it, they skip that.
+      - name: Build the flowchart script
+        run: node node_modules/vite/bin/vite.js build --config vite.ios-flowchart.config.ts
+
+      # Without a worker to talk to, the live tests skip themselves:
+      # verify-harness/drive-ios.mjs runs those, in ci.yml.
+      - name: Test the core
+        run: swift test --package-path ios/DoklinKit -Xlinker "-L$PWD/ios/Engine/host"
 
       - name: Build the app for the simulator
         run: |

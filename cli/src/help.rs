@@ -380,8 +380,9 @@ RL): any other kind of Mermaid diagram is shown as its source. What is drawn:
                                           stands out), good, warn or bad
 
 Colours and styles written in the source (classDef, style, linkStyle) are not
-used: the look is the document's. The boxes are placed for you, so when the
-arrangement itself matters, draw it."##;
+used: the look is the document's. The boxes are placed for you, and a flowchart
+too wide to read on a phone is turned there (a row of boxes becomes a column),
+so when the arrangement itself matters, draw it."##;
 
 const AGENT: &str = r#"FOR AN AGENT
 

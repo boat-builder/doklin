@@ -34,6 +34,7 @@
 - **A link to a page opens the app** (rules: [cloud.md](cloud.md) *Links*): from doklin.cc straight, by `applinks:doklin.cc` in `Doklin.entitlements`, or as `doklin://` (`Info.plist`), both through `onOpenURL` → `Workspaces.follow`, whose page the workspace's screens open (`opening`). A tap on one in a note stays in the app (`Workspaces.isPageLink`): one of the note's workspace on this iPhone pushes onto the note's stack (`Workspace.page`), any other goes through `Workspaces.follow`.
 - **The engine's sentences say what this device is** (`Setup::device_kind`, `UIDevice.current.model`: iPhone, iPad).
 - **Callouts are read as the Mac reads them**: a top-level quote whose first line is `[!NOTE]` (or `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), alone, any case, is `Block.callout` (`CalloutKind.marker` ⇄ `parseCalloutMarker` in `src/calloutTypes.ts`, **change both**); the reader's box (`CalloutView`) and the editor's (`src/ios-editor/editor.css`) look alike, and so do the reader's headings (`Font.docHeading`) and the editor's.
+- **A flowchart is the Mac's picture, drawn natively.** The reader runs the Mac's own renderer (`src/flowchart/`, as the script `Editor/flowchart.js`) in a JavaScript context with no page, off the main thread (`FlowchartRenderer`), for the column the block is in: its width in points, less as the person's text size grows, so a picture's words are the size the renderer set and grow with the note's. What comes back is a scene (`Scene.swift` ⇄ `src/flowchart/scene.ts`, **change both**; both held to `verify-harness/flowchart-fixture.json`), which `FlowchartView.swift` draws item by item in the `--dg-*` colours. Another kind of ` ```mermaid ` diagram, and a flowchart that cannot be read, is its source under the renderer's sentence; a ` ```svg ` drawing is its source.
 - **Colours are generated, never typed**: `node scripts/ios-colors.mjs` writes every colour set in `Assets.xcassets` from `src/styles/tokens.css`, for the names `Theme.swift` asks for. `--check` runs in CI.
 - **`ios/Doklin/PrivacyInfo.xcprivacy` lists every "required reason" API the app calls, the engine's Rust included** (UserDefaults; file timestamps, which Rust's `stat` counts as): App Store Connect checks each upload's binary against it. A new one (a free-space check, `mach_absolute_time`) is an entry there too.
 - **`DoklinKit` imports nothing Apple-only** outside `#if canImport(…)`, so its tests run on Linux. Views go in `ios/Doklin/`; logic a view needs goes in the kit.
@@ -45,10 +46,11 @@
 | --- | --- |
 | `engine/ffi/` | The engine behind three C functions (`include/doklin_engine.h`, **change both** with `src/lib.rs`): start (setup JSON, events, the Keychain callbacks), call a command by name, free |
 | `scripts/ios-engine.sh` | Builds `ios/Engine/<platform>/libdoklin_engine_ffi.a` (ignored): `host` for `swift test`, `iphonesimulator`, `iphoneos`. Xcode runs it as the app target's first build phase |
-| `ios/DoklinKit/` | Swift package: `Engine/` (`Engine.swift`, `Payloads.swift`), `Models/` (`Workspaces`: the engine's model, join, leave, settle, links; `Workspace`; `WorkspaceFiles`; the screens' models: what changed (`Recent`), what was read (`Seen`), the tree, folder, document, search, people, agents, sections, comments, publishing, history, limits), `Comments/` (the comment format's port), `Markdown/` (the reader's parser, task ticking, links, and `Marks`: what a search found and what changed since a note was read) |
+| `ios/DoklinKit/` | Swift package: `Engine/` (`Engine.swift`, `Payloads.swift`), `Models/` (`Workspaces`: the engine's model, join, leave, settle, links; `Workspace`; `WorkspaceFiles`; the screens' models: what changed (`Recent`), what was read (`Seen`), the tree, folder, document, search, people, agents, sections, comments, publishing, history, limits), `Comments/` (the comment format's port), `Markdown/` (the reader's parser, task ticking, links, and `Marks`: what a search found and what changed since a note was read), `Flowchart/` (a flowchart's scene, and the renderer that runs the Mac's script for it) |
 | `ios/Doklin/` | SwiftUI views. UIKit and WebKit only in `NoteEditor.swift` and `PlatformViews.swift` |
 | `src/ios-editor/` | The note editor the phone edits in: the Mac's Milkdown set-up without its chrome (`vite.ios-editor.config.ts`) |
-| `scripts/ios-editor.sh` | Builds it into `ios/Editor/` (ignored) and, as the app target's last build phase, copies it into the app as `Editor/`. Needs node and `pnpm install`; without node, an editor built before is used |
+| `src/flowchart/phone.ts` | The flowchart renderer as the one script the reader runs (`vite.ios-flowchart.config.ts`) |
+| `scripts/ios-editor.sh` | Builds both into `ios/Editor/` (ignored) and, as the app target's last build phase, copies it into the app as `Editor/`. Needs node and `pnpm install`; without node, what was built before is used |
 | `ios/DoklinUITests/` | One class per journey through the real screens (`*UITests.swift`), each joining with a line of its own; run by `drive-ios.mjs --app`, skipped without it. `UITestCase.swift` asks the drive, at the address in `DOKLIN_TEST_DRIVE`, for what only the domain's side can do: `/line` (a device line, minted as the class starts: a person has one code waiting at a time), `/editing?path=` (another device editing), `/deleted?name=` (a restricted folder deleted elsewhere) |
 | `ios/Doklin.xcodeproj` | The app and its UI tests. Both folders are synchronized: a file added there is in the build, with no project edit |
 | `ios/Info.plist` | Only what build settings cannot say (plain http to a worker on this machine, the `doklin` scheme). The rest is `INFOPLIST_KEY_*` |
@@ -68,7 +70,8 @@
 - `"\r\n"` is one `Character` in Swift. Lines are split by `MarkdownLines.split`, and a ticked box changes one character in place, so a note's line endings survive.
 - A block's `line` is a line of the file, frontmatter included: `togglingTask` takes that number as it is.
 - `x-doklin-client` is `ios/<MARKETING_VERSION>`. The version is the project's, not the Mac app's: `bump` does not stamp it, and a push touching only `ios/` cuts no release.
-- Diagrams (` ```mermaid `, ` ```svg `) are shown as their source when read; the editor draws them, as the Mac's does.
+- A flowchart's words are measured in Inter (`src/flowchart/interWidths.ts`) and drawn here in the system font, which sets a line within two points of Inter's width: a box's own margin takes the difference. Another font for figures needs that measured again.
+- The flowchart script runs where there is no `window`, `document` or `console`: a dependency that asks for one at load breaks every flowchart on the phone, and only `FlowchartTests` (on a Mac) and the app's journey say so.
 - The UI tests find rows and fields by `accessibilityIdentifier` (`entry-<name>`, `recent-<name>`, `result-<name>`, `line`, `join`, `edit`, `done`, `workspace-menu`, `workspace-settings`, …), tabs and buttons by their label: renaming either is a change to the tests too. In the editor, the note is the web view's text view.
 - The engine is built for Apple Silicon only. The project excludes `x86_64` from simulator builds (`EXCLUDED_ARCHS`).
 - The simulator build must stay signed-to-run-locally for the UI tests: with `CODE_SIGNING_ALLOWED=NO` the app has no Keychain, and a sign-in cannot be kept.
@@ -79,7 +82,7 @@
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 pnpm install                              # the note editor is built from src/
 open ios/Doklin.xcodeproj                 # run (the first build compiles the engine: minutes)
-scripts/ios-editor.sh                     # the note editor alone, into ios/Editor/
+scripts/ios-editor.sh                     # the note editor and the flowchart script alone, into ios/Editor/
 node verify-harness/drive-ios.mjs         # the core against the harness worker (builds the host engine, runs swift test)
 node verify-harness/drive-ios.mjs --app   # the app in a simulator; DOKLIN_ONLY=<class>, DOKLIN_SIMULATOR=<udid>
 node scripts/ios-colors.mjs [--check]     # colour sets from tokens.css

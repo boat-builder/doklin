@@ -273,7 +273,15 @@ struct BlockView: View {
         case .list(let list):
             ListView(list: list, file: file, workspace: workspace, actions: actions)
         case .code(let language, let text):
-            CodeView(language: language, text: text, container: Find.container(node.id))
+            switch language?.lowercased() {
+            case "mermaid":
+                FlowchartBlock(source: text, container: Find.container(node.id))
+            case "svg":
+                // A drawing is drawn on a Mac and on its public page; here it is its source.
+                CodeView(note: "A drawing, shown here as its source", text: text, container: Find.container(node.id))
+            default:
+                CodeView(text: text, container: Find.container(node.id))
+            }
         case .table(let table):
             TableView(table: table, id: node.id)
         case .image(let source, let alt):
@@ -466,8 +474,9 @@ private struct ListView: View {
     }
 }
 
-private struct CodeView: View {
-    let language: String?
+struct CodeView: View {
+    /// A line over the code, when it stands for a figure: why it is shown as its source.
+    var note: String?
     let text: String
     let container: String
 
@@ -488,15 +497,6 @@ private struct CodeView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.codeBg, in: RoundedRectangle(cornerRadius: 8))
-        }
-    }
-
-    /// A diagram is drawn on a Mac and on its public page; here it is its source.
-    private var note: String? {
-        switch language?.lowercased() {
-        case "mermaid": return "A diagram, shown here as its source"
-        case "svg": return "A drawing, shown here as its source"
-        default: return nil
         }
     }
 }

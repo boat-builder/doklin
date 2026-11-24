@@ -16,6 +16,7 @@ export { isFlowchart } from "./kind";
 export { sceneSvg } from "./svg";
 export type { Item, Paint, Run, Scene, Seg } from "./scene";
 
+/** ⇄ `FlowchartResult` in the iPhone app's Scene.swift, which reads it as JSON: change both. */
 export type Result =
   | { ok: true; scene: Scene }
   /** `unsupported`: a kind of diagram Doklin does not draw. `error`: a flowchart that cannot be read. `message` is a sentence. */

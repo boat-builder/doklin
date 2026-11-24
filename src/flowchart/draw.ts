@@ -12,8 +12,9 @@ import type { Item, Paint, Scene, Seg } from "./scene";
 
 const HAIRLINE = 1.25;
 const TITLE_SIZE = 15;
-/** Room for the title above the picture. */
+/** Room for a title of one line above the picture, and what each further line adds. */
 const TITLE_ROOM = 56;
+const TITLE_STEP = 20;
 /** A quarter circle as a cubic curve. */
 const KAPPA = 0.5523;
 
@@ -22,20 +23,39 @@ const r1 = (v: number) => Math.round(v * 10) / 10;
 type Layers = { back: Item[]; lines: Item[]; front: Item[] };
 
 export function draw(chart: Chart, laid: Laid, frame: number): Scene {
-  const top = chart.title ? TITLE_ROOM : MARGIN;
+  const width = Math.max(frame, Math.ceil(laid.w + MARGIN * 2));
+  const title = titleLines(chart.title, width - MARGIN * 2);
+  const top = title.length ? TITLE_ROOM + TITLE_STEP * (title.length - 1) : MARGIN;
   const layers: Layers = { back: [], lines: [], front: [] };
   drawScope(laid, MARGIN, top, layers);
-  const items: Item[] = [];
-  if (chart.title) {
-    items.push({ t: "text", x: MARGIN, y: 34, anchor: "start", size: TITLE_SIZE, paint: "ink", runs: [{ s: chart.title, bold: true }] });
-  }
+  const items: Item[] = title.map((s, k) => ({
+    t: "text",
+    x: MARGIN,
+    y: 34 + TITLE_STEP * k,
+    anchor: "start",
+    size: TITLE_SIZE,
+    paint: "ink",
+    runs: [{ s, bold: true }],
+  }));
   items.push(...layers.back, ...layers.lines, ...layers.front);
-  return {
-    width: Math.max(frame, Math.ceil(laid.w + MARGIN * 2)),
-    height: Math.ceil(laid.h + top + MARGIN),
-    label: chart.label,
-    items,
-  };
+  return { width, height: Math.ceil(laid.h + top + MARGIN), label: chart.label, items };
+}
+
+/** The title's words in lines no wider than `room`, unless one word is. */
+function titleLines(title: string, room: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  for (const word of title.split(/\s+/).filter(Boolean)) {
+    const longer = line ? `${line} ${word}` : word;
+    if (line && textWidth(longer, TITLE_SIZE, "semibold") > room) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = longer;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
 }
 
 function drawScope(laid: Laid, ox: number, oy: number, layers: Layers) {

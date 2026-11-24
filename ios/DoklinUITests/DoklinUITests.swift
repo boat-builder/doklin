@@ -5,8 +5,9 @@
 // (from Xcode's Test button, say).
 //
 // One journey, in the order a person would take it: join with a line from
-// another device, look around, read a note, edit one, make one, tick a box
-// in it, search, quit and come back, remove the workspace from this iPhone.
+// another device, look around, read a note and one with a flowchart, edit
+// one, make one, tick a box in it, search, quit and come back, remove the
+// workspace from this iPhone.
 //
 // Every step prints what is on screen (lines that begin `UI>`) and keeps a
 // screenshot in the result bundle, so a run can be read afterwards without
@@ -39,6 +40,14 @@ final class DoklinUITests: UITestCase {
         expect(app.staticTexts["The plan"], "the plan's heading")
         expect(text(containing: "Ship it by June"), "the plan's first paragraph")
         record("a note, read")
+        back()
+
+        // A flowchart is a picture; another kind of diagram is its source,
+        // under the sentence that says why.
+        reveal(marked("entry-Diagram"), "the Diagram note").tap()
+        XCTAssertEqual(expect(marked("flowchart"), "the flowchart, drawn").label, "Flowchart")
+        expect(text(containing: "Doklin draws flowcharts. A sequence diagram is shown as its source."), "why the other diagram is not drawn")
+        record("a flowchart, read")
         back()
 
         // Editing in place: what is typed is what the note then says.

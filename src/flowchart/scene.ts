@@ -4,6 +4,10 @@
 //
 // Numbers are in the scene's own units: `width` × `height` is its frame, and
 // a drawer scales that frame to the room it has.
+//
+// There are two drawers: svg.ts, and the iPhone app's reader, which reads a
+// scene as JSON. ⇄ ios/DoklinKit/Sources/DoklinKit/Flowchart/Scene.swift:
+// change both. Both sides are held to verify-harness/flowchart-fixture.json.
 
 /** A colour by name: the drawing token `--dg-<name>`; `sheet` is the page (`--sheet`). */
 export type Paint = "ink" | "ink-2" | "rule" | "grid" | "accent" | "good" | "warn" | "bad" | "sheet";

@@ -10,6 +10,14 @@
 // tighter (down to 96) while the picture is wider than the frame. dagre is
 // the slow part, so the loosest wrap that fits is found in at most four
 // passes of it, not one for every wrap.
+//
+// A picture still wider than its frame is shown smaller. One that would be
+// shown under three quarters of its size is laid out once more, and this
+// time a part that does not fit its room — the whole flowchart, or a group
+// laid out by itself — is turned the other way (left to right becomes top to
+// bottom, top to bottom left to right) when that makes it narrower. The
+// narrower picture is kept: on a phone, a row of boxes becomes a column that
+// reads at full size.
 
 import { layout } from "dagre-d3-es/src/dagre/index.js";
 import { Graph } from "dagre-d3-es/src/graphlib/index.js";
@@ -59,9 +67,24 @@ type Ctx = {
   ranks: Map<Group, Map<string, number>>;
   /** The first pass found boxes of one rank with different heights: it is worth one more. */
   uneven: boolean;
+  /** Whether a part that does not fit its room is turned the other way. */
+  turning: boolean;
+  /** What this pass laid out, by scope and direction: a part is asked for again each way its parent is tried. */
+  laid: Map<string, Laid>;
 };
 
+/** Shown smaller than this share of its size, a picture's words are too small to read. */
+const SMALLEST = 0.75;
+
 export function place(chart: Chart, frame: number): Laid {
+  const written = fit(chart, frame, false);
+  if (frame / (written.w + MARGIN * 2) >= SMALLEST) return written;
+  const turned = fit(chart, frame, true);
+  return turned.w < written.w ? turned : written;
+}
+
+/** The chart with its labels wrapped as loosely as the frame allows: as written, or with what does not fit turned. */
+function fit(chart: Chart, frame: number, turning: boolean): Laid {
   const inside = new Map<Group, Set<string>>();
   const gather = (g: Group): Set<string> => {
     const set = new Set<string>();
@@ -73,10 +96,13 @@ export function place(chart: Chart, frame: number): Laid {
     return set;
   };
   gather(chart.root);
-  const ctx: Ctx = { chart, inside, ranks: new Map(), uneven: false };
-  const pass = (wrap: number) => layoutScope(chart.root, chart.dir, wrap, ctx);
-
+  const ctx: Ctx = { chart, inside, ranks: new Map(), uneven: false, turning, laid: new Map() };
   const room = frame - MARGIN * 2;
+  const pass = (wrap: number) => {
+    ctx.laid.clear();
+    return fitted(chart.root, chart.dir, wrap, room, ctx);
+  };
+
   const wide = pass(WRAPS[0]);
   if (wide.w <= room) return ctx.uneven ? pass(WRAPS[0]) : wide;
   // The loosest wrap that fits, found by halving: a tighter wrap is never wider.
@@ -127,7 +153,18 @@ function sizeBox(box: Box, wrap: number): Leaf {
 
 const isRect = (l: Leaf) => l.box !== null && (l.box.shape === "rect" || l.box.shape === "subroutine");
 
-function layoutScope(scope: Group, dir: Dir, wrap: number, ctx: Ctx): Laid {
+/** A scope laid out in `dir`; where parts turn and it does not fit `room` that way, the other way when that is narrower. */
+function fitted(scope: Group, dir: Dir, wrap: number, room: number, ctx: Ctx): Laid {
+  const written = layoutScope(scope, dir, wrap, room, ctx);
+  if (!ctx.turning || written.w <= room) return written;
+  const turned = layoutScope(scope, dir === "LR" || dir === "RL" ? "TB" : "LR", wrap, room, ctx);
+  return turned.w < written.w ? turned : written;
+}
+
+function layoutScope(scope: Group, dir: Dir, wrap: number, room: number, ctx: Ctx): Laid {
+  const key = `${scope.id}\n${dir}`;
+  const done = ctx.laid.get(key);
+  if (done) return done;
   const { chart } = ctx;
   const horizontal = dir === "LR" || dir === "RL";
   const crossed = (g: Group) => {
@@ -147,7 +184,7 @@ function layoutScope(scope: Group, dir: Dir, wrap: number, ctx: Ctx): Laid {
         clusters.push(c);
         collect(c, c.id);
       } else {
-        const inner = layoutScope(c, c.dir ?? (dir === "TB" ? "LR" : "TB"), wrap, ctx);
+        const inner = fitted(c, c.dir ?? (dir === "TB" ? "LR" : "TB"), wrap, room - GROUP_PAD * 2, ctx);
         const title = c.title ? ceil8(textWidth(c.title, QUIET_SIZE, "semibold") + 48) : 0;
         leaves.push({
           id: c.id,
@@ -306,5 +343,7 @@ function layoutScope(scope: Group, dir: Dir, wrap: number, ctx: Ctx): Laid {
       r.label.y -= y0;
     }
   }
-  return { w: x1 - x0, h: y1 - y0, leaves, frames, routes };
+  const laid = { w: x1 - x0, h: y1 - y0, leaves, frames, routes };
+  ctx.laid.set(key, laid);
+  return laid;
 }

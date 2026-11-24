@@ -20,7 +20,7 @@ const ASSETS = join(ROOT, "ios/Doklin/Assets.xcassets");
 const check = process.argv.includes("--check");
 
 // tokens.css is a flat list of rules, so a palette is read by its selector —
-// the same two the worker reads. One that cannot be found is an error.
+// the same three the worker reads. One that cannot be found is an error.
 const blocks = new Map();
 for (const m of readFileSync(TOKENS, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
   blocks.set(m[1].replace(/\s+/g, " ").trim(), m[2]);
@@ -32,8 +32,10 @@ function palette(selector) {
   for (const m of body.matchAll(/--([a-z0-9-]+)\s*:\s*([^;]+);/g)) out.set(m[1], m[2].trim());
   return out;
 }
-const light = palette(':root, [data-theme="light"]');
-const dark = palette('[data-theme="dark"]');
+// What does not change with the theme is in :root alone: a palette holds it too.
+const always = palette(":root");
+const light = new Map([...always, ...palette(':root, [data-theme="light"]')]);
+const dark = new Map([...always, ...palette('[data-theme="dark"]')]);
 
 /** A token's value as an asset catalog colour: sRGB bytes and an alpha. */
 function colour(token, value) {
