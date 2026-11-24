@@ -1,10 +1,12 @@
-//! A link to a page (engine/src/cloud/link.rs), followed on this Mac. It
-//! arrives from macOS — the page at doklin.cc hands it on as
-//! `doklin://open#…`, the scheme Info.plist registers — or from a click in a
-//! note or an html page (`open_external`). The engine finds the file; the
-//! workspace's window shows it, as a file opened from Finder is shown
-//! (external_open.rs). A link that opens nothing says why, in a dialog: it
-//! can arrive with no window up to say it in.
+//! A link to a page (engine/src/cloud/link.rs), followed on this Mac from
+//! outside the window it was clicked in. It arrives from macOS — the page at
+//! doklin.cc hands it on as `doklin://open#…`, the scheme Info.plist
+//! registers — or from `open_external`, for a link in a note whose page is
+//! in another window's workspace (one of this window's is followed in the
+//! note's own tab: `cloud_follow_link`, cloud.rs). The engine finds the
+//! file; the workspace's window shows it, as a file opened from Finder is
+//! shown (external_open.rs). A link that opens nothing says why, in a
+//! dialog: it can arrive with no window up to say it in.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -64,7 +66,7 @@ async fn ready_core(app: &AppHandle) -> Option<Arc<Core>> {
 }
 
 /// The engine answers a refusal as a phrase; a dialog says it as a sentence.
-fn sentence(words: &str) -> String {
+pub(crate) fn sentence(words: &str) -> String {
     let words = words.trim();
     let mut chars = words.chars();
     let Some(first) = chars.next() else { return String::new() };

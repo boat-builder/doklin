@@ -462,9 +462,16 @@ struct DocumentView: View {
         case .external(let address):
             guard let url = URL(string: address) else { return }
             // A link to a page opens here, not in a browser that would only
-            // hand it back.
+            // hand it back: one of this workspace's on this note's stack,
+            // as a link by its path does; any other as from outside.
             if Workspaces.isPageLink(url) {
-                Task { await device.follow(url) }
+                Task {
+                    if let path = await workspace.page(url) {
+                        route.append(.document(path))
+                    } else {
+                        await device.follow(url)
+                    }
+                }
             } else {
                 openInSystem(url)
             }

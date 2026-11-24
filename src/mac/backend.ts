@@ -321,6 +321,7 @@ const cloud: Cloud = {
   setActivity: (path) => invoke("cloud_set_activity", { path }),
   takeOver: (root, path) => invoke("cloud_take_over", { root, path }),
   link: (path) => invoke("cloud_link", { path }),
+  follow: (url) => invoke<string | null>("cloud_follow_link", { url }),
 
   publish: (path, opts = {}) =>
     invoke("cloud_publish", {

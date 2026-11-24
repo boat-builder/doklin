@@ -647,6 +647,18 @@ public final class Workspace: Identifiable {
         try await Engine.shared.call("cloud_link", ["path": .string(files.absolute(path))])
     }
 
+    /// The document a link to a page leads to, when it is one of this
+    /// workspace's and is on this iPhone: its path here, for a tap in a note
+    /// to push onto the note's own stack. Nil for any other, which the app
+    /// follows as it follows a link from outside (`Workspaces.follow`),
+    /// saying why when it opens nothing.
+    public func page(_ url: URL) async -> String? {
+        guard let absolute: String = try? await Engine.shared.call("cloud_follow_link", ["url": .string(url.absoluteString)]),
+              let path = relative(absolute), !path.isEmpty, files.exists(path)
+        else { return nil }
+        return path
+    }
+
     /// Who can open what is at a path.
     public func audience(of path: String) -> Audience {
         Audience.of(path, in: status)

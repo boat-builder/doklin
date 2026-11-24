@@ -63,8 +63,13 @@ import {
   isUntitled,
   noteHasText,
   noteTitle,
+  remapSteps,
+  stepOnto,
   tabLabel,
   toStoredTab,
+  type DocTab,
+  type Step,
+  type Steps,
   type StoredTab,
   type Tab,
   type TabKind,
@@ -184,6 +189,7 @@ const PART_LABEL: Record<DocumentPart, string> = { rendition: "HTML version", me
 // A sidecar's text as the records it holds; null (the document has none yet)
 // is no records.
 const NO_RECENT: string[] = [];
+const NO_STEPS: Steps = { back: [], forward: [] };
 
 // Two lists of link records as one, a destination's record once: `next`'s
 // where both have one.
@@ -415,6 +421,22 @@ function readStoredDocZoom(): number {
 function stepDocZoom(current: number, dir: 1 | -1): number {
   const i = DOC_ZOOM_STEPS.indexOf(nearestZoomStep(current));
   return DOC_ZOOM_STEPS[Math.min(DOC_ZOOM_STEPS.length - 1, Math.max(0, i + dir))];
+}
+
+// Scroll a pane to `top` once it is tall enough to be there: Crepe lays a
+// long note out over several frames after it mounts, and a scroll set before
+// then is cut short to what has height yet. Set again each frame for a
+// moment; a scroll the reader makes meanwhile wins.
+function settleScroll(wrap: HTMLElement, top: number) {
+  const until = performance.now() + 800;
+  let set = -1;
+  const apply = () => {
+    if (set >= 0 && Math.abs(wrap.scrollTop - set) > 1) return;
+    wrap.scrollTop = top;
+    set = wrap.scrollTop;
+    if (set < top - 1 && performance.now() < until) requestAnimationFrame(apply);
+  };
+  apply();
 }
 
 const uuid = () =>
@@ -1691,18 +1713,13 @@ export default function App() {
     if (wrap) scrollPositionsRef.current.set(id, wrap.scrollTop);
   }, []);
 
-  // Restore the active tab's scroll offset. Runs from the editor's onReady; the
-  // rAF re-apply covers Crepe finishing layout a frame after mount (a too-early
-  // set gets clamped to 0 by a document that has no height yet).
+  // Restore the active tab's scroll offset. Runs from the editor's onReady
+  // (`settleScroll` covers Crepe finishing layout after mount).
   const restoreActiveScroll = useCallback(() => {
     const id = activeIdRef.current;
     const wrap = wrapElsRef.current[focusedSideOf(splitRef.current)];
     if (!wrap) return;
-    const saved = (id ? scrollPositionsRef.current.get(id) : 0) ?? 0;
-    wrap.scrollTop = saved;
-    requestAnimationFrame(() => {
-      wrap.scrollTop = saved;
-    });
+    settleScroll(wrap, (id ? scrollPositionsRef.current.get(id) : 0) ?? 0);
   }, []);
 
   // Same pair for the companion pane (its editor remounts on external
@@ -1720,11 +1737,7 @@ export default function App() {
     if (!s) return;
     const wrap = wrapElsRef.current[s.side];
     if (!wrap) return;
-    const saved = scrollPositionsRef.current.get(companionScrollKey(s)) ?? 0;
-    wrap.scrollTop = saved;
-    requestAnimationFrame(() => {
-      wrap.scrollTop = saved;
-    });
+    settleScroll(wrap, scrollPositionsRef.current.get(companionScrollKey(s)) ?? 0);
   }, []);
 
   // Remount the FOCUSED pane's editor from the live machinery content.
@@ -2154,21 +2167,22 @@ export default function App() {
     [captureActiveScroll, flushPendingAutosave, loadActiveContent, materializeSameDocSplit],
   );
 
+  // The path a file's tab goes by. An html file whose markdown sibling
+  // exists is a rendition of THAT document — the pair is one tab keyed on
+  // the markdown path, starting on the view the user actually asked for.
+  const tabPathOf = useCallback(async (p: string): Promise<string> => {
+    if (!isHtmlPath(p)) return p;
+    const md = mdSiblingOf(p);
+    if (!(await backend.documents.exists(md).catch(() => false))) return p;
+    viewPrefsRef.current.set(md, "html");
+    return md;
+  }, []);
+
   // Open a file in a tab (dedupe by path): from the picker, the sidebar, a
-  // link, the CLI.
+  // link in an untitled note, the CLI.
   const openTab = useCallback(
-    async (p: string) => {
-      // An html file whose markdown sibling exists is a rendition of THAT
-      // document — open the pair as one tab keyed on the markdown path,
-      // starting on the view the user actually asked for.
-      if (isHtmlPath(p)) {
-        const md = mdSiblingOf(p);
-        const paired = await backend.documents.exists(md).catch(() => false);
-        if (paired) {
-          viewPrefsRef.current.set(md, "html");
-          p = md;
-        }
-      }
+    async (path: string) => {
+      const p = await tabPathOf(path);
       const existing = tabsRef.current.find((t) => t.path === p);
       if (existing) {
         if (existing.id === activeIdRef.current) {
@@ -2182,7 +2196,7 @@ export default function App() {
       }
       await appendAndActivate({ id: uuid(), kind: "file", path: p });
     },
-    [switchTab, appendAndActivate, loadActiveContent],
+    [tabPathOf, switchTab, appendAndActivate, loadActiveContent],
   );
 
   // ⌘N: a new untitled note, in a new tab. Nothing is written for it until
@@ -2447,33 +2461,201 @@ export default function App() {
     );
   }, [pushToast]);
 
-  // A link the reader clicked inside a note (see linkOpen.ts for which clicks
-  // count as following one). Notion's split, applied to files: an external URL
-  // leaves for the browser or mail client, an internal one — a markdown/html
-  // file next to the note — opens in a tab right here. Anything else is left
-  // alone: a link to a .png or a missing file does nothing rather than
-  // guessing, and a foreign scheme (javascript:, data:, a custom app scheme)
-  // is never handed to the OS.
-  const followDocLink = useCallback(
-    async (href: string, fromPath: string | null) => {
-      const url = href.trim();
-      if (/^(https?:|mailto:)/i.test(url)) {
-        openExternal(url);
-        return;
-      }
-      const target = linkTargetPath(url, fromPath);
-      if (!target || !(MD_EXT_RE.test(target) || HTML_EXT_RE.test(target))) return;
-      try {
-        if (await backend.documents.exists(target)) {
-          await openTab(target);
-        }
-      } catch (e) {
-        console.error("open linked document failed", e);
-      }
+  /* ---------- Following links ----------
+     A link to a document clicked in a pane (linkOpen.ts says which clicks
+     are one; an html document's come through its bridge) goes there in that
+     pane's own tab, as a browser goes to a page; ⌘-click opens it in a new
+     tab beside it instead, and nothing here moves. A web address goes to
+     the browser or mail client, and a link that leads nowhere does nothing
+     rather than guess. Each tab keeps the documents it showed (`Steps`,
+     tabs.ts) for Back and Forward. One tab per file still holds: a document
+     already open in another tab brings that tab forward, taking the way back
+     here with it, so its Back returns to where the link was clicked. */
+
+  // Navigations run one after another, each from where the last one left
+  // its tab.
+  const steppingRef = useRef<Promise<void>>(Promise.resolve());
+  const inTurn = useCallback((run: () => Promise<void>) => {
+    steppingRef.current = steppingRef.current.then(run).catch((e) => console.error("following a link failed", e));
+  }, []);
+
+  const replaceTab = useCallback((next: Tab) => {
+    const list = tabsRef.current.map((t) => (t.id === next.id ? next : t));
+    tabsRef.current = list;
+    setTabs(list);
+    writeStoredSession(list, activeIdRef.current);
+  }, []);
+
+  // A same-document split whose `clicked` pane goes somewhere else in its
+  // tab: the other pane keeps the document, in a tab of its own beside this
+  // one. The tab is leaving the file, so the file still has one tab.
+  const splitOffSameDoc = useCallback(
+    (clicked: PaneSide) => {
+      const s = splitRef.current;
+      const id = activeIdRef.current;
+      const at = tabsRef.current.findIndex((t) => t.id === id);
+      const tab = tabsRef.current[at];
+      if (!s || s.doc || s.tabId !== id || !tab) return;
+      const stays = otherSide(clicked);
+      const view = stays === s.side ? s.view : docViewRef.current;
+      const kept: DocTab = { id: uuid(), kind: "file", path: tab.path };
+      const wrap = wrapElsRef.current[stays];
+      if (wrap && view === "md") scrollPositionsRef.current.set(kept.id, wrap.scrollTop);
+      const list = [...tabsRef.current.slice(0, at + 1), kept, ...tabsRef.current.slice(at + 1)];
+      tabsRef.current = list;
+      setTabs(list);
+      setSplitState({ side: stays, tabId: kept.id, view, doc: stashActiveDoc() });
+      companionMdRef.current = {
+        md: currentMarkdownRef.current,
+        baseline: lastSavedRef.current,
+        baselined: true,
+      };
     },
-    [openExternal, openTab],
+    [setSplitState, stashActiveDoc],
   );
 
+  // Take the active tab to `to`, in the pane on the `clicked` side: a link
+  // followed, or a step Back or Forward. Answers whether it went.
+  const goTo = useCallback(
+    async (to: Step, how: "follow" | "back" | "forward", clicked: PaneSide): Promise<boolean> => {
+      const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      if (!tab || tab.kind !== "file" || (how === "follow" && to.path === tab.path)) return false;
+      captureActiveScroll();
+      const here: Step = { path: tab.path, scroll: scrollPositionsRef.current.get(tab.id) ?? 0 };
+      const { back, forward } = tab.steps ?? NO_STEPS;
+      // This tab's steps, less the one being taken.
+      const left: Steps =
+        how === "back"
+          ? { back: back.slice(0, -1), forward }
+          : how === "forward"
+            ? { back, forward: forward.slice(0, -1) }
+            : { back, forward };
+      const holder = tabsRef.current.find(
+        (t): t is DocTab => t.id !== tab.id && t.kind === "file" && t.path === to.path,
+      );
+      if (holder) {
+        if (how !== "follow") replaceTab({ ...tab, steps: left });
+        const theirs = holder.steps ?? NO_STEPS;
+        replaceTab({
+          ...holder,
+          steps:
+            how === "back"
+              ? { back: theirs.back, forward: stepOnto(theirs.forward, here) }
+              : { back: stepOnto(theirs.back, here), forward: theirs.forward },
+        });
+        await switchTab(holder.id);
+        return true;
+      }
+      const steps: Steps =
+        how === "back"
+          ? { back: left.back, forward: stepOnto(left.forward, here) }
+          : { back: stepOnto(left.back, here), forward: how === "follow" ? [] : left.forward };
+      flushPendingAutosave(); // the note being left lands first
+      splitOffSameDoc(clicked);
+      const next: DocTab = { id: tab.id, kind: "file", path: to.path, steps };
+      replaceTab(next);
+      scrollPositionsRef.current.set(tab.id, to.scroll);
+      await loadActiveContent(next);
+      return true;
+    },
+    [captureActiveScroll, replaceTab, switchTab, flushPendingAutosave, splitOffSameDoc, loadActiveContent],
+  );
+
+  // ⌘-click: the document in a new tab beside the one the link is in, and
+  // nothing here moves. Several in a row line up after each other, as a
+  // browser's do. One that has a tab already keeps it.
+  const besideRef = useRef<{ from: string; last: string } | null>(null);
+  const openBeside = useCallback((path: string, fromId: string | null) => {
+    const list = tabsRef.current;
+    if (list.some((t) => t.path === path)) return;
+    const tab: DocTab = { id: uuid(), kind: "file", path };
+    const prior = besideRef.current;
+    const after = prior && prior.from === fromId && list.some((t) => t.id === prior.last) ? prior.last : fromId;
+    const at = list.findIndex((t) => t.id === after);
+    const next = at < 0 ? [...list, tab] : [...list.slice(0, at + 1), tab, ...list.slice(at + 1)];
+    besideRef.current = fromId ? { from: fromId, last: tab.id } : null;
+    tabsRef.current = next;
+    setTabs(next);
+    writeStoredSession(next, activeIdRef.current);
+  }, []);
+
+  // A link clicked in the pane on `side`, with ⌘ (`newTab`) or without.
+  const followLink = useCallback(
+    (href: string, side: PaneSide, newTab: boolean) =>
+      inTurn(async () => {
+        const url = href.trim();
+        const s = splitRef.current;
+        const fromId = s && side === s.side ? s.tabId : activeIdRef.current;
+        const from = tabsRef.current.find((t) => t.id === fromId) ?? null;
+        let target: string | null;
+        if (/^(https?:|mailto:)/i.test(url)) {
+          // A link to a page (*Copy link*) of this window's workspace is
+          // followed here; one of another workspace goes to that one's
+          // window, and the web to the browser.
+          let page: string | null;
+          try {
+            page = await backend.cloud.follow(url);
+          } catch (e) {
+            pushToast("info", errText(e));
+            return;
+          }
+          if (page === null || !workspaceRoot || !page.startsWith(`${workspaceRoot}/`)) {
+            openExternal(url);
+            return;
+          }
+          target = page;
+        } else {
+          target = linkTargetPath(url, from?.path ?? null);
+          if (!target || !(MD_EXT_RE.test(target) || HTML_EXT_RE.test(target))) return;
+          if (!(await backend.documents.exists(target).catch(() => false))) return;
+        }
+        const path = await tabPathOf(target);
+        if (newTab) {
+          openBeside(path, fromId);
+          return;
+        }
+        // An untitled note stays where it is: following in its tab would
+        // close it.
+        if (from?.kind !== "file") {
+          await openTab(path);
+          return;
+        }
+        // The other pane of a two-document split takes the focus first (a
+        // press there already began it).
+        if (s?.doc && side === s.side && splitRef.current?.side === side) await swapFocusRef.current();
+        if (activeIdRef.current !== fromId) return;
+        if (await goTo({ path, scroll: 0 }, "follow", side)) backend.browserHistory?.took();
+      }),
+    [inTurn, pushToast, workspaceRoot, openExternal, tabPathOf, openBeside, openTab, goTo],
+  );
+
+  // One step Back (-1) or Forward (1) for the active tab.
+  const stepActive = useCallback(
+    (by: -1 | 1) =>
+      inTurn(async () => {
+        const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+        if (tab?.kind !== "file") return;
+        const list = (by < 0 ? tab.steps?.back : tab.steps?.forward) ?? [];
+        const to = list[list.length - 1];
+        if (to) await goTo(to, by < 0 ? "back" : "forward", focusedSideOf(splitRef.current));
+      }),
+    [inTurn, goTo],
+  );
+
+  // Back and Forward as the person asks for them: ⌘[ ⌘], the arrows at the
+  // left of the tab bar. In a browser they go through its history while it
+  // has an entry of the app's that way, and the step comes back through
+  // `onStep`, so the browser's own Back and the app's stay one.
+  const goStep = useCallback(
+    (by: -1 | 1) => {
+      const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      if (!(by < 0 ? tab?.steps?.back : tab?.steps?.forward)?.length) return;
+      if (backend.browserHistory?.go(by)) return;
+      stepActive(by);
+    },
+    [stepActive],
+  );
+  useEffect(() => backend.browserHistory?.onStep(stepActive), [stepActive]);
 
   const reloadFromDisk = useCallback(async () => {
     const target = pathRef.current;
@@ -3727,11 +3909,13 @@ export default function App() {
     async (remap: (path: string) => string) => {
       const activeBefore = tabsRef.current.find((t) => t.id === activeIdRef.current);
       let tabsChanged = false;
-      const nextTabs = tabsRef.current.map((t) => {
+      const nextTabs = tabsRef.current.map((t): Tab => {
         const np = remap(t.path);
-        if (np === t.path) return t;
+        // Back and Forward still find a file that moved.
+        const steps = t.kind === "file" ? remapSteps(t.steps, remap) : undefined;
+        if (np === t.path && steps === t.steps) return t;
         tabsChanged = true;
-        return { ...t, path: np };
+        return t.kind === "file" ? { ...t, path: np, steps } : { ...t, path: np };
       });
       if (tabsChanged) {
         tabsRef.current = nextTabs;
@@ -4664,6 +4848,22 @@ export default function App() {
     setDocZoom((z) => (dir === 0 ? DOC_ZOOM_DEFAULT : stepDocZoom(z, dir > 0 ? 1 : -1)));
   }, []);
 
+  // ⌘[ and ⌘]: Back and Forward, wherever focus is. Taken in the capture
+  // phase, before the editor's own bindings for the two (Milkdown's list
+  // indent and table cells, CodeMirror's indent in a code block) can act:
+  // Tab and ⇧Tab still do those.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      if (e.code !== "BracketLeft" && e.code !== "BracketRight") return;
+      e.preventDefault();
+      e.stopPropagation();
+      goStep(e.code === "BracketLeft" ? -1 : 1);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [goStep]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Esc dismisses an active in-file highlight even when the find bar isn't
@@ -5436,15 +5636,16 @@ export default function App() {
               onTableWidths={focused ? onTableWidthsChange : undefined}
               // Relative links resolve against the document this pane is
               // showing, so a note in another folder links to its own
-              // neighbours correctly. One whose file can't be opened here is
-              // never followed by its path, which may be another's file.
+              // neighbours correctly, and the pane follows it in its own tab.
+              // One whose file can't be opened here is never followed by its
+              // path, which may be another's file.
               onOpenLink={(href, link) =>
-                link?.closed
+                link.closed
                   ? pushToast(
                       "info",
                       `That page isn't one you can open in ${workspaceName}: it may have been deleted, or moved where you can't see it.`,
                     )
-                  : void followDocLink(href, paneTab?.path ?? null)
+                  : followLink(href, side, link.newTab)
               }
               links={focused || isMirror ? activeLinks : companionLinks}
               linkRecords={focused || isMirror ? linkRecords : doc!.metaLinks}
@@ -5502,6 +5703,8 @@ export default function App() {
               }
               zoom={docZoom}
               onZoomKey={nudgeDocZoom}
+              onFollowLink={(href, newTab) => followLink(href, side, newTab)}
+              onStepKey={goStep}
               onScrollRatio={side === "left" ? htmlRatioLeft : htmlRatioRight}
               onGesture={
                 side === effectiveSplit?.side && !focused
@@ -5616,6 +5819,11 @@ export default function App() {
         onDragOutCancel={handleTabDragCancel}
         onHistory={onHistory}
         live={livePaths}
+        onStep={goStep}
+        steps={{
+          back: activeTab?.kind === "file" && !!activeTab.steps?.back.length,
+          forward: activeTab?.kind === "file" && !!activeTab.steps?.forward.length,
+        }}
         leading={showSidebar ? undefined : titleLead}
         trailing={
           activeTab && !activeNoDoc ? (

@@ -1,0 +1,154 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Following links verification harness</title>
+    <style>
+      body { margin: 0; font-family: -apple-system, system-ui, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <script>
+      // The REAL <App/> on the Mac's backend, over an IPC stub: a /docs
+      // workspace of notes that link to each other, in memory, for
+      // drive-follow.mjs. Commands it doesn't name resolve null, which every
+      // caller left either ignores or catches.
+      const para = (seed, n) =>
+        Array.from(
+          { length: n },
+          (_, i) =>
+            `Paragraph ${i + 1} of ${seed}. The quick brown fox jumps over the lazy dog, ` +
+            `again and again, so the document grows tall enough to scroll.`,
+        ).join("\n\n");
+      // What a *Copy link* looks like; the stub's engine knows two of them.
+      const page = (file) => `https://doklin.cc/open#d=notes.example&w=w-1&f=${file}`;
+
+      window.__fs = new Map([
+        [
+          "/docs/a.md",
+          `# A\n\nGo [to b](./b.md), [to c](./sub/c.md), [to g](./g.md), [to the page](${page("f-e")}), ` +
+            `[a gone page](${page("f-gone")}) or [the web](https://example.com/).\n\n` +
+            `${para("a", 40)}\n\nFurther down: [to b again](./b.md).\n\n${para("a, below", 20)}\n`,
+        ],
+        [
+          "/docs/b.md",
+          `# B\n\nBack [to a](./a.md), or on [to c](./sub/c.md).\n\n- item one\n- item two\n\n${para("b", 30)}\n`,
+        ],
+        ["/docs/sub/c.md", `# C\n\nUp [to b](../b.md).\n`],
+        ["/docs/d.md", `# D\n\nOn [to f](./f.md).\n\n${para("d", 10)}\n`],
+        ["/docs/e.md", `# E\n\nThe end of the line.\n`],
+        ["/docs/f.md", `# F\n\nWhere d leads.\n`],
+        ["/docs/g.md", `# G\n\nWhere a leads last.\n`],
+        [
+          "/docs/web.html",
+          `<!doctype html><html><head><meta charset="utf-8"><title>Web</title></head><body>` +
+            `<main><h1>An html document</h1><p><a id="to-e" href="e.md">e, from html</a></p></main></body></html>`,
+        ],
+      ]);
+      window.__opened = [];
+      window.__writes = [];
+      window.__mtime = 1000;
+      const snap = (c) => ({ mtime_ms: ++window.__mtime, size: c.length });
+      const file = (path) => ({ kind: "file", name: path.split("/").pop(), path });
+
+      window.__TAURI_INTERNALS__ = {
+        metadata: {
+          currentWindow: { label: "main" },
+          currentWebview: { label: "main", windowLabel: "main" },
+        },
+        transformCallback: (cb) => cb,
+        invoke: (cmd, args) => {
+          switch (cmd) {
+            case "take_window_shows":
+              return Promise.resolve([]);
+            case "take_window_init":
+              return Promise.resolve({ isMain: true, folder: null, file: null, tabs: [], activeId: null, restored: false });
+            case "take_pending_folder":
+              return Promise.resolve(null);
+            case "read_file": {
+              const c = window.__fs.get(args.path);
+              return c === undefined
+                ? Promise.reject(`no such file: ${args.path}`)
+                : Promise.resolve({ contents: c, snapshot: snap(c) });
+            }
+            case "write_file":
+              window.__fs.set(args.path, args.contents);
+              window.__writes.push(args.path);
+              return Promise.resolve(snap(args.contents));
+            case "path_exists":
+              return Promise.resolve(args.path === "/docs" || args.path === "/docs/sub" || window.__fs.has(args.path));
+            case "list_md_tree":
+              return Promise.resolve({
+                kind: "dir",
+                name: "docs",
+                path: "/docs",
+                children: [
+                  file("/docs/a.md"),
+                  file("/docs/b.md"),
+                  file("/docs/d.md"),
+                  file("/docs/e.md"),
+                  file("/docs/f.md"),
+                  file("/docs/g.md"),
+                  file("/docs/web.html"),
+                  { kind: "dir", name: "sub", path: "/docs/sub", children: [file("/docs/sub/c.md")] },
+                ],
+              });
+            case "stat_file": {
+              const c = window.__fs.get(args.path);
+              return c === undefined ? Promise.reject("missing") : Promise.resolve(snap(c));
+            }
+            case "watch_file":
+              return Promise.resolve(snap(window.__fs.get(args.path) ?? ""));
+            case "unwatch_file":
+              return Promise.resolve(null);
+            case "cloud_status":
+              return Promise.resolve([]);
+            // The engine's answer for a link to a page: the file it names,
+            // a refusal for one that opens nothing, none for the web.
+            case "cloud_follow_link":
+              if (!args.url.startsWith("https://doklin.cc/open#")) return Promise.resolve(null);
+              if (args.url.endsWith("f=f-e")) return Promise.resolve("/docs/e.md");
+              return Promise.reject("That page isn't one you can open in Notes: it may have been deleted, or moved where you can't see it.");
+            case "device_name":
+              return Promise.resolve("Test Mac");
+            case "untitled_dir":
+              return Promise.resolve("/untitled");
+            case "orphaned_untitled":
+              return Promise.resolve([]);
+            case "open_external":
+              window.__opened.push(args.url);
+              return Promise.resolve(null);
+            case "plugin:updater|check":
+              return Promise.reject("updater unavailable in harness");
+            case "plugin:event|listen":
+              return Promise.resolve(1);
+            default:
+              return Promise.resolve(null);
+          }
+        },
+      };
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+
+      // The /docs workspace, open on a.md, with d.md in a second tab.
+      localStorage.clear();
+      localStorage.setItem(
+        "doklin:session",
+        JSON.stringify({
+          version: 2,
+          lastRoot: "/docs",
+          sessions: {
+            "/docs": {
+              tabs: [
+                { id: "t-a", kind: "file", path: "/docs/a.md" },
+                { id: "t-d", kind: "file", path: "/docs/d.md" },
+              ],
+              activeId: "t-a",
+            },
+          },
+        }),
+      );
+    </script>
+    <div id="root"></div>
+    <script type="module" src="./split.tsx"></script>
+  </body>
+</html>

@@ -234,12 +234,44 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
 - `orphaned_untitled` at launch reopens any buffer with text that no window
   holds as an unsaved tab in the main window; empty buffers are swept.
 
+## Following links
+
+- A link to a document goes there in its pane's own tab; ⌘-click (Ctrl-click
+  off a Mac) opens it in a new tab beside, loaded when it is first shown, and
+  nothing else moves. **One tab per file still holds**: a document open in
+  another tab brings that tab forward, and the way back to the clicked note
+  goes onto that tab's Back.
+- A tab's steps (`Steps`, `src/tabs.ts`) are the documents it showed and
+  where each was scrolled: never stored (the session keeps the descriptor),
+  kept through a rename or move (`repoint`). An untitled note never follows
+  in its own tab, which would close it: its links open as `openTab` does.
+- **A pane follows in its own tab.** The other pane of a two-document split
+  is promoted first. In a same-document split the pane that stays gets the
+  document in a new tab beside (`splitOffSameDoc`): the split's tab is never
+  the one moving.
+- *Copy link*s of this window's workspace are followed in place too
+  (`Cloud.follow`: `cloud_follow_link` in `src-tauri/src/cloud.rs`,
+  `followLink` in `src/web/address.ts`); one of another workspace's goes to
+  `openExternal`, which on a Mac hands it to that workspace's window.
+- **⌘[ and ⌘] are taken in the capture phase on the window** (`goStep`):
+  Milkdown binds them to list indent and table cells, CodeMirror to a code
+  block's indent, and only stopping them first keeps a Back from also
+  indenting. Tab and ⇧Tab still indent. In an html view the bridge forwards
+  them (`step-key`), as it does the zoom chords.
+- In a browser each follow pushes a numbered entry onto its history
+  (`src/web/steps.ts`), and the browser moving between two is a step for the
+  tab in front. The app's own Back and Forward go through `history.go` while
+  the browser has an entry of the app's that way, so the two never drift
+  apart by a step.
+
 ## Windows and session
 
-- A link to a page (`doklin://open#…` from macOS, or a click in a note) is
-  turned into its file's path by the engine (`src-tauri/src/links.rs`) and
-  then opened like any external open; a link that opens nothing says why in a
-  dialog, since it can arrive with no window up.
+- A link to a page from outside the window it is clicked in
+  (`doklin://open#…` from macOS, or `open_external` for one of another
+  workspace) is turned into its file's path by the engine
+  (`src-tauri/src/links.rs`) and then opened like any external open; a link
+  that opens nothing says why in a dialog, since it can arrive with no window
+  up.
 - External opens (Finder, `doklin open`, cold or warm start) are placed by
   `src-tauri/src/external_open.rs` against the connected roots in
   `cloud.json`. A path inside a connected workspace goes to that workspace's
@@ -282,11 +314,16 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   the workspace's worker, at a request against its day each. A picture on the
   web is asked for as written.
 - Links (`src/linkOpen.ts`): a followed click always `preventDefault`s — a
-  navigation would replace the app. `http(s)`/`mailto:` go to `open_external`;
-  path-shaped hrefs resolve through `src/docLinks.ts` into a tab; other schemes
-  are dropped; a `javascript:` href must never run. The html rendition posts
-  its clicks out through `htmlBridge.ts`. A link the editor marks closed (its
-  file can't be opened here) is never followed by its path, which may be
+  navigation would replace the app. `http(s)`/`mailto:` go to `open_external`
+  (a *Copy link* of the workspace excepted: *Following links*); path-shaped
+  hrefs resolve through `src/docLinks.ts`; other schemes are dropped; a
+  `javascript:` href must never run. A ⌘-press on a link is taken from
+  ProseMirror, which would select the block; ⌥- and ⇧-clicks, a drag and a
+  double click stay the text's. The html rendition posts its clicks out
+  through `htmlBridge.ts` (`follow`), with the href as written: the frame
+  resolves a path against its own page (`/app/frame` in a browser), where
+  it would pass for a web address. A link the editor marks closed (its file
+  can't be opened here) is never followed by its path, which may be
   somebody else's file: the host says the engine's sentence.
 - Links to documents (`src/linkMark.ts`): Crepe's link mark carries one more
   attribute, `doklin` (the file id, and what the link was read and shown

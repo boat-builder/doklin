@@ -60,15 +60,27 @@ export function ownLink(url: string): string | null {
 
 /** The document the address asks for, taken out of the address: a reload
  *  opens what was open, not the link again. None when the address carries no
- *  link. Throws the reason, as a sentence, for a link that opens nothing —
- *  and says the same of a page that was deleted, one in a section this
- *  person is not in and one that never was. */
+ *  link. Throws the reason, as a sentence, for a link that opens nothing. */
 export function takeLink(ws: Workspace): Show[] {
   const link = new URLSearchParams(location.hash.slice(1));
+  if (!link.get("f") && !link.get("w")) return [];
+  history.replaceState(history.state, "", location.pathname + location.search);
+  return [{ path: pathOfLink(ws, link), kind: "file" }];
+}
+
+/** Where a link to a page of this domain leads, a click in a note's own way
+ *  there (`Cloud.follow`): the file's path. Null for any other address.
+ *  Throws the reason, as a sentence, for one that opens nothing. */
+export function followLink(ws: Workspace, url: string): string | null {
+  const own = ownLink(url);
+  return own === null ? null : pathOfLink(ws, new URLSearchParams(own));
+}
+
+/** The file a link's `w`, `s` and `f` name. Says the same of a page that was
+ *  deleted, one in a section this person is not in and one that never was. */
+function pathOfLink(ws: Workspace, link: URLSearchParams): string {
   const file = link.get("f");
   const workspace = link.get("w");
-  if (!file && !workspace) return [];
-  history.replaceState(history.state, "", location.pathname + location.search);
   if (!file || !workspace) throw new Error("That link is cut short. Ask whoever sent it to copy it again.");
   if (workspace !== ws.wsId) {
     throw new Error(`That link is from before ${location.host} was set up again, and its page is gone.`);
@@ -79,5 +91,5 @@ export function takeLink(ws: Workspace): Show[] {
       `That page isn't one you can open in ${ws.name}: it may have been deleted, or moved where you can't see it.`,
     );
   }
-  return [{ path, kind: "file" }];
+  return path;
 }

@@ -34,7 +34,8 @@ import type {
   CloudRole,
   EveryPage,
 } from "../cloud";
-import { linkTo, ownLink, takeLink } from "./address";
+import { followLink, linkTo, ownLink, takeLink } from "./address";
+import { browserHistory } from "./steps";
 import { mintAgentLogin, mintDeviceCode, mintInvite } from "./codes";
 import { Refused, ask, askJson, deviceId } from "./http";
 import type { Saving } from "./saving";
@@ -167,6 +168,9 @@ function cloudOf(ws: Workspace, saving: Saving): Cloud {
       const link = linkTo(ws, path);
       if (!link) throw new Error("it isn’t in the workspace yet");
       return link;
+    },
+    async follow(url) {
+      return followLink(ws, url);
     },
 
     async publish(path, opts = {}) {
@@ -379,5 +383,6 @@ export function webBackend(ws: Workspace, saving: Saving): Backend {
     session,
     shows,
     leaving,
+    browserHistory: browserHistory(),
   };
 }

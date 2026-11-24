@@ -29,11 +29,12 @@
 //      app opens the floating card at the element — but never
 //      preventDefault()s; the page's own handler still runs. Both happen;
 //      neither blocks the other.
-//   5. External links are the one place the bridge overrides the page:
-//      following a link inside the iframe would replace the rendition (and
-//      the comment layer) with the linked site, so http(s)/mailto links open
-//      in the system browser via the app instead. Same-page #hash links keep
-//      their in-page behavior.
+//   5. Links are the one place the bridge overrides the page: following a
+//      link inside the iframe would replace the rendition (and the comment
+//      layer) with what it leads to, so the app follows it instead, as it
+//      follows one in a note — a web address in the system browser, a
+//      document in the app (⌘ or Ctrl held: a new tab). Same-page #hash
+//      links keep their in-page behavior.
 //   6. The bridge listens in the capture phase, so renditions that
 //      stopPropagation() in their own handlers can't starve activation — and
 //      since activation never blocks (rule 4), the reverse holds too.
@@ -90,7 +91,16 @@ export type BridgeActivateMsg = {
   type: "activate";
   id: string | null;
 };
-export type BridgeOpenMsg = { dk: "doklin-comments"; type: "open"; url: string };
+// A link clicked: `href` as the markup writes it (a path is relative to the
+// document, which the frame has no address for), `url` as the frame resolved
+// it (a web address), and whether ⌘ or Ctrl asked for a new tab.
+export type BridgeFollowMsg = {
+  dk: "doklin-comments";
+  type: "follow";
+  href: string;
+  url: string;
+  newTab: boolean;
+};
 // A USER scroll of the iframe's document (programmatic scroll-sync moves are
 // suppressed bridge-side): the document's proportional offset, for driving
 // the opposite split pane.
@@ -102,6 +112,9 @@ export type BridgeGestureMsg = { dk: "doklin-comments"; type: "gesture" };
 // 0 = reset. Key events don't cross the frame boundary either, so without
 // this the shortcuts would go dead the moment the reader clicks the page.
 export type BridgeZoomKeyMsg = { dk: "doklin-comments"; type: "zoom-key"; dir: number };
+// ⌘[ or ⌘] pressed inside the frame: Back (-1) or Forward (1), for the same
+// reason.
+export type BridgeStepKeyMsg = { dk: "doklin-comments"; type: "step-key"; by: -1 | 1 };
 // The computed colour the rendition paints its canvas with (may be
 // transparent), re-sent whenever it changes. The frame's scrollbar gutter
 // lies outside that canvas and shows the iframe element's own backdrop, so
@@ -113,10 +126,11 @@ export type BridgeOutMsg =
   | BridgeLayoutMsg
   | BridgePickMsg
   | BridgeActivateMsg
-  | BridgeOpenMsg
+  | BridgeFollowMsg
   | BridgeScrollMsg
   | BridgeGestureMsg
   | BridgeZoomKeyMsg
+  | BridgeStepKeyMsg
   | BridgeCanvasMsg;
 
 export function isBridgeMsg(data: unknown): data is BridgeOutMsg {
@@ -509,7 +523,7 @@ const BRIDGE_SCRIPT = `
     });
   });
 
-  /* ----- clicks: activation + external links; never block the page ----- */
+  /* ----- clicks: activation + links; never block the page ----- */
 
   function closestAnchored(el) {
     var node = el;
@@ -526,19 +540,17 @@ const BRIDGE_SCRIPT = `
     function (e) {
       if (e.target === bubble || bubble.contains(e.target)) return;
 
-      // External links leave the rendition — route them to the system browser
-      // instead of letting them replace the preview + comment layer. In-page
-      // #hash links keep their default.
+      // Links leave the rendition through the app, which follows them as it
+      // follows one in a note, instead of letting them replace the preview +
+      // comment layer. In-page #hash links keep their default.
       var link = e.target && e.target.closest ? e.target.closest("a[href]") : null;
       if (link) {
         var href = link.getAttribute("href") || "";
         if (!/^#/.test(href)) {
           e.preventDefault();
-          if (/^(https?:|mailto:)/i.test(link.href)) {
-            post({ type: "open", url: link.href });
+          if (e.button === 0 && !e.altKey && !e.shiftKey) {
+            post({ type: "follow", href: href, url: link.href, newTab: e.metaKey || e.ctrlKey });
           }
-          // Anything else (relative paths have nowhere to point from srcdoc)
-          // is inert rather than a broken navigation.
         }
       }
 
@@ -626,12 +638,18 @@ const BRIDGE_SCRIPT = `
 
   // Once the reader clicks into the rendition, keystrokes stop at the frame
   // boundary — the app's window listener never sees them. Forward the three
-  // zoom chords so ⌘+ / ⌘- / ⌘0 keep working here; nothing else crosses (this
-  // is not a general key tunnel out of arbitrary markup).
+  // zoom chords so ⌘+ / ⌘- / ⌘0 keep working here, and ⌘[ / ⌘] for Back and
+  // Forward; nothing else crosses (this is not a general key tunnel out of
+  // arbitrary markup).
   document.addEventListener(
     "keydown",
     function (e) {
       if (!e.metaKey && !e.ctrlKey) return;
+      if ((e.code === "BracketLeft" || e.code === "BracketRight") && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        post({ type: "step-key", by: e.code === "BracketLeft" ? -1 : 1 });
+        return;
+      }
       var dir = null;
       if (e.code === "Equal" || e.code === "NumpadAdd") dir = 1;
       else if (e.code === "Minus" || e.code === "NumpadSubtract") dir = -1;

@@ -38,6 +38,10 @@ type Props = {
   // Rendered at the bar's right edge, after the tab strip (the app puts the
   // MD/HTML view toggle here).
   trailing?: React.ReactNode;
+  // Back (-1) and Forward (1) in the active tab, the arrows before the tabs;
+  // `steps` says which way it can go.
+  onStep: (by: -1 | 1) => void;
+  steps: { back: boolean; forward: boolean };
   // Version history for this tab's file — the tab's right-click menu is one
   // of the ways in. An untitled note has no history, so it has no item.
   onHistory?: (path: string) => void;
@@ -63,6 +67,8 @@ export default function TabBar({
   onDragOutCancel,
   leading,
   trailing,
+  onStep,
+  steps,
   onHistory,
   live,
 }: Props) {
@@ -199,6 +205,26 @@ export default function TabBar({
     // The bar is the window's title row: its empty stretches move the window.
     <div className={`tab-bar ${leading ? "has-lead" : ""}`} onMouseDown={dragWindowFromGap}>
       {leading}
+      <div className="tab-steps">
+        <button
+          className="tab-step"
+          onClick={() => onStep(-1)}
+          disabled={!steps.back}
+          aria-label="Back"
+          title={`Back (${keys("⌘[")})`}
+        >
+          <ArrowIcon back />
+        </button>
+        <button
+          className="tab-step"
+          onClick={() => onStep(1)}
+          disabled={!steps.forward}
+          aria-label="Forward"
+          title={`Forward (${keys("⌘]")})`}
+        >
+          <ArrowIcon />
+        </button>
+      </div>
       <div
         className="tab-strip"
         role="tablist"
@@ -394,6 +420,35 @@ function LiveGlyph() {
     >
       <circle cx="8" cy="8" r="1.3" fill="currentColor" stroke="none" />
       <path d="M5.4 5.4a3.7 3.7 0 0 0 0 5.2M10.6 5.4a3.7 3.7 0 0 1 0 5.2M3.3 3.3a6.6 6.6 0 0 0 0 9.4M12.7 3.3a6.6 6.6 0 0 1 0 9.4" />
+    </svg>
+  );
+}
+
+// Back points left, Forward right.
+function ArrowIcon({ back = false }: { back?: boolean }) {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      {back ? (
+        <>
+          <line x1="19" y1="12" x2="5" y2="12" />
+          <polyline points="12 19 5 12 12 5" />
+        </>
+      ) : (
+        <>
+          <line x1="5" y1="12" x2="19" y2="12" />
+          <polyline points="12 5 19 12 12 19" />
+        </>
+      )}
     </svg>
   );
 }

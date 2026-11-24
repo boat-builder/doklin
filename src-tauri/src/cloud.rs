@@ -327,9 +327,20 @@ pub(crate) async fn cloud_documents(app: AppHandle, root: String) -> Result<Opti
     cloud::cloud_documents(&core(&app)?, root).await
 }
 
-/// *Copy link*. Following one is the app's own (links.rs): a link reaches
-/// this Mac from macOS, or from a click in a note, never from a frontend call.
+/// *Copy link*.
 #[tauri::command]
 pub(crate) async fn cloud_link(app: AppHandle, path: String) -> Result<PageLinkCopy, String> {
     cloud::cloud_link(&core(&app)?, path).await
+}
+
+/// Where a link to a page leads on this Mac, for a click in a note, which
+/// the note's own tab follows: the file's absolute path, or None for an
+/// address that is no such link. A link that reaches the Mac from outside
+/// is links.rs's, which opens it in its workspace's window.
+#[tauri::command]
+pub(crate) async fn cloud_follow_link(app: AppHandle, url: String) -> Result<Option<String>, String> {
+    if !crate::links::is_page_link(&url) {
+        return Ok(None);
+    }
+    cloud::cloud_follow_link(&core(&app)?, url).await.map(Some).map_err(|words| crate::links::sentence(&words))
 }

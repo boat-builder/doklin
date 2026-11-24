@@ -227,6 +227,11 @@ export interface Cloud {
   /** The link to the document at `path`. Waits for one made a moment ago,
    *  which has no id until the workspace has taken it in. */
   link(path: string): Promise<CloudPageLink>;
+  /** Where a link to a page (`link`'s) leads on this device: the file's
+   *  path. Null for an address that is no such link, which is the web's to
+   *  open. Rejects, with the reason as a sentence, for one that opens
+   *  nothing here. */
+  follow(url: string): Promise<string | null>;
 
   /** Publish a file or a folder (the path decides); resolves to the slug.
    *  Rejects when the address asked for is another page's, where the backend
@@ -469,6 +474,20 @@ export interface Shows {
   onArrive(cb: () => void): Unsubscribe;
 }
 
+/** A browser's own Back and Forward. Each step a tab takes by a link
+ *  followed in it is an entry in the browser's history, so the browser's
+ *  Back — its button, a swipe, a key — takes the tab in front back a step. */
+export interface BrowserHistory {
+  /** The tab in front took a step: the browser gets an entry for it. */
+  took(): void;
+  /** Go back (-1) or forward (1) through the browser, when it has an entry
+   *  of the app's that way: the step then comes back through `onStep`.
+   *  False when it has none, and the app takes the step itself. */
+  go(by: -1 | 1): boolean;
+  /** The browser moved an entry of the app's back (-1) or forward (1). */
+  onStep(cb: (by: -1 | 1) => void): Unsubscribe;
+}
+
 /** A page that can go at any moment, with no window of the app's own to
  *  ask first (`Windows` has that): a browser's tab. */
 export interface Leaving {
@@ -597,6 +616,7 @@ export interface Backend {
   readonly versions?: Versions;
   readonly shows?: Shows;
   readonly leaving?: Leaving;
+  readonly browserHistory?: BrowserHistory;
   readonly windows?: Windows;
   readonly untitled?: UntitledNotes;
   readonly localFiles?: LocalFiles;
