@@ -180,6 +180,7 @@ public extension DocLinks {
                 case .heading(let level, let content): block = .heading(level: level, content: inline(content))
                 case .paragraph(let content): block = .paragraph(inline(content))
                 case .blockquote(let inner): block = .blockquote(blocks(inner))
+                case .callout(let kind, let inner): block = .callout(kind: kind, blocks: blocks(inner))
                 case .list(let list):
                     block = .list(ListBlock(
                         ordered: list.ordered, start: list.start, tight: list.tight,

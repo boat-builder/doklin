@@ -84,6 +84,9 @@ final class LinksTests: XCTestCase {
         let source = """
         See [launch-plan](../GTM/launch-plan.md#friday), [the *plan*](plan.md) and [new](new.md).
 
+        > [!NOTE]
+        > Read [launch-plan](../GTM/launch-plan.md) first.
+
         - [board-plan](../Board/board-plan.md)
         """
         let filed = records([
@@ -108,6 +111,10 @@ final class LinksTests: XCTestCase {
             return XCTFail("a list")
         }
         XCTAssertEqual(item, [.link(destination: "../../Restricted/Board/board-plan.md", children: [.text("board-plan")])])
+        guard case .callout(_, let inside)? = shown.blocks.dropFirst().first?.block, case .paragraph(let said)? = inside.first?.block else {
+            return XCTFail("a callout")
+        }
+        XCTAssertEqual(said, [.text("Read "), .link(destination: "../GTM/launch-plan-v2.md", children: [.text("launch-plan-v2")]), .text(" first.")], "inside a callout too")
         let none = DocLinks.resolving(MarkdownDocument.parse(source), in: note, records: [], documents: index)
         XCTAssertEqual(none, MarkdownDocument.parse(source), "no records: the note as written")
     }
