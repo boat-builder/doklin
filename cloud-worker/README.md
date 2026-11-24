@@ -225,10 +225,10 @@ PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → 
        file, rev, size, created, unchanged?, htmlBehind?}; 409 {rev}; 413 > 25 MB
 DELETE doc?path=&v=[&dry=1]  document, or one version → {kind, path, versions, stillPublic, threadsRemoved?}
 POST   move {from, to, dryRun?}  document/folder; to ending in /, or a section's own folder,
-       = into → {kind, from, to, files, newLinks?, unpublished?}. A section's own folder
-       (`Library`, `Private`, `Restricted/<f>`) never moves → 400. Between two sections
-       (`newLinks: true`): ≤ 16 files,
-       written where they go (new file ids) before they are removed with a tombstone `to`;
+       = into → {kind, from, to, files, unpublished?}. A section's own folder
+       (`Library`, `Private`, `Restricted/<f>`) never moves → 400. Between two sections:
+       ≤ 16 files,
+       written where they go (the ids they had) before they are removed with a tombstone `to`;
        pages re-claimed after, and `unpublished` lists addresses that could not be
 comment:
 POST   comments {path, on, body, v?} → 201 {path, thread, version, on, line?|tag?}
@@ -316,7 +316,7 @@ PUT    doc?space=&path=  {md?: {text, ifRev}, meta?: {text, ifRev}} → {md?, me
 DELETE doc?space=&path=[&v=md|html]  the document, or one version of two (last_version → 409)
 DELETE folder?space=&path=  every file under it → {kind: "folder", path, files}; 404 none
 POST   move  {from: {space?, path}, to: {space?, path}, kind: "document"|"folder"} → {kind, from, to,
-       files}; to exactly `to`, never "into it". Across sections: newLinks, unpublished?; a document
+       files}; to exactly `to`, never "into it". Across sections: unpublished?; a document
        is ≤ 16 files; a folder goes 16 files a request, whole documents at a time, by path:
        `remaining` (files still where they were) until the same request, made again, answers
        without it. `to.path` "" = the top of another section, a folder only: what was in the

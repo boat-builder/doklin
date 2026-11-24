@@ -315,12 +315,21 @@ export class Workspace {
 
   /** The document a file id names, by its absolute path; null when no
    *  section this person is in holds it. `space` is the section's id, ""
-   *  the shared workspace. */
+   *  the shared workspace.
+   *
+   *  A file keeps its id when it moves to another section, so the id is
+   *  looked for in every section, `space` first. While a move is half done
+   *  one id is in two sections: then `space` wins, else the lowest section
+   *  id, which is the shared workspace's. The engine looks the same way
+   *  (`follow`, engine/src/cloud/engine.rs): change both. */
   pathOfFile(space: string, fid: string): string | null {
-    const section = this.sections.get(space);
-    const file = section?.manifest.files?.[fid];
-    if (!section || !file || !section.files.has(file.path)) return null;
-    return `${this.root}/${join(section.mount, file.path)}`;
+    const ids = [...this.sections.keys()].sort();
+    for (const id of [space, ...ids.filter((id) => id !== space)]) {
+      const section = this.sections.get(id);
+      const file = section?.manifest.files?.[fid];
+      if (section && file && section.files.has(file.path)) return `${this.root}/${join(section.mount, file.path)}`;
+    }
+    return null;
   }
 
   /* ---------- Reading ---------- */

@@ -2,7 +2,8 @@
 // layout (src/metaFile.ts): expansion of a bare marker and its meta record
 // feeding the editor full CriticMarkup, opening writing nothing, a reply
 // saving as a meta-only write (markdown byte-identical), reload persistence,
-// orphan surfacing, and deletions updating both files.
+// orphan surfacing, deletions updating both files, and a save that stops
+// between its two writes.
 import { chromium } from "playwright";
 
 import { existsSync, mkdirSync } from "node:fs";
@@ -130,11 +131,37 @@ await poll(async () => {
 });
 step("orphan delete scrubs its meta record", true);
 
-// 8. Deleting the real thread updates BOTH files: the marker leaves the
-//    markdown, the record leaves the meta.
+// 8. A save is the sidecar first, then the text, and fails whole. With the
+//    markdown's write refused, deleting the thread writes the sidecar and
+//    stops: the text on disk still has its marker, and the sidecar still
+//    has the record it names (add before, drop after).
+await page.evaluate(() => {
+  window.__failWrite = "/docs/notes.md";
+  window.__writes.length = 0;
+});
 const realCard = page.locator(".comment-card:not(:has(.comment-orphan-note))");
 await realCard.first().click();
 await realCard.first().locator('[title="Delete comment"]').first().click();
+await poll(async () => (await page.evaluate(() => window.__writes.slice())).includes("/docs/notes.meta.jsonl"));
+await page.waitForTimeout(300);
+{
+  const md = await fsGet("/docs/notes.md");
+  const m = await fsGet("/docs/notes.meta.jsonl");
+  step(
+    "a save stopped after the sidecar leaves the text's records in it",
+    md.includes("{>>#m1meta<<}") && m.includes('"id":"m1meta"'),
+    m,
+  );
+}
+
+// 9. The next save, once the disk takes it, updates BOTH files: the marker
+//    leaves the markdown, the record leaves the meta.
+await page.evaluate(() => {
+  window.__failWrite = null;
+});
+await page.locator(".ProseMirror p").last().click();
+await page.keyboard.press("End");
+await page.keyboard.type(" Again.");
 await poll(async () => {
   const md = await fsGet("/docs/notes.md");
   const m = await fsGet("/docs/notes.meta.jsonl");

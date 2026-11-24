@@ -8,12 +8,12 @@
 //
 //   notes.md  +  notes.html  +  notes.meta.jsonl
 //
-// The file is JSON Lines — a header line, then ONE record per line —
-// because cloud sync merges files with a three-way *text* merge
-// (engine/src/cloud/merge.rs): two people adding threads concurrently
-// merge cleanly line-by-line. Records are sorted by (type, id) and
-// serialized with a fixed key order, so two devices writing the same
-// logical state produce the same bytes.
+// The file is JSON Lines — a header line, then ONE record per line. Sync
+// merges it by its records, never as text (engine/src/sidecar.rs, the
+// browser's mergeMeta in src/web/merge.ts): two people adding threads at
+// once keep both. Records are sorted by (type, id) and serialized with a
+// fixed key order, so two devices writing the same logical state produce
+// the same bytes — the engine writes them the same way.
 //
 // Record types:
 //   {"t":"hthread", id, anchor, comments}  — a rendition (html) thread,
@@ -220,6 +220,39 @@ export function serializeEntityMeta(meta: EntityMeta): string {
   }
   rows.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   return [HEADER, ...rows.map((r) => r.line)].join("\n") + "\n";
+}
+
+/* ---------- add before, drop after ---------- */
+
+// What the sidecar holds while a save writes the text: every record of the
+// sidecar it is becoming (`next`), and every record of the one on disk that
+// `next` drops. Whichever text is on disk when a write fails or the app
+// stops, the one there before or the new one, every record it uses is
+// there. The save writes `next` itself once the text is down, which is when
+// a record goes. `next` when it drops nothing.
+export function sidecarWhileWriting(onDisk: string | null, next: string): string {
+  if (onDisk === null) return next;
+  const a = parseEntityMeta(next);
+  const b = parseEntityMeta(onDisk);
+  const missing = <T extends { id: string }>(mine: T[], theirs: T[]): T[] => {
+    const have = new Set(mine.map((x) => x.id));
+    return theirs.filter((x) => !have.has(x.id));
+  };
+  const foreignKey = (f: ForeignRecord) => `${f.t} ${f.sortId}`;
+  const haveForeign = new Set(a.foreign.map(foreignKey));
+  const extra: EntityMeta = {
+    mthreads: missing(a.mthreads, b.mthreads),
+    hthreads: missing(a.hthreads, b.hthreads),
+    tcols: missing(a.tcols, b.tcols),
+    foreign: b.foreign.filter((f) => !haveForeign.has(foreignKey(f))),
+  };
+  if (metaIsEmpty(extra)) return next;
+  return serializeEntityMeta({
+    mthreads: [...a.mthreads, ...extra.mthreads],
+    hthreads: [...a.hthreads, ...extra.hthreads],
+    tcols: [...a.tcols, ...extra.tcols],
+    foreign: [...a.foreign, ...extra.foreign],
+  });
 }
 
 // Does this meta carry anything worth a file on disk?

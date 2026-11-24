@@ -408,7 +408,7 @@ What matters here
     doklin comment <doc> --on "<words in it>" -m "<what you think>"
   · To point your person at a document, give its link from doklin info, not its
     path: it opens in their Doklin app, for whoever can see the document. It is
-    not public — publishing is. A move to another section gives it a new link.
+    not public — publishing is. A rename or a move keeps the link.
   · Publishing makes a document readable by anyone. Do it only when asked, and
     look at a folder with --dry-run first (doklin help publishing).
   · A diagram is a ```svg drawing you place by hand, in the theme's colours —

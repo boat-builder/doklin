@@ -332,9 +332,20 @@ async function lift(source: Where, ask: MoveAsk, limit: (files: number) => strin
  *  file has there, by the id it had where it was read. */
 type Landed = { label: Route["label"]; ids: [string, string][] };
 
-/** Write what was lifted where it goes. Each file is a new one there, with
- *  an id of its own. */
-function land(who: Mover, dest: Where, lifted: Lifted, ask: MoveAsk, dryRun: boolean): Promise<Committed<Landed> | Refusal> {
+/** Write what was lifted where it goes. A copy is a new file there, with an
+ *  id of its own. A move keeps each file's id, so every link to it still
+ *  finds it — as a Mac's own move between sections does (`moved_in`,
+ *  engine/src/cloud/unit.rs): change both. Only when the section already
+ *  has a file by that id, from a move that stopped half done, does it get
+ *  a new one. */
+function land(
+  who: Mover,
+  dest: Where,
+  lifted: Lifted,
+  ask: MoveAsk,
+  dryRun: boolean,
+  keep: boolean,
+): Promise<Committed<Landed> | Refusal> {
   return commit(
     dest.env,
     who.by,
@@ -344,7 +355,7 @@ function land(who: Mover, dest: Where, lifted: Lifted, ask: MoveAsk, dryRun: boo
       if (routed instanceof Refusal) return routed;
       const ids = new Map<string, string>();
       for (const step of routed.plan) {
-        const fid = newFileId();
+        const fid = keep && !tx.files[step.fid] ? step.fid : newFileId();
         ids.set(step.fid, fid);
         await tx.write(fid, step.to, lifted.contents.get(step.fid)!, contentTypeOf(step.to));
       }
@@ -367,7 +378,7 @@ export async function copyTo(who: Mover, source: Where, dest: Where, ask: MoveAs
     (files) => `that is ${files} files, and ${MAX_FILES_ACROSS} are copied at a time — copy it in parts, or in the Doklin app`,
   );
   if (lifted instanceof Refusal) return lifted;
-  const arrived = await land(who, dest, lifted, ask, false);
+  const arrived = await land(who, dest, lifted, ask, false, false);
   if (arrived instanceof Refusal) return arrived;
   await mirrorAfter({ env: dest.env, ctx: who.ctx }, arrived);
   return { ...arrived, value: { kind: lifted.picked.kind, ...arrived.value.label, files: lifted.picked.moving.length } };
@@ -400,15 +411,13 @@ export async function moveAcross(
   const { picked } = lifted;
 
   // Where it goes, first.
-  const arrived = await land(who, dest, lifted, ask, dryRun);
+  const arrived = await land(who, dest, lifted, ask, dryRun, true);
   if (arrived instanceof Refusal) return arrived;
   const { label } = arrived.value;
-  // New file ids where it went: a link to it from before finds nothing.
   const answer = {
     kind: picked.kind,
     ...label,
     files: picked.moving.length,
-    newLinks: true,
     ...(lifted.remaining > 0 ? { remaining: lifted.remaining } : {}),
   };
   if (dryRun) return { ...answer, moved: false };

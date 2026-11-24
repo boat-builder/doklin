@@ -101,8 +101,6 @@ export class SaveConflict extends Error {
 export type Saved = {
   /** What the text is at now; null when the save carried no text. */
   rev: Rev | null;
-  /** Whether the sidecar that came with the text landed too. */
-  meta: boolean;
 };
 
 /** The parts of a document that travel with it. */
@@ -157,8 +155,10 @@ export interface Documents {
   meta(path: string): Promise<string | null>;
   /** Write a document's text, its sidecar, or both as one save. The text
    *  lands only over `over` (null: over whatever is there) and rejects with
-   *  `SaveConflict` otherwise. The sidecar is last writer wins. Rejects when
-   *  nothing landed. */
+   *  `SaveConflict` otherwise. The sidecar is last writer wins. Both land, or
+   *  the save rejects: the sidecar is written before the text, and on a
+   *  rejection it may hold the new text's records beside the old ones, which
+   *  nothing uses until a text does. */
   save(path: string, parts: { text?: string; meta?: string }, over: Rev | null): Promise<Saved>;
   /** Whether a file or a folder is at `path`. */
   exists(path: string): Promise<boolean>;

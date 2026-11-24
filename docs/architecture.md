@@ -35,9 +35,16 @@
   never names a `.meta.jsonl`, and never does to a document's parts in turn
   what it did to the document.
 - A save is the text and the sidecar together (`writeToDisk` composes the
-  sidecar before it writes). The text lands only over the `Rev` it was read at
-  and rejects with `SaveConflict` otherwise; the sidecar is last writer wins.
-  A `Rev` is opaque outside the backend that made it.
+  sidecar before it writes, for a document that isn't the active one too).
+  The text lands only over the `Rev` it was read at and rejects with
+  `SaveConflict` otherwise; the sidecar is last writer wins. A `Rev` is opaque
+  outside the backend that made it.
+- **A save fails whole, and writes the sidecar first.** While the text is
+  written, the sidecar holds every record the text on disk or the new text
+  uses (`sidecarWhileWriting`, `src/metaFile.ts`); the records it drops go
+  once the text is down. A save that stops between the two writes leaves
+  records nothing uses, never a text without its records. A browser's save
+  is one manifest write, so it needs neither.
 - What a platform may not have is an optional group on `Backend` (`setup`,
   `sync`, `domain`, `access`, `spaces`, `session`, `versions`, `shows`,
   `leaving`, `windows`, `untitled`, `localFiles`, `pdf`, `updater`), never a flag and

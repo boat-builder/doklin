@@ -5554,16 +5554,16 @@ await test("sections: a move between sections writes where it goes first and lea
   const [oldFid] = entryAt(spaceManifest(mine), "notes/idea.md");
   const dry = await move(pat, { from: "Private/notes/idea", to: "Library/Shared/", dryRun: true });
   assert.equal(dry.status, 200, dry.text);
-  assert.deepEqual(dry.json, { kind: "document", from: "Private/notes/idea", to: "Library/Shared/idea", files: 2, newLinks: true, moved: false });
+  assert.deepEqual(dry.json, { kind: "document", from: "Private/notes/idea", to: "Library/Shared/idea", files: 2, moved: false });
   assert.ok(pathsOf(spaceManifest(mine)).includes("notes/idea.md") && !pathsOf(storedManifest()).includes("Shared/idea.md"), "a dry run moved nothing");
 
   const out = await move(pat, { from: "Private/notes/idea", to: "Library/Shared/" });
   assert.equal(out.status, 200, out.text);
-  assert.deepEqual(out.json, { kind: "document", from: "Private/notes/idea", to: "Library/Shared/idea", files: 2, newLinks: true });
+  assert.deepEqual(out.json, { kind: "document", from: "Private/notes/idea", to: "Library/Shared/idea", files: 2 });
   const shared = storedManifest();
   assert.ok(pathsOf(shared).includes("Shared/idea.md") && pathsOf(shared).includes("Shared/idea.meta.jsonl"), "the note and its comments");
   const [newFid, landed] = entryAt(shared, "Shared/idea.md");
-  assert.notEqual(newFid, oldFid, "a new file where it went, with an id of its own");
+  assert.equal(newFid, oldFid, "the id it had, so every link to it still finds it");
   assert.equal(landed.rev, 1);
   assert.equal(landed.by, PAT_BOT.id);
   assert.ok(textAt("Shared/idea.md").includes("{==quiet cove==}"), "the same bytes");
@@ -5604,20 +5604,22 @@ await test("sections: a move between sections writes where it goes first and lea
   await put(pat, "Private/trip/b", "# B\n");
   const folder = await move(pat, { from: "Private/trip", to: "Library/Shared/Trips/2026" });
   assert.equal(folder.status, 200, folder.text);
-  assert.deepEqual(folder.json, { kind: "folder", from: "Private/trip", to: "Library/Shared/Trips/2026", files: 2, newLinks: true });
+  assert.deepEqual(folder.json, { kind: "folder", from: "Private/trip", to: "Library/Shared/Trips/2026", files: 2 });
   assert.ok(["Shared/Trips/2026/a.md", "Shared/Trips/2026/b.md"].every((x) => pathsOf(storedManifest()).includes(x)));
 
   // Library is a section like the others: its own folder means into it, at
   // the top of what the shared manifest stores, and out of it a path says where.
   const toLibrary = await move(pat, { from: "Private/tides/noon", to: "Library/" });
   assert.equal(toLibrary.status, 200, toLibrary.text);
-  assert.deepEqual(toLibrary.json, { kind: "document", from: "Private/tides/noon", to: "Library/noon", files: 1, newLinks: true });
+  assert.deepEqual(toLibrary.json, { kind: "document", from: "Private/tides/noon", to: "Library/noon", files: 1 });
   const [noonFid] = entryAt(storedManifest(), "noon.md");
   assert.ok(noonFid, "stored as the shared manifest has its paths");
   const fromLibrary = await move(pat, { from: "library/NOON", to: "Private/tides/" });
-  assert.deepEqual(fromLibrary.json, { kind: "document", from: "Library/noon", to: "Private/tides/noon", files: 1, newLinks: true });
+  assert.deepEqual(fromLibrary.json, { kind: "document", from: "Library/noon", to: "Private/tides/noon", files: 1 });
   assert.equal(storedManifest().tombstones[noonFid].to, mine, "the tombstone says where it went");
-  assert.ok(pathsOf(spaceManifest(mine)).includes("tides/noon.md"));
+  const back = spaceManifest(mine);
+  assert.equal(back.files[noonFid]?.path, "tides/noon.md", "back where it was, under the id it always had");
+  assert.equal(back.tombstones[noonFid], undefined, "and the tombstone its first move left there is gone");
 
   // What does not move.
   const refused = async (body, status, pattern) => {
@@ -5678,20 +5680,31 @@ await test("find: a link's ids lead an agent to the path its person names — an
   assert.equal(moved.status, 200, moved.text);
   assert.equal((await find(alice, shared)).json.path, "Library/Linked/renamed");
 
-  // Somebody else's section, the wrong section, a page gone, a page never
-  // made and another workspace: one answer, which names none of them.
+  // An id is looked for in every section its person is in, the one the link
+  // names first: a link that names the wrong one still finds its file.
+  assert.deepEqual((await find(pat, deal)).json, { path: "Restricted/Deals/linked" });
+
+  // Somebody else's section, a page gone, a page never made and another
+  // workspace: one answer, which names none of them.
   const refused = [
     await find(alice, deal, DEALS.id),
+    await find(alice, deal),
     await find(quinn, mine, privateOf(PAT)),
-    await find(pat, deal),
     await find(pat, "f-000000000000"),
     await find(pat, shared, "", "w-000000000000"),
   ];
   assert.deepEqual(refused.map((r) => r.status), [404, 404, 404, 404, 404]);
   assert.equal(new Set(refused.map((r) => r.json.error)).size, 1, "all said alike");
   assert.ok(!refused[0].json.error.includes("Deals"));
-  assert.equal((await pat(docUrl("Library/Linked/renamed"), { method: "DELETE" })).status, 200);
-  assert.equal((await find(alice, shared)).status, 404, "deleted, it is found nowhere");
+
+  // A move to another section keeps the id, so the link from before it
+  // finds the file where it went — for whoever can open it there.
+  const across = await pat("/api/agent/move", { method: "POST", body: { from: "Library/Linked/renamed", to: "Restricted/Deals/" } });
+  assert.equal(across.status, 200, across.text);
+  assert.deepEqual((await find(quinn, shared)).json, { path: "Restricted/Deals/renamed" });
+  assert.equal((await find(alice, shared)).status, 404, "Alice isn't in Deals");
+  assert.equal((await pat(docUrl("Restricted/Deals/renamed"), { method: "DELETE" })).status, 200);
+  assert.equal((await find(quinn, shared)).status, 404, "deleted, it is found nowhere");
 
   // What is not an id is a usage mistake, not a missing page.
   assert.equal((await find(pat, "../plan")).status, 400);
@@ -6575,12 +6588,13 @@ await test("web: a document or a folder is moved to exactly where the browser sa
   // tombstone that says where it went.
   const across = await move({ from: { path: "browser/Roadmap.md" }, to: { space, path: "Roadmap.md" }, kind: "document" });
   assert.equal(across.status, 200);
-  assert.deepEqual([across.json.files, across.json.newLinks], [2, true]);
+  assert.equal(across.json.files, 2);
   m = await sharedManifest();
   assert.equal(m.files[planFid], undefined);
   assert.equal(m.tombstones[planFid].to, space, "a Mac in both sections moves its copy; one that is not deletes its own");
   const there = (await call(`/api/spaces/${space}/manifest`, { token: OWNER })).json;
-  assert.ok(fileAt(there, "Roadmap.md")[0] && fileAt(there, "Roadmap.meta.jsonl")[0], "the note and its comments, under ids of their own");
+  assert.equal(fileAt(there, "Roadmap.md")[0], planFid, "under the id it had, so links to it still find it");
+  assert.ok(fileAt(there, "Roadmap.meta.jsonl")[0], "and its comments with it");
   assert.equal((await move({ from: { space: "s-00000000", path: "x.md" }, to: { path: "x.md" }, kind: "document" })).status, 404);
 
   // Removing: one version only when it is one of two; the document whole; a folder.

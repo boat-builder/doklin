@@ -45,7 +45,7 @@ import HistoryRail from "./HistoryRail";
 import VersionPreview, { momentLabel } from "./VersionPreview";
 import WorkspaceHistory from "./WorkspaceHistory";
 import VersionsSettings from "./VersionsSettings";
-import RecentlyDeleted from "./RecentlyDeleted";
+import RecentlyDeleted, { deletedDocuments } from "./RecentlyDeleted";
 import { dragWindowFromGap } from "./windowDrag";
 import { keys } from "./keys";
 import Editor, { type EditorHandle } from "./Editor";
@@ -1021,6 +1021,8 @@ export default function App() {
   // section of it — its folder is what `historyRoot` and `deletedFor` hold.
   const [historyRoot, setHistoryRoot] = useState<string | null>(null);
   const [deletedFiles, setDeletedFiles] = useState<DeletedFile[]>([]);
+  // A document's files are one row, and one in the count.
+  const deletedCount = useMemo(() => deletedDocuments(deletedFiles).length, [deletedFiles]);
   const [deletedFor, setDeletedFor] = useState<string | null>(null);
   const [sectionDeleted, setSectionDeleted] = useState<DeletedFile[]>([]);
   // Every store's status — the settings surface's whole model, the same way
@@ -1094,17 +1096,16 @@ export default function App() {
     return () => window.removeEventListener("dk-figure-expand", onExpand);
   }, []);
 
-  // Land a markdown save's thread bodies in the entity meta of a document
-  // that is NOT the active one (a background flush after a focus swap, a
-  // web-edit pull): a guarded read-modify-write preserving the sections this
-  // write doesn't own — html threads, table widths, foreign records — and
-  // any orphaned bodies whose marker is still missing from the given hybrid
-  // markdown.
-  const writeMdThreadsToMeta = useCallback(
-    async (target: string, hybridMd: string, mthreads: MdThread[]) => {
-      const { meta: base, metaExists: exists } = metaOf(
-        await backend.documents.meta(target).catch(() => null),
-      );
+  // The entity meta a markdown save carries for a document that is NOT the
+  // active one (a background flush after a focus swap, a web-edit pull), so
+  // that it goes in the same save as the text: its own meta as the disk has
+  // it, with this save's thread bodies, keeping the sections this save
+  // doesn't own — html threads, table widths, foreign records — and any
+  // orphaned bodies whose marker is still missing from the given hybrid
+  // markdown. Undefined for a document that has no meta and needs none.
+  const metaWithMdThreads = useCallback(
+    async (target: string, hybridMd: string, mthreads: MdThread[]): Promise<string | undefined> => {
+      const { meta: base, metaExists: exists } = metaOf(await backend.documents.meta(target));
       const rooted = new Set(mthreads.map((t) => t.id));
       const ids = markerIds(hybridMd);
       const out: EntityMeta = {
@@ -1116,10 +1117,7 @@ export default function App() {
         tcols: base.tcols,
         foreign: base.foreign,
       };
-      if (metaIsEmpty(out) && !exists) return;
-      await backend.documents
-        .save(target, { meta: serializeEntityMeta(out) }, null)
-        .catch((e) => console.error("meta save failed", target, e));
+      return metaIsEmpty(out) && !exists ? undefined : serializeEntityMeta(out);
     },
     [],
   );
@@ -1302,14 +1300,16 @@ export default function App() {
     // meta rather than leaving it stale; a document that never had one never
     // gets one.
     let meta: string | undefined;
-    if (isActive) {
-      const next: EntityMeta = {
-        ...composeActiveMeta(),
-        mthreads: [...mthreads, ...mdOrphansRef.current.filter(stillOrphan)],
-      };
-      if (!metaIsEmpty(next) || htmlSidecarExistsRef.current) meta = serializeEntityMeta(next);
-    }
     try {
+      if (isActive) {
+        const next: EntityMeta = {
+          ...composeActiveMeta(),
+          mthreads: [...mthreads, ...mdOrphansRef.current.filter(stillOrphan)],
+        };
+        if (!metaIsEmpty(next) || htmlSidecarExistsRef.current) meta = serializeEntityMeta(next);
+      } else {
+        meta = await metaWithMdThreads(target, hybrid, mthreads);
+      }
       const saved =
         mdUnchanged && meta === undefined
           ? null
@@ -1334,12 +1334,6 @@ export default function App() {
             doc: { ...s.doc, snapshot: newSnapshot, contents, dirty: false },
           });
         }
-        // A document that was not the active one when this began had no meta
-        // composed for it: its thread bodies still land in ITS meta — a
-        // guarded read-modify-write that preserves the sections this save
-        // doesn't own (html threads, foreign records) and any orphaned
-        // bodies.
-        if (!isActive) await writeMdThreadsToMeta(target, hybrid, mthreads);
         return;
       }
       if (newSnapshot) {
@@ -1355,7 +1349,7 @@ export default function App() {
         mdOrphansRef.current = remaining;
         setMdOrphans(remaining);
       }
-      if (meta !== undefined && saved?.meta) {
+      if (meta !== undefined && saved) {
         const isNew = !htmlSidecarExistsRef.current;
         htmlSidecarExistsRef.current = true;
         if (isNew) await refreshWatchSet();
@@ -1386,7 +1380,7 @@ export default function App() {
         console.error("autosave failed", e);
       }
     }
-  }, [setSplitState, refreshMirror, writeMdThreadsToMeta, composeActiveMeta, refreshWatchSet]);
+  }, [setSplitState, refreshMirror, metaWithMdThreads, composeActiveMeta, refreshWatchSet]);
 
   const scheduleAutosave = useCallback(() => {
     if (autosaveTimerRef.current != null) {
@@ -5601,7 +5595,7 @@ export default function App() {
           onCopyAgentPath={cloudForRoot ? copyAgentPath : undefined}
           onHistory={onHistory}
           onWorkspaceHistory={versionStore ? (dir) => setHistoryRoot(dir ?? libraryDir) : undefined}
-          deletedCount={deletedFiles.length}
+          deletedCount={deletedCount}
           onRecentlyDeleted={
             versionStore
               ? (dir) => {
@@ -5875,12 +5869,12 @@ export default function App() {
         // in words.
         <div className="side-footer">
           {settingsMenu}
-          {showSidebar && workspaceRoot && deletedFiles.length > 0 && (
+          {showSidebar && workspaceRoot && deletedCount > 0 && (
             <button
               className="side-footer-btn"
               data-testid="recently-deleted-button"
               aria-pressed={sidebarMode === "deleted"}
-              aria-label={`Recently deleted (${deletedFiles.length})`}
+              aria-label={`Recently deleted (${deletedCount})`}
               title="Recently deleted — files this folder's history still holds"
               onClick={() => {
                 setDeletedFor(null);
@@ -5888,7 +5882,7 @@ export default function App() {
               }}
             >
               <TrashIcon />
-              <span className="side-footer-count">{deletedFiles.length}</span>
+              <span className="side-footer-count">{deletedCount}</span>
             </button>
           )}
           {showSidebar && cloudForRoot && (

@@ -440,8 +440,10 @@ await page.evaluate(() => {
   midnight.setHours(0, 0, 0, 0);
   window.__versions.deleted = [
     { path: "Projects/gone.md", lastSeenMs: midnight.getTime() - 3600000, hash: "9".repeat(64), size: 120 },
+    { path: "Projects/gone.meta.jsonl", lastSeenMs: midnight.getTime() - 3600000, hash: "8".repeat(64), size: 60 },
   ];
   window.__versions.blobs["9".repeat(64)] = "# Gone\n\nthe note that was deleted\n";
+  window.__versions.blobs["8".repeat(64)] = '{"doklin":"meta","v":1}\n';
   window.__emit("versions-applied", { root: "/docs", paths: [] });
 });
 await poll(async () => (await tid("recently-deleted-button").count()) === 1);
@@ -451,9 +453,10 @@ await tid("recently-deleted-button").click();
 await poll(async () => (await tid("recently-deleted").count()) === 1);
 const deletedRow = await tid("deleted-row").innerText();
 step(
-  "a deleted file gets a count in the sidebar's footer bar, and a column listing its old folder and when it was last seen",
+  "a deleted note and its sidecar are one row and one in the count in the sidebar's footer bar, with its old folder and when it was last seen",
   footerLabel === "Recently deleted (1)" &&
     footerCount.trim() === "1" &&
+    (await tid("deleted-row").count()) === 1 &&
     deletedRow.includes("gone") &&
     deletedRow.includes("Projects") &&
     deletedRow.includes("last seen"),
@@ -496,15 +499,22 @@ await poll(async () =>
     () => window.__versions.calls.filter((c) => c.cmd === "versions_restore_file").at(-1)?.args.path,
   )) !== back.args.path,
 );
-const collided = await page.evaluate(
-  () => window.__versions.calls.filter((c) => c.cmd === "versions_restore_file").at(-1)?.args.path,
+const restores = await page.evaluate(() =>
+  window.__versions.calls.filter((c) => c.cmd === "versions_restore_file").map((c) => c.args.path),
 );
+const collided = restores.at(-1);
 step(
-  "Restore puts a deleted file back where it was, and beside it when the path is taken",
+  "Restore puts a deleted note back where it was with its sidecar, written first, and both beside it when the path is taken",
   back.args.path === "/docs/Projects/gone.md" &&
     back.args.hash === "9".repeat(64) &&
-    collided === "/docs/Projects/gone (restored).md",
-  `${back.args.path} → ${collided}`,
+    JSON.stringify(restores.slice(-4)) ===
+      JSON.stringify([
+        "/docs/Projects/gone.meta.jsonl",
+        "/docs/Projects/gone.md",
+        "/docs/Projects/gone (restored).meta.jsonl",
+        "/docs/Projects/gone (restored).md",
+      ]),
+  `${back.args.path} → ${collided}; ${restores.join(", ")}`,
 );
 
 /* ---------- Phase 5: the settings, the space, the copy you keep ---------- */

@@ -134,7 +134,7 @@ export async function getTree(c: Call): Promise<Response> {
  * Where a link to a page leads, as this agent's person names the path. A
  * link (engine/src/cloud/link.rs) names its workspace, the space its file is
  * in ("" the shared workspace) and the file's id — never a path, so that a
- * rename keeps it and no folder's name is in it. Only documents sync, so a
+ * rename or a move keeps it and no folder's name is in it. Only documents sync, so a
  * file found is one: it comes back as the tree names it, by its stem.
  *
  * A space this person is not in, a file deleted, one that never was and a
@@ -158,15 +158,22 @@ export async function getFind(c: Call): Promise<Response> {
   if (bound.id !== workspace) return nothing;
   const all = await c.places.all();
   if (all === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
-  const section = all.find((s) => s.space === space);
-  if (!section) return nothing;
-  const tree = await openTree(inSection(c, section));
-  if (!tree) return notBound();
-  const file = tree.manifest.files[fid];
-  if (!file || file.path.toLowerCase().endsWith(META_SUFFIX)) return nothing;
-  const { stem } = nameOf(file.path);
-  const alone = new Index(tree.manifest.files).doc(stem).mds.length <= 1;
-  return json({ path: alone ? stem : file.path });
+  // A file keeps its id when it moves to another section, so the id is
+  // looked for in every section, the one the link names first. While a move
+  // is half done one id is in two sections: then the named one wins, else
+  // the lowest section id, which is the shared workspace's — as on a Mac
+  // (`follow`, engine/src/cloud/engine.rs). Change both.
+  const order = [...all].sort((a, b) => (a.space === space ? -1 : b.space === space ? 1 : a.space < b.space ? -1 : 1));
+  for (const section of order) {
+    const tree = await openTree(inSection(c, section));
+    if (!tree) return notBound();
+    const file = tree.manifest.files[fid];
+    if (!file || file.path.toLowerCase().endsWith(META_SUFFIX)) continue;
+    const { stem } = nameOf(file.path);
+    const alone = new Index(tree.manifest.files).doc(stem).mds.length <= 1;
+    return json({ path: alone ? stem : file.path });
+  }
+  return nothing;
 }
 
 /** Which documents are called this or contain this text (search.ts). A

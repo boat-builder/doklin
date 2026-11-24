@@ -539,15 +539,6 @@ pub fn mv(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         if !unpublished.is_empty() {
             out.push_str(&format!(" It is no longer public at {} — publish it again.", list(&unpublished)));
         }
-        // A section of its own gives it new file ids, and so new links.
-        if v.get("newLinks").and_then(Value::as_bool) == Some(true) {
-            out.push_str(match (text(&v, "kind") == "folder", ctx.dry_run) {
-                (false, false) => " It is in another section now, so links to it from before the move no longer open it — doklin info gives its new link.",
-                (true, false) => " It is in another section now, so links to what is in it from before the move no longer open anything — doklin info gives each document's new link.",
-                (false, true) => " It would go to another section, so links to it from before the move would stop opening it.",
-                (true, true) => " It would go to another section, so links to what is in it would stop opening anything.",
-            });
-        }
         out
     });
     Ok(())

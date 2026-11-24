@@ -11,6 +11,7 @@
 //! paths.rs      paths as they are written down, where the app's folder can move
 //! cloud/        the sync engine, its manager and its commands
 //! versions/     the version store, its manager and its commands
+//! sidecar.rs    a document's `.meta.jsonl`, merged by its records
 //! command.rs    every command by name, JSON in and JSON out
 //! ```
 
@@ -18,6 +19,7 @@ pub mod cloud;
 pub mod command;
 mod host;
 pub mod paths;
+pub mod sidecar;
 pub mod versions;
 
 pub use host::{Core, Host, Secrets, Setup};

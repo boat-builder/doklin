@@ -1,5 +1,5 @@
 {
-  "about": "Cases the comment code of the Mac (src/criticMarkup.ts, src/metaFile.ts, and the worker's placement rule in cloud-worker/src/agentComments.ts) and of the iPhone (ios/DoklinKit/Sources/DoklinKit/Comments/) must answer alike, byte for byte. Read by verify-harness/comments.test.mjs and ios/DoklinKit/Tests/DoklinKitTests/CommentsTests.swift. Times are milliseconds since 1970.",
+  "about": "Cases the comment code of the Mac (src/criticMarkup.ts, src/metaFile.ts, and the worker's placement rule in cloud-worker/src/agentComments.ts) and of the iPhone (ios/DoklinKit/Sources/DoklinKit/Comments/) must answer alike, byte for byte. Read by verify-harness/comments.test.mjs and ios/DoklinKit/Tests/DoklinKitTests/CommentsTests.swift; mergeMeta, how a sidecar changed in two places is merged, by src/web/merge.ts and the engine (engine/src/sidecar.rs, its tests). Times are milliseconds since 1970.",
   "metaFile": [
     {
       "path": "/a/notes.md",
@@ -1954,6 +1954,92 @@
       },
       "outMd": "# Comments\n\nA sentence with {==a highlighted phrase==}{>>#plain1<<} and more after it.\n",
       "outMeta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"plain1\",\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Say it plainer.\"},{\"author\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\ud83d\",\"at\":1757000123000,\"body\":\"Long name.\"}]}\n"
+    }
+  ],
+  "mergeMeta": [
+    {
+      "about": "two threads added next to each other, one on each side",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n{\"t\":\"mthread\",\"id\":\"aaaa0002\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n{\"t\":\"mthread\",\"id\":\"aaaa0003\",\"comments\":[{\"author\":\"Bo\",\"at\":1700000009500,\"body\":\"Reply there\"}]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n{\"t\":\"mthread\",\"id\":\"aaaa0002\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n{\"t\":\"mthread\",\"id\":\"aaaa0003\",\"comments\":[{\"author\":\"Bo\",\"at\":1700000009500,\"body\":\"Reply there\"}]}\n"
+    },
+    {
+      "about": "a reply to one thread on each side: both kept",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Bo\",\"at\":1700000009500,\"body\":\"Reply there\"}]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"},{\"author\":\"Bo\",\"at\":1700000009500,\"body\":\"Reply there\"}]}\n"
+    },
+    {
+      "about": "a thread deleted on one side and left alone on the other: deleted",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n{\"t\":\"mthread\",\"id\":\"aaaa0002\",\"comments\":[{\"author\":\"Bo\",\"at\":1700000005000,\"body\":\"Second\"}]}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0002\",\"comments\":[{\"author\":\"Bo\",\"at\":1700000005000,\"body\":\"Second\"}]}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n{\"t\":\"mthread\",\"id\":\"aaaa0002\",\"comments\":[{\"author\":\"Bo\",\"at\":1700000005000,\"body\":\"Second\"}]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0002\",\"comments\":[{\"author\":\"Bo\",\"at\":1700000005000,\"body\":\"Second\"}]}\n"
+    },
+    {
+      "about": "a thread deleted on one side and replied to on the other: the deletion sticks",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Bo\",\"at\":1700000009500,\"body\":\"Reply there\"}]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n"
+    },
+    {
+      "about": "a body edited on one side follows that side",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Bo\",\"at\":1700000005000,\"body\":\"Second\"}]}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Bo\",\"at\":1700000005000,\"body\":\"Second\"}]}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First, edited\"},{\"author\":\"Bo\",\"at\":1700000005000,\"body\":\"Second\"}]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First, edited\"},{\"author\":\"Bo\",\"at\":1700000005000,\"body\":\"Second\"}]}\n"
+    },
+    {
+      "about": "a body edited on both sides: this side's",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"Mine\"}]}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"Theirs\"}]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"Mine\"}]}\n"
+    },
+    {
+      "about": "html threads: a re-anchor on one side and a reply on the other",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hhhh0001\",\"anchor\":{\"path\":\"body>p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"Old words\"},\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hhhh0001\",\"anchor\":{\"path\":\"body>p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"Old words\"},\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hhhh0001\",\"anchor\":{\"path\":\"body>p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"New words\"},\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hhhh0001\",\"anchor\":{\"path\":\"body>p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"New words\"},\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n"
+    },
+    {
+      "about": "table widths: one changed on each side, and one on both",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"t1\",\"cols\":[100,0]}\n{\"t\":\"tcols\",\"id\":\"t2\",\"cols\":[80]}\n{\"t\":\"tcols\",\"id\":\"t3\",\"cols\":[50]}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"t1\",\"cols\":[120,0]}\n{\"t\":\"tcols\",\"id\":\"t2\",\"cols\":[80]}\n{\"t\":\"tcols\",\"id\":\"t3\",\"cols\":[60]}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"t1\",\"cols\":[100,0]}\n{\"t\":\"tcols\",\"id\":\"t2\",\"cols\":[90]}\n{\"t\":\"tcols\",\"id\":\"t3\",\"cols\":[70]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"t1\",\"cols\":[120,0]}\n{\"t\":\"tcols\",\"id\":\"t2\",\"cols\":[90]}\n{\"t\":\"tcols\",\"id\":\"t3\",\"cols\":[60]}\n"
+    },
+    {
+      "about": "records the engine doesn't know, added on each side, are kept as written",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"../a.md\",\"file\":\"f-111111111111\"}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"../b.md\",\"file\":\"f-222222222222\"}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"../a.md\",\"file\":\"f-111111111111\"}\n{\"t\":\"link\",\"id\":\"../b.md\",\"file\":\"f-222222222222\"}\n"
+    },
+    {
+      "about": "no sidecar to start from: both sides' threads",
+      "base": null,
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0002\",\"comments\":[{\"author\":\"Bo\",\"at\":1700000005000,\"body\":\"Second\"}]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n{\"t\":\"mthread\",\"id\":\"aaaa0002\",\"comments\":[{\"author\":\"Bo\",\"at\":1700000005000,\"body\":\"Second\"}]}\n"
+    },
+    {
+      "about": "what isn't a record is dropped, and numbers are written back whole",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1.7e12,\"body\":\"x\"}]}\n<<<<<<< ours\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"tcols\",\"id\":\"t9\",\"cols\":[100.4,0.5]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"x\"}]}\n{\"t\":\"tcols\",\"id\":\"t9\",\"cols\":[100,1]}\n"
+    },
+    {
+      "about": "the same on both sides is that",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"mthread\",\"id\":\"aaaa0001\",\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n"
     }
   ]
 }

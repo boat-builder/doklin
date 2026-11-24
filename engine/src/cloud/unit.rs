@@ -23,6 +23,7 @@ use super::manifest::{
     MAX_TITLE_LEN,
 };
 use super::merge::{conflict_copy_path, merge_texts, MergeOutcome};
+use crate::sidecar::sidecar_of;
 use super::pace::{Pacer, BATCH_BYTES, BATCH_FILES, EXPRESS};
 use super::remote::{Remote, RemoteError, RemoteResult};
 use super::scan::{
@@ -192,6 +193,10 @@ pub(crate) struct Ctx<'a> {
     pub releasing: &'a HashSet<String>,
     /// Files of this unit that are in another section on this Mac now.
     pub moved_out: &'a HashMap<String, MovedOut>,
+    /// Files that came into this unit from another section on this Mac:
+    /// their path here, and the id they had there, which they keep. Links
+    /// and *Copy link*s name a file by its id, so a move never breaks one.
+    pub moved_in: &'a HashMap<String, String>,
     /// The workspace's bulk lane (pace.rs).
     pub pacer: &'a Mutex<Pacer>,
     /// Paths of this unit the app itself wrote since they last went up: a
@@ -942,8 +947,10 @@ impl<R: Remote> Unit<R> {
             (Vec::new(), fresh.into_iter().chain(owed).collect())
         };
 
+        // Conflict copies made in this pass, beside the document each is of.
+        let mut copies: Vec<(String, String)> = Vec::new();
         for (fid, rf) in express {
-            if !self.apply_file(&fid, &rf, ctx, &mut touched).await? {
+            if !self.apply_file(&fid, &rf, ctx, &mut touched, &mut copies).await? {
                 self.state.owed.insert(fid);
             }
         }
@@ -960,13 +967,27 @@ impl<R: Remote> Unit<R> {
                 left -= 1;
                 bytes += rf.size;
             }
-            if self.apply_file(&fid, &rf, ctx, &mut touched).await? {
+            if self.apply_file(&fid, &rf, ctx, &mut touched, &mut copies).await? {
                 self.state.owed.remove(&fid);
             } else {
                 self.state.owed.insert(fid);
             }
         }
         *downloads = Some(left);
+        // A conflict copy's markers and links name records in its document's
+        // sidecar, so the copy gets one of its own: the document's, as this
+        // pass left it, which holds both sides' records.
+        for (doc, copy) in copies {
+            let (from, to) = (self.root.join(sidecar_of(&doc)), self.root.join(sidecar_of(&copy)));
+            if to.exists() {
+                continue;
+            }
+            if let Some(bytes) = read_file_checked(&from) {
+                if write_atomic(&to, &bytes).is_ok() {
+                    touched.push(sidecar_of(&copy));
+                }
+            }
+        }
         Ok(touched)
     }
 
@@ -979,6 +1000,7 @@ impl<R: Remote> Unit<R> {
         rf: &ManifestFile,
         ctx: &Ctx<'_>,
         touched: &mut Vec<String>,
+        copies: &mut Vec<(String, String)>,
     ) -> RemoteResult<bool> {
         let (fid, rf) = (fid.to_string(), rf.clone());
         let target = self.root.join(&rf.path);
@@ -1069,9 +1091,15 @@ impl<R: Remote> Unit<R> {
         }
         let theirs = self.remote.get_blob(&fid, &rf.hash).await?;
 
-        // Both sides changed: three-way merge against the stored base.
+        // Both sides changed: three-way merge against the stored base. A
+        // sidecar is merged by its records, and never conflicts.
         let base = std::fs::read(self.base_path(&fid)).ok();
-        let merged = merge_texts(base.as_deref(), &ours, &theirs);
+        let merged = if crate::sidecar::is_sidecar(&rf.path) {
+            let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+            MergeOutcome::Clean(crate::sidecar::merge(base.as_deref().map(text).as_deref(), &text(&ours), &text(&theirs)))
+        } else {
+            merge_texts(base.as_deref(), &ours, &theirs)
+        };
         match merged {
             MergeOutcome::Clean(text) => {
                 write_atomic(&target, text.as_bytes())
@@ -1096,6 +1124,7 @@ impl<R: Remote> Unit<R> {
                 self.record_synced_content(&fid, &rf, &theirs);
                 let copy_rel = rel_path(&self.root, &copy).unwrap_or_default();
                 touched.push(copy_rel.clone());
+                copies.push((rf.path.clone(), copy_rel.clone()));
                 ctx.events.emit_json(
                     EV_CONFLICT,
                     json!({
@@ -1258,7 +1287,19 @@ impl<R: Remote> Unit<R> {
                 }
                 _ if ctx.hold_new => {}
                 _ => {
-                    let fid = self.state.pending_new.get(&path).cloned().unwrap_or_else(|| random_id("f"));
+                    // A file moved in from another section keeps its id,
+                    // unless this section already has a file by it.
+                    let kept = ctx
+                        .moved_in
+                        .get(&path)
+                        .filter(|fid| !self.state.files.contains_key(*fid) && !remote.files.contains_key(*fid));
+                    let fid = self
+                        .state
+                        .pending_new
+                        .get(&path)
+                        .or(kept)
+                        .cloned()
+                        .unwrap_or_else(|| random_id("f"));
                     staged.pushes.push(StagedPush { file_id: fid, path, hash, bytes, new: true });
                 }
             }

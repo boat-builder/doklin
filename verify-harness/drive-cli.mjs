@@ -1232,7 +1232,8 @@ await check("mv: a document moves whole — both versions and its comments — w
   };
 });
 
-await check("mv: into another section, a document gets a new link — the answer says links from before stop opening it, and info gives the new one; inside a section its link stays; a section as the destination means into it", async () => {
+await check("mv: into another section, a document keeps its link — a link from before still opens it, and info names its section now; inside a section its link stays; a section as the destination means into it", async () => {
+  const fileOf = (link) => new URLSearchParams(new URL(link).hash.slice(1)).get("f");
   const made = await doklin(editorBox, ["write", "Library/Drive/linked"], { input: "# Linked\n" });
   const before = (await doklin(editorBox, ["info", "Library/Drive/linked"])).json.link;
   const dry = await doklin(editorBox, ["mv", "Library/Drive/linked", "Private/", "--dry-run"]);
@@ -1243,14 +1244,15 @@ await check("mv: into another section, a document gets a new link — the answer
   const renamed = await doklin(editorBox, ["mv", "Private/linked", "Private/kept"]);
   const kept = (await doklin(editorBox, ["info", "Private/kept"])).json.link;
   const back = await doklin(editorBox, ["mv", "Private/kept", "Library/"]);
+  const home = (await doklin(editorBox, ["info", "Library/kept"])).json.link;
   return {
     "written, with a link": made.code === 0 && typeof before === "string",
-    "a dry run says it would": dry.code === 0 && dry.json.newLinks === true && dry.json.moved === false,
-    "a person is told links from before stop opening it": words.includes("It is in another section now, so links to it from before the move no longer open it — doklin info gives its new link."),
-    "a link from before opens nothing": refused(stale, 3, /no page at that link/),
-    "info gives the new one, in Private's section": after !== before && /&s=p-[0-9a-f]+&/.test(after) && opened.code === 0 && opened.out === "# Linked\n" && opened.meta.path === "Private/linked",
-    "a move inside the section keeps it, and says nothing of links": renamed.code === 0 && renamed.json.newLinks === undefined && kept === after,
-    "out again, into Library itself, is a new link too": back.code === 0 && back.json.to === "Library/kept" && back.json.newLinks === true,
+    "a dry run says nothing of links": dry.code === 0 && dry.json.newLinks === undefined && dry.json.moved === false,
+    "nor does the move": !/\blinks?\b/i.test(words),
+    "a link from before still opens it": stale.code === 0 && stale.out === "# Linked\n" && stale.meta.path === "Private/linked",
+    "info names its section now, under the same file": after !== before && /&s=p-[0-9a-f]+&/.test(after) && fileOf(after) === fileOf(before) && opened.code === 0 && opened.out === "# Linked\n",
+    "a move inside the section keeps it": renamed.code === 0 && kept === after,
+    "back in Library, it is the link it had": back.code === 0 && back.json.to === "Library/kept" && home === before,
   };
 });
 

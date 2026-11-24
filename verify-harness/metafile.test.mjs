@@ -32,6 +32,7 @@ const {
   stemOf,
   metaIsEmpty,
   emptyMeta,
+  sidecarWhileWriting,
 } = mod;
 
 const entry = (author, at, body, extra = {}) => ({ author, at, body, ...extra });
@@ -185,6 +186,28 @@ assert.equal(metaFileOf("/a/n.markdown"), "/a/n.meta.jsonl");
   const { md, mthreads } = extractMarkdown(expanded.md);
   assert.equal(md, "{==a==}{>>#in1x<<} and {==b==}{>>#hy1x<<}\n");
   assert.equal(mthreads.length, 2);
+}
+
+/* ---------- add before, drop after: the sidecar while a save writes the text ---------- */
+{
+  const thread = (id, body) => ({ id, comments: [entry("A", 1, body)] });
+  const disk = serializeEntityMeta({
+    ...emptyMeta(),
+    mthreads: [thread("gone1", "dropped by this save"), thread("kept1", "as it was")],
+    tcols: [{ id: "old", cols: [100] }],
+    foreign: [{ t: "link", sortId: "../a.md", raw: '{"t":"link","id":"../a.md","file":"f-111111111111"}' }],
+  });
+  const next = serializeEntityMeta({ ...emptyMeta(), mthreads: [thread("kept1", "edited"), thread("new1", "added")] });
+  const meanwhile = parseEntityMeta(sidecarWhileWriting(disk, next));
+  assert.deepEqual(
+    meanwhile.mthreads.map((t) => [t.id, t.comments[0].body]),
+    [["gone1", "dropped by this save"], ["kept1", "edited"], ["new1", "added"]],
+    "every record either text uses, the new one's where both have it",
+  );
+  assert.deepEqual(meanwhile.tcols.map((c) => c.id), ["old"]);
+  assert.deepEqual(meanwhile.foreign.map((f) => f.sortId), ["../a.md"], "records it doesn't know too");
+  assert.equal(sidecarWhileWriting(null, next), next, "no sidecar on disk: the new one");
+  assert.equal(sidecarWhileWriting(next, next), next, "nothing dropped: the new one, byte for byte");
 }
 
 console.log("metafile.test.mjs: all assertions passed");

@@ -422,9 +422,10 @@ impl Versioner {
             .ok_or_else(|| "that file isn't in a folder with version history".to_string())?;
         // A revision only the cloud still holds arrives as text; everything
         // else is a blob in this store.
-        let contents = match (text, hash) {
+        let local = text.is_none();
+        let contents = match (text, hash.as_deref()) {
             (Some(text), _) => text,
-            (None, Some(hash)) => history::read_version(&self.store, &hash)?,
+            (None, Some(hash)) => history::read_version(&self.store, hash)?,
             (None, None) => return Err("there's no version to restore".to_string()),
         };
 
@@ -444,6 +445,21 @@ impl Versioner {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {}", parent.display(), e))?;
         }
+        // A document's sidecar from the same snapshot goes down first, beside
+        // what the sidecar holds now: the old text finds every record it
+        // uses (its comments' bodies, its links' ids) and nothing is lost.
+        // What no text uses any more goes at the app's next save.
+        let mut paths = vec![path.to_string_lossy().to_string()];
+        let then = hash.as_deref().zip(from_ts).filter(|_| local).and_then(|(hash, ts)| self.sidecar_then(&rel, ts, hash));
+        if let Some(then) = then {
+            let sidecar = path.with_file_name(crate::sidecar::sidecar_of(&path.file_name().unwrap_or_default().to_string_lossy()));
+            let now = std::fs::read_to_string(&sidecar).ok();
+            let both = crate::sidecar::with_records_of(now.as_deref(), &then);
+            if now.as_deref() != Some(both.as_str()) {
+                write(&sidecar, &both)?;
+                paths.push(sidecar.to_string_lossy().to_string());
+            }
+        }
         write(path, &contents)?;
 
         let made = self.capture(Reason::Restore, from_ts);
@@ -456,10 +472,25 @@ impl Versioner {
             EV_APPLIED,
             serde_json::json!({
                 "root": self.store.root.to_string_lossy(),
-                "paths": [path.to_string_lossy()],
+                "paths": paths,
             }),
         );
         Ok(RestoreOutcome { pre_restore_ts, pre_restore_hash, ts: made.map(|row| row.ts) })
+    }
+
+    /// The sidecar of the document at `rel` in the snapshot taken at `ts`,
+    /// when that snapshot holds the document at `hash`: the comments and
+    /// links its text had then. None for a file that is a sidecar itself.
+    fn sidecar_then(&self, rel: &str, ts: u64, hash: &str) -> Option<String> {
+        if crate::sidecar::is_sidecar(rel) || !crate::syncs(rel) {
+            return None;
+        }
+        let snap = self.store.read_snapshot(ts)?;
+        if snap.files.get(rel)?.h != hash {
+            return None;
+        }
+        let entry = snap.files.get(&crate::sidecar::sidecar_of(rel))?;
+        history::read_version(&self.store, &entry.h).ok()
     }
 
     fn set_enabled(&mut self, enabled: bool) {

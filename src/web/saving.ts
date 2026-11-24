@@ -288,7 +288,7 @@ export class Saving {
     }
     this.wait(path);
     this.ws.touch(path);
-    return Promise.resolve({ rev, meta: parts.meta !== undefined });
+    return Promise.resolve({ rev });
   }
 
   /** Something waits for a document: keep it, and send it when its turn comes. */
