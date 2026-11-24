@@ -52,23 +52,26 @@
   --fs-md: 13px;
   --fs-lg: 14px;
 
-  /* The document, as the Claude Docs viewer sets it: sans text under
-     regular-weight serif headings, in a 672px column (Full width, App.css,
-     lifts that cap). The faces are not reader choices. The body size is
-     the 100% rung and --doc-zoom multiplies it. Heading sizes are fixed px,
-     multiplied by zoom too. */
+  /* The document, set for long reading: 17px sans text with open leading
+     in a 680px column (60–72 characters a line; Full width, App.css, lifts
+     the cap), under headings big enough to scan by — H1 and H2 in the serif
+     at a medium weight, H3 down in the text face at 600. The faces are not
+     reader choices. The body size is the 100% rung and --doc-zoom
+     multiplies it. Heading sizes are fixed px, multiplied by zoom too. */
   --font-text: var(--font-sans);
   --font-heading: var(--font-serif);
-  --doc-size: 16px;
-  --doc-leading: 1.5;
-  --doc-measure: 672px;
-  --doc-h1: 32px;
-  --doc-h2: 22px;
-  --doc-h3: 18px;
-  --doc-h4: 16px;
-  --doc-h5: 14px;
-  --doc-heading-weight: 400;
-  --doc-h1-track: -0.01em;
+  --doc-size: 17px;
+  --doc-leading: 1.65;
+  --doc-measure: 680px;
+  --doc-h1: 44px;
+  --doc-h2: 30px;
+  --doc-h3: 21px;
+  --doc-h4: 17px;
+  --doc-h5: 15px;
+  --doc-heading-weight: 500;
+  --doc-h1-track: -0.02em;
+  --doc-h2-track: -0.015em;
+  --doc-h3-track: -0.012em;
 
   --r-xs: 4px;
   --r-sm: 5px;
@@ -159,6 +162,21 @@
   --mark-ring: rgba(255, 145, 0, 0.85);
   --scrim: rgba(31, 30, 29, 0.32);
 
+  /* Callouts (> [!NOTE] …): the ink is the title and icon, ≥4.5:1 on the
+     tint; the tint is the box. Note, Tip, Warning and Caution take the
+     link and status inks; Important a darker --dg-cat-7. Amber at 7% fades
+     on white, so Warning's tint is stronger. */
+  --callout-note: #256abf;
+  --callout-note-tint: rgba(42, 120, 214, 0.07);
+  --callout-tip: #137738;
+  --callout-tip-tint: rgba(15, 164, 77, 0.075);
+  --callout-important: #5b45c9;
+  --callout-important-tint: rgba(98, 80, 214, 0.07);
+  --callout-warning: #945a00;
+  --callout-warning-tint: rgba(232, 157, 0, 0.1);
+  --callout-caution: #be2e31;
+  --callout-caution-tint: rgba(211, 59, 54, 0.07);
+
   --dg-ink: #1f1e1d;
   --dg-ink-2: #52514e;
   --dg-rule: #c3c2b7;
@@ -234,6 +252,17 @@
   --mark-current: rgba(230, 130, 0, 0.5);
   --mark-ring: rgba(230, 130, 0, 0.8);
   --scrim: rgba(31, 30, 29, 0.32);
+
+  --callout-note: #2560b0;
+  --callout-note-tint: rgba(42, 120, 214, 0.075);
+  --callout-tip: #1d6e36;
+  --callout-tip-tint: rgba(15, 154, 72, 0.08);
+  --callout-important: #5640bf;
+  --callout-important-tint: rgba(98, 80, 214, 0.075);
+  --callout-warning: #8a5300;
+  --callout-warning-tint: rgba(217, 143, 0, 0.11);
+  --callout-caution: #b02c2a;
+  --callout-caution-tint: rgba(200, 56, 47, 0.075);
 
   --dg-ink: #1f1e1d;
   --dg-ink-2: #5e5d59;
@@ -313,6 +342,17 @@
   --mark-current: rgba(255, 145, 0, 0.5);
   --mark-ring: rgba(255, 145, 0, 0.85);
   --scrim: rgba(0, 0, 0, 0.6);
+
+  --callout-note: #6aa6f0;
+  --callout-note-tint: rgba(57, 135, 229, 0.13);
+  --callout-tip: #75d78d;
+  --callout-tip-tint: rgba(71, 200, 110, 0.11);
+  --callout-important: #ab9ff2;
+  --callout-important-tint: rgba(144, 133, 233, 0.13);
+  --callout-warning: #f0ba59;
+  --callout-warning-tint: rgba(237, 179, 69, 0.11);
+  --callout-caution: #fb817a;
+  --callout-caution-tint: rgba(246, 109, 103, 0.12);
 
   --dg-ink: #f0efec;
   --dg-ink-2: #c3c2b7;

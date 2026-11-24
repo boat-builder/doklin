@@ -18,7 +18,7 @@ public extension BlockNode {
         func join(_ nodes: [BlockNode]) -> String { nodes.map(\.plainText).joined(separator: "\n") }
         switch block {
         case .heading(_, let content), .paragraph(let content): return content.plainText
-        case .blockquote(let inner): return join(inner)
+        case .blockquote(let inner), .callout(_, let inner): return join(inner)
         case .list(let list):
             return list.items.enumerated().map { index, item in
                 let mark = item.task.map { $0 ? "[x] " : "[ ] " } ?? ""
@@ -37,12 +37,33 @@ public indirect enum Block: Equatable, Sendable {
     case heading(level: Int, content: [Inline])
     case paragraph([Inline])
     case blockquote([BlockNode])
+    /// A top-level quote that opens with `[!NOTE]` (or one of four more): a
+    /// callout, GitHub's alert. Its blocks are the quote's, the marker line gone.
+    case callout(kind: CalloutKind, blocks: [BlockNode])
     case list(ListBlock)
     case code(language: String?, text: String)
     case table(TableBlock)
     case image(source: String, alt: String)
     case html(String)
     case thematicBreak
+}
+
+/// A callout's kind: GitHub's five alerts, as the Mac draws them
+/// (src/calloutTypes.ts — change both).
+public enum CalloutKind: String, CaseIterable, Equatable, Sendable {
+    case note, tip, important, warning, caution
+
+    /// What its title says.
+    public var name: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+
+    /// The kind a quote's first line names: `[!NOTE]` alone on the line, any
+    /// case. Anything after the marker (a title) is not GitHub's syntax.
+    public static func marker(_ line: Substring) -> CalloutKind? {
+        var t = line
+        while let c = t.last, c == " " || c == "\t" { t = t.dropLast() }
+        guard t.hasPrefix("[!"), t.hasSuffix("]"), t.count > 3 else { return nil }
+        return CalloutKind(rawValue: t.dropFirst(2).dropLast().lowercased())
+    }
 }
 
 public struct ListBlock: Equatable, Sendable {
@@ -96,7 +117,7 @@ public struct MarkdownDocument: Equatable, Sendable {
             for node in nodes {
                 switch node.block {
                 case .heading(let level, let content): out.append(Heading(id: node.id, level: level, title: content.plainText))
-                case .blockquote(let inner): walk(inner)
+                case .blockquote(let inner), .callout(_, let inner): walk(inner)
                 case .list(let list): list.items.forEach { walk($0.blocks) }
                 default: break
                 }
@@ -147,6 +168,9 @@ private struct Line {
 
 private struct BlockParser {
     var nextID = 0
+    /// How deep `blocks` is: 1 for the note's own blocks. Only a top-level
+    /// quote can be a callout, as GitHub has it.
+    var nesting = 0
 
     mutating func node(_ line: Int, _ block: Block) -> BlockNode {
         defer { nextID += 1 }
@@ -326,6 +350,8 @@ private struct BlockParser {
     /* ---------- Blocks ---------- */
 
     mutating func blocks(_ lines: [Line]) -> [BlockNode] {
+        nesting += 1
+        defer { nesting -= 1 }
         var out: [BlockNode] = []
         var i = 0
         while i < lines.count {
@@ -388,6 +414,11 @@ private struct BlockParser {
                     i += 1
                 }
                 let number = line.number
+                if nesting == 1, let first = inner.first, let kind = CalloutKind.marker(first.text) {
+                    let body = blocks(Array(inner.dropFirst()))
+                    out.append(node(number, .callout(kind: kind, blocks: body)))
+                    continue
+                }
                 let quoted = blocks(inner)
                 out.append(node(number, .blockquote(quoted)))
                 continue

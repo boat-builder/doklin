@@ -339,7 +339,7 @@ const DOC_ZOOM_STORAGE_KEY = "doklin:doc-zoom";
 const FULL_WIDTH_STORAGE_KEY = "doklin:full-width";
 
 /* ---------- Full width (Settings → Appearance) ----------
-   The note reads in a 672px column (--doc-measure); full width lifts that
+   The note reads in a 680px column (--doc-measure); full width lifts that
    cap so the note spans its pane, side padding kept — Notion's "Full width",
    Obsidian's readable line length turned off. Per app, like zoom: it's about
    the reader's screen, not the file. Applied as data-full-width on <html>,

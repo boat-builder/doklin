@@ -1,3 +1,4 @@
+import DoklinKit
 import SwiftUI
 
 /// The app's palette: the Mac app's own tokens (src/styles/tokens.css), light
@@ -23,17 +24,42 @@ enum Theme {
     static let warnInk = Color("warn-ink")
     static let errorInk = Color("error-ink")
     static let live = Color("live")
+
+    /// A callout's ink — its title and icon, 4.5:1 or better on its tint.
+    static func calloutInk(_ kind: CalloutKind) -> Color {
+        switch kind {
+        case .note: return Color("callout-note")
+        case .tip: return Color("callout-tip")
+        case .important: return Color("callout-important")
+        case .warning: return Color("callout-warning")
+        case .caution: return Color("callout-caution")
+        }
+    }
+
+    /// A callout's tint: its box.
+    static func calloutTint(_ kind: CalloutKind) -> Color {
+        switch kind {
+        case .note: return Color("callout-note-tint")
+        case .tip: return Color("callout-tip-tint")
+        case .important: return Color("callout-important-tint")
+        case .warning: return Color("callout-warning-tint")
+        case .caution: return Color("callout-caution-tint")
+        }
+    }
 }
 
 extension Font {
-    /// A heading of a note: serif, as the Mac app sets them by default.
+    /// A heading of a note, as the Mac app sets them: H1 and H2 in the serif
+    /// at a medium weight, H3 and below in the text face at semibold — big
+    /// enough to scan a note by. The editor's sheet (src/ios-editor/editor.css)
+    /// sets the same sizes: change both.
     static func docHeading(_ level: Int) -> Font {
         switch level {
-        case 1: return .system(.largeTitle, design: .serif)
-        case 2: return .system(.title2, design: .serif)
-        case 3: return .system(.title3, design: .serif)
-        case 4: return .system(.headline, design: .serif)
-        default: return .system(.subheadline, design: .serif).weight(.semibold)
+        case 1: return .system(.largeTitle, design: .serif).weight(.medium)
+        case 2: return .system(.title, design: .serif).weight(.medium)
+        case 3: return .system(.title3).weight(.semibold)
+        case 4: return .system(.headline)
+        default: return .system(.subheadline).weight(.semibold)
         }
     }
 

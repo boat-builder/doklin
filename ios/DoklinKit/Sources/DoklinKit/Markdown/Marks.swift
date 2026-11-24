@@ -149,7 +149,7 @@ public enum Find {
                 add(container(node.id), RunMarks.text(content.runs), top: top)
             case .code(_, let text):
                 add(container(node.id), text, top: top)
-            case .blockquote(let inner):
+            case .blockquote(let inner), .callout(_, let inner):
                 inner.forEach { walk($0, top: top) }
             case .list(let list):
                 list.items.forEach { $0.blocks.forEach { walk($0, top: top) } }

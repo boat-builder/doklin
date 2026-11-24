@@ -203,7 +203,7 @@ const darkDrawings = await drawingLook("dark");
 step(
   "drawings: drawn with scripts off, full column width, own markers, nothing executable, the theme's rule colour light and dark, a broken one left as source",
   lightDrawings.count === 2 &&
-    lightDrawings.width === 672 &&
+    lightDrawings.width === 680 &&
     lightDrawings.markers.join() === "dg1-arrow,dg2-arrow" &&
     lightDrawings.scripts === 0 &&
     lightDrawings.broken === 1 &&
@@ -225,7 +225,7 @@ const type = await page.evaluate(() => {
       return `${h1.fontFamily.split(",")[0].replace(/"/g, "")} ${h1.fontWeight} ${h1.fontSize}`;
     })(),
     size: p.fontSize,
-    loaded: document.fonts.check('16px "Inter"') && document.fonts.check('32px "Literata"'),
+    loaded: document.fonts.check('17px "Inter"') && document.fonts.check('500 44px "Literata"'),
     served: performance.getEntriesByType("resource").some((r) => r.name.includes("/__web/fonts/")),
     chrome: getComputedStyle(document.querySelector("footer")).fontFamily.split(",")[0],
     // The reading measure: the column's content box, without its padding.
@@ -244,14 +244,14 @@ await darkHome.screenshot({ path: SHOTS + "public-06b-home-dark.png" });
 await darkHome.context().close();
 await page.screenshot({ path: SHOTS + "public-06b-home-light.png" });
 step(
-  "the app's look: text in the bundled Inter at 16px and headings in Literata 400 at 32px, in the 672px column, the chrome in the UI face, links in the light and dark link colours",
+  "the app's look: text in the bundled Inter at 17px and headings in Literata 500 at 44px, in the 680px column, the chrome in the UI face, links in the light and dark link colours",
   type.face === "Inter" &&
-    type.heading === "Literata 400 32px" &&
-    type.size === "16px" &&
+    type.heading === "Literata 500 44px" &&
+    type.size === "17px" &&
     type.loaded &&
     type.served &&
     type.chrome === "Inter" &&
-    type.measure === 672 &&
+    type.measure === 680 &&
     type.accent === "rgb(37, 106, 191)" &&
     darkLink === "rgb(57, 135, 229)",
   JSON.stringify({ ...type, darkLink }),

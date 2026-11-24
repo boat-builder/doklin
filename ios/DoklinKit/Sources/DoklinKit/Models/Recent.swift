@@ -202,7 +202,7 @@ public enum RecentWords {
                     if !text.isEmpty { return text }
                 case .list(let list):
                     if let text = first(list.items.flatMap(\.blocks)) { return text }
-                case .blockquote(let inner):
+                case .blockquote(let inner), .callout(_, let inner):
                     if let text = first(inner) { return text }
                 default:
                     continue

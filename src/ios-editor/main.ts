@@ -51,6 +51,8 @@ import { inlineCodeNewlines } from "../inlineCodeNewlines";
 import { codeTheme } from "../codeTheme";
 import { splitFrontmatter } from "../frontmatter";
 import { expandMarkdown, extractMarkdown, markerIds, parseEntityMeta } from "../metaFile";
+import { CALLOUT_PICK_EVENT, calloutPlugins, removeCallout, setCalloutKind, type CalloutPickDetail } from "../callout";
+import { CALLOUTS, CALLOUT_KINDS, calloutIconSvg } from "../calloutTypes";
 
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
@@ -164,6 +166,9 @@ async function load(input: Load): Promise<void> {
     });
     editor.editor.use([...criticCommentSchema, ...criticRemark]);
     editor.editor.use([...inlineCodeNewlines]);
+    // Callouts, as on the Mac (src/callout.ts); a tap on one's title opens
+    // this page's own picker.
+    editor.editor.use(calloutPlugins);
     editor.on((api) => {
       api.markdownUpdated((_ctx, markdown) => post({ kind: "changed", markdown: toDisk(markdown) }));
       api.selectionUpdated(() => report());
@@ -187,6 +192,7 @@ async function load(input: Load): Promise<void> {
     post({ kind: "loaded", markdown: toDisk(editor.getMarkdown()) });
     const v = view();
     if (v) {
+      v.dom.addEventListener(CALLOUT_PICK_EVENT, (e) => openPicker(v, (e as CustomEvent<CalloutPickDetail>).detail));
       place(v, input.block, input.prefix);
       v.focus();
     }
@@ -352,6 +358,58 @@ function todo() {
     v.focus();
   };
   setTimeout(back, 0);
+}
+
+/* ---------- The callout picker ----------
+   The Mac's (src/CalloutPicker.tsx) on a phone: under the tapped title, one
+   44pt row per kind — icon, name, meaning — a check on the current one, then
+   Remove callout. A tap outside closes it. This page has no other layers, so
+   it keeps its own outside-tap listener. */
+let picker: { el: HTMLElement; close: () => void } | null = null;
+
+function openPicker(v: EditorView, detail: CalloutPickDetail) {
+  const reopen = picker?.el.dataset.pos === String(detail.pos);
+  picker?.close();
+  if (reopen) return; // a second tap on the same title closes it
+  const el = document.createElement("div");
+  el.className = "callout-picker";
+  el.dataset.pos = String(detail.pos);
+  el.setAttribute("role", "menu");
+  const rows = CALLOUT_KINDS.map(
+    (k) => `<button type="button" role="menuitemradio" aria-checked="${k === detail.kind}" class="callout-picker-row callout-${k}" data-kind="${k}">
+${calloutIconSvg(k, "callout-picker-icon")}<span class="callout-picker-name">${CALLOUTS[k].name}</span>${
+      k === detail.kind
+        ? '<svg class="callout-picker-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>'
+        : "<span></span>"
+    }<span class="callout-picker-meaning">${CALLOUTS[k].meaning}</span></button>`,
+  ).join("");
+  el.innerHTML = `${rows}<div class="callout-picker-sep" role="separator"></div><button type="button" role="menuitem" class="callout-picker-remove">Remove callout</button>`;
+  document.body.appendChild(el);
+  const r = detail.anchor.getBoundingClientRect();
+  el.style.top = `${window.scrollY + r.bottom + 6}px`;
+  el.style.left = `${Math.max(8, Math.min(r.left - 4, window.innerWidth - el.offsetWidth - 8))}px`;
+  detail.anchor.classList.add("is-open");
+  const outside = (e: PointerEvent) => {
+    if (!el.contains(e.target as Node) && !detail.anchor.contains(e.target as Node)) close();
+  };
+  const close = () => {
+    window.removeEventListener("pointerdown", outside, true);
+    detail.anchor.classList.remove("is-open");
+    el.remove();
+    picker = null;
+  };
+  window.addEventListener("pointerdown", outside, true);
+  el.addEventListener("mousedown", (e) => e.preventDefault());
+  el.addEventListener("click", (e) => {
+    const button = (e.target as HTMLElement).closest("button");
+    if (!button) return;
+    close();
+    const kind = button.dataset.kind;
+    if (kind) setCalloutKind(v, detail.pos, kind as (typeof CALLOUT_KINDS)[number]);
+    else removeCallout(v, detail.pos);
+    v.focus();
+  });
+  picker = { el, close };
 }
 
 /** The light or dark palette, as the phone is set. */

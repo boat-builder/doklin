@@ -749,7 +749,7 @@ body,
    Any other px font-size inside .ProseMirror opts that element out of zoom.
    The canvas padding stays fixed: zoom is about type size, not margins.
 
-   The measure is --doc-measure (a 672px column × zoom) plus the fixed side
+   The measure is --doc-measure (a 680px column × zoom) plus the fixed side
    padding. Full width (Settings → Appearance, data-full-width on <html>)
    lifts the cap: the note spans its pane, the side padding stays. */
 .editor-wrap .milkdown .ProseMirror {
@@ -1114,10 +1114,14 @@ body,
 }
 
 /* ---------- Document type and rhythm ----------
-   The Claude Docs viewer's scale: headings in the serif heading face at a
-   regular weight, fixed px × zoom; h4–h6 drop to the sans text face. Block spacing is margins in em, so the rhythm follows
-   the text size. Crepe's reset pads headings and paragraphs; the margins
-   here replace that padding outright. */
+   Set for long reading. Headings are big enough to scan a note by: H1 and
+   H2 in the serif heading face at a medium weight, H3 down in the text face
+   at 600 (a step a reader tells from H2 at a glance, and heavier than a
+   bold phrase in the text), fixed px × zoom. A heading sits far from what
+   comes before it and close to what follows, so it reads as the start of
+   its section. Block spacing is margins in em, so the rhythm follows the
+   text size. Crepe's reset pads headings and paragraphs; the margins here
+   replace that padding outright. */
 .editor-wrap .milkdown .ProseMirror h1,
 .editor-wrap .milkdown .ProseMirror h2,
 .editor-wrap .milkdown .ProseMirror h3,
@@ -1132,20 +1136,17 @@ body,
 
 .editor-wrap .milkdown .ProseMirror h1 {
   font-size: calc(var(--doc-h1) * var(--doc-zoom, 1));
-  line-height: 1.2;
+  line-height: 1.15;
   letter-spacing: var(--doc-h1-track);
-  margin: 0 0 0.25em;
+  margin: 1.5em 0 0.45em;
 }
 .editor-wrap .milkdown .ProseMirror h2 {
   font-size: calc(var(--doc-h2) * var(--doc-zoom, 1));
-  line-height: 1.3;
-  margin: 1.6em 0 0.5em;
+  line-height: 1.25;
+  letter-spacing: var(--doc-h2-track);
+  margin: 2.1em 0 0.4em;
 }
-.editor-wrap .milkdown .ProseMirror h3 {
-  font-size: calc(var(--doc-h3) * var(--doc-zoom, 1));
-  line-height: 1.35;
-  margin: 1.4em 0 0.4em;
-}
+.editor-wrap .milkdown .ProseMirror h3,
 .editor-wrap .milkdown .ProseMirror h4,
 .editor-wrap .milkdown .ProseMirror h5,
 .editor-wrap .milkdown .ProseMirror h6 {
@@ -1153,46 +1154,61 @@ body,
   font-weight: 600;
   letter-spacing: 0;
 }
+.editor-wrap .milkdown .ProseMirror h3 {
+  font-size: calc(var(--doc-h3) * var(--doc-zoom, 1));
+  line-height: 1.35;
+  letter-spacing: var(--doc-h3-track);
+  margin: 1.9em 0 0.35em;
+}
 .editor-wrap .milkdown .ProseMirror h4 {
   font-size: calc(var(--doc-h4) * var(--doc-zoom, 1));
-  line-height: 1.4;
-  margin: 1.3em 0 0.3em;
+  line-height: 1.45;
+  margin: 1.6em 0 0.25em;
 }
 .editor-wrap .milkdown .ProseMirror h5,
 .editor-wrap .milkdown .ProseMirror h6 {
   font-size: calc(var(--doc-h5) * var(--doc-zoom, 1));
   line-height: 1.45;
-  margin: 1.2em 0 0.25em;
+  margin: 1.4em 0 0.2em;
 }
 .editor-wrap .milkdown .ProseMirror h6 {
   font-weight: 500;
   color: var(--text-2);
 }
 
-/* The first block in the document, and whatever follows the title, sit
-   flush: the column's padding is the top margin. */
+/* Code in a heading is a step smaller than in text: the heading's size
+   would make a mono run shout. */
+.editor-wrap .milkdown .ProseMirror :is(h1, h2, h3) code {
+  font-size: 0.8em;
+}
+
+/* The first block in the document, and whatever follows a heading, sit
+   flush: the column's padding is the top margin, and a heading's own
+   bottom margin is the only gap under it. */
 .editor-wrap .milkdown .ProseMirror > :first-child,
-.editor-wrap .milkdown .ProseMirror > h1 + * {
+.editor-wrap .milkdown .ProseMirror > :is(h1, h2, h3, h4, h5, h6) + * {
   margin-top: 0;
 }
 
+/* Paragraphs: a clear gap — about two-thirds of a line — so each one reads
+   as its own unit. */
 .editor-wrap .milkdown .ProseMirror p {
   font-size: 1em;
   line-height: var(--doc-leading);
   padding: 0;
-  margin: 0.6em 0;
+  margin: 1.15em 0;
 }
 
-/* Lists: native-looking markers in a 1.855em indent, a quarter line
-   between items. Crepe draws <ul>/<ol> holding one block per item, each a
-   flex row (marker widget + children); the marker box is one line tall so
-   the marker centres on the first line, and its width plus the gap is the
+/* Lists: native-looking markers in a 1.855em indent, half a line between
+   items. Crepe draws <ul>/<ol> holding one block per item, each a flex row
+   (marker widget + children); the marker box is one line tall so the
+   marker centres on the first line, and its width plus the gap is the
    indent. The bullet is a disc drawn here (Crepe's icon is a small circle in
    a 24px box), centred 1.2em in, as a native disc sits. Paragraphs inside
    an item carry no margin of their own. */
 .editor-wrap .milkdown .ProseMirror ul,
 .editor-wrap .milkdown .ProseMirror ol {
-  margin: 0.6em 0;
+  margin: 1.15em 0;
 }
 
 .editor-wrap .milkdown .ProseMirror li ul,
@@ -1202,7 +1218,7 @@ body,
 
 .editor-wrap .milkdown .ProseMirror .milkdown-list-item-block + .milkdown-list-item-block,
 .editor-wrap .milkdown .ProseMirror li li {
-  margin-top: 0.25em;
+  margin-top: 0.5em;
 }
 
 .editor-wrap .milkdown .ProseMirror .milkdown-list-item-block li {
@@ -1288,6 +1304,227 @@ body,
 
 .editor-wrap .milkdown .ProseMirror img {
   border-radius: 4px;
+}
+
+/* ---------- Callouts (callout.ts; the design is GitHub's alerts, drawn as
+   a box) ----------
+   A tinted box with a hairline edge in the kind's colour, a title row (icon
+   and name, in the UI face, in the kind's ink) over the body. The body is
+   the note's own text in its own ink: a callout never shrinks or tints what
+   it holds. A quote is a bar and a callout a box, so the two never read
+   alike. Sizes are in em of the text, so zoom scales a callout. The same
+   rules are restated for public pages (cloud-worker/src/render.ts) and the
+   iPhone (ios-editor/editor.css): change all three. */
+.callout-note { --co: var(--callout-note); --co-tint: var(--callout-note-tint); }
+.callout-tip { --co: var(--callout-tip); --co-tint: var(--callout-tip-tint); }
+.callout-important { --co: var(--callout-important); --co-tint: var(--callout-important-tint); }
+.callout-warning { --co: var(--callout-warning); --co-tint: var(--callout-warning-tint); }
+.callout-caution { --co: var(--callout-caution); --co-tint: var(--callout-caution-tint); }
+
+.editor-wrap .milkdown .ProseMirror .callout {
+  position: relative;
+  margin: 1.4em 0;
+  padding: 0.8em 1.1em 0.9em 1.05em;
+  border-radius: var(--r-lg);
+  background: var(--co-tint);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--co) 13%, transparent);
+  color: var(--text-1);
+}
+
+/* The title: a control while editing (a click picks the kind), plain
+   while reading. */
+.editor-wrap .milkdown .ProseMirror .callout-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42em;
+  margin: 0 0 0.4em -0.1em;
+  padding: 0.1em 0.3em 0.1em 0.1em;
+  border-radius: var(--r-sm);
+  color: var(--co);
+  font-family: var(--font-ui);
+  font-size: 0.9em;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.005em;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.editor-wrap .milkdown .ProseMirror .callout-icon {
+  width: 1.12em;
+  height: 1.12em;
+  flex: none;
+}
+
+.editor-wrap .milkdown .ProseMirror .callout-chevron {
+  width: 0.75em;
+  height: 0.75em;
+  margin-left: -0.1em;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.editor-wrap .milkdown .ProseMirror[contenteditable="true"] .callout-head {
+  cursor: pointer;
+}
+
+.editor-wrap .milkdown .ProseMirror[contenteditable="true"] .callout-head:hover,
+.editor-wrap .milkdown .ProseMirror[contenteditable="true"] .callout-head.is-open {
+  background: color-mix(in srgb, var(--co) 12%, transparent);
+}
+
+.editor-wrap .milkdown .ProseMirror[contenteditable="true"] .callout-head:hover .callout-chevron,
+.editor-wrap .milkdown .ProseMirror[contenteditable="true"] .callout-head.is-open .callout-chevron {
+  opacity: 0.8;
+}
+
+.editor-wrap .milkdown .ProseMirror .callout-body {
+  position: relative;
+}
+
+/* Inside the box, paragraphs sit closer than on the page, so the box reads
+   as one unit; its first and last blocks meet its padding. */
+.editor-wrap .milkdown .ProseMirror .callout-body > p {
+  margin: 0.55em 0;
+}
+
+.editor-wrap .milkdown .ProseMirror .callout-body > :first-child {
+  margin-top: 0;
+}
+
+.editor-wrap .milkdown .ProseMirror .callout-body > :last-child {
+  margin-bottom: 0;
+}
+
+/* The page's inline-code pill looks muddy on a tint: take the kind's
+   colour instead. A code block lifts off the box as it does off the page. */
+.editor-wrap .milkdown .ProseMirror .callout code {
+  background: color-mix(in srgb, var(--co) 11%, transparent);
+}
+
+.editor-wrap .milkdown .callout .milkdown-code-block {
+  --crepe-color-surface: color-mix(in srgb, var(--sheet) 70%, transparent);
+}
+
+.editor-wrap .milkdown .callout .milkdown-code-block code {
+  background: none;
+}
+
+/* An empty callout says what to write. */
+.editor-wrap .milkdown .ProseMirror .callout.is-empty .callout-body::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  top: 0;
+  left: 0;
+  color: var(--text-3);
+  pointer-events: none;
+}
+
+.editor-wrap .milkdown .ProseMirror .callout.ProseMirror-selectednode {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+  .editor-wrap .milkdown .ProseMirror .callout {
+    padding: 0.7em 0.9em 0.8em;
+  }
+}
+
+/* The slash menu's Callout icon: a stroke drawing among Crepe's filled
+   glyphs, so it opts out of their fill and sits a size smaller to match
+   their weight. */
+.milkdown .milkdown-slash-menu .menu-groups .menu-group li svg.callout-menu-icon {
+  width: 20px;
+  height: 20px;
+  margin: 2px;
+  fill: none;
+  stroke: var(--crepe-color-outline);
+}
+
+/* The type picker (CalloutPicker.tsx): the app's menu, one row per kind —
+   the icon in its ink, the name, the one-line meaning — then Remove. */
+.callout-picker {
+  position: fixed;
+  z-index: 30;
+  width: 308px;
+  padding: 6px;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1.3;
+  color: var(--text-1);
+  outline: none;
+  animation: settings-popover-in 0.1s ease-out;
+}
+
+.callout-picker-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 14px;
+  column-gap: 9px;
+  align-items: center;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.callout-picker-row.is-hot,
+.callout-picker-remove.is-hot {
+  background: var(--hover);
+}
+
+.callout-picker-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--co);
+}
+
+.callout-picker-name {
+  font-weight: 500;
+}
+
+.callout-picker-check {
+  width: 14px;
+  height: 14px;
+  color: var(--text-2);
+}
+
+.callout-picker-meaning {
+  grid-column: 2;
+  margin-top: 1px;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.callout-picker-sep {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--border);
+}
+
+.callout-picker-remove {
+  display: block;
+  width: 100%;
+  padding: 6px 8px 6px 35px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 /* Code: the mono face at .875em of the text. Applied to exactly the two
@@ -3472,6 +3709,154 @@ body.tree-dragging.tree-drag-invalid * {
    centered content column shifts left into the remaining space. */
 .editor-wrap.has-comments .milkdown .ProseMirror {
   margin-right: 312px;
+}
+
+/* ---------- The outline ("On this page", DocOutline.tsx) ----------
+   Short lines at the pane's edge, one per heading; the section being read
+   is the line in the text colour. Hover or focus opens the card over them.
+   Fixed to the window at the pane's measured box (the component sets top
+   and right/left). */
+.doc-outline {
+  position: fixed;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+}
+
+.doc-outline.is-right {
+  align-items: flex-end;
+}
+
+.doc-outline-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 6px 2px;
+  overflow: hidden;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.doc-outline.is-right .doc-outline-lines {
+  align-items: flex-end;
+}
+
+.doc-outline-line {
+  display: block;
+  height: 2px;
+  width: 18px;
+  border-radius: 1px;
+  background: var(--border-strong);
+}
+
+.doc-outline-line.depth-1 {
+  width: 12px;
+}
+
+.doc-outline-line.depth-2 {
+  width: 8px;
+}
+
+.doc-outline-line.is-current {
+  background: var(--text-1);
+}
+
+/* The card: closed it is out of sight and out of the way, yet its buttons
+   stay in the tab order — focusing one opens it. */
+.doc-outline-card {
+  position: absolute;
+  top: -10px;
+  width: 248px;
+  padding: 6px;
+  overflow-y: auto;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity var(--dur-fast) var(--ease) 80ms, transform var(--dur-fast) var(--ease) 80ms;
+}
+
+.doc-outline.is-right .doc-outline-card {
+  right: -4px;
+}
+
+.doc-outline.is-left .doc-outline-card {
+  left: -4px;
+}
+
+.doc-outline:hover .doc-outline-card,
+.doc-outline:focus-within .doc-outline-card {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  transition-delay: 0ms;
+}
+
+.doc-outline:hover .doc-outline-lines,
+.doc-outline:focus-within .doc-outline-lines {
+  opacity: 0;
+}
+
+.doc-outline-head {
+  padding: 4px 8px 6px;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.doc-outline-item {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.doc-outline-item.depth-1 {
+  padding-left: 20px;
+}
+
+.doc-outline-item.depth-2 {
+  padding-left: 32px;
+  color: var(--text-3);
+}
+
+.doc-outline-item:hover {
+  background: var(--hover);
+  color: var(--text-1);
+}
+
+.doc-outline-item:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+
+.doc-outline-item.is-current {
+  background: var(--accent-wash);
+  color: var(--link);
+  font-weight: 500;
+}
+
+/* Not over the html view, and not over a version preview (which shows its
+   own document, with its own outline). */
+.editor-wrap.is-html-view .doc-outline,
+.editor-wrap.is-version-preview > .doc-outline {
+  display: none;
 }
 
 /* The rail itself: absolutely positioned inside the (scrolling, position:

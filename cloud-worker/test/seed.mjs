@@ -9,7 +9,8 @@
 //   Projects/status.md               a note inside the published folder that links out of it
 //   Projects/Roadmap/…               notes a folder deeper — one opens with a frontmatter
 //                                    block, one with a plain rule
-//   Ideas.md                         a note outside the folder, linked with ../
+//   Ideas.md                         a note outside the folder, linked with ../; callouts,
+//                                    and quotes that only look like them
 //   Sizes.md + Sizes.meta.jsonl      a table with stored column widths
 //   Comments.md + Comments.meta.jsonl  comment markers in the text, bodies in the sidecar
 //   Diagram.md                       a ```mermaid block and ```svg drawings (two
@@ -77,6 +78,19 @@ We launched.
   "Ideas.md": `# Ideas
 
 A teleporter, or a jetpack.
+
+> [!WARNING]
+> Both need *fuel*.
+
+> [!note]
+> A marker in lowercase.
+
+> [!NOTE] A title after the marker
+
+- In a list:
+
+  > [!TIP]
+  > a quote in a list stays a quote
 `,
   "Sizes.md": WIDE_TABLE,
   "Sizes.meta.jsonl": '{"doklin":"meta","v":1}\n{"t":"tcols","id":"yh4epk11","cols":[260,0,140]}\n',
