@@ -61,7 +61,7 @@ final class DoklinUITests: UITestCase {
         expect(app.buttons["New note"], "New note in the menu").tap()
         expect(text(containing: "Everyone in"), "who will see a note made in Library")
         type("Phone list", into: expect(app.alerts.textFields.firstMatch, "the new note's name field"))
-        app.alerts.buttons["Create"].tap()
+        answerAlert("New note", with: "Create")
         expect(app.staticTexts["Phone list"], "the new note's heading")
         let fresh = editAtTheEnd()
         fresh.typeText("\n- [ ] ")

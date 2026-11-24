@@ -88,7 +88,7 @@ final class CommentsUITests: UITestCase {
         expect(marked("entry-Scratch"), "the Scratch note").tap()
         expect(app.staticTexts["Not public."], "Scratch's text")
         app.buttons["More"].tap()
-        expect(marked("publish"), "Publish… in the menu").tap()
+        expect(app.buttons["Publish…"], "Publish… in the menu").tap()
         let address = expect(marked("publish-slug"), "the address field")
         type("API", into: address)
         expect(text(containing: "“api” is taken by the site itself."), "why the address cannot be one")

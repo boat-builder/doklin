@@ -70,6 +70,7 @@
 - `x-doklin-client` is `ios/<MARKETING_VERSION>`. The version is the project's, not the Mac app's: `bump` does not stamp it, and a push touching only `ios/` cuts no release.
 - Diagrams (` ```mermaid `, ` ```svg `) are shown as their source when read; the editor draws them, as the Mac's does.
 - The UI tests find rows and fields by `accessibilityIdentifier` (`entry-<name>`, `recent-<name>`, `result-<name>`, `line`, `join`, `edit`, `done`, `workspace-menu`, `workspace-settings`, …), tabs and buttons by their label: renaming either is a change to the tests too. In the editor, the note is the web view's text view.
+- iOS 27 changes what the UI tests meet: a button inside a menu's `Section` loses its `accessibilityIdentifier` (a menu's items are found by their label), a confirmation dialog is a popover with no Cancel, drawn wherever iOS puts it (shut with a tap outside it), and a tap on an alert's button just after typing into its field can be lost (`answerAlert` taps again).
 - The engine is built for Apple Silicon only. The project excludes `x86_64` from simulator builds (`EXCLUDED_ARCHS`).
 - The simulator build must stay signed-to-run-locally for the UI tests: with `CODE_SIGNING_ALLOWED=NO` the app has no Keychain, and a sign-in cannot be kept.
 
