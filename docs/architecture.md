@@ -303,6 +303,13 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   is fixed to the window at the pane's box, measured on the comment rail's
   tick. It sits right, or left while the comment rail holds the right, or
   nowhere when neither side has room.
+- Milkdown's listener reports a change 200 ms after it and never cancels that
+  wait, so it also calls an editor destroyed in the meantime — and a tab
+  switch mounts one for a moment, holding the outgoing note's text.
+  `Editor.tsx` listens to `updated`, checks `editor.status` first and
+  serializes there. Subscribing to `markdownUpdated` has Milkdown serialize
+  on that wait instead, and writing a paragraph asks for the view, which
+  throws once the editor is gone.
 - Mermaid's `look` and `layout` are pinned (`mermaidConfig`): an upgrade that
   changes either default would re-lay out every diagram people wrote.
 - Sidebar and tab drags are pointer-based: Tauri intercepts HTML5 drag.

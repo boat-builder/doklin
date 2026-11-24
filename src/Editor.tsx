@@ -8,7 +8,7 @@ import {
 } from "react";
 import { Crepe } from "@milkdown/crepe";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
-import { commandsCtx, editorViewCtx } from "@milkdown/kit/core";
+import { commandsCtx, editorViewCtx, EditorStatus } from "@milkdown/kit/core";
 import {
   addBlockTypeCommand,
   clearTextInCurrentBlockCommand,
@@ -507,15 +507,12 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     // itself from accepting input.
     if (readOnlyRef.current) crepe.setReadonly(true);
     crepe.on((api) => {
-      api.markdownUpdated((_ctx, markdown) => {
-        onChangeRef.current(markdown);
-      });
       api.mounted((ctx) => {
         const view = ctx.get(editorViewCtx);
         viewRef.current = view;
         view.setProps({ editable: () => !readOnlyRef.current });
-        // Emit the mounted doc's serialization as the baseline. markdownUpdated
-        // only fires on edit transactions — never on mount — so without this the
+        // Emit the mounted doc's serialization as the baseline. A change is
+        // reported on edit transactions only — never on mount — so without this the
         // host would mistake the first real edit (e.g. a paste into a fresh
         // untitled note) for the load-normalization baseline and never autosave it.
         onChangeRef.current(crepe.getMarkdown());
@@ -565,10 +562,23 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         recompute();
         onReadyRef.current?.();
       });
-      // Keep search count + comment rail fresh as the document changes.
+      // The document changed: keep the search count and the comment rail
+      // fresh, and report the text. Milkdown calls this 200ms after the last
+      // change and never cancels that wait, so it calls it for an editor
+      // destroyed in the meantime too: a note left right after a keystroke,
+      // or right after it mounted, where a document that ends in a list, a
+      // table or a code block is given a last paragraph. That editor has
+      // nothing left to read; a host that wanted its text took it before
+      // letting it go (flushMarkdown).
+      // The text is serialized here and not by subscribing to
+      // markdownUpdated, which has Milkdown serialize on that same wait:
+      // writing a paragraph asks for the view, and that throws once the
+      // editor is destroyed.
       api.updated(() => {
+        if (crepe.editor.status !== EditorStatus.Created) return;
         report();
         recompute();
+        onChangeRef.current(crepe.getMarkdown());
       });
     });
     return crepe;
