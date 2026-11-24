@@ -38,8 +38,12 @@ final class EditorPage: NSObject {
     @ObservationIgnored private let server = EditorFiles()
 
     enum Said {
-        case loaded(String)
-        case changed(String)
+        case loaded(EditorText)
+        case changed(EditorText)
+        /// Its links shown where their files are now: not an edit.
+        case relinked(EditorText)
+        /// Something to tell the person about what they picked.
+        case notice(String)
         case failed(String)
     }
 
@@ -88,9 +92,13 @@ final class EditorPage: NSObject {
             waiting.forEach { $0.resume() }
             waiting = []
         case "loaded":
-            heard?(.loaded(message["markdown"] as? String ?? ""))
+            heard?(.loaded(EditorText(message)))
         case "changed":
-            heard?(.changed(message["markdown"] as? String ?? ""))
+            heard?(.changed(EditorText(message)))
+        case "relinked":
+            heard?(.relinked(EditorText(message)))
+        case "notice":
+            if let text = message["message"] as? String { heard?(.notice(text)) }
         case "failed":
             heard?(.failed(message["message"] as? String ?? "The editor could not open this note."))
         case "selection":
@@ -109,20 +117,43 @@ final class EditorPage: NSObject {
 
     /// Hand the editor a note, as the file has it, with the caret at the
     /// start of its top-level block `block` (whose text starts `prefix`).
-    func open(_ markdown: String, meta: String?, folder: String, files: WorkspaceFiles, block: Int?, prefix: String?) async {
+    /// `path` is where it is in the workspace, for its links, and
+    /// `documents` what they can lead to.
+    func open(
+        _ markdown: String, meta: String?, path: String, workspace: String, documents: [WorkspaceDocument], recent: [String],
+        files: WorkspaceFiles, block: Int?, prefix: String?
+    ) async {
         await whenReady()
         self.files = files
-        let folders = folder.split(separator: "/").map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+        let folders = DocLinks.directory(of: path).split(separator: "/").map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
         let base = "/doc/" + folders.map { $0 + "/" }.joined()
         let nothing: Any = NSNull()
         let input: [String: Any] = [
             "markdown": markdown,
             "base": base,
             "meta": meta.map { $0 as Any } ?? nothing,
+            "note": path,
+            "documents": documents.map(Self.json),
+            "recent": recent,
+            "workspace": workspace,
             "block": block.map { $0 as Any } ?? nothing,
             "prefix": prefix.map { $0 as Any } ?? nothing,
         ]
         _ = await run("await window.doklin.load(input)", ["input": input])
+    }
+
+    /// The workspace's documents changed: the note's links follow.
+    func documents(_ documents: [WorkspaceDocument]) {
+        Task { _ = await run("window.doklin.documents(list)", ["list": documents.map(Self.json)]) }
+    }
+
+    private static func json(_ document: WorkspaceDocument) -> [String: Any] {
+        let nothing: Any = NSNull()
+        return [
+            "path": document.path,
+            "fileId": document.fileId.map { $0 as Any } ?? nothing,
+            "section": document.section.map { $0 as Any } ?? nothing,
+        ]
     }
 
     func command(_ name: String) {
@@ -134,9 +165,9 @@ final class EditorPage: NSObject {
     }
 
     /// What the note would hold if it were written now.
-    func markdown() async -> String? {
-        guard ready else { return nil }
-        return await run("return window.doklin.markdown()") as? String
+    func markdown() async -> EditorText? {
+        guard ready, let said = await run("return window.doklin.markdown()") as? [String: Any] else { return nil }
+        return EditorText(said)
     }
 
     /// Put the keyboard away.
@@ -285,6 +316,21 @@ struct EditorSurface: UIViewRepresentable {
     }
 }
 
+/// What the editor would write: the note's markdown, and the link records
+/// its sidecar is to hold.
+struct EditorText: Equatable {
+    var markdown: String
+    var links: [LinkRecord]
+
+    init(_ message: [String: Any]) {
+        markdown = message["markdown"] as? String ?? ""
+        links = (message["links"] as? [[Any]] ?? []).compactMap { pair in
+            guard pair.count == 2, let id = pair[0] as? String, let file = pair[1] as? String else { return nil }
+            return LinkRecord(id: JSString(id), file: JSString(file))
+        }
+    }
+}
+
 /* ---------- One note being edited ---------- */
 
 /// A note being edited here: what the editor holds, what the file holds,
@@ -308,11 +354,11 @@ final class NoteEditing {
     /// What the file holds, as far as this editing knows.
     private(set) var saved: String
     /// The note as the editor first had it: opening a note writes nothing.
-    private var baseline: String?
+    private var baseline: EditorText?
     /// What the editor holds now.
-    private var current: String?
+    private var current: EditorText?
     /// What this editing last wrote, or is writing.
-    private var written: String?
+    private var written: EditorText?
     private(set) var saving = false
     /// The file changed elsewhere while something typed here was unsaved.
     var changedElsewhere = false
@@ -339,8 +385,19 @@ final class NoteEditing {
         page.heard = { [weak self] said in self?.hear(said) }
         await model.editing(true)
         let meta = try? model.workspace.files.text(DocLinks.metaFile(of: model.path))
-        await page.open(saved, meta: meta, folder: DocLinks.directory(of: model.path), files: model.workspace.files, block: block, prefix: prefix)
+        let workspace = model.workspace
+        await page.open(
+            saved, meta: meta, path: model.path, workspace: workspace.name, documents: workspace.documents.documents,
+            recent: workspace.recent?.files.map(\.path) ?? [], files: workspace.files, block: block, prefix: prefix
+        )
         page.editable(lease == nil && !changedElsewhere)
+    }
+
+    /// The workspace's documents changed: the editor shows the note's links
+    /// where their files are now.
+    func documentsChanged() {
+        guard phase == .editing else { return }
+        EditorPage.shared.documents(model.workspace.documents.documents)
     }
 
     private func hear(_ said: EditorPage.Said) {
@@ -353,6 +410,19 @@ final class NoteEditing {
         case .changed(let markdown):
             current = markdown
             schedule()
+        case .relinked(let text):
+            // With nothing unsaved, that is the note now: nothing to save
+            // until the person types. Unsaved typing goes with it.
+            if unsaved {
+                current = text
+                schedule()
+            } else {
+                baseline = text
+                current = text
+                written = nil
+            }
+        case .notice(let message):
+            model.problem = message
         case .failed(let message):
             phase = .failed(message)
         }
@@ -379,8 +449,8 @@ final class NoteEditing {
         defer { saving = false }
         written = typed
         do {
-            try await model.save(typed, over: saved)
-            saved = typed
+            try await model.save(typed.markdown, links: typed.links, over: saved)
+            saved = typed.markdown
             return true
         } catch is DocumentModel.ChangedElsewhere {
             written = nil
@@ -406,7 +476,7 @@ final class NoteEditing {
             await model.editing(false)
             return true
         }
-        guard let disk = try? model.workspace.files.text(model.path), disk != saved, disk != written else { return false }
+        guard let disk = try? model.workspace.files.text(model.path), disk != saved, disk != written?.markdown else { return false }
         if unsaved {
             pending?.cancel()
             changedElsewhere = true

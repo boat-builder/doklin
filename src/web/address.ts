@@ -22,8 +22,9 @@ import type { Workspace } from "./workspace";
 const PAGE = "https://doklin.cc/open";
 
 /** The link to the stored file at `path`, and who can open it, as the engine
- *  says it (`linked`, engine/src/cloud/engine.rs — change both). Null when
- *  the workspace holds no file there. */
+ *  says it (`linked`, engine/src/cloud/engine.rs) and the `@` list does
+ *  (`whoCanOpen`, src/docLinks.ts) — change all three. Null when the
+ *  workspace holds no file there. */
 export function linkTo(ws: Workspace, path: string): CloudPageLink | null {
   const file = ws.stored(path);
   if (!file) return null;

@@ -45,6 +45,15 @@
   once the text is down. A save that stops between the two writes leaves
   records nothing uses, never a text without its records. A browser's save
   is one manifest write, so it needs neither.
+- **The editor's markdown ends with a records line** when its note has links
+  to documents: an html comment marked by a private-use character, holding
+  the `link` records the sidecar is to hold (`recordsLine`,
+  `src/docLinks.ts`). It is the editor's form, like a comment's inline body:
+  `splitLinkRecords` takes it off before anything is written, copied or
+  compared with disk (`writeToDisk`, the untitled save, *Copy with
+  comments*, the iPhone's `toDisk`). A save's records are the editor's; a
+  meta-only write (the rail's) writes the ones of the text on disk
+  (`metaLinksRef`), so it never drops a record that text uses.
 - What a platform may not have is an optional group on `Backend` (`setup`,
   `sync`, `domain`, `access`, `spaces`, `session`, `versions`, `shows`,
   `leaving`, `windows`, `untitled`, `localFiles`, `pdf`, `updater`), never a flag and
@@ -276,7 +285,25 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   navigation would replace the app. `http(s)`/`mailto:` go to `open_external`;
   path-shaped hrefs resolve through `src/docLinks.ts` into a tab; other schemes
   are dropped; a `javascript:` href must never run. The html rendition posts
-  its clicks out through `htmlBridge.ts`.
+  its clicks out through `htmlBridge.ts`. A link the editor marks closed (its
+  file can't be opened here) is never followed by its path, which may be
+  somebody else's file: the host says the engine's sentence.
+- Links to documents (`src/linkMark.ts`): Crepe's link mark carries one more
+  attribute, `doklin` (the file id, and what the link was read and shown
+  as). The note's records and its place in the workspace must be in the
+  editor's ctx before Crepe parses (`linkRecords`, `links`), and a change of
+  `links` relinks in place, outside the undo history. A relink is not an
+  edit: the editor reports the text as it stood through `onChange`, then the
+  relinked text through `onRelinked`, which the host takes as its baseline
+  only when nothing was unsaved. The mark's `toDOM` writes no id into the
+  page, and every clipboard text is the markdown without the records line:
+  copy and cut (`criticCopyPlugin`, which puts the records beside it in
+  `application/x-doklin-links` for a paste into another note) and any drag
+  (`clipboardTextSerializer`, a view prop, so it is asked before Milkdown's
+  clipboard plugin).
+- The `@` list (`src/mentionMenu.ts`) opens on an `@` typed through
+  `handleTextInput`, never on the caret landing after one, and the `@` is
+  never stored.
 - Figure blocks (```` ```mermaid ```` in `src/mermaid.ts`, ```` ```svg ```` drawings
   in `src/drawing.ts`): the block is picture *or* source, never both, driven
   by `:focus-within` plus the `.dk-figure-editing` class (`src/figureBlock.ts`).

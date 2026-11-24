@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Links between documents harness</title>
+  </head>
+  <body>
+    <script>
+      // The editor never invokes on its own; the stub only keeps a stray
+      // invoke from throwing.
+      window.__TAURI_INTERNALS__ = {
+        invoke: () => Promise.resolve(null),
+        transformCallback: (cb) => cb,
+        metadata: {},
+      };
+    </script>
+    <div id="root"></div>
+    <script type="module" src="./doclinks.tsx"></script>
+  </body>
+</html>

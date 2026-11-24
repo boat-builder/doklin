@@ -259,4 +259,33 @@ final class DocumentTests: XCTestCase {
         await note.toggleTask(line: 4)
         XCTAssertEqual(try workspace.files.text("note.md"), "# Note\n\nFrom the Mac.\n\n- [x] milk\n")
     }
+
+    func testASaveFromTheEditorWritesItsLinksRecordsAndKeepsTheRestOfTheSidecar() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("doklin-doc-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let device = Workspaces(remembered: UserDefaults(suiteName: "doklin-test-\(UUID().uuidString)")!)
+        let workspace = device.workspace(root.path)
+        let thread = #"{"t":"mthread","id":"t1","comments":[{"author":"Ann","at":1,"body":"Yes"}]}"#
+        try workspace.files.write("note.md", Data("# Note\n\nSee [a](a.md).\n".utf8))
+        try workspace.files.write(
+            "note.meta.jsonl", Data("{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-a\"}\n\(thread)\n".utf8)
+        )
+        let note = DocumentModel(workspace: workspace, path: "note.md")
+        note.load()
+
+        let typed = "# Note\n\nSee [b](b.md).\n"
+        try await note.save(typed, links: [LinkRecord(id: "b.md", file: "f-b")], over: "# Note\n\nSee [a](a.md).\n")
+        XCTAssertEqual(try workspace.files.text("note.md"), typed)
+        let meta = MetaFile.parse(try workspace.files.text("note.meta.jsonl"))
+        XCTAssertEqual(meta.links, [LinkRecord(id: "b.md", file: "f-b")], "the old text's record goes once the new text is down")
+        XCTAssertEqual(meta.mthreads.map(\.id), ["t1"], "a comment's body stays")
+
+        // A note with no sidecar and no links to records gets no sidecar.
+        try workspace.files.write("plain.md", Data("# Plain\n".utf8))
+        let plain = DocumentModel(workspace: workspace, path: "plain.md")
+        plain.load()
+        try await plain.save("# Plain\n\nMore.\n", links: [], over: "# Plain\n")
+        XCTAssertFalse(workspace.files.exists("plain.meta.jsonl"))
+    }
 }

@@ -8,21 +8,30 @@
 // split off before the editor sees it and put back byte for byte on every
 // write (src/frontmatter.ts); comment markers are expanded with their bodies
 // from the meta file, as the Mac does, and written back as bare markers
-// (src/metaFile.ts). Nothing here fetches: the app serves this page and the
-// workspace's pictures itself, and blocks every other load.
+// (src/metaFile.ts). Links to other documents are the Mac's too
+// (src/linkMark.ts): each is shown where its file is now, `@` lists the
+// workspace's documents above the keyboard, and what the editor hands back
+// is the note with the link records its sidecar is to hold. Nothing here
+// fetches: the app serves this page and the workspace's pictures itself, and
+// blocks every other load.
 //
 // The bridge (change both sides with NoteEditor.swift):
-//   native → page   window.doklin.load({markdown, meta, block, prefix})
+//   native → page   window.doklin.load({markdown, meta, note, documents,
+//                     recent, workspace, block, prefix})
+//                   window.doklin.documents(list)  the workspace's documents changed
 //                   window.doklin.command(name)    bold, italic, strike, code,
 //                     text, heading1…3, bullet, ordered, todo, quote,
 //                     codeBlock, indent, outdent, undo, redo
 //                   window.doklin.markdown()       what a write now would hold
 //                   window.doklin.editable(on)     off while another device holds it
 //                   window.doklin.blur()
-//   page → native   {kind: "ready"} once, {kind: "loaded", markdown} (the
-//                   baseline: the note as the editor would write it),
-//                   {kind: "changed", markdown}, {kind: "selection", marks,
-//                   block}, {kind: "failed", message}
+//   page → native   {kind: "ready"} once, {kind: "loaded", markdown, links}
+//                   (the baseline: the note as the editor would write it),
+//                   {kind: "changed", markdown, links}, {kind: "relinked",
+//                   markdown, links} (its links shown anew: not an edit),
+//                   {kind: "selection", marks, block}, {kind: "notice",
+//                   message}, {kind: "failed", message}
+// `links` are the records the note's sidecar is to hold, `[id, file]` each.
 
 import { Crepe } from "@milkdown/crepe";
 import { commandsCtx, editorViewCtx } from "@milkdown/kit/core";
@@ -53,10 +62,24 @@ import { splitFrontmatter } from "../frontmatter";
 import { expandMarkdown, extractMarkdown, markerIds, parseEntityMeta } from "../metaFile";
 import { CALLOUT_PICK_EVENT, calloutPlugins, removeCallout, setCalloutKind, type CalloutPickDetail } from "../callout";
 import { CALLOUTS, CALLOUT_KINDS, calloutIconSvg } from "../calloutTypes";
+import { criticCopyPlugin } from "../criticPlugin";
+import { indexDocuments, sectionOf, splitLinkRecords, type WorkspaceDocument } from "../docLinks";
+import {
+  configureLinkClipboard,
+  configureLinkMark,
+  linkContextCtx,
+  linkPlugins,
+  NO_LINKS,
+  relinkDocument,
+  setLinkRecords,
+  type LinkContext,
+} from "../linkMark";
+import { mentionPlugin } from "../mentionMenu";
 
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
 import "../styles/tokens.css";
+import "../styles/docLinks.css";
 import "./editor.css";
 
 // As on the Mac (src/Editor.tsx): a code block's editor, once mounted, stays.
@@ -68,19 +91,32 @@ export type Load = {
   /** Where the note's pictures are, relative to: its folder, as the app
    *  serves the workspace (`/doc/<folder>/`). */
   base: string | null;
-  /** Its `<stem>.meta.jsonl`, for the comments' bodies; null when it has none. */
+  /** Its `<stem>.meta.jsonl`, for the comments' bodies and the links'
+   *  records; null when it has none. */
   meta: string | null;
+  /** Where it is in the workspace, workspace-relative. */
+  note: string;
+  /** The workspace's documents (`cloud_documents`), what changed lately
+   *  (workspace-relative paths, latest first), and its name. */
+  documents: WorkspaceDocument[];
+  recent: string[];
+  workspace: string;
   /** The top-level block to start at, counted from 0; null for the top. */
   block: number | null;
   /** What that block's text begins with: the check that it is the one meant. */
   prefix: string | null;
 };
 
+/** The note as a write would hold it, and its sidecar's link records. */
+type Written = { markdown: string; links: [string, string][] };
+
 type Message =
   | { kind: "ready" }
-  | { kind: "loaded"; markdown: string }
-  | { kind: "changed"; markdown: string }
+  | ({ kind: "loaded" } & Written)
+  | ({ kind: "changed" } & Written)
+  | ({ kind: "relinked" } & Written)
   | { kind: "selection"; marks: string[]; block: string }
+  | { kind: "notice"; message: string }
   | { kind: "failed"; message: string };
 
 type Native = { postMessage(message: Message): void };
@@ -99,10 +135,29 @@ let head = "";
  *  hold: it is written back in that form, so nothing of them is lost. */
 let keepInline = false;
 
+/** Where the note is and what the workspace holds, for its links. */
+let links: LinkContext = NO_LINKS;
+
 /** What the file would hold: the frontmatter, then the editor's markdown
- *  with its comments as bare markers. */
-function toDisk(editorMarkdown: string): string {
-  return head + (keepInline ? editorMarkdown : extractMarkdown(editorMarkdown).md);
+ *  with its comments as bare markers; and the records of its links. */
+function toDisk(editorMarkdown: string): Written {
+  const { md, records } = splitLinkRecords(editorMarkdown);
+  return {
+    markdown: head + (keepInline ? md : extractMarkdown(md).md),
+    links: records.map((r) => [r.id, r.file]),
+  };
+}
+
+function contextFor(note: string, documents: WorkspaceDocument[], recent: string[], workspace: string): LinkContext {
+  const docs = indexDocuments(documents);
+  return {
+    note: { path: note, section: sectionOf(note, docs) },
+    docs,
+    recent,
+    workspace,
+    placement: "keyboard",
+    notify: (message) => post({ kind: "notice", message }),
+  };
 }
 
 function view(): EditorView | null {
@@ -128,7 +183,9 @@ async function load(input: Load): Promise<void> {
     const fm = splitFrontmatter(input.markdown);
     head = fm.head;
     keepInline = extractMarkdown(fm.body).mthreads.length > 0;
-    const threads = input.meta ? parseEntityMeta(input.meta).mthreads : [];
+    const meta = input.meta ? parseEntityMeta(input.meta) : null;
+    const threads = meta?.mthreads ?? [];
+    links = contextFor(input.note, input.documents, input.recent, input.workspace);
     const editor = new Crepe({
       root,
       defaultValue: expandMarkdown(fm.body, threads).md,
@@ -169,8 +226,19 @@ async function load(input: Load): Promise<void> {
     // Callouts, as on the Mac (src/callout.ts); a tap on one's title opens
     // this page's own picker.
     editor.editor.use(calloutPlugins);
+    // As on the Mac: links to documents, the `@` list, and a copy that
+    // holds the plain markdown (src/Editor.tsx).
+    editor.editor.use(linkPlugins);
+    editor.editor.use(mentionPlugin);
+    editor.editor.use(criticCopyPlugin);
+    editor.editor.config((ctx) => {
+      configureLinkMark(ctx);
+      configureLinkClipboard(ctx);
+      ctx.set(linkContextCtx.key, links);
+      setLinkRecords(ctx, meta?.links ?? []);
+    });
     editor.on((api) => {
-      api.markdownUpdated((_ctx, markdown) => post({ kind: "changed", markdown: toDisk(markdown) }));
+      api.markdownUpdated((_ctx, markdown) => post({ kind: "changed", ...toDisk(markdown) }));
       api.selectionUpdated(() => report());
     });
     await editor.create();
@@ -178,7 +246,7 @@ async function load(input: Load): Promise<void> {
     // Every comment the note has must come out of the editor again: one
     // whose marker would not (its body is missing from the meta file) makes
     // the note one to read here, not to edit.
-    const kept = markerIds(extractMarkdown(editor.getMarkdown()).md);
+    const kept = markerIds(extractMarkdown(splitLinkRecords(editor.getMarkdown()).md).md);
     const lost = [...markerIds(extractMarkdown(fm.body).md)].filter((id) => !kept.has(id));
     if (lost.length > 0) {
       await editor.destroy();
@@ -189,7 +257,7 @@ async function load(input: Load): Promise<void> {
     }
     // The baseline: what the note reads as once the editor has it. Saving
     // is measured from this, so opening a note never rewrites it.
-    post({ kind: "loaded", markdown: toDisk(editor.getMarkdown()) });
+    post({ kind: "loaded", ...toDisk(editor.getMarkdown()) });
     const v = view();
     if (v) {
       v.dom.addEventListener(CALLOUT_PICK_EVENT, (e) => openPicker(v, (e as CustomEvent<CalloutPickDetail>).detail));
@@ -271,6 +339,18 @@ function blockAt(v: EditorView): string {
     }
   }
   return "text";
+}
+
+/** The workspace's documents changed: each link shown where its file is
+ *  now. The app hears what the note held first, then what it holds. */
+function documents(list: WorkspaceDocument[]) {
+  if (!links.note) return;
+  links = contextFor(links.note.path, list, links.recent, links.workspace);
+  const v = view();
+  if (!crepe || !v) return;
+  crepe.editor.ctx.set(linkContextCtx.key, links);
+  post({ kind: "changed", ...toDisk(crepe.getMarkdown()) });
+  if (relinkDocument(v, links)) post({ kind: "relinked", ...toDisk(crepe.getMarkdown()) });
 }
 
 /** One thing the bar asked for. */
@@ -426,8 +506,9 @@ declare global {
   interface Window {
     doklin: {
       load: (input: Load) => Promise<void>;
+      documents: (list: WorkspaceDocument[]) => void;
       command: (name: string) => void;
-      markdown: () => string | null;
+      markdown: () => Written | null;
       editable: (on: boolean) => void;
       blur: () => void;
     };
@@ -436,6 +517,7 @@ declare global {
 
 window.doklin = {
   load,
+  documents,
   command,
   markdown: () => (crepe ? toDisk(crepe.getMarkdown()) : null),
   editable: (on: boolean) => crepe?.setReadonly(!on),

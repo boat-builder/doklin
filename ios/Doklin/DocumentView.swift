@@ -62,7 +62,10 @@ struct DocumentView: View {
                 comments.load()
             }
             .task { await workspace.loadDocuments() }
-            .onChange(of: workspace.documents) { model.relink() }
+            .onChange(of: workspace.documents) {
+                model.relink()
+                session?.documentsChanged()
+            }
             .task(id: model.phase == .loaded) {
                 guard model.phase == .loaded else { return }
                 markFound()

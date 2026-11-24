@@ -49,6 +49,11 @@ struct TableCols: Equatable, Sendable {
 public struct LinkRecord: Equatable, Sendable {
     public var id: JSString
     public var file: JSString
+
+    public init(id: JSString, file: JSString) {
+        self.id = id
+        self.file = file
+    }
 }
 
 /// A record of a kind this version does not know, kept line for line.
@@ -281,6 +286,25 @@ public enum MetaFile {
     /// a record, and the records whose markers are gone kept. Running it
     /// again changes nothing. `md` nil is a page with no markdown, whose
     /// records are left alone.
+    /// What a save that changes a note's links writes to its sidecar, as it
+    /// is on disk (`onDisk`, nil: it has none): first what it holds while
+    /// the text is written (the new records and the old ones the new drop),
+    /// then, once the text is down, the new records alone. Everything else
+    /// in it is kept as it is. Nil where nothing is to be written. The
+    /// Mac's save does the same (`sidecarWhileWriting`, src/metaFile.ts).
+    public static func withLinks(_ onDisk: String?, _ links: [LinkRecord]) -> (whileWriting: String?, then: String?) {
+        let meta = onDisk.map(parse) ?? EntityMeta()
+        if onDisk == nil, links.isEmpty { return (nil, nil) }
+        var next = meta
+        next.links = links
+        var both = next
+        let kept = Set(links.map(\.id))
+        both.links += meta.links.filter { !kept.contains($0.id) }
+        let during = serialize(both)
+        let after = serialize(next)
+        return (during == onDisk ? nil : during, after == during ? nil : after)
+    }
+
     static func roundTrip(md: JSString?, meta: EntityMeta) -> (md: JSString?, meta: EntityMeta) {
         guard let md else { return (nil, meta) }
         let expanded = expand(md, meta.mthreads)

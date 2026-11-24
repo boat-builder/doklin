@@ -133,4 +133,30 @@ final class LinksTests: XCTestCase {
             XCTAssertFalse(Workspaces.isPageLink(try url(text)), text)
         }
     }
+
+    /// A save's sidecar: while its text is written, the records of both
+    /// texts; once it is down, the new text's alone; the rest kept as it is.
+    func testASaveWritesTheRecordsOfBothTextsFirstAndThenTheNewOnes() {
+        let disk = """
+        {"doklin":"meta","v":1}
+        {"t":"link","id":"a.md","file":"f-a"}
+        {"t":"tcols","id":"x","cols":[100]}
+
+        """
+        let (during, then) = MetaFile.withLinks(disk, [LinkRecord(id: "b.md", file: "f-b")])
+        let first = MetaFile.parse(during ?? "")
+        let last = MetaFile.parse(then ?? "")
+        XCTAssertEqual(Set(first.links.map(\.id.string)), ["a.md", "b.md"])
+        XCTAssertEqual(last.links.map(\.id.string), ["b.md"])
+        XCTAssertTrue((then ?? "").contains(#"{"t":"tcols","id":"x","cols":[100]}"#))
+
+        // Nothing changes: nothing is written.
+        let same = MetaFile.withLinks(disk, [LinkRecord(id: "a.md", file: "f-a")])
+        XCTAssertNil(same.whileWriting)
+        XCTAssertNil(same.then)
+        // No sidecar and no records: none is made.
+        let none = MetaFile.withLinks(nil, [])
+        XCTAssertNil(none.whileWriting)
+        XCTAssertNil(none.then)
+    }
 }

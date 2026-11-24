@@ -25,11 +25,14 @@
 import { $prose } from "@milkdown/kit/utils";
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
+import { hasClosedLink, linkContextCtx } from "./linkMark";
 
 // What the host does with a followed link. The href is passed through
 // verbatim — exactly what the markdown says — so the host can tell an external
-// URL from a path to a note next door.
-export type LinkOpener = (href: string) => void;
+// URL from a path to a note next door. `closed`: a link to a document this
+// person can't open here (src/linkMark.ts), which must not be followed by
+// its path: that may be somebody else's file.
+export type LinkOpener = (href: string, link?: { closed: boolean }) => void;
 
 export const linkOpenKey = new PluginKey("doklin-link-open");
 
@@ -91,7 +94,7 @@ function scrollToAnchor(view: EditorView, fragment: string): boolean {
  * the host can swap its handler (or drop it) without remounting the editor.
  */
 export function linkOpenPlugin(getOpener: () => LinkOpener | undefined) {
-  return $prose(() => {
+  return $prose((ctx) => {
     let downX = Number.NaN;
     let downY = Number.NaN;
 
@@ -114,7 +117,7 @@ export function linkOpenPlugin(getOpener: () => LinkOpener | undefined) {
         scrollToAnchor(view, href.slice(1));
         return;
       }
-      getOpener()?.(href);
+      getOpener()?.(href, { closed: hasClosedLink(view, href, ctx.get(linkContextCtx.key)) });
     };
 
     return new Plugin({

@@ -160,17 +160,34 @@ public final class DocumentModel {
     /// the file held when they started. When the file holds something else
     /// now, sync wrote it from another device: `ChangedElsewhere`, and
     /// nothing is written over it.
-    public func save(_ source: String, over expected: String) async throws {
+    ///
+    /// `links`, from the editor, are the records its sidecar is to hold
+    /// (nil: the links are not this save's). The sidecar is written first,
+    /// with the records of the text there now as well, then the text, then
+    /// the sidecar with only the new records: whatever stops a save halfway
+    /// leaves every link of the text on disk its record. If the sidecar
+    /// can't be written, neither is the text.
+    public func save(_ source: String, links: [LinkRecord]? = nil, over expected: String) async throws {
         guard isNote else { throw DoklinError("Only a note's markdown can be edited here.") }
         guard exists else {
             throw DoklinError("\(title) was not saved: it is no longer on this iPhone — moved or removed on another device, or its folder left.")
         }
         let now = try workspace.files.text(path)
         guard now == expected || now == source else { throw ChangedElsewhere() }
-        try workspace.files.write(path, Data(source.utf8))
+        let sidecar = DocLinks.metaFile(of: path)
+        var plan: (whileWriting: String?, then: String?)?
+        if let links {
+            // A sidecar that is there but can't be read is never written over.
+            plan = MetaFile.withLinks(workspace.files.exists(sidecar) ? try workspace.files.text(sidecar) : nil, links)
+        }
+        var wrote: [String] = []
+        if let during = plan?.whileWriting { wrote += try workspace.files.write(sidecar, Data(during.utf8)) }
+        if now != source { wrote += try workspace.files.write(path, Data(source.utf8)) }
+        if let after = plan?.then { wrote += try workspace.files.write(sidecar, Data(after.utf8)) }
         text = source
+        if let links { self.links = links }
         document = reading(source)
-        await workspace.wrote([path])
+        if !wrote.isEmpty { await workspace.wrote(Array(Set(wrote))) }
     }
 
     /// Tick or untick the task on a line of the source (0-based).

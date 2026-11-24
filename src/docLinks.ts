@@ -172,6 +172,7 @@ export function linkWords(name: string): string {
  *  else the one in the lowest section id: every device answers alike, as
  *  `Engine::follow` does (engine/src/cloud/engine.rs). */
 export type DocumentIndex = {
+  list: WorkspaceDocument[];
   byId: Map<string, WorkspaceDocument>;
   byPath: Map<string, WorkspaceDocument>;
 };
@@ -185,7 +186,95 @@ export function indexDocuments(docs: WorkspaceDocument[]): DocumentIndex {
     const held = byId.get(doc.fileId);
     if (!held || (doc.section ?? "") < (held.section ?? "")) byId.set(doc.fileId, doc);
   }
-  return { byId, byPath };
+  return { list: docs, byId, byPath };
+}
+
+/* ---------- Sections ---------- */
+
+/** The folders a section is at the top of a workspace: `Library`,
+ *  `Private`, `Restricted/<folder>`; null for a path in none of them (a
+ *  folder that doesn't sync has no sections). */
+function sectionFolder(path: string): string | null {
+  const [top, next] = path.split("/");
+  if (top === "Library" || top === "Private") return top;
+  return top === "Restricted" && next ? `Restricted/${next}` : null;
+}
+
+/** The section the document at `path` is in: the one the list says, else
+ *  the one of any document in the same section's folder; null for Library,
+ *  and for a folder that doesn't sync. */
+export function sectionOf(path: string, docs: DocumentIndex): string | null {
+  const known = docs.byPath.get(path.toLowerCase());
+  if (known) return known.section;
+  const folder = sectionFolder(path);
+  if (folder === null || folder === "Library") return null;
+  return docs.list.find((d) => sectionFolder(d.path) === folder)?.section ?? null;
+}
+
+/** A section as a person calls it: "Library", "Private", or a restricted
+ *  folder's name. */
+export function sectionName(path: string): string {
+  const folder = sectionFolder(path);
+  return folder?.startsWith("Restricted/") ? folder.slice("Restricted/".length) : (folder ?? "");
+}
+
+/** Who can open a document, as a sentence. The engine says it in the same
+ *  words (`linked`, engine/src/cloud/engine.rs) and so does the browser
+ *  (`linkTo`, src/web/address.ts): change all three. */
+export function whoCanOpen(doc: WorkspaceDocument, workspace: string): string {
+  if (doc.section === null) return `Everyone in ${workspace} can open it.`;
+  if (doc.section.startsWith("p-")) return "Only you can open it, on any device of yours.";
+  return `Only the people in “${sectionName(doc.path)}” can open it.`;
+}
+
+/** Whether a link from a note in section `from` to `doc` opens for everyone
+ *  who reads the note: `doc` is in Library, or in the note's own section. */
+export const opensForReaders = (doc: WorkspaceDocument, from: string | null): boolean =>
+  doc.section === null || doc.section === from;
+
+/** What picking `doc` for a note in section `from` tells the author, when
+ *  the people who read the note are not all people who can open it: its
+ *  name and its folder are in the note's text for all of them to see. */
+export function pickNotice(doc: WorkspaceDocument, from: string | null): string | null {
+  // Nobody but its owner reads a Private note.
+  if (doc.section === null || doc.section === from || from?.startsWith("p-")) return null;
+  const name = documentName(doc.path);
+  if (doc.section.startsWith("p-")) {
+    return `Everyone who can read this note can see “${name}”, but only you can open it.`;
+  }
+  const folder = sectionName(doc.path);
+  return `Everyone who can read this note can see “${name}” and its folder “${folder}”, but only the people in “${folder}” can open it.`;
+}
+
+/* ---------- The list `@` opens ---------- */
+
+/**
+ * The documents the `@` list offers the note at `note` for `query`, best
+ * first. With nothing typed: the note's own folder, then what changed
+ * lately (`recent`, workspace-relative paths, latest first), then the rest.
+ * With a query: names that start with it, then a word of the name that
+ * does, then names that hold it, then folders that do; within each, what
+ * changed lately first. The note itself is never offered.
+ */
+export function documentsFor(query: string, note: string | null, docs: DocumentIndex, recent: string[]): WorkspaceDocument[] {
+  const q = query.trim().toLowerCase();
+  const late = new Map(recent.map((p, i) => [p.toLowerCase(), i]));
+  const lateness = (d: WorkspaceDocument) => late.get(d.path.toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+  const own = note === null ? null : folderOf(note).toLowerCase();
+  const tier = (d: WorkspaceDocument): number => {
+    const name = documentName(d.path).toLowerCase();
+    if (q === "") return own !== null && folderOf(d.path).toLowerCase() === own ? 0 : 1;
+    if (name.startsWith(q)) return 0;
+    if (name.split(/[\s\-_.,;:()[\]]+/).some((w) => w.startsWith(q))) return 1;
+    if (name.includes(q)) return 2;
+    return folderOf(d.path).toLowerCase().includes(q) ? 3 : -1;
+  };
+  return docs.list
+    .filter((d) => note === null || d.path.toLowerCase() !== note.toLowerCase())
+    .map((d) => ({ d, t: tier(d), l: lateness(d), n: documentName(d.path).toLowerCase() }))
+    .filter((r) => r.t >= 0)
+    .sort((a, b) => a.t - b.t || a.l - b.l || (a.n < b.n ? -1 : a.n > b.n ? 1 : 0) || (a.d.path < b.d.path ? -1 : 1))
+    .map((r) => r.d);
 }
 
 /** What a link opens. `record`: it has one, and the id decides, never its
@@ -216,6 +305,64 @@ export const isNamedLink = (words: string, key: string): boolean => words === do
  *  other words are the author's. */
 export function shownWords(words: string, resolved: ResolvedLink): string {
   return resolved.doc && isNamedLink(words, resolved.key) ? documentName(resolved.doc.path) : words;
+}
+
+/** A link to a document as it reads in the note at `from` with its
+ *  document at `doc`: the destination from this note to where the document
+ *  is now (its `#…` kept, and the destination as written when it already
+ *  leads there), and a named link's words the document's name now. */
+export function shownLink(from: string, link: { href: string; words: string }, doc: WorkspaceDocument): { href: string; words: string } {
+  const key = linkKey(link.href);
+  if (key === null) return link;
+  const now = relativePath(from, doc.path);
+  return {
+    href: now === key ? link.href : now + splitDestination(link.href.trim()).rest,
+    words: isNamedLink(link.words, key) ? documentName(doc.path) : link.words,
+  };
+}
+
+/* ---------- The editor's form ---------- */
+
+// What the editor hands the app for a note is its markdown with one more
+// line at the end: the link records the note's sidecar is to hold, in an
+// html comment. The app splits it off before anything is written
+// (`splitLinkRecords`), so it never reaches a file, a clipboard or a
+// person. A private-use character marks it as the editor's own.
+const RECORDS_LINE = "<!--\u{E000}doklin-links ";
+
+/** The records line the editor ends its markdown with: empty for none. */
+export function recordsLine(records: LinkRecord[]): string {
+  if (records.length === 0) return "";
+  const json = JSON.stringify(records.map((r) => [r.id, r.file])).replace(/>/g, "\\u003e");
+  return `${RECORDS_LINE}${json}-->`;
+}
+
+/** `text` with the records line it ends with taken off, and the records;
+ *  null when it ends with none. */
+export function takeRecordsLine(text: string): { rest: string; records: LinkRecord[] } | null {
+  const at = text.lastIndexOf(RECORDS_LINE);
+  if (at < 0) return null;
+  const body = text.slice(at + RECORDS_LINE.length).trimEnd();
+  if (!body.endsWith("-->")) return null;
+  let rows: unknown;
+  try {
+    rows = JSON.parse(body.slice(0, -3));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(rows)) return null;
+  const records = rows
+    .filter((r): r is [string, string] => Array.isArray(r) && typeof r[0] === "string" && typeof r[1] === "string" && r[0] !== "" && r[1] !== "")
+    .map(([id, file]) => ({ id, file }));
+  return { rest: text.slice(0, at), records };
+}
+
+/** The editor's markdown split into the note's markdown and the records its
+ *  sidecar is to hold (none when it has no records line). */
+export function splitLinkRecords(editorMarkdown: string): { md: string; records: LinkRecord[] } {
+  const taken = takeRecordsLine(editorMarkdown);
+  if (!taken || !taken.rest.endsWith("\n\n")) return { md: editorMarkdown, records: [] };
+  return { md: taken.rest.slice(0, -1), records: taken.records };
 }
 
 /* ---------- What a save writes ---------- */
@@ -262,15 +409,13 @@ export function linksToSave(
     recorded.add(key);
     out.records.push({ id: key, file });
   };
-  const opensForAll = (doc: WorkspaceDocument) => doc.section === null || doc.section === note.section;
+  const opensForAll = (doc: WorkspaceDocument) => opensForReaders(doc, note.section);
   // Written from where `doc` is now, the fragment kept; a named link's
   // words follow its name.
-  const current = (link: NoteLink, key: string, doc: WorkspaceDocument) => {
-    const now = relativePath(note.path, doc.path);
-    const href = now === key ? link.href : now + splitDestination(link.href.trim()).rest;
-    const words = isNamedLink(link.words, key) ? documentName(doc.path) : link.words;
-    return { href, words, key: now };
-  };
+  const current = (link: NoteLink, doc: WorkspaceDocument) => ({
+    ...shownLink(note.path, link, doc),
+    key: relativePath(note.path, doc.path),
+  });
   for (const link of links) {
     const key = linkKey(link.href);
     if (key === null) {
@@ -281,7 +426,7 @@ export function linksToSave(
     const file = link.made ?? filed.get(key);
     if (file !== undefined) {
       const doc = made ?? docs.byId.get(file);
-      const written = doc && (link.made !== undefined || opensForAll(doc)) ? current(link, key, doc) : null;
+      const written = doc && (link.made !== undefined || opensForAll(doc)) ? current(link, doc) : null;
       out.links.push(written ? { href: written.href, words: written.words } : { href: link.href, words: link.words });
       record(written?.key ?? key, file);
       continue;

@@ -106,7 +106,15 @@ import {
   type TableCols,
 } from "./metaFile";
 import { tableWidthsKey } from "./tableWidths";
-import { linkTargetPath } from "./docLinks";
+import {
+  indexDocuments,
+  linkTargetPath,
+  sectionOf,
+  splitLinkRecords,
+  type DocumentIndex,
+  type WorkspaceDocument,
+} from "./docLinks";
+import type { LinkContext } from "./linkMark";
 import { useDismiss } from "./dismiss";
 import { splitFrontmatter } from "./frontmatter";
 import {
@@ -175,6 +183,20 @@ const PART_LABEL: Record<DocumentPart, string> = { rendition: "HTML version", me
 
 // A sidecar's text as the records it holds; null (the document has none yet)
 // is no records.
+const NO_RECENT: string[] = [];
+
+// Two lists of link records as one, a destination's record once: `next`'s
+// where both have one.
+const unionRecords = (prev: LinkRecord[], next: LinkRecord[]): LinkRecord[] => {
+  const have = new Set(next.map((r) => r.id));
+  return [...next, ...prev.filter((r) => !have.has(r.id))];
+};
+
+// The same documents, in the same places, under the same ids.
+const sameDocuments = (a: WorkspaceDocument[], b: WorkspaceDocument[]): boolean =>
+  a.length === b.length &&
+  a.every((d, i) => d.path === b[i].path && d.fileId === b[i].fileId && d.section === b[i].section);
+
 const metaOf = (text: string | null): { meta: EntityMeta; metaExists: boolean } =>
   text === null
     ? { meta: emptyMeta(), metaExists: false }
@@ -744,9 +766,13 @@ export default function App() {
   // else here. See tableWidths.ts for how a record finds its table.
   const [tableWidths, setTableWidths] = useState<TableCols[]>([]);
   const tableWidthsRef = useRef<TableCols[]>([]);
-  // The document's link records (src/docLinks.ts), carried through every
-  // meta write as they were read.
+  // The active document's link records as its sidecar holds them for the
+  // text on disk: what a meta-only write (the rail's) writes, so it never
+  // drops a record that text uses. A save replaces them with the editor's
+  // (src/linkMark.ts). State for the editor's mount-time prop, as the
+  // widths are.
   const metaLinksRef = useRef<LinkRecord[]>([]);
+  const [linkRecords, setLinkRecords] = useState<LinkRecord[]>([]);
   const metaForeignRef = useRef<ForeignRecord[]>([]);
   // The hybrid markdown as last read from / written to disk — lets a
   // body-only comment edit skip the (byte-identical) markdown write. This is
@@ -977,6 +1003,42 @@ export default function App() {
   // Where something new lands when nothing says where, and whose version
   // history the folder's own is (a connected top has none).
   const libraryDir = workspaceRoot && cloudForRoot ? libraryDirOf(workspaceRoot) : workspaceRoot;
+  // The workspace's documents, for links between them: what a link to one
+  // opens and shows (src/linkMark.ts) and what the `@` list offers, with
+  // what changed lately first. Read again whenever the tree is
+  // (`treeRefreshToken`: a sync applied, a move, the window's focus); an
+  // unchanged list keeps its index, so open notes relink only for a change.
+  const [listedDocs, setListedDocs] = useState<{ root: string; index: DocumentIndex; recent: string[] } | null>(null);
+  const syncsHere = cloudForRoot != null;
+  useEffect(() => {
+    if (!workspaceRoot) return;
+    let live = true;
+    const root = workspaceRoot;
+    void Promise.all([
+      backend.documents.documents(root),
+      syncsHere && backend.sync
+        ? backend.sync
+            .recent(root, 50)
+            .then((r) => r.files.map((f) => f.path))
+            .catch((): string[] => [])
+        : [],
+    ])
+      .then(([list, recent]) => {
+        if (!live) return;
+        setListedDocs((prev) =>
+          prev && prev.root === root && sameDocuments(prev.index.list, list) && prev.recent.join("\n") === recent.join("\n")
+            ? prev
+            : { root, index: prev && prev.root === root && sameDocuments(prev.index.list, list) ? prev.index : indexDocuments(list), recent },
+        );
+      })
+      .catch((e) => console.error("listing the documents failed", e));
+    return () => {
+      live = false;
+    };
+  }, [workspaceRoot, treeRefreshToken, syncsHere]);
+  const workspaceDocs = listedDocs && listedDocs.root === workspaceRoot ? listedDocs.index : null;
+  const recentDocs = listedDocs && listedDocs.root === workspaceRoot ? listedDocs.recent : NO_RECENT;
+
   // The workspaces this Mac belongs to — every connected one has an engine,
   // so the statuses are the list. What the sidebar's switcher shows.
   const myWorkspaces = useMemo(
@@ -1107,9 +1169,10 @@ export default function App() {
   // it, with this save's thread bodies, keeping the sections this save
   // doesn't own — html threads, table widths, foreign records — and any
   // orphaned bodies whose marker is still missing from the given hybrid
-  // markdown. Undefined for a document that has no meta and needs none.
+  // markdown. Its link records are this save's (`links`, from the editor).
+  // Undefined for a document that has no meta and needs none.
   const metaWithMdThreads = useCallback(
-    async (target: string, hybridMd: string, mthreads: MdThread[]): Promise<string | undefined> => {
+    async (target: string, hybridMd: string, mthreads: MdThread[], links: LinkRecord[]): Promise<string | undefined> => {
       const { meta: base, metaExists: exists } = metaOf(await backend.documents.meta(target));
       const rooted = new Set(mthreads.map((t) => t.id));
       const ids = markerIds(hybridMd);
@@ -1120,7 +1183,7 @@ export default function App() {
           ...base.mthreads.filter((t) => !rooted.has(t.id) && !ids.has(t.id)),
         ],
         tcols: base.tcols,
-        links: base.links,
+        links,
         foreign: base.foreign,
       };
       return metaIsEmpty(out) && !exists ? undefined : serializeEntityMeta(out);
@@ -1279,13 +1342,15 @@ export default function App() {
   );
 
 
-  // `contents` is the editor's serialization — FULL CriticMarkup. What is
-  // saved is the hybrid split: markers-only markdown plus thread-body records
-  // in the entity meta (see metaFile.ts), the two as ONE save. A body-only
+  // `contents` is the editor's serialization — FULL CriticMarkup, and the
+  // records line of its links (src/linkMark.ts). What is saved is the
+  // hybrid split: markers-only markdown plus thread-body and link records in
+  // the entity meta (see metaFile.ts), the two as ONE save. A body-only
   // edit (a reply typed in the rail) leaves the hybrid markdown
   // byte-identical and its text is not sent at all — only the meta moves.
   const writeToDisk = useCallback(async (target: string, contents: string): Promise<void> => {
-    const { md: hybrid, mthreads } = extractMarkdown(contents);
+    const { md: noteMd, records: links } = splitLinkRecords(contents);
+    const { md: hybrid, mthreads } = extractMarkdown(noteMd);
     const isActive = pathRef.current === target;
     // The editor never saw the document's frontmatter block; put it back,
     // byte for byte, in front of what it did see. Captured now, because the
@@ -1312,10 +1377,14 @@ export default function App() {
         const next: EntityMeta = {
           ...composeActiveMeta(),
           mthreads: [...mthreads, ...mdOrphansRef.current.filter(stillOrphan)],
+          links,
         };
         if (!metaIsEmpty(next) || htmlSidecarExistsRef.current) meta = serializeEntityMeta(next);
+        // Until this save is down, a meta-only write keeps the records of
+        // both texts: whichever is on disk then has its own.
+        metaLinksRef.current = unionRecords(metaLinksRef.current, links);
       } else {
-        meta = await metaWithMdThreads(target, hybrid, mthreads);
+        meta = await metaWithMdThreads(target, hybrid, mthreads, links);
       }
       const saved =
         mdUnchanged && meta === undefined
@@ -1347,6 +1416,7 @@ export default function App() {
         snapshotRef.current = newSnapshot;
         lastDiskMdRef.current = hybrid;
       }
+      if (saved || meta === undefined) metaLinksRef.current = links;
       lastSavedRef.current = contents;
       mdThreadsRef.current = mthreads;
       // Read again, not kept from above: the rail may have changed the
@@ -1443,6 +1513,13 @@ export default function App() {
     setTableWidths(cols);
   }, []);
 
+  // Adopt a document's link records as the active one's: the ref the meta
+  // writers read, and the editor's next mount.
+  const adoptLinkRecords = useCallback((records: LinkRecord[]) => {
+    metaLinksRef.current = records;
+    setLinkRecords(records);
+  }, []);
+
   // Read an entity's meta from disk WITHOUT touching the active-doc refs
   // (missing file = no comments yet). Never writes.
   const readEntityMeta = useCallback(
@@ -1462,7 +1539,7 @@ export default function App() {
       htmlSidecarExistsRef.current = metaExists;
       applyHtmlThreads(meta.hthreads);
       adoptTableWidths(meta.tcols);
-      metaLinksRef.current = meta.links;
+      adoptLinkRecords(meta.links);
       metaForeignRef.current = meta.foreign;
       if (md !== null) {
         const ids = markerIds(md);
@@ -1476,7 +1553,7 @@ export default function App() {
         setMdOrphans([]);
       }
     },
-    [applyHtmlThreads, adoptTableWidths],
+    [applyHtmlThreads, adoptTableWidths, adoptLinkRecords],
   );
 
   // Read an entity's meta and install it as the active one's (no document =
@@ -2303,7 +2380,8 @@ export default function App() {
   // contrast, always copies clean (markers stripped) via the editor's copy hook.
   const copyWithComments = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(currentMarkdownRef.current);
+      // The editor's records line is the app's, never a clipboard's.
+      await navigator.clipboard.writeText(splitLinkRecords(currentMarkdownRef.current).md);
     } catch (e) {
       console.error("copy with comments failed", e);
     }
@@ -2824,7 +2902,7 @@ export default function App() {
       // this only re-points the meta writer at the incoming document's
       // records — the widths on screen are already the ones it mounted with.
       adoptTableWidths(incoming.tcols);
-      metaLinksRef.current = incoming.metaLinks;
+      adoptLinkRecords(incoming.metaLinks);
       metaForeignRef.current = incoming.metaForeign;
       setConflict(incoming.conflict);
       applyDocView(incomingView);
@@ -2851,6 +2929,7 @@ export default function App() {
       captureActiveScroll,
       stashActiveDoc,
       adoptTableWidths,
+      adoptLinkRecords,
       applyDocView,
       scheduleAutosave,
       setSplitState,
@@ -3071,6 +3150,15 @@ export default function App() {
   // machinery picks it up (the swap hydration compares the edited content
   // against the stashed baseline and schedules the save). The mount-time
   // serialization is the baseline.
+  // The split pane's editor showed its links anew: the same as for the
+  // focused one (onActiveRelinked), for the pane's own record.
+  const onCompanionRelinked = useCallback((md: string) => {
+    const t = companionMdRef.current;
+    if (!t.baselined) return;
+    if (t.md === t.baseline) t.baseline = md;
+    t.md = md;
+  }, []);
+
   const onCompanionMarkdownChange = useCallback((md: string) => {
     const t = companionMdRef.current;
     if (!t.baselined) {
@@ -3302,7 +3390,7 @@ export default function App() {
         autosaveTimerRef.current = null;
       }
       const contents = currentMarkdownRef.current;
-      const hybrid = extractMarkdown(contents).md;
+      const hybrid = extractMarkdown(splitLinkRecords(contents).md).md;
       // The rendition beside the chosen name, if one is already there — probed
       // before the write, because its meta is adopted below.
       const sibling = htmlSiblingOf(chosen);
@@ -4171,6 +4259,7 @@ export default function App() {
                   missing: false,
                   head: htmlOnly ? cur.doc.head : fm.head,
                   contents: full,
+                  metaLinks: meta.links,
                   snapshot: htmlOnly ? null : r.rev,
                   htmlContent: htmlOnly ? r.text : cur.doc.htmlContent,
                   dirty: false,
@@ -4265,12 +4354,12 @@ export default function App() {
             // records now also means our next meta write echoes them back
             // rather than resurrecting what we loaded.
             adoptTableWidths(meta.tcols);
-            metaLinksRef.current = meta.links;
+            adoptLinkRecords(meta.links);
             metaForeignRef.current = meta.foreign;
             if (pathRef.current) {
               const ids = markerIds(currentMarkdownRef.current);
               const theirs = meta.mthreads.filter((t) => ids.has(t.id));
-              const mine = extractMarkdown(currentMarkdownRef.current).mthreads;
+              const mine = extractMarkdown(splitLinkRecords(currentMarkdownRef.current).md).mthreads;
               const mergedLive = mergeMdThreads(mdThreadsRef.current, mine, theirs);
               mdThreadsRef.current = mergedLive;
               editorRef.current?.refreshThreadBodies(
@@ -4338,6 +4427,7 @@ export default function App() {
     reloadFromDisk,
     applyHtmlThreads,
     adoptTableWidths,
+    adoptLinkRecords,
     captureCompanionScroll,
     bumpEditorSeq,
     setSplitState,
@@ -4457,6 +4547,28 @@ export default function App() {
       if (changed) scheduleAutosave();
     },
     [scheduleAutosave, syncUntitledTab],
+  );
+
+  // The focused editor showed its links where their files are now (a rename
+  // while the note is open). With nothing unsaved that is the note's new
+  // baseline: there is nothing to save until the person edits. With unsaved
+  // text it goes with it, and must never become the baseline, or that text
+  // would read as saved. The editor brought this copy up to date first.
+  const onActiveRelinked = useCallback(
+    (editorKey: string, md: string) => {
+      const loaded = loadedIdRef.current;
+      if (loaded === null || editorKey !== `${loaded}:${editorSeqRef.current.get(loaded) ?? 0}`) return;
+      if (!baselineCapturedRef.current) return;
+      const clean = currentMarkdownRef.current === lastSavedRef.current;
+      currentMarkdownRef.current = md;
+      if (clean) {
+        lastSavedRef.current = md;
+        return;
+      }
+      setDirty(true);
+      scheduleAutosave();
+    },
+    [scheduleAutosave],
   );
 
   // The focused editor's table columns were resized (or a header edit moved a
@@ -5116,6 +5228,30 @@ export default function App() {
   const effectiveSplit = split && splitTab ? split : null;
   const focusedSide: PaneSide = effectiveSplit ? otherSide(effectiveSplit.side) : "left";
   const canSplit = activeTab != null && !activeNoDoc;
+
+  // What each pane's editor knows of its note's links: where the note is in
+  // the workspace, and the workspace's documents. One object per note and
+  // list, so an editor relinks only when one of them changed.
+  const workspaceName = cloudForRoot?.name ?? "this workspace";
+  const notifyLink = useCallback((message: string) => pushToast("info", message), [pushToast]);
+  const linkContextOf = useCallback(
+    (path: string | null): LinkContext => {
+      const rel = path && workspaceRoot ? relPathIn(workspaceRoot, path) : null;
+      return {
+        note: rel ? { path: rel, section: workspaceDocs ? sectionOf(rel, workspaceDocs) : null } : null,
+        docs: workspaceDocs,
+        recent: recentDocs,
+        workspace: workspaceName,
+        placement: "caret",
+        notify: notifyLink,
+      };
+    },
+    [workspaceRoot, workspaceDocs, recentDocs, workspaceName, notifyLink],
+  );
+  const activeLinks = useMemo(() => linkContextOf(activeFilePath), [linkContextOf, activeFilePath]);
+  const companionPath = split?.doc?.kind === "file" ? split.doc.path : null;
+  const companionLinks = useMemo(() => linkContextOf(companionPath), [linkContextOf, companionPath]);
+
   // No hooks below this line: a hook after the early return crashes React
   // ("rendered more hooks than during the previous render") the moment
   // `ready` flips, unmounting the whole app.
@@ -5300,8 +5436,25 @@ export default function App() {
               onTableWidths={focused ? onTableWidthsChange : undefined}
               // Relative links resolve against the document this pane is
               // showing, so a note in another folder links to its own
-              // neighbours correctly.
-              onOpenLink={(href) => void followDocLink(href, paneTab?.path ?? null)}
+              // neighbours correctly. One whose file can't be opened here is
+              // never followed by its path, which may be another's file.
+              onOpenLink={(href, link) =>
+                link?.closed
+                  ? pushToast(
+                      "info",
+                      `That page isn't one you can open in ${workspaceName}: it may have been deleted, or moved where you can't see it.`,
+                    )
+                  : void followDocLink(href, paneTab?.path ?? null)
+              }
+              links={focused || isMirror ? activeLinks : companionLinks}
+              linkRecords={focused || isMirror ? linkRecords : doc!.metaLinks}
+              onRelinked={
+                focused
+                  ? (md) => onActiveRelinked(editorKey, md)
+                  : isMirror
+                    ? undefined
+                    : onCompanionRelinked
+              }
             />
           )}
           {previewHere && versionPreview && versionStore && (

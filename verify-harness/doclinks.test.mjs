@@ -37,6 +37,14 @@ const {
   resolveLink,
   shownWords,
   linksToSave,
+  shownLink,
+  recordsLine,
+  splitLinkRecords,
+  sectionOf,
+  sectionName,
+  whoCanOpen,
+  pickNotice,
+  documentsFor,
 } = await import(`data:text/javascript,${encodeURIComponent(chunk.code)}`);
 
 const NOTE = "/Users/me/notes/projects/plan.md";
@@ -260,6 +268,92 @@ const NOTE_IN = "Library/Roadmap/q1.md";
     const r = save(library, [{ href: "plan.md", words: "a" }, { href: "./plan.md", words: "b" }], [{ id: "unused.md", file: "f-todo" }]);
     assert.deepEqual(r.records, [{ id: "plan.md", file: "f-plan" }]);
   }
+}
+
+/* ---------- How a link with a record reads ---------- */
+{
+  const doc = { path: "Library/GTM/launch-final.md", fileId: "f-launch", section: null };
+  const from = "Library/Roadmap/q1.md";
+  assert.deepEqual(shownLink(from, { href: "../GTM/launch-plan.md", words: "launch-plan" }, doc), {
+    href: "../GTM/launch-final.md",
+    words: "launch-final",
+  }, "a named link takes the name the file has now");
+  assert.deepEqual(shownLink(from, { href: "../GTM/launch-plan.md#risks", words: "the plan" }, doc), {
+    href: "../GTM/launch-final.md#risks",
+    words: "the plan",
+  }, "other words are the author's; the #… stays");
+  assert.deepEqual(shownLink(from, { href: "./../GTM/launch-final.md", words: "x" }, doc), {
+    href: "./../GTM/launch-final.md",
+    words: "x",
+  }, "a destination that already leads there is kept as written");
+}
+
+/* ---------- The editor's records line ---------- */
+{
+  const records = [{ id: "../GTM/a-->b.md", file: "f-a" }, { id: "plan.md", file: "f-plan" }];
+  const line = recordsLine(records);
+  assert.ok(!line.slice(4, -3).includes("-->"), "nothing in it ends the comment early");
+  const editor = `# Note\n\nSee [a](plan.md).\n\n${line}\n`;
+  assert.deepEqual(splitLinkRecords(editor), { md: "# Note\n\nSee [a](plan.md).\n", records });
+  assert.equal(recordsLine([]), "", "no records, no line");
+  assert.deepEqual(splitLinkRecords("# Note\n"), { md: "# Note\n", records: [] });
+  const typed = "# Note\n\n<!--doklin-links [[\"a.md\",\"f-x\"]]-->\n";
+  assert.deepEqual(splitLinkRecords(typed), { md: typed, records: [] }, "a comment a person wrote is theirs");
+}
+
+/* ---------- Sections ---------- */
+{
+  const docs = indexDocuments([
+    { path: "Library/plan.md", fileId: "f-plan", section: null },
+    { path: "Restricted/Board/board-plan.md", fileId: "f-board", section: "s-board" },
+    { path: "Private/todo.md", fileId: "f-todo", section: "p-me" },
+  ]);
+  assert.equal(sectionOf("Restricted/Board/board-plan.md", docs), "s-board");
+  assert.equal(sectionOf("Restricted/Board/new.md", docs), "s-board", "a note not listed yet: its folder's section");
+  assert.equal(sectionOf("Private/new.md", docs), "p-me");
+  assert.equal(sectionOf("Library/new.md", docs), null);
+  assert.equal(sectionOf("notes/x.md", docs), null, "a folder that doesn't sync");
+  assert.equal(sectionName("Restricted/Board/x/y.md"), "Board");
+  assert.equal(sectionName("Private/y.md"), "Private");
+  const board = docs.byId.get("f-board");
+  const todo = docs.byId.get("f-todo");
+  const plan = docs.byId.get("f-plan");
+  assert.equal(whoCanOpen(board, "Acme"), "Only the people in “Board” can open it.");
+  assert.equal(whoCanOpen(todo, "Acme"), "Only you can open it, on any device of yours.");
+  assert.equal(whoCanOpen(plan, "Acme"), "Everyone in Acme can open it.");
+  assert.equal(
+    pickNotice(board, null),
+    "Everyone who can read this note can see “board-plan” and its folder “Board”, but only the people in “Board” can open it.",
+  );
+  assert.equal(pickNotice(todo, null), "Everyone who can read this note can see “todo”, but only you can open it.");
+  assert.equal(pickNotice(plan, "s-board"), null, "Library opens for everyone");
+  assert.equal(pickNotice(board, "s-board"), null, "its own section");
+  assert.equal(pickNotice(board, "p-me"), null, "nobody else reads a Private note");
+}
+
+/* ---------- The list `@` opens ---------- */
+{
+  const docs = indexDocuments(
+    [
+      "Library/Roadmap/q1.md",
+      "Library/Roadmap/q2.md",
+      "Library/GTM/launch-plan.md",
+      "Library/GTM/plan-b.md",
+      "Library/Plans/budget.md",
+      "Library/Ops/the plan for ops.md",
+      "Library/Ops/explanation.md",
+    ].map((path, i) => ({ path, fileId: `f-${i}`, section: null })),
+  );
+  const names = (q, recent = []) => documentsFor(q, "Library/Roadmap/q1.md", docs, recent).map((d) => documentName(d.path));
+  assert.deepEqual(
+    names("plan"),
+    ["plan-b", "launch-plan", "the plan for ops", "explanation", "budget"],
+    "starts with it, a word starts with it, holds it, its folder holds it",
+  );
+  assert.deepEqual(names("PLAN", ["Library/Ops/the plan for ops.md"]).slice(0, 3), ["plan-b", "the plan for ops", "launch-plan"], "what changed lately first within each");
+  assert.deepEqual(names("").slice(0, 1), ["q2"], "with nothing typed, the note's own folder first, never the note itself");
+  assert.deepEqual(names("", ["Library/Plans/budget.md"])[1], "budget", "then what changed lately");
+  assert.deepEqual(names("zzz"), []);
 }
 
 console.log("PASS doclinks.test.mjs");

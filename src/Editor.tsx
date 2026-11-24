@@ -39,7 +39,19 @@ import {
   setActiveThread,
 } from "./criticPlugin";
 import { resizableTableView, enableColumnResizing } from "./tableResize";
-import { linkOpenPlugin, openInBrowserTab } from "./linkOpen";
+import { linkOpenPlugin, openInBrowserTab, type LinkOpener } from "./linkOpen";
+import {
+  configureLinkClipboard,
+  configureLinkMark,
+  linkContextCtx,
+  linkPlugins,
+  NO_LINKS,
+  relinkDocument,
+  setLinkRecords,
+  type LinkContext,
+} from "./linkMark";
+import { mentionPlugin } from "./mentionMenu";
+import type { LinkRecord } from "./metaFile";
 import type { TableCols } from "./tableWidths";
 import { inlineCodeNewlines } from "./inlineCodeNewlines";
 import { codeTheme } from "./codeTheme";
@@ -72,6 +84,7 @@ import {
 
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
+import "./styles/docLinks.css";
 
 /* ---------- Code block lifetime ----------
    Crepe's code-block node view lazy-mounts CodeMirror when a block comes
@@ -176,7 +189,19 @@ type Props = {
   // a host without one opens a browser tab. In-document `#anchors` never arrive
   // here; the editor scrolls to them itself. Read-only views follow links too
   // — a published page is exactly where links matter most.
-  onOpenLink?: (href: string) => void;
+  onOpenLink?: LinkOpener;
+  // Links to other documents (src/linkMark.ts): where this note is in its
+  // workspace and the workspace's documents, read live; a change shows each
+  // link where its file is now. Omit for a view with no place in one.
+  links?: LinkContext;
+  // The note's link records from its sidecar, read ONCE at mount, with
+  // `initialMarkdown`. Markdown this editor wrote carries its own.
+  linkRecords?: LinkRecord[];
+  // The editor showed its links anew for a change of `links` (a rename
+  // while the note is open): its markdown now. Not an edit: the host takes
+  // it as its baseline when nothing was unsaved before. The host's copy is
+  // brought up to date through onChange first.
+  onRelinked?: (markdown: string) => void;
 };
 
 /** The address a note's picture is asked for at. A picture on the web is
@@ -251,6 +276,9 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     tableWidths,
     onTableWidths,
     onOpenLink,
+    links,
+    linkRecords,
+    onRelinked,
   },
   ref,
 ) {
@@ -311,6 +339,9 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   onTableWidthsRef.current = onTableWidths;
   const onOpenLinkRef = useRef(onOpenLink);
   onOpenLinkRef.current = onOpenLink;
+  const linksRef = useRef(links ?? NO_LINKS);
+  const onRelinkedRef = useRef(onRelinked);
+  onRelinkedRef.current = onRelinked;
 
   const report = () => {
     const view = viewRef.current;
@@ -479,6 +510,17 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       }));
     });
     crepe.editor.use(searchPlugin);
+    // Links to documents and the `@` list (linkMark.ts, mentionMenu.ts). The
+    // context and the note's records are in place before the document is
+    // parsed, which is what shows each link where its file is now.
+    crepe.editor.use(linkPlugins);
+    crepe.editor.use(mentionPlugin);
+    crepe.editor.config((ctx) => {
+      configureLinkMark(ctx);
+      configureLinkClipboard(ctx);
+      ctx.set(linkContextCtx.key, linksRef.current);
+      setLinkRecords(ctx, linkRecords ?? []);
+    });
     // Click-to-follow for links (linkOpen.ts). Registered for read-only views
     // too — following a link is reading, not editing. Hosts that don't say
     // where links go get a browser tab.
@@ -511,6 +553,12 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         const view = ctx.get(editorViewCtx);
         viewRef.current = view;
         view.setProps({ editable: () => !readOnlyRef.current });
+        // Links moved while the editor was being made: shown where they
+        // are now before the baseline below, so opening writes nothing.
+        if (ctx.get(linkContextCtx.key) !== linksRef.current) {
+          ctx.set(linkContextCtx.key, linksRef.current);
+          relinkDocument(view, linksRef.current);
+        }
         // Emit the mounted doc's serialization as the baseline. A change is
         // reported on edit transactions only — never on mount — so without this the
         // host would mistake the first real edit (e.g. a paste into a fresh
@@ -590,6 +638,21 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [recompute]);
+
+  // A new place for the note or a new list of documents: show each link
+  // where its file is now. The host hears the text as it stood first, so the
+  // relinked text is never mistaken for an edit, then hears that.
+  useEffect(() => {
+    const next = links ?? NO_LINKS;
+    if (linksRef.current === next) return;
+    linksRef.current = next;
+    const crepe = crepeRef.current;
+    const view = viewRef.current;
+    if (!crepe || !view) return; // not mounted yet: the mount reads the ref
+    crepe.editor.ctx.set(linkContextCtx.key, next);
+    onChangeRef.current(crepe.getMarkdown());
+    if (relinkDocument(view, next)) onRelinkedRef.current?.(crepe.getMarkdown());
+  }, [links]);
 
   // Apply readOnly flips after mount (the ref keeps the editable prop
   // current; setProps forces ProseMirror to re-consult it). A flip also
