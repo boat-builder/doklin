@@ -2,9 +2,11 @@
 
 Tags on notes, set by people and agents, filtered by both. Everything marked
 **decided** was agreed with the user on 2026-11-25. Everything under *My
-choices* is mine and has not been confirmed. **Phase A is built** (not yet
-committed); B and C are not, and each waits for its own go-ahead. What phase
-A settled is in `docs/architecture.md` (*Frontmatter*, *Tags*). Delete this file once the phases are built, and
+choices* is mine and has not been confirmed. **Phases A and B are built**
+(A committed, B not yet); C is not, and waits for its own go-ahead. What A
+settled is in `docs/architecture.md` (*Frontmatter*, *Tags*); what B settled
+is in `docs/cloud-people-agents.md` (*Document API*, *Search*, *CLI*) and
+`cloud-worker/README.md`. Delete this file once the phases are built, and
 put what outlives it into the docs the way every other rule is kept.
 
 ## Decided
@@ -234,9 +236,10 @@ are held to `verify-harness/tags-fixture.json` (**change all**).
 ## The worker
 
 - `src/tags.ts` is bundled into the worker, as `src/frontmatter.ts` is today.
-- **D1 step 12:** `tags ((space_id, fid, name) PK, value)`, indexed on
-  `(space_id, name, value)`.
-  - The name is stored lowercased.
+- **D1 step 12:** `tags ((space_id, fid, name) PK, value, folded)`, indexed
+  on `(space_id, name, folded)`.
+  - The name is stored lowercased, and so is `folded`, the value a filter
+    matches (D1's `lower()` folds ASCII alone; JavaScript's folds the rest).
   - It holds every pair of a note, not only listed tags, so a tag added to
     the list later needs no re-read.
   - The search catch-up fills and clears it beside `links`, for the same
@@ -269,8 +272,7 @@ are held to `verify-harness/tags-fixture.json` (**change all**).
 - **The person route:** `GET search` takes `tag=name:value` (repeatable),
   and `tag=name` for a note that has the tag with any value (what renames
   search with). The browser already sends both since phase A
-  (`src/web/backend.ts`); the worker ignores them until B. `q` may be empty
-  when there is a `tag`.
+  (`src/web/backend.ts`). `q` may be empty when there is a `tag`.
 - **Versions:** `WORKER_VERSION` 32 (one step from main's 31; the browser
   shell's changes ride it) and D1 schema 12.
 
@@ -360,6 +362,24 @@ go-ahead. All of them go in one PR and one release.
 - The Mac's Edit menu *Add Tag…* is emitted to every window with the focused
   one's label (`menu-add-tag`); the window it names opens its menu.
 
+## Found while building phase B
+
+- **A tag alone lists every such note**, with no limit: it costs no blob
+  read, and a rename in a browser asks until nothing new turns up, which a
+  cap of 30 would stop short of on a case-only rename of a tag.
+- **`where` names must be listed tags** (`no_tag`, with the tags there are),
+  so a typo is a sentence and not an empty listing. The person's `tag=` is
+  not checked: the browser sends only listed names.
+- **A worker from before tags ignores `where`** and lists everything, so
+  the CLI takes `where` said back as the sign the worker knows tags, and
+  exit 7 without it.
+- **`POST tag` applies a request's tags in the list's order**: the CLI's
+  JSON object has its keys sorted, so the order typed can't be kept.
+- **A tag alone still reads the list once**, to check the names; that is
+  the one blob read such a search makes.
+- **The harness bundle needs `dagre-d3-es`** in a worktree, as in phase A:
+  a temporary `node_modules/dagre-d3-es` link to the root's, removed after.
+
 ## Traps known before building
 
 - **An open note's save must put back the head as it is on disk now.** The
@@ -400,6 +420,11 @@ go-ahead. All of them go in one PR and one release.
 - A rename writes notes leased elsewhere.
 - On the iPhone, chips go above the who-edited line, not below it. In its
   editor page they're shown, but can't be changed.
+- At most 8 tags in one `where`; a `where` listing has no folders.
+- A person's writes in a browser aren't checked against the list, as a
+  Mac's syncs aren't: the picker is the only way they set a tag.
+- The CLI's words: `status: Doing, priority: p1` in `ls` and `info`, and
+  "(not one of its values)" beside a value the list lacks.
 
 ## Not in this plan
 

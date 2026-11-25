@@ -81,7 +81,7 @@ const db = new FakeD1();
 const env = { OWNER_TOKEN: KEY, DATA: fake, DB: db };
 
 /** What a fully migrated database reports, and the tables it then holds. */
-const D1_SCHEMA = 11;
+const D1_SCHEMA = 12;
 const D1_TABLES = [
   "addresses",
   "agent_codes",
@@ -101,6 +101,7 @@ const D1_TABLES = [
   "spaces",
   "spent_keys",
   "superadmin",
+  "tags",
   "tokens",
   "usage",
 ];
@@ -268,7 +269,7 @@ await test("d1: a fresh database migrates itself, once per isolate", async () =>
   assert.deepEqual(db.queries, [], "a migrated isolate's probe asks the database nothing");
 });
 
-await test("d1: a database at schema 9 takes steps 10 and 11 — settings, usage and links made, presence made again with until, everything else kept", async () => {
+await test("d1: a database at schema 9 takes steps 10, 11 and 12 — settings, usage, links and tags made, presence made again with until, everything else kept", async () => {
   const at9 = new FakeD1();
   const probe = (isolate) =>
     isolate.fetch(new Request("https://nine.example.com/api/meta", { headers: { authorization: `Bearer ${KEY}` } }), {
@@ -281,6 +282,7 @@ await test("d1: a database at schema 9 takes steps 10 and 11 — settings, usage
   at9.run("DROP TABLE settings");
   at9.run("DROP TABLE usage");
   at9.run("DROP TABLE links");
+  at9.run("DROP TABLE tags");
   at9.run("DROP TABLE presence");
   at9.run(
     "CREATE TABLE presence (device_id TEXT PRIMARY KEY, member_id TEXT, device_name TEXT NOT NULL, space_id TEXT NOT NULL DEFAULT '', path TEXT, ts INTEGER NOT NULL)",
@@ -5030,6 +5032,213 @@ await test("search: a document is found by its name as well as its text — its 
 
 /* ---------- Who an `a-` id is ---------- */
 
+/* ---------- The document API: tags ---------- */
+
+const TAG_LIST = "---\nstatus: [Todo, Doing, Done]\npriority: [p1, p2]\n---\nWhat each value means.\n";
+const treeUrl = (dir, more = "") => `/api/agent/tree?dir=${encodeURIComponent(dir)}${more}`;
+const where = (...filters) => filters.map((f) => `&where=${encodeURIComponent(f)}`).join("");
+const pathsIn = (listing) => listing.documents.map((d) => d.path);
+/** A Mac's removal of a file: gone from the files, with its tombstone. */
+const macRemove = (m, p) => {
+  const [fid, f] = entryAt(m, p);
+  delete m.files[fid];
+  m.tombstones[fid] = { path: f.path, rev: f.rev + 1, ts: Date.now(), by: ALICE.id };
+  return fid;
+};
+
+await test("tags: the index holds each note's pairs, filled and cleared with the search mirror; a listing carries each note's listed tags, and where narrows a listing or a search", async () => {
+  await freshWorkspace({
+    "Tags.md": TAG_LIST,
+    "Work/a.md": "---\nstatus: Doing\npriority: p1\nowner: Sam\n---\n# A\n\nAlpha text.\n",
+    "Work/b.md": "---\nStatus: doing\n---\nBeta text.\n",
+    "Work/c.md": "---\nstatus: Blocked\n---\nGamma.\n",
+    "Work/d.md": "---\nstatus:\n  - Todo\nstatus: Done\n---\nDelta.\n",
+    "Work/e.md": "No block here, and it says alpha.\n",
+    "Work/page.html": "<p>An html page.</p>\n",
+  });
+  const bot = await addAgent("Tagger", ["read"]);
+  const api = as(bot);
+
+  assert.deepEqual((await api("/api/agent/tags")).json, {
+    note: "Library/Tags",
+    exists: true,
+    tags: [
+      { name: "status", values: ["Todo", "Doing", "Done"] },
+      { name: "priority", values: ["p1", "p2"] },
+    ],
+  });
+
+  // Narrowed: the index catches up first, as a search's does.
+  const doing = await api(treeUrl("Library/Work", where("status:Doing")));
+  assert.equal(doing.status, 200, doing.text);
+  assert.deepEqual(doing.json.where, [{ name: "status", value: "Doing" }], "said back, as the list spells it");
+  assert.deepEqual(doing.json.folders, []);
+  assert.deepEqual(pathsIn(doing.json), ["Library/Work/a", "Library/Work/b"], "whatever the case of the name or the value");
+  assert.deepEqual(doing.json.documents[0].tags, [
+    { name: "status", value: "Doing", known: true },
+    { name: "priority", value: "p1", known: true },
+  ]);
+  assert.deepEqual(doing.json.documents[1].tags, [{ name: "status", value: "Doing", known: true }], "the list's spelling");
+  const [aFid] = entryAt(storedManifest(), "Work/a.md");
+  assert.deepEqual(
+    db.rows("SELECT name, value, folded FROM tags WHERE fid = ? ORDER BY name", aFid),
+    [
+      { name: "owner", value: "Sam", folded: "sam" },
+      { name: "priority", value: "p1", folded: "p1" },
+      { name: "status", value: "Doing", folded: "doing" },
+    ],
+    "every pair of the note, not only the listed tags'",
+  );
+
+  // Every listing carries them, from the index as it is.
+  const all = (await api(treeUrl("Library/Work"))).json;
+  assert.equal(all.tagsBehind, undefined, "the index is whole");
+  assert.deepEqual(
+    all.documents.map((d) => [d.path, d.tags ?? []]),
+    [
+      ["Library/Work/a", doing.json.documents[0].tags],
+      ["Library/Work/b", [{ name: "status", value: "Doing", known: true }]],
+      ["Library/Work/c", [{ name: "status", value: "Blocked", known: false }]],
+      ["Library/Work/d", []],
+      ["Library/Work/e", []],
+      ["Library/Work/page", []],
+    ],
+    "a value the list doesn't have is still the note's; a tag's first line that isn't one value gives none",
+  );
+  assert.deepEqual(pathsIn((await api(treeUrl("Library/Work", where("status")))).json), ["Library/Work/a", "Library/Work/b", "Library/Work/c"], "a name alone: any value");
+  assert.deepEqual(pathsIn((await api(treeUrl("Library/Work", where("STATUS:blocked")))).json), ["Library/Work/c"], "a value not in the list can be asked for");
+  assert.deepEqual(pathsIn((await api(treeUrl("Library/Work", where("priority:p1", "status:doing")))).json), ["Library/Work/a"], "every filter at once");
+  assert.deepEqual(pathsIn((await api(treeUrl("Library", "&deep=1" + where("status:Doing")))).json), ["Library/Work/a", "Library/Work/b"]);
+  assert.deepEqual(pathsIn((await api(treeUrl("", "&deep=1" + where("status:Doing")))).json), ["Library/Work/a", "Library/Work/b"], "the workspace itself");
+  const unknown = await api(treeUrl("Library/Work", where("owner:Sam")));
+  assert.deepEqual([unknown.status, unknown.json.code], [400, "no_tag"], "a pair that isn't a listed tag is not one to narrow by");
+  assert.match(unknown.json.error, /there is no tag called "owner" — the tags are status or priority/);
+  assert.equal((await api(treeUrl("Library/Work", where("status:")))).status, 400);
+  assert.equal((await api(treeUrl("Library/Work", where(...Array.from({ length: 9 }, () => "status"))))).status, 400, "eight at most");
+
+  // Search: the same filters, beside the text or alone.
+  const alpha = (await api(searchUrl("alpha", where("status:Doing")))).json;
+  assert.deepEqual([alpha.where, alpha.results.map((r) => r.path)], [[{ name: "status", value: "Doing" }], ["Library/Work/a"]], "the text and the tag");
+  const only = await countingBlobReads(() => api(`/api/agent/search?q=${where("status:doing")}`));
+  assert.deepEqual(only.res.json.results, [
+    { path: "Library/Work/a", version: "md", matches: [] },
+    { path: "Library/Work/b", version: "md", matches: [] },
+  ]);
+  assert.equal(only.reads, 1, "a tag alone reads the list, and no note");
+  assert.deepEqual((await api(`/api/agent/search?q=${where("status:Done")}`)).json.results, []);
+  assert.equal((await api(`/api/agent/search?q=`)).status, 400, "text, or a tag");
+
+  // `info` reads the note's tags from its text.
+  assert.deepEqual((await api(docUrl("Library/Work/c", "", "&info=1"))).json.tags, [{ name: "status", value: "Blocked", known: false }]);
+  assert.equal((await api(docUrl("Library/Work/e", "", "&info=1"))).json.tags, undefined);
+
+  // A Mac's change: a listing says the index is behind, and a narrowed one waits for it.
+  await macWrite((m, put) => {
+    put("Work/a.md", "---\nstatus: Done\n---\n# A\n\nAlpha text.\n");
+  });
+  const stale = (await api(treeUrl("Library/Work"))).json;
+  assert.deepEqual([stale.tagsBehind, stale.documents[0].tags[0].value], [true, "Doing"], "what the index holds, said to be behind");
+  assert.deepEqual(pathsIn((await api(treeUrl("Library/Work", where("status:Done")))).json), ["Library/Work/a"]);
+  assert.deepEqual(db.rows("SELECT name FROM tags WHERE fid = ?", aFid), [{ name: "status" }], "what it held before went");
+
+  // A note gone holds nothing; the tags of a note too large to mirror are not known.
+  let bFid;
+  await macWrite((m, put) => {
+    bFid = macRemove(m, "Work/b.md");
+    put("Work/huge.md", `---\nstatus: Doing\n---\n${"word ".repeat(220_000)}\n`);
+  });
+  const now = (await api(`/api/agent/search?q=${where("status:Doing")}`)).json;
+  assert.deepEqual([now.results, now.notSearched], [[], ["Library/Work/huge"]], "said, rather than silently never found");
+  assert.equal(db.value("SELECT COUNT(*) FROM tags WHERE fid = ?", bFid), 0);
+
+  // No list: no tags, and nothing to narrow by.
+  await macWrite((m) => {
+    macRemove(m, "Tags.md");
+  });
+  assert.deepEqual((await api("/api/agent/tags")).json, { note: "Library/Tags", exists: false, tags: [] });
+  assert.equal((await api(treeUrl("Library/Work"))).json.documents[0].tags, undefined);
+  const none = await api(treeUrl("Library/Work", where("status:Doing")));
+  assert.equal(none.status, 400);
+  assert.match(none.json.error, /this workspace has no tags yet — a tag is a line in Library\/Tags/);
+});
+
+await test("tags: an agent's write keeps to the list where it changes a tag's line; tag sets and clears one through the app's own writer; a write of the list must read whole", async () => {
+  const c = "---\nstatus: Blocked\nowner: Sam\n---\nGamma.\n";
+  await freshWorkspace({ "tags.md": TAG_LIST, "Work/c.md": c, "Work/e.md": "No block.\r\n", "Work/page.html": "<p>Page.</p>\n" });
+  const bot = await addAgent("Setter", ["edit"]);
+  const api = as(bot);
+  const write = (p, text, rev) => api(docUrl(p), { method: "PUT", body: text, headers: rev ? { "if-rev": String(rev) } : {} });
+  const tag = (body) => api("/api/agent/tag", { method: "POST", body });
+
+  const wrong = await write("Library/Work/new", "---\nstatus: Doinf\n---\nNew.\n");
+  assert.deepEqual([wrong.status, wrong.json.code, wrong.json.tag, wrong.json.values], [400, "tag_value", "status", ["Todo", "Doing", "Done"]]);
+  assert.equal(
+    wrong.json.error,
+    'status takes Todo, Doing or Done, not "Doinf" — use one of those, or add "Doinf" to status\'s line in Library/Tags first (ask your person if you aren\'t sure)',
+  );
+  assert.equal(entryAt(storedManifest(), "Work/new.md"), undefined, "nothing written");
+  assert.equal((await api(docUrl("Library/Work/new", "", "&dry=1"), { method: "PUT", body: "---\nstatus: Doinf\n---\n" })).status, 400, "a dry run says the same");
+  const many = await write("Library/Work/new", "---\nstatus: [Todo, Done]\n---\nNew.\n");
+  assert.deepEqual([many.status, many.json.error], [400, 'status takes one value — write its line as "status: Todo", with Todo, Doing or Done']);
+  assert.equal((await write("Library/Work/new", "---\nSTATUS: doing\nmood: anything\n---\nNew.\n")).status, 201, "a listed value in any case; a pair that isn't a tag is the note's own");
+
+  // A line the write leaves as it was is never checked: a body edit passes over a value the list doesn't have.
+  assert.equal((await write("Library/Work/c", c.replace("Gamma.", "Gamma, edited."), 1)).status, 200);
+  const changed = await write("Library/Work/c", c.replace("Blocked", "Blocked again"), 2);
+  assert.deepEqual([changed.status, changed.json.code], [400, "tag_value"], "but one it changes is");
+  assert.equal((await write("Library/Work/c", c.replace("status: Blocked\n", ""), 2)).status, 200, "and removing one always passes");
+
+  // tag: the app's writer, over what is stored now.
+  const set = await tag({ path: "Library/Work/e", set: { STATUS: "done" } });
+  assert.equal(set.status, 200, set.text);
+  assert.deepEqual(set.json, { path: "Library/Work/e", version: "md", rev: 2, tags: [{ name: "status", value: "Done", known: true }] });
+  assert.equal(textAt("Work/e.md"), "---\r\nstatus: Done\r\n---\r\nNo block.\r\n", "a block of the note's own line endings, spelled as the list spells it");
+  assert.deepEqual(pathsIn((await api(treeUrl("Library/Work", where("status:Done")))).json), ["Library/Work/e"], "found at once");
+  assert.equal((await tag({ path: "Library/Work/e", set: { status: null } })).status, 200);
+  assert.equal(textAt("Work/e.md"), "No block.\r\n", "a set and a clear give back the bytes");
+  assert.equal((await tag({ path: "Library/Work/e", set: { priority: "p1", status: "Doing" } })).status, 200);
+  assert.equal(textAt("Work/e.md"), "---\r\nstatus: Doing\r\npriority: p1\r\n---\r\nNo block.\r\n", "new lines in the list's order, whatever the request's");
+  assert.equal((await tag({ path: "Library/Work/e", set: { status: null, priority: null } })).status, 200);
+  const two = await tag({ path: "Library/Work/new", set: { priority: "P2", status: "todo" } });
+  assert.deepEqual(two.json.tags, [
+    { name: "status", value: "Todo", known: true },
+    { name: "priority", value: "p2", known: true },
+  ]);
+  assert.equal(textAt("Work/new.md"), "---\nstatus: Todo\nmood: anything\npriority: p2\n---\nNew.\n", "a line in its place, a new one at the end of the block");
+  const again = await tag({ path: "Library/Work/new", set: { status: "Todo" } });
+  assert.deepEqual([again.json.unchanged, again.json.rev], [true, 2], "the same value writes nothing");
+  const dry = await tag({ path: "Library/Work/new", set: { status: "Done" }, dryRun: true });
+  assert.deepEqual([dry.json.written, dry.json.tags[0].value], [false, "Done"]);
+  assert.match(textAt("Work/new.md"), /status: Todo/);
+
+  const refused = async (body, status, pattern) => {
+    const res = await tag(body);
+    assert.equal(res.status, status, res.text);
+    assert.match(res.json.error, pattern);
+  };
+  await refused({ path: "Library/Work/new", set: { stage: "Done" } }, 400, /there is no tag called "stage"/);
+  await refused({ path: "Library/Work/new", set: { status: "Shipped" } }, 400, /status takes Todo, Doing or Done, not "Shipped"/);
+  await refused({ path: "Library/Work/new", set: {} }, 400, /set is/);
+  await refused({ path: "Library/Work/new", set: { status: 3 } }, 400, /set is/);
+  await refused({ path: "Library/Work/page", set: { status: "Done" } }, 400, /only an html version/);
+  await refused({ path: "Library/tags", set: { status: "Done" } }, 400, /is the tag list itself/);
+  await refused({ path: "Library/Work/nothing", set: { status: "Done" } }, 404, /there is no document/);
+  const reader = await addAgent("Reader", ["read"]);
+  assert.equal((await as(reader)("/api/agent/tag", { method: "POST", body: { path: "Library/Work/new", set: { status: "Done" } } })).status, 403);
+
+  // The list itself: every line of its block a tag.
+  const bad = await write("Library/tags", "---\nstatus: [Todo, Doing, Done]\nowner: Sam\n---\n", 1);
+  assert.deepEqual([bad.status, bad.json.code, bad.json.line], [400, "tag_list", 3]);
+  assert.equal(bad.json.error, 'the tag list (Library/tags) can\'t hold line 3, "owner: Sam". Write a tag and its values as status: [Todo, Doing, Done].');
+  const twice = await write("Library/tags", "---\nstatus: [Todo, todo]\n---\n", 1);
+  assert.match(twice.json.error, /line 2, "status: \[Todo, todo\]"\. Todo is there twice\./);
+  assert.equal((await write("Library/tags", "---\nstatus: [Todo, Doing, Done, Shipped]\n---\nNow with Shipped.\n", 1)).status, 200);
+  assert.equal((await tag({ path: "Library/Work/new", set: { status: "shipped" } })).json.tags[0].value, "Shipped", "a value added to the list is one at once");
+  // A Tags note anywhere else is a note like any other.
+  assert.equal((await write("Private/Tags", "---\nanything: at all\n---\n")).status, 201);
+  assert.equal((await api(docUrl("Private/Tags"), { method: "DELETE" })).status, 200);
+});
+
 await test("directory: /api/meta names agents beside people, so every Mac can put a name to what an agent changed", async () => {
   await freshWorkspace({ "Dir/note.md": "# Note\n\nSome plain words.\n" });
   const bot = await addAgent("Grok bot", ["comment", "edit", "publish"]);
@@ -6969,6 +7178,32 @@ await test("web: search covers every section the person is in, and names what it
 
   assert.equal((await browser("/api/web/folder?path=browsing", { method: "DELETE", cookie: WEB })).status, 200);
   assert.equal((await browser(`/api/web/doc?path=Secret.md&space=${space}`, { method: "DELETE", cookie: WEB })).status, 200);
+});
+
+await test("web: a search narrows by tags — tag=name:value or a name alone, with text or none, and then every such note is listed", async () => {
+  const put = (path, text) =>
+    browser(`/api/web/doc?path=${encodeURIComponent(path)}`, { method: "PUT", cookie: WEB, body: { md: { text, ifRev: null } } });
+  const search = async (query) => {
+    for (let round = 0; round < 40; round += 1) {
+      const res = await browser(`/api/web/search?${query}`, { cookie: WEB });
+      if (res.status !== 202) return res;
+    }
+    throw new Error("the mirror never caught up");
+  };
+  const doing = await put("tagged/Doing one.md", "---\nstatus: Doing\n---\nA kakapo.\n");
+  const done = await put("tagged/Done one.md", "---\nStatus: done\n---\nAnother kakapo.\n");
+  await put("tagged/Plain.md", "A kakapo with no tags.\n");
+  const paths = (res) => res.json.results.map((r) => r.path);
+
+  assert.deepEqual(paths(await search("tag=status%3ADoing")), ["tagged/Doing one.md"], "no text: every note with the tag");
+  assert.deepEqual((await search("tag=status%3ADoing")).json.results[0], { space: "", fid: doing.json.md.fid, path: "tagged/Doing one.md", matches: [] });
+  assert.deepEqual(paths(await search("tag=status")), ["tagged/Doing one.md", "tagged/Done one.md"], "a name alone: any value");
+  assert.deepEqual(paths(await search("q=kakapo&tag=status%3ADONE")), ["tagged/Done one.md"], "with the text, whatever the case");
+  assert.equal((await search("q=&tag=status%3A")).status, 400);
+  assert.equal(done.status, 200);
+
+  assert.equal((await browser("/api/web/folder?path=tagged", { method: "DELETE", cookie: WEB })).status, 200);
+  assert.deepEqual((await search("tag=status")).json.results, []);
 });
 
 await test("web: publishing from a browser is the same entry in the public map — an address answers at once, the home page is chosen from Library, and `app` is no page's address", async () => {

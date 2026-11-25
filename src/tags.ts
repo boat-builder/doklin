@@ -325,6 +325,39 @@ export function parseTagList(text: string): TagDef[] {
   return out;
 }
 
+/** The first line of the list's block that isn't a tag it lists, with why,
+ *  in a sentence: what the worker refuses an agent's write of the list for.
+ *  Null when every line is one. `line` counts from the file's first line. */
+export function listProblem(text: string): { line: number; text: string; problem: string } | null {
+  const block = blockOf(text);
+  if (!block) return null;
+  const listed: TagDef[] = [];
+  const at = (from: number, problem: string) => {
+    const line = block.lines.find((l) => l.from === from)!;
+    return { line: text.slice(0, from).split("\n").length, text: line.text, problem };
+  };
+  const shape = "Write a tag and its values as status: [Todo, Doing, Done].";
+  let covered = block.start;
+  for (const entry of block.entries) {
+    const stray = block.lines.find((l) => l.from >= covered && l.from < entry.from && l.text.trim() !== "");
+    if (stray) return at(stray.from, shape);
+    covered = entry.end;
+    if (entry.run) return at(entry.from, "Its values go in brackets on its own line, as status: [Todo, Doing, Done].");
+    const values = flowList(entry.rest);
+    if (!values) return at(entry.from, shape);
+    if (values.length === 0) return at(entry.from, "A tag needs at least one value.");
+    const named = nameProblem(entry.key, listed);
+    if (named) return at(entry.from, named);
+    for (let i = 0; i < values.length; i += 1) {
+      const wrong = valueProblem(values[i], values.slice(0, i));
+      if (wrong) return at(entry.from, wrong);
+    }
+    listed.push({ name: entry.key, values });
+  }
+  const stray = block.lines.find((l) => l.from >= covered && l.text.trim() !== "");
+  return stray ? at(stray.from, shape) : null;
+}
+
 /** Whether the list's block holds lines that aren't tags it lists. */
 export function otherListLines(text: string): boolean {
   const block = blockOf(text);

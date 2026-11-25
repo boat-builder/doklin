@@ -123,5 +123,31 @@ for (const c of fx.query) {
   assert.equal(tags.valueProblem("todo", ["Todo"]), "Todo is there twice.");
   n += 3;
 }
+{
+  // The first line of a list that isn't a tag, as the worker refuses it.
+  const problem = (text) => tags.listProblem(text);
+  assert.equal(problem("No block.\n"), null);
+  assert.equal(problem("---\n---\nEmpty.\n"), null);
+  assert.equal(problem("---\nstatus: [Todo, Doing]\n\npriority: [p1, 'p2']\n---\nWhat they mean.\n"), null);
+  const shape = "Write a tag and its values as status: [Todo, Doing, Done].";
+  assert.deepStrictEqual(problem("---\nstatus: [Todo]\nowner: Sam\n---\n"), { line: 3, text: "owner: Sam", problem: shape });
+  assert.deepStrictEqual(problem("---\n# what these are\nstatus: [Todo]\n---\n"), { line: 2, text: "# what these are", problem: shape });
+  assert.deepStrictEqual(problem("---\nstatus: [Todo]\n- loose\n---\n"), { line: 3, text: "- loose", problem: shape });
+  assert.deepStrictEqual(problem("---\r\nstatus: [Todo, Doing\r\n---\r\n"), { line: 2, text: "status: [Todo, Doing", problem: shape });
+  assert.deepStrictEqual(problem("---\nstatus:\n  - Todo\n---\n"), {
+    line: 2,
+    text: "status:",
+    problem: "Its values go in brackets on its own line, as status: [Todo, Doing, Done].",
+  });
+  assert.deepStrictEqual(problem("---\nstatus: []\n---\n"), { line: 2, text: "status: []", problem: "A tag needs at least one value." });
+  assert.deepStrictEqual(problem("---\nstatus: [a]\nStatus: [b]\n---\n"), { line: 3, text: "Status: [b]", problem: "There's already a tag called status." });
+  assert.deepStrictEqual(problem("---\nstatus: [Done, done]\n---\n"), { line: 2, text: "status: [Done, done]", problem: "Done is there twice." });
+  assert.deepStrictEqual(problem("---\nbad!: [a]\n---\n"), {
+    line: 2,
+    text: "bad!: [a]",
+    problem: "A tag's name holds letters, digits, spaces, _ and -, and starts and ends with a letter or a digit.",
+  });
+  n += 11;
+}
 
 console.log(`tags: ${n} checks passed`);

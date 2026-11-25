@@ -24,13 +24,20 @@ const SHORT: &[(&str, &str)] = &[("w", "workspace"), ("m", "message"), ("o", "ou
 #[derive(Debug, Default)]
 pub struct Args {
     pub positionals: Vec<String>,
-    values: HashMap<String, String>,
+    /// Each flag's values, in the order given: a flag may be repeated.
+    values: HashMap<String, Vec<String>>,
     switches: Vec<String>,
 }
 
 impl Args {
+    /// A flag's value — its last, when it was given more than once.
     pub fn value(&self, name: &str) -> Option<&str> {
-        self.values.get(name).map(String::as_str)
+        self.values.get(name).and_then(|v| v.last()).map(String::as_str)
+    }
+
+    /// Every value a repeatable flag was given: `--where a --where b`.
+    pub fn values(&self, name: &str) -> &[String] {
+        self.values.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 
     pub fn has(&self, name: &str) -> bool {
@@ -96,7 +103,7 @@ pub fn parse(raw: &[String], accepts: &Accepts) -> Result<Args, Failure> {
                     v
                 }
             };
-            args.values.insert(name, value);
+            args.values.entry(name).or_default().push(value);
         } else if is_switch {
             if inline.is_some() {
                 return Err(Failure::usage(format!("--{} takes no value", name)));

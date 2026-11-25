@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::args::Args;
 use crate::creds::{self, Workspace};
-use crate::http::{Body, Client, Reply};
+use crate::http::{too_old, Body, Client, Reply};
 use crate::link::PageLink;
 use crate::text::{ago, list, plural, size, stamp, version_word};
 use crate::{usage, Failure};
@@ -253,32 +253,114 @@ fn versions_of(row: &Value) -> String {
     format!("[{}{}]", have.join(" · "), behind)
 }
 
+/// `--where status=Doing` (repeatable), as the worker reads it:
+/// `status:Doing`, or a tag's name alone for any value.
+fn wheres(args: &Args) -> Result<Vec<String>, Failure> {
+    args.values("where")
+        .iter()
+        .map(|w| {
+            let (name, value) = match w.split_once('=') {
+                Some((name, value)) => (name.trim(), Some(value.trim())),
+                None => (w.trim(), None),
+            };
+            if name.is_empty() || value == Some("") {
+                return Err(Failure::usage("--where takes a tag and a value, as status=Doing — or a tag's name alone, for any value"));
+            }
+            Ok(match value {
+                Some(value) => format!("{}:{}", name, value),
+                None => name.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// What `--where` asked for, as the worker said it back: "status: Doing and a priority".
+fn where_words(v: &Value) -> String {
+    let said: Vec<String> = v["where"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|f| match f.get("value").and_then(Value::as_str) {
+            Some(value) => format!("{}: {}", text(f, "name"), value),
+            None => format!("a {}", text(f, "name")),
+        })
+        .collect();
+    said.join(" and ")
+}
+
+/// A document's tags in words — `status: Doing, priority: p1` — a value the
+/// list doesn't have said so.
+fn tags_of(row: &Value) -> Option<String> {
+    let tags = row["tags"].as_array().filter(|t| !t.is_empty())?;
+    let words: Vec<String> = tags
+        .iter()
+        .map(|t| {
+            let odd = if t["known"].as_bool() == Some(false) { " (not one of its values)" } else { "" };
+            format!("{}: {}{}", text(t, "name"), text(t, "value"), odd)
+        })
+        .collect();
+    Some(words.join(", "))
+}
+
+/// How many times a command asks again while the domain reads documents
+/// into its index — the first time in a large workspace takes a few rounds.
+const INDEX_ROUNDS: usize = 200;
+
+/// A GET that the domain answers `202` while its `index` catches up, asked
+/// again until it answers — said once, on a terminal.
+fn indexed(s: &Session, ctx: &Ctx, route: &str, query: &[(&str, &str)], index: &str) -> Result<Value, Failure> {
+    for round in 0..INDEX_ROUNDS {
+        let reply = s.client.send("GET", route, query, &[], None)?;
+        let v = reply.json()?;
+        if reply.status != 202 {
+            return Ok(v);
+        }
+        if round == 0 && !ctx.json {
+            eprintln!("Reading the workspace into its {} — this happens after documents change…", index);
+        }
+    }
+    Err(Failure::other(format!("the {} is still being built — try again in a moment", index)))
+}
+
 pub fn ls(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     args.at_most(1)?;
+    let wheres = wheres(args)?;
     let s = session(ctx)?;
     let dir = args.positionals.first().map(String::as_str).unwrap_or("");
     let mut query = vec![("dir", dir)];
     if args.has("deep") {
         query.push(("deep", "1"));
     }
-    let v = s.client.send("GET", "tree", &query, &[], None)?.json()?;
+    query.extend(wheres.iter().map(|w| ("where", w.as_str())));
+    let v = if wheres.is_empty() {
+        s.client.send("GET", "tree", &query, &[], None)?.json()?
+    } else {
+        indexed(&s, ctx, "tree", &query, "search index")?
+    };
+    // A worker from before tags lists everything, and says nothing of them.
+    if !wheres.is_empty() && v.get("where").is_none() {
+        return Err(too_old(s.ws.domain()));
+    }
     ctx.answer(&v, || {
         let mut lines = Vec::new();
         for folder in strings(&v["folders"]) {
             lines.push(format!("{}/", folder));
         }
         for doc in v["documents"].as_array().into_iter().flatten() {
-            lines.push(format!("{}  {}", text(doc, "path"), versions_of(doc)));
+            let tags = tags_of(doc).map(|t| format!("  {}", t)).unwrap_or_default();
+            lines.push(format!("{}  {}{}", text(doc, "path"), versions_of(doc), tags));
         }
         let unlisted = strings(&v["notListed"]);
         if !unlisted.is_empty() {
             lines.push(format!("Not listed here — list each on its own: {}.", unlisted.join(", ")));
         }
         if lines.is_empty() {
-            "Nothing here yet.".to_string()
-        } else {
-            lines.join("\n")
+            lines.push(if wheres.is_empty() { "Nothing here yet.".to_string() } else { format!("No document here has {}.", where_words(&v)) });
         }
+        if v.get("tagsBehind").is_some() {
+            lines.push("Tags may be behind: Doklin's index hasn't read the latest changes yet. --where waits for it.".to_string());
+        }
+        lines.join("\n")
     });
     Ok(())
 }
@@ -320,6 +402,9 @@ pub fn info(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         }
         let threads = v["comments"].as_u64().unwrap_or(0) as usize;
         lines.push(format!("  {:<9} {}", "comments", if threads == 0 { "none".to_string() } else { plural(threads, "thread", "threads") }));
+        if let Some(tags) = tags_of(&v) {
+            lines.push(format!("  {:<9} {}", "tags", tags));
+        }
         if let Some(link) = v.get("link").and_then(Value::as_str) {
             lines.push(format!("  {:<9} {}", "link", link));
         }
@@ -807,10 +892,6 @@ pub fn reply(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
 
 /* ---------- links ---------- */
 
-/// How many times `links --to` asks again while the domain reads documents
-/// into its index, as a search does.
-const LINK_ROUNDS: usize = 200;
-
 pub fn links(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let path = args.need(0, "which document — doklin links <doc>")?;
     args.at_most(1)?;
@@ -822,20 +903,7 @@ pub fn links(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     if args.has("to") {
         query.push(("to", "1"));
     }
-    let mut v = Value::Null;
-    for round in 0..LINK_ROUNDS {
-        let reply = s.client.send("GET", "links", &query, &[], None)?;
-        v = reply.json()?;
-        if reply.status != 202 {
-            break;
-        }
-        if round == 0 && !ctx.json {
-            eprintln!("Reading the workspace into its index of links — this happens after documents change…");
-        }
-        if round + 1 == LINK_ROUNDS {
-            return Err(Failure::other("the index of links is still being built — try again in a moment"));
-        }
-    }
+    let v = indexed(&s, ctx, "links", &query, "index of links")?;
 
     ctx.answer(&v, || {
         let doc = text(&v, "path");
@@ -872,13 +940,10 @@ pub fn links(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
 
 /* ---------- search ---------- */
 
-/// How many times a search asks again while the domain reads documents into
-/// its index — the first search of a large workspace takes a few rounds.
-const SEARCH_ROUNDS: usize = 200;
-
 pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
-    if args.positionals.is_empty() {
-        return Err(Failure::usage("say what to search for — doklin search <text>"));
+    let wheres = wheres(args)?;
+    if args.positionals.is_empty() && wheres.is_empty() {
+        return Err(Failure::usage("say what to search for — doklin search <text>, or --where <tag>=<value>"));
     }
     // `doklin search boat ships` means the phrase, quoted or not.
     let query_text = args.positionals.join(" ");
@@ -894,20 +959,11 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     if let Some(limit) = limit {
         query.push(("limit", limit));
     }
-
-    let mut v = Value::Null;
-    for round in 0..SEARCH_ROUNDS {
-        let reply = s.client.send("GET", "search", &query, &[], None)?;
-        v = reply.json()?;
-        if reply.status != 202 {
-            break;
-        }
-        if round == 0 && !ctx.json {
-            eprintln!("Reading the workspace into its search index — this happens after documents change…");
-        }
-        if round + 1 == SEARCH_ROUNDS {
-            return Err(Failure::other("the search index is still being built — try again in a moment"));
-        }
+    query.extend(wheres.iter().map(|w| ("where", w.as_str())));
+    let v = indexed(&s, ctx, "search", &query, "search index")?;
+    // A worker from before tags searches the text alone, and says nothing of them.
+    if !wheres.is_empty() && v.get("where").is_none() {
+        return Err(too_old(s.ws.domain()));
     }
 
     ctx.answer(&v, || {
@@ -934,7 +990,11 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
             }
         }
         let total = v["total"].as_u64().unwrap_or(0) as usize;
-        lines.push(if total == 0 {
+        lines.push(if total == 0 && query_text.is_empty() {
+            format!("No document has {}.", where_words(&v))
+        } else if total == 0 && !wheres.is_empty() {
+            format!("Nothing with {} has \"{}\" in its name or its text.", where_words(&v), query_text)
+        } else if total == 0 {
             format!("Nothing has \"{}\" in its name or its text.", query_text)
         } else if v.get("truncated").is_some() {
             format!(
@@ -954,6 +1014,62 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
             lines.push(format!("Not searched — search each with --in: {}.", unsearched.join(", ")));
         }
         lines.join("\n")
+    });
+    Ok(())
+}
+
+/* ---------- tags ---------- */
+
+pub fn tags(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
+    args.at_most(0)?;
+    let s = session(ctx)?;
+    let v = s.client.send("GET", "tags", &[], &[], None)?.json()?;
+    ctx.answer(&v, || {
+        let note = text(&v, "note");
+        let tags = v["tags"].as_array().cloned().unwrap_or_default();
+        if tags.is_empty() {
+            return format!(
+                "This workspace has no tags yet. A tag is a line at the top of {}, as status: [Todo, Doing, Done] — see `doklin help tags`.",
+                note
+            );
+        }
+        let width = tags.iter().map(|t| text(t, "name").chars().count()).max().unwrap_or(0);
+        let mut lines = vec![format!("The tags, from {}:", note)];
+        for t in &tags {
+            lines.push(format!("  {:<width$}  {}", text(t, "name"), strings(&t["values"]).join(" · "), width = width));
+        }
+        lines.push(format!("Set one with `doklin tag <doc> <tag>=<value>`. What each value means is in {}.", note));
+        lines.join("\n")
+    });
+    Ok(())
+}
+
+pub fn tag(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
+    let usage = "which document and which tags — doklin tag <doc> status=Done";
+    let path = args.need(0, usage)?;
+    if args.positionals.len() < 2 {
+        return Err(Failure::usage(format!("say {}", usage)));
+    }
+    let mut set = serde_json::Map::new();
+    for word in &args.positionals[1..] {
+        let parsed = word.split_once('=').map(|(name, value)| (name.trim(), value.trim())).filter(|(name, _)| !name.is_empty());
+        let Some((name, value)) = parsed else {
+            return Err(Failure::usage(format!("\"{}\" is not a tag and its value — write status=Done, or status= to remove it", word)));
+        };
+        set.insert(name.to_string(), if value.is_empty() { Value::Null } else { json!(value) });
+    }
+    let s = session(ctx)?;
+    let body = json!({ "path": path, "set": set, "dryRun": ctx.dry_run });
+    let v = s.client.send("POST", "tag", &[], &[], Some(Body::Json(&body)))?.json()?;
+    ctx.answer(&v, || {
+        let now = tags_of(&v).unwrap_or_else(|| "no tags".to_string());
+        if v.get("unchanged").is_some() {
+            format!("{} already has {} — nothing was written.", text(&v, "path"), now)
+        } else if ctx.dry_run {
+            format!("{} would have {} — revision {}.", text(&v, "path"), now, v["rev"])
+        } else {
+            format!("{} now has {} — revision {}.", text(&v, "path"), now, v["rev"])
+        }
     });
     Ok(())
 }

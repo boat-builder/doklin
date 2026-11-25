@@ -81,7 +81,7 @@ const VERSION_FLAGS: &[&str] = &["md", "html"];
 
 /// The commands whose words name documents. Each also takes a link to a page
 /// there, and runs in the workspace the link is to (`commands::follow_links`).
-const TAKE_LINKS: &[&str] = &["info", "read", "links", "comments", "comment", "reply", "write", "edit", "mv", "rm", "publish", "unpublish"];
+const TAKE_LINKS: &[&str] = &["info", "read", "links", "comments", "comment", "reply", "write", "edit", "tag", "mv", "rm", "publish", "unpublish"];
 
 pub const COMMANDS: &[Command] = &[
     Command {
@@ -107,9 +107,9 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "ls",
-        usage: "doklin ls [folder] [--deep]",
-        about: "What a folder holds: its folders and its documents, with their versions. --deep lists everything beneath it. With no folder, the sections this agent can see.",
-        accepts: Accepts { values: &[], switches: &["deep"] },
+        usage: "doklin ls [folder] [--deep] [--where <tag>=<value>]…",
+        about: "What a folder holds: its folders and its documents, with their versions and tags. --deep lists everything beneath it; --where only the documents with that tag. With no folder, the sections this agent can see.",
+        accepts: Accepts { values: &["where"], switches: &["deep"] },
         run: commands::ls,
     },
     Command {
@@ -128,10 +128,17 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "search",
-        usage: "doklin search <text> [--in <folder>] [--limit <n>]",
-        about: "Documents whose name or text holds the text, whatever its case — named ones first, with the matching lines. With no --in, everywhere this agent can see.",
-        accepts: Accepts { values: &["in", "limit"], switches: &[] },
+        usage: "doklin search <text> [--in <folder>] [--limit <n>] [--where <tag>=<value>]…",
+        about: "Documents whose name or text holds the text, whatever its case — named ones first, with the matching lines. --where only those with that tag; with no text, every one that has it. With no --in, everywhere this agent can see.",
+        accepts: Accepts { values: &["in", "limit", "where"], switches: &[] },
         run: commands::search,
+    },
+    Command {
+        name: "tags",
+        usage: "doklin tags",
+        about: "The workspace's tags and the values each takes, from the tag list in Library/Tags.",
+        accepts: Accepts { values: &[], switches: &[] },
+        run: commands::tags,
     },
     Command {
         name: "links",
@@ -174,6 +181,13 @@ pub const COMMANDS: &[Command] = &[
         about: "Change part of a document. --find must occur exactly once, unless --all. Refused if the document changed while this ran.",
         accepts: Accepts { values: &["find", "replace"], switches: &["md", "html", "all"] },
         run: commands::edit,
+    },
+    Command {
+        name: "tag",
+        usage: "doklin tag <doc> <tag>=<value> [<tag>=<value> …]",
+        about: "Set a document's tags to values the tag list has, whatever their case; <tag>= removes one. `doklin tags` lists them.",
+        accepts: Accepts { values: &[], switches: &[] },
+        run: commands::tag,
     },
     Command {
         name: "mv",

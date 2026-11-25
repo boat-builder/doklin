@@ -23,6 +23,7 @@ import { json, readJsonObject } from "./http";
 import { MAX_FILE_BYTES, contentTypeOf } from "./layout";
 import { askOf, mirrorAfter, searchIn } from "./search";
 import { listSpaces, sharedEnv, spaceEnv, type Where } from "./spaces";
+import { filtersOf } from "./tagList";
 import { refuse, sectionOf, trimSlashes, type WebCall } from "./webCall";
 import type { SearchAnswer, SearchIndexing } from "./wire";
 import { META_SUFFIX } from "../../src/metaFile";
@@ -234,9 +235,14 @@ export async function postCopy(c: WebCall): Promise<Response> {
 /* ---------- Searching ---------- */
 
 /** Every section the person is in, the shared workspace first. A hit names
- *  its section and its file by their ids: the browser holds the manifests. */
+ *  its section and its file by their ids: the browser holds the manifests.
+ *  `tag=name:value` (repeatable) narrows it to notes with that tag, and
+ *  `tag=name` to notes with the tag at all; the browser sends only listed
+ *  names, spelled as the list spells them. */
 export async function getSearch(c: WebCall): Promise<Response> {
-  const ask = askOf(c.url.searchParams, "");
+  const tags = filtersOf(c.url.searchParams, "tag");
+  if (tags instanceof Refusal) return refuse(tags);
+  const ask = askOf(c.url.searchParams, "", tags);
   if (ask instanceof Refusal) return refuse(ask);
   const spaces = await listSpaces(c.env, c.auth);
   if (spaces === null) return json({ error: "search needs this domain's database, which isn't answering — try again in a moment" }, 503);

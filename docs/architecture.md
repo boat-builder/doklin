@@ -379,7 +379,8 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
 - **Search splits its tokens off** (`searchQuery`) and sends them beside the
   text, spelled as the list spells them; the backends never read the list.
   With tokens and no text, every note that has the tags is a result, with no
-  lines.
+  lines. In a browser the worker answers them from its index
+  ([cloud-people-agents.md](cloud-people-agents.md) *Search*).
 - **No tags** on untitled notes, html-only documents, or in the html view.
   Read-only where the note is: a leased note, the other pane, a version.
 

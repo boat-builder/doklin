@@ -78,6 +78,14 @@
 //     the rest is, and one that moves nothing leaves no folder behind;
 //   - a folder is left, and deleted for everyone.
 //
+// And tags (the `tags` group), which the worker's index answers in a browser:
+//
+//   - `status:Doing` in search lists the notes with that tag, asked of the
+//     worker as a tag and no text, and words beside a tag find lines in
+//     those notes alone;
+//   - a value renamed in *Edit status…* rewrites the list, the open note and
+//     every other note that has it, found by that same search.
+//
 // A real domain is https, and a Secure cookie needs it (WebKit keeps none
 // over http, localhost included), so the worker is driven through a TLS
 // front this file runs, with a certificate it makes for the run (`openssl`).
@@ -88,7 +96,7 @@
 //   (cd verify-harness && npm install && npx playwright install)   # once
 //   node verify-harness/drive-web.mjs                 # every engine installed
 //   ENGINES=chromium node verify-harness/drive-web.mjs
-//   PARTS=writing node verify-harness/drive-web.mjs   # files, cookie, app, writing, rest, access, folders, cache
+//   PARTS=writing node verify-harness/drive-web.mjs   # files, cookie, app, writing, rest, access, folders, tags, cache
 import { chromium, firefox, webkit } from "playwright";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -103,7 +111,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ENGINES = { chromium, firefox, webkit };
 const wanted = (process.env.ENGINES ?? "chromium,firefox,webkit").split(",").map((s) => s.trim()).filter(Boolean);
-const parts = new Set((process.env.PARTS ?? "files,cookie,app,writing,rest,access,folders,cache").split(",").map((s) => s.trim()));
+const parts = new Set((process.env.PARTS ?? "files,cookie,app,writing,rest,access,folders,tags,cache").split(",").map((s) => s.trim()));
 
 const results = [];
 const step = (name, ok, detail = "") => {
@@ -1824,6 +1832,111 @@ async function driveFolders(name) {
   await browser.close();
 }
 
+/* ---------- Tags ---------- */
+
+async function driveTags(name) {
+  const say = (what, ok, detail) => step(`${name}, tags: ${what}`, Boolean(ok), detail);
+  const browser = await ENGINES[name].launch();
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
+  await context.addInitScript(() => Object.defineProperty(navigator, "platform", { get: () => "Win32" }));
+  const page = await context.newPage();
+  const trouble = [];
+  let stage = "starting";
+  page.on("console", (m) => {
+    if (process.env.DEBUG_DRIVE) console.log(`  [${stage}] console.${m.type()}: ${m.text().slice(0, 200)}`);
+    if (/Content Security Policy|Content-Security-Policy|Refused to/i.test(m.text())) trouble.push(`${stage}: ${m.text().slice(0, 200)}`);
+  });
+  page.on("pageerror", (e) => trouble.push(`${stage}: ${String(e).slice(0, 200)}`));
+
+  // A folder of this engine's own; the list is the workspace's, written by each engine in its turn.
+  const DIR = `Tags in ${name}`;
+  const ONE = `${DIR}/One.md`;
+  const TWO = `${DIR}/Two.md`;
+  const THREE = `${DIR}/Three.md`;
+  const other = await elsewhere(browser);
+  const put = async (path, text) =>
+    other.ask(`/api/web/doc?path=${encodeURIComponent(path)}`, { method: "PUT", body: JSON.stringify({ md: { text, ifRev: (await storedAt(path))?.rev ?? null } }) });
+  await put("Tags.md", "---\nstatus: [Todo, Doing, Done]\n---\nWhat each value means.\n");
+  await put(ONE, "---\nstatus: Doing\n---\n# One\n\nA heron by the water.\n");
+  await put(TWO, "---\nstatus: doing\nowner: Ada\n---\nTwo.\n");
+  await put(THREE, "---\nstatus: Done\n---\nA heron too.\n");
+
+  const row = (path) => page.locator(`[data-tree-path="${LIBRARY}/${path}"]`);
+  const pane = () => page.locator(".editor-pane.is-focused");
+  const chip = (tag) => pane().locator(`[data-testid="tag-chip-${tag}"]`);
+  const menuItem = (label) => page.locator(".tag-menu").getByRole("menuitem", { name: label, exact: true });
+  const names = () => page.locator(".ws-result-file-name").evaluateAll((els) => els.map((el) => el.innerText));
+  const searched = (from) => answered.slice(from).filter((a) => a.method === "GET" && a.path.startsWith("/api/web/search"));
+
+  await page.goto(`${ORIGIN}/app`);
+  await page.locator('[data-testid="web-invite"]').fill(`doklin-invite ${ORIGIN} ${await deviceCode()}`);
+  await page.click('[data-testid="web-sign-in"]');
+  await row("Home.md").waitFor({ timeout: 60_000 });
+
+  /* 1 — search by tag */
+  stage = "search by tag";
+  let from = answered.length;
+  await page.locator(".sidebar-search").click();
+  const input = page.locator(".ws-search-input");
+  await input.fill("status:Doing");
+  const byTag = await until(async () => {
+    const got = await names();
+    return got.length === 2 ? got : null;
+  }, 30_000);
+  const asked = searched(from);
+  say(
+    "status:Doing lists the notes with that tag, asked of the worker as a tag and no text",
+    JSON.stringify(byTag) === JSON.stringify(["One", "Two"]) && asked.some((a) => a.status === 200 && /[?&]q=&/.test(a.path) && /[?&]tag=status%3ADoing\b/.test(a.path)),
+    `${JSON.stringify(byTag)} ${asked.map((a) => a.path).join(" ")}`,
+  );
+  await input.fill("heron status:done");
+  const withWords = await until(async () => {
+    const got = await names();
+    return JSON.stringify(got) === JSON.stringify(["Three"]) ? got : null;
+  }, 30_000);
+  say("words beside a tag find lines in the notes with it alone", withWords !== null, JSON.stringify(await names()));
+  await page.keyboard.press("Escape");
+
+  /* 2 — a value renamed */
+  stage = "a value renamed";
+  await row(DIR).click();
+  await row(ONE).click();
+  await chip("status").waitFor({ timeout: 30_000 });
+  const before = (await chip("status").innerText()).replace(/\s+/g, " ").trim();
+  await chip("status").click();
+  await menuItem("Edit status…").click();
+  const dialog = page.locator('[data-testid="tag-edit-dialog"]');
+  await dialog.locator('[data-testid="tag-edit-value-1"]').fill("In progress");
+  from = answered.length;
+  await dialog.locator('[data-testid="tag-edit-save"]').click();
+  const rewritten = await until(async () => {
+    const [one, two, list] = await Promise.all([storedAt(ONE), storedAt(TWO), storedAt("Tags.md")]);
+    return one?.text.startsWith("---\nstatus: In progress\n---\n") &&
+      two?.text === "---\nstatus: In progress\nowner: Ada\n---\nTwo.\n" &&
+      list?.text.startsWith("---\nstatus: [Todo, In progress, Done]\n---\n")
+      ? true
+      : null;
+  }, 45_000);
+  say("the chip reads the note's value as the list spells it", before === "status Doing", before);
+  say(
+    "a value renamed rewrites the list, the open note and every other note that has it",
+    rewritten && (await storedAt(THREE)).text === "---\nstatus: Done\n---\nA heron too.\n",
+    JSON.stringify([(await storedAt(ONE))?.text, (await storedAt(TWO))?.text, (await storedAt("Tags.md"))?.text]),
+  );
+  say("…the notes found by a search for the old value", searched(from).some((a) => /[?&]tag=status%3ADoing\b/.test(a.path)));
+  const after = await until(async () => {
+    const text = (await chip("status").innerText()).replace(/\s+/g, " ").trim();
+    return text === "status In progress" ? text : null;
+  }, 15_000);
+  say("the open note's chip follows", after !== null);
+  say("nothing was refused by the page's policy, and nothing threw", trouble.length === 0, trouble.join(" | "));
+
+  await other.ask(`/api/web/folder?path=${encodeURIComponent(DIR)}`, { method: "DELETE" });
+  await other.ask("/api/web/doc?path=Tags.md", { method: "DELETE" });
+  await other.close();
+  await browser.close();
+}
+
 /* ---------- What a browser keeps, and stops keeping ---------- */
 
 /** Over plain http, where Chromium caches as it does on a real domain (and
@@ -1883,6 +1996,7 @@ for (const name of wanted) {
   if (parts.has("rest")) await driveRest(name);
   if (parts.has("access")) await driveAccess(name);
   if (parts.has("folders")) await driveFolders(name);
+  if (parts.has("tags")) await driveTags(name);
 }
 if (wanted.includes("chromium") && parts.has("cache")) await driveCache();
 

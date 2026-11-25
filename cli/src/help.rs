@@ -29,17 +29,19 @@ Getting in
   whoami                       which workspace and agent this is, whose, and what it may do
 
 Reading
-  ls [folder] [--deep]         what a folder holds
-  info <doc>                   a document's versions, comments, link and public addresses
+  ls [folder] [--deep]         what a folder holds            [--where tag=value]
+  info <doc>                   a document's versions, tags, comments, link and public addresses
   read <doc>                   a document's text              [--md|--html] [--clean] [-o file]
-  search <text>                documents by name or text      [--in folder] [--limit n]
+  search <text>                documents by name or text      [--in folder] [--limit n] [--where tag=value]
   links <doc>                  what it links to, and what links to it   [--from|--to]
   comments <doc>               the comment threads on a document
+  tags                         the workspace's tags and the values each takes
   published                    everything that is public
 
 Changing
   write <doc>                  create or replace a document   [--md|--html] [--if-rev n|--force] [--from file]
   edit <doc>                   change part of a document      --find "…" --replace "…" [--all]
+  tag <doc> <tag>=<value>…     set a document's tags; <tag>= removes one
   mv <from> <to>               move or rename a document or a folder
   rm <doc>                     remove a document, or one version of it   [--md|--html]
   comment <doc>                start a comment thread         --on "…" -m "…"
@@ -59,6 +61,7 @@ Everywhere
 More
   doklin help documents        one document, two versions: markdown and html
   doklin help comments         how a comment attaches to text
+  doklin help tags             tags: the list, a document's values, finding by them
   doklin help publishing       what public means
   doklin help sections         Library, Private and Restricted: who sees what
   doklin help writing          how a document reads well: its name, sections, callouts
@@ -141,6 +144,47 @@ that takes away the element a thread is on is refused the same way.
 
 `read --clean` gives the text without markers, to read or to make an html version
 from. Written back over the markdown, it is refused."#;
+
+const TAGS: &str = r#"TAGS
+
+A tag is a name and a short list of values, the same for the whole workspace:
+status takes Todo, Doing or Done. A document holds at most one value of each tag.
+People set them in the Doklin app, under a document's title; you set them here.
+
+  doklin tags                                        every tag and its values
+  doklin tag Library/Projects/plan status=Doing      set one, or several at once
+  doklin tag Library/Projects/plan status=           remove one
+  doklin ls Library/Projects --where status=Doing    the documents that have it
+  doklin ls --deep --where status                    the ones with any status
+  doklin search "launch" --where priority=p1         text and tags together
+
+Only a value the tag lists can be set, in any case. A write that gives a tag any
+other value is refused, and so is one that gives it two. Never invent a value: ask
+your person, or add it to the list.
+
+The list is a document of its own, Library/Tags. Each line at its top is a tag
+and its values, in order:
+
+  ---
+  status: [Todo, Doing, Done]
+  priority: [p1, p2, p3]
+  ---
+  What each value means, for the people and agents who set them.
+
+Change it with `doklin edit`: every line at its top must be a tag like these, or
+the write is refused. Renaming a value there leaves every document that holds the
+old one as it was — ask your person to rename it in the app, which changes them.
+
+In a document, a tag is a line at the top of its markdown, between two --- lines:
+
+  ---
+  status: Doing
+  ---
+
+`read` shows these lines as they are, and `doklin tag` writes them for you. Any
+other line there is the document's own, never a tag. `ls` and `info` show a
+document's tags. `ls` shows what Doklin's index holds and says when it hasn't read
+the latest changes; --where waits for it."#;
 
 const PUBLISHING: &str = r#"PUBLISHING
 
@@ -432,6 +476,9 @@ What matters here
     the path from this document's folder: [plan](../Projects/plan.md). It keeps
     working when that document is renamed or moved. doklin links <doc> lists
     what a document links to, and what links to it.
+  · Set a document's tags with doklin tag <doc> status=Done, to a value that
+    doklin tags lists. Never invent one: ask your person, or add it to the list
+    in Library/Tags (doklin help tags).
   · Publishing makes a document readable by anyone. Do it only when asked, and
     look at a folder with --dry-run first (doklin help publishing).
   · A diagram is a ```svg drawing you place by hand, in the theme's colours —
@@ -461,6 +508,7 @@ pub fn print(topic: Option<&str>) -> Result<(), Failure> {
     let words = match topic {
         "documents" | "document" | "versions" => DOCUMENTS,
         "comments" => COMMENTS,
+        "tags" => TAGS,
         "publishing" => PUBLISHING,
         "sections" | "private" | "restricted" => SECTIONS,
         "agent" | "agents" => AGENT,
@@ -469,7 +517,7 @@ pub fn print(topic: Option<&str>) -> Result<(), Failure> {
         name => {
             let Some(found) = COMMANDS.iter().find(|c| c.name == name) else {
                 return Err(Failure::usage(format!(
-                    "there is no help on \"{}\" — try: documents, comments, publishing, sections, writing, drawings, agent, or a command's name",
+                    "there is no help on \"{}\" — try: documents, comments, tags, publishing, sections, writing, drawings, agent, or a command's name",
                     name
                 )));
             };
@@ -505,12 +553,17 @@ fn options_of(command: &str) -> &'static str {
         "comment" => {
             "  --on \"…\"       the words the thread is on (doklin help comments)\n  -m \"…\"         the comment\n  --md, --html   which version the words are in (default: the markdown, or the one the name's extension picks)"
         }
-        "search" => "  --in <folder>  only under this folder\n  --limit <n>    how many documents to show (default 20, at most 30)",
+        "search" => {
+            "  --in <folder>  only under this folder\n  --limit <n>    how many documents to show (default 20, at most 30)\n  --where <tag>=<value>\n                 only documents with that tag; a tag alone is any value. Repeat it for\n                 several. With no text, every document that has them"
+        }
         "links" => "  --from         only what the document links to\n  --to           only the documents that link to it",
         "publish" => {
             "  --slug <s>     the last part of the address (default: a random one)\n  --title <t>    the page's title, where it differs from the document's\n  --desc <d>     its description, for link previews\n  --dry-run      list what would become public"
         }
-        "ls" => "  --deep         everything beneath the folder, not only what is directly in it",
+        "ls" => {
+            "  --deep         everything beneath the folder, not only what is directly in it\n  --where <tag>=<value>\n                 only documents with that tag; a tag alone is any value. Repeat it for\n                 several"
+        }
+        "tag" => "  <tag>=<value>  a value the tag lists, in any case (doklin tags)\n  <tag>=         remove the tag\n  --dry-run      say what would happen",
         "rm" => "  --md, --html   remove one version, keeping the other and the document\n  --dry-run      say what would happen",
         _ => "",
     }
