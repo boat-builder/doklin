@@ -85,7 +85,7 @@ final class CommentsUITests: UITestCase {
         back()
 
         // A note published at an address of its own, then stopped.
-        expect(marked("entry-Scratch"), "the Scratch note").tap()
+        reveal(marked("entry-Scratch"), "the Scratch note").tap()
         expect(app.staticTexts["Not public."], "Scratch's text")
         app.buttons["More"].tap()
         expect(app.buttons["Publish…"], "Publish… in the menu").tap()

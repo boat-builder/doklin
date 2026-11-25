@@ -53,7 +53,7 @@ final class DoklinUITests: UITestCase {
         back()
 
         // Editing in place: what is typed is what the note then says.
-        expect(marked("entry-Scratch"), "the Scratch note").tap()
+        reveal(marked("entry-Scratch"), "the Scratch note").tap()
         expect(app.staticTexts["Scratch"], "Scratch's heading")
         let editor = editAtTheEnd()
         editor.typeText("\nTyped in the simulator.")
@@ -101,7 +101,7 @@ final class DoklinUITests: UITestCase {
         app.terminate()
         app.launch()
         browse()
-        expect(marked("entry-Scratch"), "the workspace after a relaunch").tap()
+        reveal(marked("entry-Scratch"), "the workspace after a relaunch").tap()
         expect(app.staticTexts["Typed in the simulator."], "the edit after a relaunch")
         back()
 
