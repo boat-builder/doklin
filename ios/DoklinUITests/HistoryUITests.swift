@@ -59,7 +59,7 @@ final class HistoryUITests: UITestCase {
         launchAndJoin()
 
         // An edit made here, so the note has a version before it and one after.
-        expect(marked("entry-Scratch"), "the Scratch note").tap()
+        reveal(marked("entry-Scratch"), "the Scratch note").tap()
         expect(app.staticTexts["Scratch"], "Scratch's heading")
         let editor = editAtTheEnd()
         editor.typeText("\nA line for history.")
@@ -130,7 +130,7 @@ final class HistoryUITests: UITestCase {
         app.buttons["Undo"].tap()
         expectGone(text(containing: "Restored — 1 file written."), "the moment restore's toast, after Undo")
         browse()
-        expect(marked("entry-Scratch"), "the Scratch note, after the moment's undo").tap()
+        reveal(marked("entry-Scratch"), "the Scratch note, after the moment's undo").tap()
         expect(app.staticTexts["A line for history."], "the line, back after the moment's Undo")
         back()
 

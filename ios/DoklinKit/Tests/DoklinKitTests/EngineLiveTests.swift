@@ -145,7 +145,7 @@ final class EngineLiveTests: XCTestCase {
         XCTAssertEqual(search.results.map(\.path), [made])
         XCTAssertEqual(search.inText.map(\.path), [made], "found by its words, not its name")
 
-        // Home: what changed, newest first — the note made here, by this
+        // Recent: what changed, newest first — the note made here, by this
         // person — and the seed's documents, by the people who wrote them.
         let recent = RecentModel(workspace: workspace)
         await recent.load()

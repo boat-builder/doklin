@@ -1,13 +1,11 @@
 import DoklinKit
 import SwiftUI
 
-/// Home: what changed in the workspace, newest first, by whom — and a dot
-/// on what changed since this person last read it here. The workspace's
-/// name, top left, switches workspaces and leads to its settings.
-struct HomeView: View {
+/// Recent: what changed in the workspace, newest first, by whom — and a dot
+/// on what changed since this person last read it here.
+struct RecentView: View {
     let workspace: Workspace
 
-    @Environment(Shell.self) private var shell
     @State private var model: RecentModel
 
     init(workspace: Workspace) {
@@ -18,8 +16,6 @@ struct HomeView: View {
     var body: some View {
         List {
             Section {
-                SyncQuietLine(workspace: workspace)
-                    .listRowSeparator(.hidden)
                 filters
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0))
@@ -44,25 +40,6 @@ struct HomeView: View {
         .overlay { emptiness }
         .navigationTitle("Recent changes")
         .navigationBarTitleDisplayMode(.large)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button {
-                    shell.switching = true
-                } label: {
-                    HStack(spacing: 6) {
-                        WorkspaceBadge(name: workspace.name, size: 24)
-                        Text(workspace.name)
-                            .font(.headline)
-                            .lineLimit(1)
-                        Image(systemName: "chevron.down")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Theme.text3)
-                    }
-                }
-                .accessibilityLabel("\(workspace.name), workspaces and settings")
-                .accessibilityIdentifier("workspace-menu")
-            }
-        }
         .refreshable {
             await workspace.syncNow()
             await model.load()
@@ -120,7 +97,7 @@ struct HomeView: View {
     }
 }
 
-/// One document in Home's list.
+/// One document in Recent's list.
 struct RecentRow: View {
     let item: RecentItem
     let excerpt: String?
@@ -213,21 +190,5 @@ struct NewBadge: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 1)
             .background(Theme.accentWash, in: Capsule())
-    }
-}
-
-/// A workspace's first letter in a rounded square: how the switcher and
-/// Home's header mark one.
-struct WorkspaceBadge: View {
-    let name: String
-    let size: CGFloat
-
-    var body: some View {
-        Text(String(name.first.map { String($0).uppercased() } ?? "?"))
-            .font(.system(size: size * 0.5, weight: .bold))
-            .foregroundStyle(Theme.sheet)
-            .frame(width: size, height: size)
-            .background(Theme.accent, in: RoundedRectangle(cornerRadius: size * 0.28))
-            .accessibilityHidden(true)
     }
 }

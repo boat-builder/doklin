@@ -1,9 +1,10 @@
 import DoklinKit
 import SwiftUI
 
-/// One workspace, in three tabs: Home (what changed), Browse (its tree) and
-/// Search — each with its own screens pushed over it. A followed link's page
-/// opens over Home, whatever tab was showing, so Back always leads Home.
+/// One workspace, in three tabs: Browse (its tree, the first), Recent (what
+/// changed) and Search — each with its own screens pushed over it. A followed
+/// link's page opens over Browse, whatever tab was showing, so Back always
+/// leads to the tree.
 /// What sync needs from this person, and what was just done, sit in one bar
 /// above the tabs.
 struct WorkspaceView: View {
@@ -16,14 +17,14 @@ struct WorkspaceView: View {
     var body: some View {
         @Bindable var shell = shell
         TabView(selection: $shell.tab) {
-            Tab("Home", systemImage: "clock", value: Shell.Tab.home) {
-                NavigationStack(path: $shell.home) {
-                    HomeView(workspace: workspace)
-                        .destinations(workspace, path: $shell.home)
-                }
-            }
             Tab("Browse", systemImage: "folder", value: Shell.Tab.browse) {
                 BrowseTab(workspace: workspace, path: $shell.browse)
+            }
+            Tab("Recent", systemImage: "clock", value: Shell.Tab.recent) {
+                NavigationStack(path: $shell.recent) {
+                    RecentView(workspace: workspace)
+                        .destinations(workspace, path: $shell.recent)
+                }
             }
             Tab(value: Shell.Tab.search, role: .search) {
                 NavigationStack(path: $shell.search) {
@@ -42,19 +43,19 @@ struct WorkspaceView: View {
         .onChange(of: workspace.left) { _, left in
             if let left { close(left) }
         }
-        // A followed link's page opens over Home.
+        // A followed link's page opens over Browse.
         .onChange(of: device.opening, initial: true) { _, opening in
             guard let opening, opening.root == workspace.root else { return }
             device.opened(opening)
-            shell.tab = .home
-            shell.home.removeAll { $0 == .arriving }
-            if shell.home.last != .document(opening.path) { shell.home.append(.document(opening.path)) }
+            shell.tab = .browse
+            shell.browse.removeAll { $0 == .arriving }
+            if shell.browse.last != .document(opening.path) { shell.browse.append(.document(opening.path)) }
         }
         // …and while it is on its way, its place is held there.
         .onChange(of: device.arrivingPage?.id, initial: true) { _, _ in
             guard let arriving = device.arrivingPage, arriving.root == workspace.root else { return }
-            shell.tab = .home
-            if shell.home.last != .arriving { shell.home = [.arriving] }
+            shell.tab = .browse
+            if shell.browse.last != .arriving { shell.browse = [.arriving] }
         }
         .sheet(isPresented: $shell.switching) {
             WorkspaceSwitcher(workspace: workspace)
@@ -161,9 +162,9 @@ struct ArrivingView: View {
                     .foregroundStyle(Theme.text2)
                     .multilineTextAlignment(.center)
                     .accessibilityIdentifier("arriving-problem")
-                Button("Back to Home") {
+                Button("Back to Browse") {
                     device.dismissArriving()
-                    shell.home = []
+                    shell.browse = []
                 }
                 .buttonStyle(.glass)
                 .padding(.top, 6)
@@ -189,7 +190,7 @@ struct ArrivingView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onDisappear {
             // Gone back before it came: nothing is waited for any more.
-            if shell.home.last != .arriving { device.dismissArriving() }
+            if shell.browse.last != .arriving { device.dismissArriving() }
         }
     }
 }

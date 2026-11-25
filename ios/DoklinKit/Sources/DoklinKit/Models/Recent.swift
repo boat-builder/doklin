@@ -57,7 +57,7 @@ public enum WhoWords {
 
 /* ---------- One row ---------- */
 
-/// A document as Home lists it: its note and its page, together.
+/// A document as Recent lists it: its note and its page, together.
 public struct RecentItem: Identifiable, Hashable, Sendable {
     /// What opens: the note, or the page when there is no note.
     public let path: String
@@ -94,7 +94,7 @@ public struct RecentItem: Identifiable, Hashable, Sendable {
     }
 }
 
-/// Which changes Home shows.
+/// Which changes Recent shows.
 public enum RecentFilter: String, CaseIterable, Sendable {
     case all, unread, agents, people
 
@@ -254,9 +254,9 @@ public enum RecentWords {
     }
 }
 
-/* ---------- Home ---------- */
+/* ---------- Recent ---------- */
 
-/// One day of Home's list.
+/// One day of Recent's list.
 public struct RecentDay: Identifiable, Sendable {
     public let label: String
     public var items: [RecentItem]
@@ -264,7 +264,7 @@ public struct RecentDay: Identifiable, Sendable {
     public var id: String { label }
 }
 
-/// Home's list: what changed in one workspace, filtered, in days.
+/// Recent's list: what changed in one workspace, filtered, in days.
 @MainActor
 @Observable
 public final class RecentModel {

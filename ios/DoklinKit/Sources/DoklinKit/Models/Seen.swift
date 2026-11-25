@@ -1,5 +1,5 @@
 // What this person has read on this device: for each document, the content
-// it held when it was last shown here. Home dots what changed since; a
+// it held when it was last shown here. Recent dots what changed since; a
 // document opened again marks what changed since then. It stays on the
 // device, beside the engine's files, and never syncs: what one device has
 // shown says nothing about another.

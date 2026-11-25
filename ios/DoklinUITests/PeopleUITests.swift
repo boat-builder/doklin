@@ -176,7 +176,7 @@ final class PeopleUITests: UITestCase {
         marked("restricted-create").tap()
         expect(app.navigationBars["Finance"], "the new folder, open")
         back()
-        expect(marked("entry-Finance"), "the new folder, listed under Restricted")
+        reveal(marked("entry-Finance"), "the new folder, listed under Restricted")
         record("restricted, with the new folder")
 
         // Renamed here, for everyone in it.

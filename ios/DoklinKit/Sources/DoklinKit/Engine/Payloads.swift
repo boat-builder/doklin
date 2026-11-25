@@ -280,7 +280,7 @@ public struct PageLinkCopy: Decodable, Equatable, Sendable {
 }
 
 /// `cloud_recent`: a workspace's documents by when their content last
-/// changed, newest first, across its sections — what Home lists — with the
+/// changed, newest first, across its sections — what Recent lists — with the
 /// directory their `by`s are read with. Mirrors `RecentFiles`
 /// (engine/src/cloud/status.rs ⇄ `CloudRecentFiles`, src/cloud.ts): change
 /// all three.
