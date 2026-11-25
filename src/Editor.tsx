@@ -16,7 +16,7 @@ import {
 } from "@milkdown/kit/preset/commonmark";
 import { codeBlockConfig, CodeMirrorBlock } from "@milkdown/kit/component/code-block";
 import { blockConfig } from "@milkdown/kit/plugin/block";
-import { TextSelection } from "@milkdown/kit/prose/state";
+import { Selection, TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { FLOWCHART_PREVIEW_WAITING, flowchartPreview, isMermaidLanguage, mermaidLanguage } from "./flowchartBlock";
 import { FRAME } from "./flowchart/index";
@@ -47,6 +47,7 @@ import {
   type LinkContext,
 } from "./linkMark";
 import { mentionPlugin } from "./mentionMenu";
+import { leaveTopPlugin } from "./leaveTop";
 import type { LinkRecord } from "./metaFile";
 import type { TableCols } from "./tableWidths";
 import { inlineCodeNewlines } from "./inlineCodeNewlines";
@@ -129,6 +130,8 @@ export type EditorHandle = {
   // or decide anything on that copy calls this first. A no-op until the
   // editor has mounted (the mount reports the baseline itself).
   flushMarkdown: () => void;
+  // The caret to the start of the note, as from the title above it.
+  focusStart: () => void;
 };
 
 // Markdown threads whose meta record lost its marker (deleted in another
@@ -198,6 +201,10 @@ type Props = {
   // it as its baseline when nothing was unsaved before. The host's copy is
   // brought up to date through onChange first.
   onRelinked?: (markdown: string) => void;
+  // ↑ on the note's first line, or Backspace in an empty first paragraph:
+  // the caret leaves the note for the title above it. Omit where there is
+  // no title to go to.
+  onLeaveTop?: () => void;
 };
 
 /** The address a note's picture is asked for at. A picture on the web is
@@ -275,6 +282,7 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
     links,
     linkRecords,
     onRelinked,
+    onLeaveTop,
   },
   ref,
 ) {
@@ -338,6 +346,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
   const linksRef = useRef(links ?? NO_LINKS);
   const onRelinkedRef = useRef(onRelinked);
   onRelinkedRef.current = onRelinked;
+  const onLeaveTopRef = useRef(onLeaveTop);
+  onLeaveTopRef.current = onLeaveTop;
 
   const report = () => {
     const view = viewRef.current;
@@ -534,6 +544,8 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
       }),
     );
     crepe.editor.use(resizableTableView);
+    // Last, so the menus and the editor's own keys have them first.
+    crepe.editor.use(leaveTopPlugin(() => onLeaveTopRef.current));
     crepeRef.current = crepe;
     // No view until THIS editor mounts: a view left over from an instance
     // this one replaces is not ours to drive (flushMarkdown would ask the
@@ -828,6 +840,12 @@ const MilkdownInner = forwardRef<EditorHandle, Props>(function MilkdownInner(
         dispatchMeta(view, { kind: "prev" });
         report();
         scrollToCurrent(view);
+      },
+      focusStart() {
+        const view = viewRef.current;
+        if (!view) return;
+        view.dispatch(view.state.tr.setSelection(Selection.atStart(view.state.doc)).scrollIntoView());
+        view.focus();
       },
       clearSearch() {
         pendingRef.current = null;

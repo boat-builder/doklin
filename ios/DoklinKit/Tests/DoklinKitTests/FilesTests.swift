@@ -71,16 +71,52 @@ final class FilesTests: XCTestCase {
         XCTAssertFalse(files.exists("Gone"))
     }
 
-    func testANewNoteNeverTakesANameInUse() throws {
+    func testANewNoteIsUntitledUntilItIsNamed() throws {
         try put("Notes/Plan.md")
-        XCTAssertThrowsError(try files.createNote(in: "Notes", named: "plan")) { error in
-            XCTAssertEqual((error as? DoklinError)?.message, "A note named “plan” is already here.")
+        let first = try files.createNote(in: "Notes")
+        XCTAssertEqual(first, "Notes/Untitled.md")
+        XCTAssertEqual(try files.text(first), "", "nothing in it: its title is its name")
+        try put("Notes/untitled 2.html")
+        XCTAssertEqual(try files.createNote(in: "Notes"), "Notes/Untitled 3.md", "a name another document has, its html's and in any case, is passed over")
+        XCTAssertTrue(DocTitle.isUnnamed("Untitled") && DocTitle.isUnnamed("Untitled 12"))
+        XCTAssertFalse(DocTitle.isUnnamed("Untitled plan") || DocTitle.isUnnamed("untitled"))
+    }
+
+    /// A note's title is its name: a new one renames the note, its comments
+    /// along, and one another document has is refused in words.
+    @MainActor
+    func testATitleRenamesTheNote() async throws {
+        let device = Workspaces(remembered: UserDefaults(suiteName: "doklin-test-\(UUID().uuidString)")!)
+        let workspace = device.workspace(root.path)
+        try put("Notes/Untitled.md", "")
+        try put("Notes/Untitled.meta.jsonl", "{\"doklin\":\"meta\",\"v\":1}\n")
+        try put("Notes/Plan.md")
+        try put("Notes/Pricing.html")
+        let note = DocumentModel(workspace: workspace, path: "Notes/Untitled.md")
+        note.load()
+        for (wanted, sentence) in [
+            ("plan", "There’s already a document called “plan” here."),
+            ("Pricing", "There’s already a document called “Pricing” here."),
+            ("a/b", "Names can't contain /, \\ or :"),
+        ] {
+            do {
+                try await note.rename(to: wanted)
+                XCTFail("renamed to \(wanted)")
+            } catch let error as DoklinError {
+                XCTAssertEqual(error.message, sentence)
+            }
         }
-        XCTAssertThrowsError(try files.createNote(in: "Notes", named: ".secret"))
-        XCTAssertThrowsError(try files.createNote(in: "Notes", named: "a/b"))
-        let made = try files.createNote(in: "Notes", named: "Groceries.md")
-        XCTAssertEqual(made, "Notes/Groceries.md")
-        XCTAssertEqual(try files.text(made), "# Groceries\n\n")
+        XCTAssertEqual(note.path, "Notes/Untitled.md")
+
+        try await note.rename(to: " Call notes ")
+        XCTAssertEqual(note.path, "Notes/Call notes.md")
+        XCTAssertEqual(note.title, "Call notes")
+        XCTAssertTrue(files.exists("Notes/Call notes.meta.jsonl"), "its comments go with it")
+        XCTAssertFalse(files.exists("Notes/Untitled.md"))
+        try await note.rename(to: "call notes")
+        XCTAssertEqual(note.path, "Notes/call notes.md", "a change of case alone is a rename")
+        try await note.save("Typed after.\n", over: "")
+        XCTAssertEqual(try files.text("Notes/call notes.md"), "Typed after.\n", "what is typed next is saved under the new name")
     }
 
     func testRenamingADocumentTakesItsPageAndCommentsAlong() throws {

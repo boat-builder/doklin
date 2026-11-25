@@ -9,17 +9,11 @@ import SwiftUI
 @MainActor
 @Observable
 final class EntryActing {
-    enum NewThing: Equatable {
-        case note, folder
-    }
-
-    struct Creating: Equatable {
-        let thing: NewThing
-        /// Where it goes, workspace-relative.
-        let dir: String
-    }
-
-    var creating: Creating?
+    /// A note to make, and where (workspace-relative): it is made at once,
+    /// "Untitled", and opens to be named by its title.
+    var makingNote: String?
+    /// A folder being made, and where: its name is asked first.
+    var creatingFolder: String?
     var newName = ""
     var renaming: FolderEntry?
     var moving: FolderEntry?
@@ -28,9 +22,13 @@ final class EntryActing {
     var publishing: PublishTarget?
     var failure: String?
 
-    func create(_ thing: NewThing, in dir: String) {
+    func newNote(in dir: String) {
+        makingNote = dir
+    }
+
+    func newFolder(in dir: String) {
         newName = ""
-        creating = Creating(thing: thing, dir: dir)
+        creatingFolder = dir
     }
 
     func rename(_ entry: FolderEntry) {
@@ -56,13 +54,16 @@ struct EntryActionsHost: ViewModifier {
         @Bindable var acting = acting
         return content
             .environment(acting)
-            .alert(acting.creating?.thing == .folder ? "New folder" : "New note", isPresented: shown(\.creating)) {
+            .onChange(of: acting.makingNote) { _, dir in
+                if let dir { makeNote(in: dir) }
+            }
+            .alert("New folder", isPresented: shown(\.creatingFolder)) {
                 TextField("Name", text: $acting.newName)
                     .accessibilityIdentifier("new-name")
-                Button("Cancel", role: .cancel) { acting.creating = nil }
-                Button("Create") { create() }
+                Button("Cancel", role: .cancel) { acting.creatingFolder = nil }
+                Button("Create") { createFolder() }
             } message: {
-                if let dir = acting.creating?.dir, let who = FolderModel(workspace: workspace, dir: dir).whoSeesNew { Text(who) }
+                if let dir = acting.creatingFolder, let who = FolderModel(workspace: workspace, dir: dir).whoSeesNew { Text(who) }
             }
             .alert("Rename", isPresented: shown(\.renaming)) {
                 TextField("Name", text: $acting.newName)
@@ -111,18 +112,24 @@ struct EntryActionsHost: ViewModifier {
         return "It goes from every device that has \(workspace.name). Its history keeps it, under Recently deleted."
     }
 
-    private func create() {
-        guard let creating = acting.creating else { return }
-        let name = acting.newName
-        acting.creating = nil
-        let model = FolderModel(workspace: workspace, dir: creating.dir)
+    private func makeNote(in dir: String) {
+        acting.makingNote = nil
         Task {
             do {
-                if creating.thing == .folder {
-                    _ = try await model.createFolder(named: name)
-                } else {
-                    open(.document(try await model.createNote(named: name)))
-                }
+                open(.made(try await FolderModel(workspace: workspace, dir: dir).createNote()))
+            } catch {
+                acting.failure = (error as? DoklinError)?.message ?? error.localizedDescription
+            }
+        }
+    }
+
+    private func createFolder() {
+        guard let dir = acting.creatingFolder else { return }
+        let name = acting.newName
+        acting.creatingFolder = nil
+        Task {
+            do {
+                _ = try await FolderModel(workspace: workspace, dir: dir).createFolder(named: name)
             } catch {
                 acting.failure = (error as? DoklinError)?.message ?? error.localizedDescription
             }
@@ -168,12 +175,12 @@ struct EntryMenu: View {
         let mayChange = workspace.may("work")
         if case .folder(let dir) = entry, mayChange, FolderModel(workspace: workspace, dir: dir).canHoldNotes {
             Button {
-                acting.create(.note, in: dir)
+                acting.newNote(in: dir)
             } label: {
                 Label("New note here", systemImage: "square.and.pencil")
             }
             Button {
-                acting.create(.folder, in: dir)
+                acting.newFolder(in: dir)
             } label: {
                 Label("New folder here", systemImage: "folder.badge.plus")
             }

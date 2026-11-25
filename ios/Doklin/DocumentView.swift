@@ -2,11 +2,12 @@ import DoklinKit
 import SwiftUI
 import UIKit
 
-/// One document, open for reading: where it is, who made it or changed it
-/// last, and — when it changed since this person last read it here — what
-/// changed, marked. *Edit*, or a double tap on a paragraph, edits it right
-/// here; its comments, its link, its page on the web and its history are in
-/// the bar along the bottom.
+/// One document, open for reading: its title, which is its name; where it
+/// is, who made it or changed it last, and — when it changed since this
+/// person last read it here — what changed, marked. *Edit*, or a double tap
+/// on a paragraph, edits it right here, and a double tap on the title edits
+/// that: a new title renames the file. Its comments, its link, its page on
+/// the web and its history are in the bar along the bottom.
 struct DocumentView: View {
     @Binding var route: [Route]
     @State private var model: DocumentModel
@@ -28,6 +29,8 @@ struct DocumentView: View {
     @State private var foundIndex = 0
     /// The source line a search found, for when its words span markup.
     private let foundLine: Int?
+    /// A note just made: it opens in the editor, to be named.
+    @State private var naming: Bool
     /// The changes since it was read, while they are marked.
     @State private var changesShown = true
     @State private var changeIndex: Int?
@@ -37,11 +40,12 @@ struct DocumentView: View {
     @Environment(Shell.self) private var shell
     @Environment(\.scenePhase) private var scenePhase
 
-    init(workspace: Workspace, path: String, route: Binding<[Route]>, find: String? = nil, line: Int? = nil) {
+    init(workspace: Workspace, path: String, route: Binding<[Route]>, find: String? = nil, line: Int? = nil, naming: Bool = false) {
         _route = route
         _model = State(initialValue: DocumentModel(workspace: workspace, path: path))
         _comments = State(initialValue: CommentsModel(workspace: workspace, path: path))
         _find = State(initialValue: find)
+        _naming = State(initialValue: naming)
         foundLine = line
     }
 
@@ -68,8 +72,17 @@ struct DocumentView: View {
             }
             .task(id: model.phase == .loaded) {
                 guard model.phase == .loaded else { return }
+                if naming {
+                    naming = false
+                    startEditing(at: nil, naming: true)
+                }
                 markFound()
                 await model.shown()
+            }
+            .onChange(of: model.path) {
+                // Renamed by its title: its comments are its sidecar's, under the new name.
+                comments = CommentsModel(workspace: workspace, path: model.path)
+                comments.load()
             }
             .onChange(of: workspace.changes) {
                 if let session {
@@ -182,11 +195,7 @@ struct DocumentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     Breadcrumb(workspace: workspace, path: model.path)
-                    if !MarkdownView.hasTitle(document) {
-                        Text(model.title)
-                            .font(.docHeading(1))
-                            .foregroundStyle(Theme.text1)
-                    }
+                    title
                     MarkdownView(
                         document: document, file: model.path, workspace: workspace, actions: actions,
                         underTitle: AnyView(header)
@@ -219,6 +228,20 @@ struct DocumentView: View {
             }
             return .handled
         })
+    }
+
+    /// The note's name. One nobody gave ("Untitled") shows as the editor's
+    /// empty title does, in grey.
+    private var title: some View {
+        Text(model.title)
+            .font(.docHeading(1))
+            .foregroundStyle(DocTitle.isUnnamed(model.title) ? Theme.text3 : Theme.text1)
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("title")
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                if actions.edit != nil { startEditing(at: nil, naming: true) }
+            }
     }
 
     /// Under the title: who made it or changed it last, and what changed
@@ -305,8 +328,8 @@ struct DocumentView: View {
     }
 
     /// Edit the note right here, at top-level block `index` — or, from the
-    /// bar, at the block at the top of the screen.
-    private func startEditing(at index: Int?) {
+    /// bar, at the block at the top of the screen; or, `naming`, at its title.
+    private func startEditing(at index: Int?, naming: Bool = false) {
         // Another device's hold opens the editor view-only, with Take over.
         guard session == nil, model.canEdit, let document = model.document else { return }
         let block = index ?? topBlock.flatMap { id in document.blocks.firstIndex { $0.id == id } }
@@ -314,7 +337,7 @@ struct DocumentView: View {
         let editing = NoteEditing(model: model)
         turning = false
         session = editing
-        Task { await editing.start(at: block, prefix: prefix) }
+        Task { await editing.start(at: block, prefix: prefix, naming: naming) }
     }
 
     /// Done: what was typed is in the file, and the note reads again.

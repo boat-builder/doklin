@@ -22,9 +22,67 @@ body {
   padding: 16px 20px 120px;
 }
 
+#title,
 #editor {
   max-width: 700px;
   margin: 0 auto;
+}
+
+/* The title: the document's name (title.ts), set as the reader sets it —
+   docHeading(1) in Theme.swift, change both. A textarea clips what leaves
+   its box, so it has room above and below its lines for accents and
+   descenders, taken back by its margin. It grows with its words: a hidden
+   copy of them shares its grid cell. */
+.doc-title {
+  margin-bottom: 16px;
+}
+
+.doc-title-field {
+  display: grid;
+}
+
+.doc-title-field::after {
+  content: attr(data-value) " ";
+  visibility: hidden;
+  white-space: pre-wrap;
+}
+
+.doc-title-field > textarea,
+.doc-title-field::after {
+  grid-area: 1 / 1 / 2 / 2;
+  margin: -0.2em 0;
+  padding: 0.2em 0;
+  border: 0;
+  font-family: var(--font-heading);
+  font-weight: 500;
+  font-size: 34px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.doc-title-field > textarea {
+  width: 100%;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: var(--text-1);
+  outline: none;
+  caret-color: var(--accent);
+  -webkit-appearance: none;
+  border-radius: 0;
+}
+
+.doc-title-field > textarea::placeholder {
+  color: var(--text-3);
+  opacity: 1;
+}
+
+.doc-title-problem {
+  margin-top: 6px;
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.35;
+  color: var(--error-ink);
 }
 
 .milkdown {
@@ -95,7 +153,10 @@ body {
   font-weight: 500;
 }
 
-.milkdown .ProseMirror > :first-child {
+/* The first block sits flush under the title. Crepe's virtual cursor is an
+   element at the top of the document, so the first block is counted past it. */
+.milkdown .ProseMirror > :nth-child(1 of :not(.ProseMirror-widget, .prosemirror-virtual-cursor)) {
+  margin-top: 0;
   padding-top: 0;
 }
 

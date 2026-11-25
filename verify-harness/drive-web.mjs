@@ -42,8 +42,9 @@
 //     leaves the other version beside it as a conflict copy;
 //   - the browser says which document it is editing: a Mac that takes the
 //     document over turns it view-only here, until it is taken back;
-//   - a note made, renamed, copied and deleted from the tree, and a folder
-//     that is real once a note is in it;
+//   - a note made from the tree as Untitled and named by its title, then
+//     renamed, copied and deleted from the tree, and a folder that is real
+//     once a note is in it;
 //   - closing with unsaved text asks first, and what was typed is sent as
 //     the page goes; what could not be sent is sent the next time the
 //     workspace is opened in that browser;
@@ -864,14 +865,18 @@ async function driveWriting(name) {
 
   /* 6 — the tree's changes */
   stage = "the tree's changes";
+  const untitled = `${DIR}/Untitled.md`;
+  await pick(DIR, "New Document");
+  await row(untitled).waitFor({ timeout: 15_000 });
+  const made = await until(() => storedAt(untitled), 10_000);
+  const inTitle = await until(() => page.evaluate(() => document.activeElement?.closest(".doc-title") != null), 10_000);
+  say("a new note is made on the domain as Untitled, with nothing in it, and the caret in its title", made && made.size === 0 && inTitle);
   const name1 = `${DIR}/Made here.md`;
-  await pick(DIR, "New File…");
-  await page.locator(".tree-create-input").fill("Made here");
+  await page.keyboard.type("Made here");
   await page.keyboard.press("Enter");
   await row(name1).waitFor({ timeout: 15_000 });
-  const made = await until(() => storedAt(name1), 10_000);
-  say("a new note is made on the domain as it is named, with nothing in it", made && made.size === 0);
-  await page.locator(".ProseMirror").click();
+  const titled = await until(() => storedAt(name1), 10_000);
+  say("typing its title renames it, the same file under the new name", titled && titled.fid === made.fid && !(await storedAt(untitled)));
   await page.keyboard.type("Hello from the tree.");
   say("and what is typed into it is saved", await until(async () => (await storedAt(name1))?.text.includes("Hello from the tree."), 15_000));
 
@@ -901,11 +906,9 @@ async function driveWriting(name) {
   await row(`${DIR}/Empty here`).waitFor({ timeout: 10_000 });
   const filesUnder = async (dir) => Object.values((await (await owner("/api/manifest")).json()).files).filter((f) => f.path.startsWith(`${dir}/`)).map((f) => f.path);
   say("a new folder is in the tree, and on the domain there is nothing yet", (await filesUnder(`${DIR}/Empty here`)).length === 0);
-  await pick(`${DIR}/Empty here`, "New File…");
-  await page.locator(".tree-create-input").fill("Inside");
-  await page.keyboard.press("Enter");
-  await row(`${DIR}/Empty here/Inside.md`).waitFor({ timeout: 15_000 });
-  say("it is a folder for everyone once a note is in it", (await filesUnder(`${DIR}/Empty here`)).includes(`${DIR}/Empty here/Inside.md`));
+  await pick(`${DIR}/Empty here`, "New Document");
+  await row(`${DIR}/Empty here/Untitled.md`).waitFor({ timeout: 15_000 });
+  say("it is a folder for everyone once a note is in it", await until(async () => (await filesUnder(`${DIR}/Empty here`)).includes(`${DIR}/Empty here/Untitled.md`), 10_000));
 
   await pick(name3, "Delete");
   // A delete here cannot be taken back, so it is asked first (the rest).

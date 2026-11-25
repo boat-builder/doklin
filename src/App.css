@@ -898,7 +898,8 @@ body,
 /* Hide the hidden markdown editor and ITS rail (a direct child of the wrap);
    the html view's own rail lives inside .html-view and stays. */
 .editor-wrap.is-html-view .milkdown,
-.editor-wrap.is-html-view > .comments-rail {
+.editor-wrap.is-html-view > .comments-rail,
+.editor-wrap.is-html-view > .doc-title {
   display: none;
 }
 
@@ -1220,8 +1221,10 @@ body,
 
 /* The first block in the document, and whatever follows a heading, sit
    flush: the column's padding is the top margin, and a heading's own
-   bottom margin is the only gap under it. */
-.editor-wrap .milkdown .ProseMirror > :first-child,
+   bottom margin is the only gap under it. Crepe's virtual cursor is an
+   element at the top of the document, so the first block is counted
+   past it. */
+.editor-wrap .milkdown .ProseMirror > :nth-child(1 of :not(.ProseMirror-widget, .prosemirror-virtual-cursor)),
 .editor-wrap .milkdown .ProseMirror > :is(h1, h2, h3, h4, h5, h6) + * {
   margin-top: 0;
 }
@@ -4466,6 +4469,111 @@ body.tree-dragging.tree-drag-invalid * {
   color: var(--text-1);
 }
 
+/* ---------- The title above a note ----------
+   The document's name (DocTitle.tsx), in the H1's face and size, on the
+   note's column: the measure, page width and side padding of
+   .editor-wrap .milkdown .ProseMirror. The field is as tall as its text:
+   the grid's hidden copy of the text sizes the row, and the textarea fills
+   it, so a long title wraps instead of scrolling. */
+.doc-title {
+  position: relative;
+  max-width: calc(var(--doc-measure) * var(--doc-zoom, 1) + 128px);
+  margin: 0 auto;
+  padding: 64px 64px 0;
+  box-sizing: border-box;
+}
+
+:root[data-full-width] .doc-title {
+  max-width: none;
+}
+
+.doc-title-field {
+  display: grid;
+}
+
+.doc-title-field::after {
+  content: attr(data-value) " ";
+  visibility: hidden;
+  white-space: pre-wrap;
+}
+
+/* The textarea clips at its padding box, and the heading's tight leading puts
+   a serif's descenders (g, y) and accents below and above the line. Padding
+   gives them room inside the box, and the negative margin hands that room
+   back, so the title sits where an H1 would. */
+.doc-title-field > textarea,
+.doc-title-field::after {
+  grid-area: 1 / 1 / 2 / 2;
+  margin: -0.2em 0;
+  padding: 0.2em 0;
+  border: 0;
+  font-family: var(--font-heading);
+  font-weight: var(--doc-heading-weight);
+  font-size: calc(var(--doc-h1) * var(--doc-zoom, 1));
+  line-height: 1.15;
+  letter-spacing: var(--doc-h1-track);
+  overflow-wrap: anywhere;
+}
+
+.doc-title-field > textarea {
+  width: 100%;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: var(--text-1);
+  outline: none;
+  caret-color: var(--text-1);
+}
+
+.doc-title-field > textarea::placeholder {
+  color: color-mix(in srgb, var(--text-3) 55%, transparent);
+  opacity: 1;
+}
+
+/* Why the title can't be the name yet: under it, in the gap above the note,
+   so the note never moves while it shows. */
+.doc-title-problem {
+  position: absolute;
+  top: 100%;
+  left: 64px;
+  right: 64px;
+  margin-top: 6px;
+  font-size: var(--fs-sm);
+  color: var(--error-ink);
+}
+
+/* Under a title the note starts closer, and is a viewport tall less the
+   title, so a short note does not scroll. */
+.editor-wrap:has(> .doc-title) .milkdown .ProseMirror {
+  padding-top: 32px;
+  min-height: calc(100vh - var(--bar-h) - 1px - var(--doc-title-h, 0px));
+}
+
+.editor-pane.is-split .editor-wrap:has(> .doc-title) .milkdown .ProseMirror {
+  min-height: calc(100vh - var(--bar-h) - 1px - 30px - var(--doc-title-h, 0px));
+}
+
+/* A note that opens with a heading keeps part of the heading's gap, so the
+   title and its first section don't read as one block. */
+.editor-wrap:has(> .doc-title) .milkdown .ProseMirror > :nth-child(1 of :not(.ProseMirror-widget, .prosemirror-virtual-cursor)):is(h1, h2, h3, h4, h5, h6) {
+  margin-top: 0.6em;
+}
+
+@media (max-width: 720px) {
+  .doc-title {
+    padding: 40px 28px 0;
+  }
+
+  .doc-title-problem {
+    left: 28px;
+    right: 28px;
+  }
+
+  .editor-wrap:has(> .doc-title) .milkdown .ProseMirror {
+    padding-top: 24px;
+  }
+}
+
 /* ---------- A note's frontmatter, above it ----------
    Read-only and as the file has it (src/frontmatter.ts): agents and other
    tools own the block, so it is shown plainly rather than as controls. Lined
@@ -5362,6 +5470,7 @@ body.tree-dragging.tree-drag-invalid * {
 .editor-wrap.is-version-preview > [data-milkdown-root],
 .editor-wrap.is-version-preview > .comments-rail,
 .editor-wrap.is-version-preview > .doc-frontmatter,
+.editor-wrap.is-version-preview > .doc-title,
 .editor-wrap.is-version-preview > .html-view {
   display: none;
 }

@@ -101,6 +101,8 @@ struct NoticeBar: View {
 enum Route: Hashable {
     case folder(String)
     case document(String)
+    /// A note just made: it opens to be named, the caret in its title.
+    case made(String)
     /// A note opened at the first place a search's words are in it — or, when
     /// they span its markup, at the source line the search found.
     case match(String, query: String, line: Int?)

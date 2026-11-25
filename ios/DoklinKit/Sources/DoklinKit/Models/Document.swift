@@ -15,7 +15,8 @@ public final class DocumentModel {
 
     public let workspace: Workspace
     /// The file it opened as: a note's markdown, a page's html, or any file.
-    public let path: String
+    /// A new title moves it (`rename`).
+    public private(set) var path: String
     public let kind: FileKind
     /// The markdown, as the file has it.
     public private(set) var text: String?
@@ -48,6 +49,7 @@ public final class DocumentModel {
         self.kind = FileKind.of(path)
     }
 
+    /// Its name, which is its title: the file's, without the extension.
     public var title: String { DocLinks.stem(of: DocLinks.name(of: path)) }
     public var isNote: Bool { kind == .markdown }
     /// A note with an html rendition beside it.
@@ -206,6 +208,26 @@ public final class DocumentModel {
         } catch {
             problem = (error as? DoklinError)?.message ?? error.localizedDescription
         }
+    }
+
+    /// Make `title` the note's name: its file, with its rendition and its
+    /// sidecar, renamed in its folder. A name another document there has —
+    /// its markdown or its html, whatever its case — is refused in words, as
+    /// is one a file can't have; a change of case alone is a rename.
+    public func rename(to title: String) async throws {
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isNote, name != self.title else { return }
+        if let problem = WorkspaceFiles.nameProblem(name) { throw DoklinError(problem) }
+        let dir = DocLinks.directory(of: path)
+        if name.lowercased() != self.title.lowercased(), workspace.files.stemTaken(name, in: dir) {
+            throw DoklinError("There’s already a document called “\(name)” here.")
+        }
+        let row = DocumentRow(path: path, html: htmlPath, modified: nil)
+        let (to, changed) = try workspace.files.rename(.document(row), to: name)
+        // Where it is before anyone hears it moved: a save that lands now
+        // writes to the new name.
+        path = to
+        await workspace.wrote(changed)
     }
 
     /// Say which document this device is editing — or, with nil, that it is

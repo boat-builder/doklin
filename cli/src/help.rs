@@ -61,7 +61,7 @@ More
   doklin help comments         how a comment attaches to text
   doklin help publishing       what public means
   doklin help sections         Library, Private and Restricted: who sees what
-  doklin help writing          how a document reads well: sections, callouts
+  doklin help writing          how a document reads well: its name, sections, callouts
   doklin help drawings         diagrams: how to draw one that reads well
   doklin help agent            a short brief for an AI agent using this
   doklin help <command>
@@ -209,8 +209,12 @@ How a document reads well in Doklin. Write plain markdown: the app, the iPhone
 and a public page all draw it the same way.
 
 Structure
-  · One # title, on the first line. Sections are ## and ###: the app's outline
-    ("On this page") is built from them, so a long document gets one for free.
+  · The name is the title. The app shows a document's name above its text, and
+    renaming one is changing its title, so name it the way a title reads:
+    Library/Projects/Launch plan. The text starts with what it says, never with
+    a # line that repeats the name.
+  · Sections are ## and ###: the app's outline ("On this page") is built from
+    them, so a long document gets one for free.
   · Short paragraphs, one idea each. Lists for parallel items.
 
 Callouts
@@ -432,6 +436,9 @@ What matters here
     look at a folder with --dry-run first (doklin help publishing).
   · A diagram is a ```svg drawing you place by hand, in the theme's colours —
     follow doklin help drawings, and it reads like the rest of the document.
+  · A document's name is its title: name a new one the way a title reads
+    (Private/Launch plan), and don't open its text with a # line that says it
+    again (doklin help writing).
   · To set something apart (a note, a warning), use a callout: "> [!NOTE]" on
     its own line, the text on the "> " lines after it (doklin help writing).
   · Every command that changes something takes --dry-run.

@@ -220,14 +220,40 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   (`isUnsupportedTab`), and it can't be split. A rename that changes which it
   is reloads the tab.
 
+## The title
+
+- A document's title is its file name, without the extension (`docName`,
+  `src/tabs.ts`): drawn above the note (`src/DocTitle.tsx`), never part of
+  the markdown. A note doesn't open with a `# title` line.
+- Typing there renames the file `RENAME_PAUSE_MS` after the last key and on
+  leaving, through `movePath` like any rename. Until then `DocTab.title`
+  holds the typed title, so the tab, the tree row and the split header follow
+  each key.
+- Never renamed to: what a file name can't hold (`titleProblem`,
+  `src/titleText.ts`, which the iPhone's editor shares), or a name
+  another document in the folder has, its markdown or its html. Left that
+  way, the title puts the name back.
+- `Untitled` and `Untitled N` show an empty title with the name as its
+  placeholder. *New Document* makes the first free one and focuses its
+  title: a document is never named in the tree.
+- **The title and the html view are siblings in one list**: they never share
+  a React key, or a note opened after an html view shows two titles.
+- ↑ and Backspace from the body's first line go to the title through a plugin
+  registered last (`src/leaveTop.ts`), so the menus and the editor's own
+  keymaps take them first.
+- The field clips what leaves its box: its `0.2em` padding, taken back by
+  its margin, keeps descenders and accents whole.
+
 ## Untitled notes
 
 - `⌘N` opens a note with no file. Its text lives in
   `<app_data>/untitled/<tab id>.md` (entity meta beside it), written by the
   normal autosave; deleted when the tab closes or the note is saved.
-- Only the tab descriptor (`id`, `kind`, `path`) is persisted; title and the
-  unsaved flag are read back from the buffer on restore.
-- Closing a tab with text asks Save / Don't Save / Cancel. `⌘Q` asks nothing —
+- Only the tab descriptor (`id`, `kind`, `path`) is persisted. The title is
+  kept in local storage by the buffer's path (`doklin:untitled-title:`) and
+  goes with the buffer; a note with a title or text is unsaved. Save offers
+  the title as the file name.
+- Closing a tab with a title or text asks Save / Don't Save / Cancel. `⌘Q` asks nothing —
   every note comes back unsaved. Closing a non-main window asks per note.
 - Untitled notes belong to the window, not a folder: switching folders takes
   them along. No history, no sync, no publishing until saved.

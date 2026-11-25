@@ -215,10 +215,24 @@ class UITestCase: XCTestCase {
     func editAtTheEnd() -> XCUIElement {
         marked("edit").tap()
         expect(text(containing: "other devices see it view-only"), "the editor, ready")
-        let editor = expect(app.webViews.textViews.firstMatch, "the editor")
+        let editor = expect(app.webViews.textViews["Note"], "the editor")
         focus(editor, at: CGVector(dx: 0.97, dy: 0.97))
         editor.typeKey(.downArrow, modifierFlags: .command)
         return editor
+    }
+
+    /// Make a note with New, which opens it in the editor as Untitled with
+    /// the caret in its title, and name it: the file takes the name, and
+    /// Return goes into the note, whose text view this answers.
+    @discardableResult
+    func newNote(named name: String) -> XCUIElement {
+        marked("new").tap()
+        expect(app.buttons["New note"], "New note in the menu").tap()
+        expect(text(containing: "other devices see it view-only"), "the new note, open to edit")
+        let title = expect(app.webViews.textViews["Title"], "the new note's title")
+        title.tap()
+        title.typeText(name + "\n")
+        return expect(app.webViews.textViews["Note"], "the new note's text")
     }
 
     /* ---------- Joining and leaving ---------- */

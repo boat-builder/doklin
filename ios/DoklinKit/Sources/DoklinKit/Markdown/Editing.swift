@@ -106,12 +106,6 @@ public enum MarkdownEditing {
         }
         return nil
     }
-
-    /// What a new note starts as: its name as a heading, the way the Mac app
-    /// titles one.
-    public static func newNote(named name: String) -> String {
-        "# \(name)\n\n"
-    }
 }
 
 /// Where a link written in a note leads — the Mac app's rule (src/docLinks.ts)

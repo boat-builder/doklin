@@ -42,12 +42,12 @@ struct FolderView: View {
                 if mayChange, model.canHoldNotes {
                     Menu {
                         Button {
-                            acting.create(.note, in: model.dir)
+                            acting.newNote(in: model.dir)
                         } label: {
                             Label("New note", systemImage: "square.and.pencil")
                         }
                         Button {
-                            acting.create(.folder, in: model.dir)
+                            acting.newFolder(in: model.dir)
                         } label: {
                             Label("New folder", systemImage: "folder.badge.plus")
                         }

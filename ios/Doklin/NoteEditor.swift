@@ -45,6 +45,8 @@ final class EditorPage: NSObject {
         /// Something to tell the person about what they picked.
         case notice(String)
         case failed(String)
+        /// A title to make the note's name; `left`: the title was left that way.
+        case title(String, left: Bool)
     }
 
     /// Make the web view and load the editor, ahead of the first Edit.
@@ -101,6 +103,8 @@ final class EditorPage: NSObject {
             if let text = message["message"] as? String { heard?(.notice(text)) }
         case "failed":
             heard?(.failed(message["message"] as? String ?? "The editor could not open this note."))
+        case "title":
+            if let title = message["title"] as? String { heard?(.title(title, left: message["left"] as? Bool ?? false)) }
         case "selection":
             marks = Set(message["marks"] as? [String] ?? [])
             block = message["block"] as? String ?? "text"
@@ -116,12 +120,12 @@ final class EditorPage: NSObject {
     }
 
     /// Hand the editor a note, as the file has it, with the caret at the
-    /// start of its top-level block `block` (whose text starts `prefix`).
-    /// `path` is where it is in the workspace, for its links, and
-    /// `documents` what they can lead to.
+    /// start of its top-level block `block` (whose text starts `prefix`) —
+    /// or, `naming`, in its title, which is `name`. `path` is where it is in
+    /// the workspace, for its links, and `documents` what they can lead to.
     func open(
-        _ markdown: String, meta: String?, path: String, workspace: String, documents: [WorkspaceDocument], recent: [String],
-        files: WorkspaceFiles, block: Int?, prefix: String?
+        _ markdown: String, meta: String?, path: String, name: String, workspace: String, documents: [WorkspaceDocument],
+        recent: [String], files: WorkspaceFiles, block: Int?, prefix: String?, naming: Bool
     ) async {
         await whenReady()
         self.files = files
@@ -133,13 +137,23 @@ final class EditorPage: NSObject {
             "base": base,
             "meta": meta.map { $0 as Any } ?? nothing,
             "note": path,
+            "name": name,
             "documents": documents.map(Self.json),
             "recent": recent,
             "workspace": workspace,
             "block": block.map { $0 as Any } ?? nothing,
             "prefix": prefix.map { $0 as Any } ?? nothing,
+            "naming": naming,
         ]
         _ = await run("await window.doklin.load(input)", ["input": input])
+    }
+
+    /// What a title came to: the note's name and where it is now, and why
+    /// `title` could not be its name (nil when it is).
+    func named(_ name: String, note: String, title: String, problem: String?) {
+        let nothing: Any = NSNull()
+        let answer: [String: Any] = ["name": name, "note": note, "title": title, "problem": problem.map { $0 as Any } ?? nothing]
+        Task { _ = await run("window.doklin.named(answer)", ["answer": answer]) }
     }
 
     /// The workspace's documents changed: the note's links follow.
@@ -172,7 +186,13 @@ final class EditorPage: NSObject {
 
     /// Put the keyboard away.
     func blur() {
-        Task { _ = await run("window.doklin.blur()") }
+        Task { await blurred() }
+    }
+
+    /// Put the keyboard away, and hear what leaving the field said: a title
+    /// left is handed over as it goes.
+    func blurred() async {
+        _ = await run("window.doklin.blur()")
     }
 
     /// Run `body` in the page, as an async function of `arguments`; its
@@ -365,6 +385,8 @@ final class NoteEditing {
     var takingOver = false
     var failure: String?
     @ObservationIgnored private var pending: Task<Void, Never>?
+    /// The renames a title asked for, one after another.
+    @ObservationIgnored private var renaming: Task<Void, Never>?
 
     init(model: DocumentModel) {
         self.model = model
@@ -379,16 +401,18 @@ final class NoteEditing {
 
     var lease: LeaseHolder? { model.lease }
 
-    /// Open the note in the editor, with the caret at top-level block `block`.
-    func start(at block: Int?, prefix: String?) async {
+    /// Open the note in the editor, with the caret at top-level block
+    /// `block` — or, `naming`, in its title.
+    func start(at block: Int?, prefix: String?, naming: Bool = false) async {
         let page = EditorPage.shared
         page.heard = { [weak self] said in self?.hear(said) }
         await model.editing(true)
         let meta = try? model.workspace.files.text(DocLinks.metaFile(of: model.path))
         let workspace = model.workspace
         await page.open(
-            saved, meta: meta, path: model.path, workspace: workspace.name, documents: workspace.documents.documents,
-            recent: workspace.recent?.files.map(\.path) ?? [], files: workspace.files, block: block, prefix: prefix
+            saved, meta: meta, path: model.path, name: model.title, workspace: workspace.name,
+            documents: workspace.documents.documents, recent: workspace.recent?.files.map(\.path) ?? [], files: workspace.files,
+            block: block, prefix: prefix, naming: naming
         )
         page.editable(lease == nil && !changedElsewhere)
     }
@@ -425,6 +449,31 @@ final class NoteEditing {
             model.problem = message
         case .failed(let message):
             phase = .failed(message)
+        case .title(let title, let left):
+            rename(to: title, left: left)
+        }
+    }
+
+    /// Make `title` the note's name, after any rename asked for before it.
+    /// What was typed into the note goes into the file first. Why it can't
+    /// be is said under the title — or, once the title was left, here, as
+    /// the title goes back to the name.
+    private func rename(to title: String, left: Bool) {
+        let before = renaming
+        renaming = Task {
+            await before?.value
+            var problem: String?
+            do {
+                pending?.cancel()
+                await save()
+                try await model.rename(to: title)
+                // Other devices see the note edited under its new name.
+                await model.editing(true)
+            } catch {
+                problem = (error as? DoklinError)?.message ?? error.localizedDescription
+            }
+            if left, let problem { model.problem = problem }
+            EditorPage.shared.named(model.title, note: model.path, title: title, problem: problem)
         }
     }
 
@@ -517,6 +566,9 @@ final class NoteEditing {
     /// Done: once what was typed is in the file — never over typing that is
     /// not, which the banner or the alert explains. True when it is over.
     func finish() async -> Bool {
+        // A title being left as Done is tapped is the note's name first.
+        await EditorPage.shared.blurred()
+        await renaming?.value
         pending?.cancel()
         guard await save() else { return false }
         EditorPage.shared.blur()
@@ -529,6 +581,8 @@ final class NoteEditing {
     /// Leaving without Done (the app goes to the background, the screen
     /// closes): what was typed is written.
     func leave() async {
+        await EditorPage.shared.blurred()
+        await renaming?.value
         pending?.cancel()
         await save()
         await model.editing(false)

@@ -250,7 +250,7 @@ public struct WorkspaceFiles: Sendable {
     }
 
     /// Whether any file of a document called `stem` is already in `dir`.
-    private func stemTaken(_ stem: String, in dir: String) -> Bool {
+    func stemTaken(_ stem: String, in dir: String) -> Bool {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: absolute(dir))) ?? []
         return names.contains { name in
             let kind = FileKind.of(name)
@@ -258,15 +258,12 @@ public struct WorkspaceFiles: Sendable {
         }
     }
 
-    /// Make a note in `dir` and answer its path. A name already taken is
-    /// refused, never written over.
-    public func createNote(in dir: String, named name: String) throws -> String {
-        if let problem = Self.nameProblem(name) { throw DoklinError(problem) }
-        var title = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if FileKind.of(title) == .markdown { title = DocLinks.stem(of: title) }
-        if stemTaken(title, in: dir) { throw DoklinError("A note named “\(title)” is already here.") }
-        let path = join(dir, title + ".md")
-        try write(path, Data(MarkdownEditing.newNote(named: title).utf8))
+    /// Make a note in `dir`, with nothing in it, and answer its path. It is
+    /// "Untitled" until it is named, by its title (`DocTitle`).
+    public func createNote(in dir: String) throws -> String {
+        let name = DocTitle.firstFree { stemTaken($0, in: dir) }
+        let path = join(dir, name + ".md")
+        try write(path, Data())
         return path
     }
 

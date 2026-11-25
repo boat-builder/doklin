@@ -75,7 +75,7 @@ struct WorkspaceView: View {
     private func close(_ left: FolderLeft) {
         shell.close { route in
             switch route {
-            case .folder(let dir), .document(let dir), .match(let dir, _, _):
+            case .folder(let dir), .document(let dir), .made(let dir), .match(let dir, _, _):
                 return left.holds(dir)
             case .access(let id):
                 // Still listed when the engine says it left, or listed no more.
@@ -114,6 +114,8 @@ struct RouteView: View {
             FolderView(workspace: workspace, dir: dir, path: $path)
         case .document(let file):
             DocumentView(workspace: workspace, path: file, route: $path)
+        case .made(let file):
+            DocumentView(workspace: workspace, path: file, route: $path, naming: true)
         case .match(let file, let query, let line):
             DocumentView(workspace: workspace, path: file, route: $path, find: query, line: line)
         case .arriving:

@@ -2461,6 +2461,7 @@ await test("public: a note with an html rendition leads with it, framed and sand
   const md = await pub("/plan?v=md");
   assert.equal(md.status, 200);
   assert.ok(md.text.includes('<main class="doc">') && md.text.includes("Ship it by June."));
+  assert.equal(md.text.match(/<h1[ >]/g)?.length, 1, "a note that opens with its own heading keeps it, and gets no second one");
   assert.ok(md.text.includes('<a class="view-seg is-active" href="https://notes.example.com/plan?v=md">MD</a>'));
   assert.ok(!md.text.includes("<iframe"));
 
@@ -2505,6 +2506,7 @@ await test("public: a folder page lists every note under it; nested URLs render 
   const unheaded = await pub("/projects/Roadmap/Ship%20the%20boat");
   assert.equal(unheaded.status, 200);
   assert.ok(unheaded.text.includes("<title>Ship the boat</title>"), "a note without a heading is named after its file");
+  assert.ok(unheaded.text.includes('<main class="doc">\n<h1>Ship the boat</h1>\n'), "and its name is drawn above it, as the app draws it");
   assert.ok(unheaded.text.includes("The hull is done."));
 
   const rendition = await rawGet("/projects/plan.html");
@@ -2532,7 +2534,7 @@ await test("public: a note's frontmatter block is left off its page; a note that
   assert.equal(ship.status, 200);
   for (const words of ["status:", "In progress", "owner:", "tags:"]) assert.ok(!ship.text.includes(words), `${words} stays in the file`);
   assert.ok(!ship.text.includes("<hr"), "the block never reaches marked");
-  assert.ok(between(ship.text, '<main class="doc">\n<p>The hull is done.</p>', "</main>"), "the document is the body alone");
+  assert.ok(between(ship.text, '<main class="doc">\n<h1>Ship the boat</h1>\n<p>The hull is done.</p>', "</main>"), "the document is its name and the body alone");
   assert.ok(ship.text.includes('<meta name="description" content="The hull is done.">'), "and so is the description");
   const launch = await pub("/projects/Roadmap/Launch");
   assert.ok(between(launch.text, "<hr>", "<p>We launched.</p>"), "a rule with no closing fence is the note's own");
