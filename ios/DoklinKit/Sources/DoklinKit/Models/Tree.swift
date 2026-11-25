@@ -69,7 +69,10 @@ public final class TreeModel {
 
     @ObservationIgnored private var open: Set<String>
     @ObservationIgnored private let defaults: UserDefaults
-    @ObservationIgnored private let key: String
+    /// Where `open` is kept: by the workspace's id, or by its folder while
+    /// the engine has not said the id yet — as just after joining, when the
+    /// tree is the first screen shown (`settle`).
+    @ObservationIgnored private var key: String
 
     /// The shared section's folder, at the top of the workspace, where
     /// everything new lands (`LIBRARY_DIR`, engine/src/cloud/space.rs;
@@ -89,11 +92,23 @@ public final class TreeModel {
     public init(workspace: Workspace, defaults: UserDefaults = .standard) {
         self.workspace = workspace
         self.defaults = defaults
-        key = Self.key(workspace.status?.wsId ?? workspace.root)
+        key = Self.key(of: workspace)
         open = Set(defaults.stringArray(forKey: key) ?? [])
     }
 
     private static func key(_ wsId: String) -> String { "tree-open-\(wsId)" }
+    private static func key(of workspace: Workspace) -> String { key(workspace.status?.wsId ?? workspace.root) }
+
+    /// The id came after the tree was made: what was kept by the folder
+    /// moves to it, so that leaving the workspace forgets it.
+    private func settle() {
+        let now = Self.key(of: workspace)
+        guard now != key else { return }
+        open.formUnion(defaults.stringArray(forKey: now) ?? [])
+        defaults.removeObject(forKey: key)
+        key = now
+        defaults.set(Array(open).sorted(), forKey: key)
+    }
 
     /// A workspace left this device: what was open in its tree goes too.
     public static func forget(_ wsId: String, in defaults: UserDefaults) {
@@ -112,6 +127,7 @@ public final class TreeModel {
         } else {
             open.insert(lower)
         }
+        settle()
         defaults.set(Array(open).sorted(), forKey: key)
         load()
     }
@@ -123,12 +139,14 @@ public final class TreeModel {
             open.insert(folder.lowercased())
             folder = DocLinks.directory(of: folder)
         }
+        settle()
         defaults.set(Array(open).sorted(), forKey: key)
         load()
     }
 
     /// Read the tree again.
     public func load() {
+        settle()
         let files = workspace.files
         let top: [FolderEntry]
         do {
