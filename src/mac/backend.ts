@@ -293,8 +293,8 @@ const documents: Documents = {
 
   // What the search lists is capped far past what a screen holds
   // (`MAX_SEARCH_FILES`, lib.rs), and it does not count what it left out.
-  search: async (root, query, caseSensitive) => ({
-    files: await invoke<FileMatches[]>("search_workspace", { root, query, caseSensitive }),
+  search: async (root, query, caseSensitive, tags) => ({
+    files: await invoke<FileMatches[]>("search_workspace", { root, query, caseSensitive, tags }),
     more: 0,
   }),
   searchByCase: true,
@@ -469,6 +469,10 @@ const windows: Windows = {
       } finally {
         void invoke("quit_flush_ack");
       }
+    }),
+  onAddTag: (cb) =>
+    on<string>("menu-add-tag", (label) => {
+      if (label === getCurrentWindow().label) cb();
     }),
   startDragging: () => void getCurrentWindow().startDragging(),
   toggleMaximize: () => void getCurrentWindow().toggleMaximize(),

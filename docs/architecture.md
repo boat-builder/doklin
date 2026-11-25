@@ -237,7 +237,10 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   placeholder. *New Document* makes the first free one and focuses its
   title: a document is never named in the tree.
 - **The title and the html view are siblings in one list**: they never share
-  a React key, or a note opened after an html view shows two titles.
+  a React key, or a note opened after an html view shows two titles. The tags
+  row under the title has a key of its own too (`tags:<tab id>`).
+- A note's tags sit right below its title (*Tags*, below). Keys moving between
+  the title and the body skip them.
 - ↑ and Backspace from the body's first line go to the title through a plugin
   registered last (`src/leaveTop.ts`), so the menus and the editor's own
   keymaps take them first.
@@ -329,8 +332,56 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   last read, byte for byte. An external change whose body equals
   `lastDiskMdRef` touched only the block: adopt it and the snapshot, leave the
   editor and its caret.
-- Shown read-only above the note. Nothing in the app parses or writes inside
-  it; the worker leaves it off published pages with the same splitter.
+- The app reads and writes the block's tag lines and nothing else in it
+  (*Tags*, below). The rest shows as the file has it, in a closed
+  *Frontmatter* disclosure under the tags. The worker leaves the block off
+  published pages with the same splitter.
+- A save of the open note writes when the body or the block differs from the
+  disk's (`lastDiskMdRef`, `diskHeadRef`): a tag change is a write with the
+  body unchanged.
+
+## Tags
+
+- **A note's tag is an unindented `key: value` line of its frontmatter**,
+  and the workspace's tag list says which keys are tags and which values each
+  takes. The rules (what a pair is, how a line is written and quoted, the
+  list's format, names and values, the search's tokens) are `src/tags.ts`'s,
+  ported for the iPhone (`Markdown/Tags.swift`) and read in Rust for the
+  Mac's search (`src-tauri/src/tags.rs`), all held to
+  `verify-harness/tags-fixture.json`: **change all three**.
+- **A tag's line is the first line keyed by its name**, whatever the case. A
+  later line for the same name is plain frontmatter. A line that isn't a pair
+  (a list, a map, an empty value, a line with an indented run) gives the note
+  no value, and setting the tag replaces it.
+- **The list is a note**: `Tags.md` in the sidebar's first list (Library, when
+  connected), found whatever its case. Its block holds one flow list per tag,
+  in menu order; its body says what the values mean. Lines that don't parse
+  are skipped and stay. It is read again whenever the tree is, and is the
+  open note's own block while it is open (shown as the list: `TagListView`).
+- **The writers hold notes to the list; readers never do.** A value the list
+  doesn't have stays the note's, shown marked. Only the chip's menu sets a
+  tag here.
+- **A write touches the tag's line alone**: replaced in place, added before
+  the closing fence, or a new block at the very top; cleared, the line goes,
+  and a block left empty goes with it unless the body would then read as a
+  block. The block's own line endings are kept.
+- **A tag change on the open note** saves through the save path, after any
+  write in flight. With nothing typed it is the new block over the body as
+  the disk has it, never the editor's rendering of it (Milkdown rewrites a
+  `-` list as `*`).
+- **A tag change on any other note** (a rename) reads it and writes over the
+  rev it read, once more on a conflict. A note in the other pane takes the
+  new block and rev: a write of the window's own is never reported back.
+- **A rename writes the list twice**: the new name or value beside the old,
+  then the notes, then the old leaves. Notes are found with the search
+  (`name:value`, or a name with any value), asked again until it finds none
+  it hasn't tried. Removing a value or a tag rewrites nothing.
+- **Search splits its tokens off** (`searchQuery`) and sends them beside the
+  text, spelled as the list spells them; the backends never read the list.
+  With tokens and no text, every note that has the tags is a result, with no
+  lines.
+- **No tags** on untitled notes, html-only documents, or in the html view.
+  Read-only where the note is: a leased note, the other pane, a version.
 
 ## Editor traps
 

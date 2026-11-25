@@ -2,9 +2,10 @@
 //
 // The editor never sees it. Milkdown would read `---` / `title: x` / `---` as
 // a rule and a heading, and write that back. So the block is split off on
-// load, shown as it is above the note, and put back verbatim on save. Doklin
-// never parses or writes what is inside — agents and other tools own it. The
-// cloud worker splits it the same way to leave it off a published page.
+// load and put back verbatim on save. Inside it Doklin reads and writes a
+// note's tag lines alone (src/tags.ts); the rest belongs to agents and other
+// tools, and is shown as it is. The cloud worker splits it the same way to
+// leave it off a published page.
 //
 // A file has a block only when its first line is `---` (trailing whitespace
 // tolerated) and a later line is `---`: the rule other tools apply, so a note

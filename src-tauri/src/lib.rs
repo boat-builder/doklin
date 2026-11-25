@@ -30,6 +30,8 @@ mod untitled;
 mod external_open;
 // A link to a page (engine/src/cloud/link.rs), followed on this Mac.
 mod links;
+// A note's tags, read for the search (src/tags.ts has the rules).
+mod tags;
 #[cfg(target_os = "macos")]
 mod cli_install;
 
@@ -157,6 +159,9 @@ const QUIT_MENU_ID: &str = "doklin-quit-flush";
 /// `build_app_menu`.
 #[cfg(target_os = "macos")]
 const CLOSE_WINDOW_MENU_ID: &str = "doklin-close-window";
+/// The Edit menu's *Add Tag…*: the focused window opens its note's tag menu.
+#[cfg(target_os = "macos")]
+const ADD_TAG_MENU_ID: &str = "doklin-add-tag";
 /// How long a quit waits for window acks before exiting anyway — the escape
 /// hatch if a webview is hung, mid-load, or otherwise never answers.
 #[cfg(target_os = "macos")]
@@ -1250,18 +1255,22 @@ fn lines_matching(
 /// its name. Documents named for the query come first. Case-insensitive
 /// unless `case_sensitive`. Results are bounded by the MAX_* caps so a broad
 /// query stays responsive.
+///
+/// `tags` narrows it to the notes that have every one (tags.rs). With tags
+/// and no query, those notes are the results, with no lines.
 #[tauri::command]
 fn search_workspace(
     root: String,
     query: String,
     case_sensitive: bool,
+    tags: Vec<tags::TagFilter>,
 ) -> Result<Vec<FileMatches>, String> {
     let root_path = PathBuf::from(&root);
     if !root_path.is_dir() {
         return Err(format!("not a directory: {}", root));
     }
     let needle_raw = query.trim();
-    if needle_raw.is_empty() {
+    if needle_raw.is_empty() && tags.is_empty() {
         return Ok(Vec::new());
     }
     let needle = if case_sensitive {
@@ -1270,7 +1279,7 @@ fn search_workspace(
         needle_raw.to_lowercase()
     };
     let is_named = |file: &Path| {
-        file.file_stem().is_some_and(|stem| {
+        !needle.is_empty() && file.file_stem().is_some_and(|stem| {
             let stem = stem.to_string_lossy();
             if case_sensitive {
                 stem.contains(&needle)
@@ -1284,6 +1293,13 @@ fn search_workspace(
     let mut budget = MAX_TREE_ENTRIES;
     collect_documents(&root_path, 0, &mut budget, &mut files);
     files.sort();
+    // Only a markdown note has a frontmatter block, and so tags.
+    if !tags.is_empty() {
+        files.retain(|f| {
+            is_markdown(f)
+                && std::fs::read_to_string(f).is_ok_and(|text| tags::matches_tags(&text, &tags))
+        });
+    }
     let mut docs: Vec<(PathBuf, bool)> = files
         .into_iter()
         .map(|f| {
@@ -1303,12 +1319,12 @@ fn search_workspace(
         if total >= MAX_TOTAL_MATCHES && !named {
             break;
         }
-        let matches = if is_markdown(&file) && total < MAX_TOTAL_MATCHES {
+        let matches = if !needle.is_empty() && is_markdown(&file) && total < MAX_TOTAL_MATCHES {
             lines_matching(&file, &needle, case_sensitive, &mut total)
         } else {
             Vec::new()
         };
-        if named || !matches.is_empty() {
+        if named || !matches.is_empty() || needle.is_empty() {
             results.push(FileMatches {
                 path: file.to_string_lossy().to_string(),
                 name: file
@@ -1485,6 +1501,17 @@ fn build_app_menu<R: tauri::Runtime>(handle: &AppHandle<R>) -> tauri::Result<Men
                 added_close = true;
             }
         }
+    }
+
+    // Edit → Add Tag…, after what the default menu has there.
+    for kind in menu.items()? {
+        let Some(submenu) = kind.as_submenu() else { continue };
+        if submenu.text().ok().as_deref() != Some("Edit") {
+            continue;
+        }
+        submenu.append(&PredefinedMenuItem::separator(handle)?)?;
+        submenu.append(&MenuItem::with_id(handle, ADD_TAG_MENU_ID, "Add Tag…", true, None::<&str>)?)?;
+        break;
     }
 
     Ok(menu)
@@ -1711,6 +1738,15 @@ pub fn run() {
                     .find(|w| w.is_focused().unwrap_or(false))
                 {
                     let _ = win.close();
+                }
+            } else if event.id() == ADD_TAG_MENU_ID {
+                // Every window hears it; the one it names acts.
+                if let Some(win) = app
+                    .webview_windows()
+                    .into_values()
+                    .find(|w| w.is_focused().unwrap_or(false))
+                {
+                    let _ = app.emit("menu-add-tag", win.label().to_string());
                 }
             }
         });
@@ -2026,7 +2062,20 @@ mod search_tests {
     /// What a search found, in its order: path under the root, whether by
     /// name, and the lines.
     fn found(root: &Path, query: &str, case_sensitive: bool) -> Vec<(String, bool, Vec<usize>)> {
-        search_workspace(root.to_string_lossy().to_string(), query.to_string(), case_sensitive)
+        found_tagged(root, query, case_sensitive, &[])
+    }
+
+    fn found_tagged(
+        root: &Path,
+        query: &str,
+        case_sensitive: bool,
+        tags: &[(&str, Option<&str>)],
+    ) -> Vec<(String, bool, Vec<usize>)> {
+        let tags = tags
+            .iter()
+            .map(|(name, value)| tags::TagFilter { name: name.to_string(), value: value.map(str::to_string) })
+            .collect();
+        search_workspace(root.to_string_lossy().to_string(), query.to_string(), case_sensitive, tags)
             .unwrap()
             .into_iter()
             .map(|f| {
@@ -2073,6 +2122,48 @@ mod search_tests {
         assert_eq!(found(&dir, "twin", false), own(&[("twin.md", true, &[])]));
         assert!(found(&dir, ".md", false).is_empty());
         assert!(found(&dir, ".html", false).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Tag tokens narrow a search to the notes that have every one; with no
+    /// words, those notes are the results, by name and with no lines.
+    #[test]
+    fn tags_narrow_a_search() {
+        let dir = std::env::temp_dir().join(format!("doklin-search-tags-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, text) in [
+            ("a.md", "---\nstatus: Doing\npriority: p1\n---\nThe launch plan.\n"),
+            ("b.md", "---\nStatus: doing\n---\nLaunch notes.\n"),
+            ("c.md", "---\nstatus: Done\n---\nThe launch is done.\n"),
+            ("d.md", "No block. status: Doing\n"),
+            ("doing.html", "<p>status: Doing</p>\n"),
+        ] {
+            std::fs::write(dir.join(name), text).unwrap();
+        }
+        let own = |rows: &[(&str, bool, &[usize])]| -> Vec<(String, bool, Vec<usize>)> {
+            rows.iter().map(|(p, n, l)| (p.to_string(), *n, l.to_vec())).collect()
+        };
+
+        assert_eq!(
+            found_tagged(&dir, "", false, &[("status", Some("Doing"))]),
+            own(&[("a.md", false, &[]), ("b.md", false, &[])])
+        );
+        assert_eq!(
+            found_tagged(&dir, "plan", false, &[("status", Some("Doing"))]),
+            own(&[("a.md", false, &[5])])
+        );
+        assert_eq!(
+            found_tagged(&dir, "", false, &[("status", Some("doing")), ("priority", Some("P1"))]),
+            own(&[("a.md", false, &[])])
+        );
+        assert_eq!(
+            found_tagged(&dir, "", false, &[("status", None)]),
+            own(&[("a.md", false, &[]), ("b.md", false, &[]), ("c.md", false, &[])])
+        );
+        assert!(found_tagged(&dir, "", false, &[("owner", None)]).is_empty());
+        assert!(found_tagged(&dir, "", false, &[]).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
