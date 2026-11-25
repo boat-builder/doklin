@@ -51,10 +51,10 @@ type PendingCreate = { parentDir: string };
 type PendingRename = { path: string; kind: "file" | "dir"; openable?: boolean };
 
 // A context-menu invocation: where it was opened and what it targets. "root"
-// is a right-click on empty sidebar space (creation lands in the first list's
-// folder); "section" is a connected workspace's heading or the empty space
-// under it, whose folder `path` names. `space` marks a restricted folder's
-// own row.
+// is a right-click on the empty space of a folder that is not connected (its
+// one list); "section" is one of a connected workspace's lists — its heading
+// or empty space in or under it (`sectionAt`) — whose folder `path` names.
+// `space` marks a restricted folder's own row.
 type MenuTarget = {
   path: string;
   kind: "file" | "dir" | "root" | "section";
@@ -697,9 +697,22 @@ export default function Sidebar({
     if (g) g.style.transform = `translate(${x + 14}px, ${y + 16}px)`;
   }, []);
 
+  // The list a point in the tree is in: the last whose top is above it. So
+  // the empty space beside a list's rows, before the next heading's line and
+  // below the last list is that list's — where it looks to be.
+  const sectionAt = useCallback((y: number): HTMLElement | null => {
+    const lists = bodyRef.current?.querySelectorAll<HTMLElement>(":scope > .tree-section") ?? [];
+    let at: HTMLElement | null = lists[0] ?? null;
+    for (const el of lists) {
+      if (el.getBoundingClientRect().top > y) break;
+      at = el;
+    }
+    return at;
+  }, []);
+
   // Hit-test the pointer against the tree: a folder row targets that folder, a
-  // file row targets its parent, empty tree space targets the first list's
-  // folder (Library, in a connected workspace).
+  // file row targets its parent, empty tree space targets the folder of the
+  // list it is in.
   const updateDropTarget = useCallback(
     (x: number, y: number) => {
       const drag = dragRef.current;
@@ -717,8 +730,7 @@ export default function Sidebar({
           toDir = row.dataset.treeParent ?? null;
         }
       } else if (el && bodyRef.current?.contains(el)) {
-        // Empty space under a heading is that section's own folder.
-        toDir = el.closest<HTMLElement>("[data-section-dir]")?.dataset.sectionDir ?? libraryDir;
+        toDir = sectionAt(y)?.dataset.sectionDir ?? libraryDir;
       }
       const valid = canDrop(drag.entries, toDir);
       setDropState(valid ? toDir : null);
@@ -742,7 +754,7 @@ export default function Sidebar({
         };
       }
     },
-    [libraryDir, canDrop, setDropState, openFolders],
+    [libraryDir, sectionAt, canDrop, setDropState, openFolders],
   );
 
   // Dragging near the tree's top/bottom edge scrolls it (rAF loop, so the
@@ -1024,9 +1036,10 @@ export default function Sidebar({
   );
 
   // Where "New Document" / "New Folder" (and Paste) land for a given target:
-  // inside a folder, next to a file, in the first list's folder for
-  // empty-space actions — and in Library for anything that would land at a
-  // connected workspace's top, where it would be in no section.
+  // inside a folder, next to a file, in a list's folder for its empty space,
+  // in the first list's with nothing selected — and in Library for anything
+  // that would land at a connected workspace's top, where it would be in no
+  // section.
   const createDirFor = useCallback(
     (target: { path: string; kind: "file" | "dir" | "root" | "section" } | null) => {
       const dir =
@@ -1034,6 +1047,16 @@ export default function Sidebar({
       return dir === root ? libraryDir : dir;
     },
     [root, libraryDir],
+  );
+  // Where a list heading's buttons make something: where the selection says
+  // when it is in that list, else at the list's top — a heading never makes
+  // into another list.
+  const createDirIn = useCallback(
+    (listDir: string) => {
+      const dir = createDirFor(primarySelection);
+      return dir === listDir || dir.startsWith(`${listDir}/`) ? dir : listDir;
+    },
+    [createDirFor, primarySelection],
   );
 
   // Commit the new folder's name. Returns an error message to show under the
@@ -1451,32 +1474,30 @@ export default function Sidebar({
           if (e.target === e.currentTarget) onSelect([]);
         }}
         onContextMenu={(e) => {
-          // Right-click on empty space targets the workspace's folder: what
-          // it makes lands in the first list's (`createDirFor`). Row-level
-          // handlers stopPropagation, so reaching here means no row was hit.
+          // A right-click off the rows (theirs stopPropagation) is for the
+          // list it is in (`sectionAt`) — a folder that is not connected is
+          // one list. Under Restricted the one thing made is a folder with
+          // people; in no section nothing is made, so there is no menu.
           e.preventDefault();
           onSelect([]);
-          setCtxMenu({ x: e.clientX, y: e.clientY, target: { path: root, kind: "root" } });
+          const list = sectioned ? sectionAt(e.clientY)?.dataset.section : null;
+          const target: MenuTarget | null = !sectioned
+            ? { path: root, kind: "root" }
+            : list === "library"
+              ? { path: libraryDir, kind: "section", section: "library" }
+              : list === "restricted" && onNewRestricted
+                ? { path: restrictedDir, kind: "section", section: "restricted" }
+                : list === "private" && hasPrivate
+                  ? { path: privateDir, kind: "section", section: "private" }
+                  : null;
+          setCtxMenu(target && { x: e.clientX, y: e.clientY, target });
         }}
       >
         <div
           className={`tree-section ${sectioned && dropDir === libraryDir ? "is-drop-section" : ""}`}
+          data-section="library"
           data-section-dir={libraryDir}
           data-testid={sectioned ? "section-library" : "section-files"}
-          onContextMenu={
-            sectioned
-              ? (e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onSelect([]);
-                  setCtxMenu({
-                    x: e.clientX,
-                    y: e.clientY,
-                    target: { path: libraryDir, kind: "section", section: "library" },
-                  });
-                }
-              : undefined
-          }
         >
           {/* A folder tree is one list, and its heading only names it; in
               sections, each heading folds its list away. */}
@@ -1490,7 +1511,7 @@ export default function Sidebar({
           >
             <button
               className="sidebar-section-btn"
-              onClick={() => startNewFolder(createDirFor(primarySelection))}
+              onClick={() => startNewFolder(createDirIn(libraryDir))}
               title="New folder"
               aria-label="New folder"
             >
@@ -1530,19 +1551,9 @@ export default function Sidebar({
           <>
             <div
               className={`tree-section ${dropDir === restrictedDir ? "is-drop-section" : ""}`}
+              data-section="restricted"
               data-section-dir={restrictedDir}
               data-testid="section-restricted"
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                onSelect([]);
-                if (!onNewRestricted) return;
-                setCtxMenu({
-                  x: e.clientX,
-                  y: e.clientY,
-                  target: { path: restrictedDir, kind: "section", section: "restricted" },
-                });
-              }}
             >
               <SectionHead
                 icon={<RestrictedIcon />}
@@ -1578,19 +1589,9 @@ export default function Sidebar({
             </div>
             <div
               className={`tree-section ${hasPrivate && dropDir === privateDir ? "is-drop-section" : ""}`}
+              data-section="private"
               data-section-dir={hasPrivate ? privateDir : ""}
               data-testid="section-private"
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                onSelect([]);
-                if (!hasPrivate) return;
-                setCtxMenu({
-                  x: e.clientX,
-                  y: e.clientY,
-                  target: { path: privateDir, kind: "section", section: "private" },
-                });
-              }}
             >
               <SectionHead
                 icon={<PrivateIcon />}
@@ -1601,15 +1602,26 @@ export default function Sidebar({
                 testid="private"
               >
                 {hasPrivate && (
-                  <button
-                    className="sidebar-section-btn"
-                    data-testid="new-private"
-                    onClick={() => void newDocument(privateDir)}
-                    title="New private note"
-                    aria-label="New private note"
-                  >
-                    <PlusIcon />
-                  </button>
+                  <>
+                    <button
+                      className="sidebar-section-btn"
+                      data-testid="new-private-folder"
+                      onClick={() => startNewFolder(createDirIn(privateDir))}
+                      title="New private folder"
+                      aria-label="New private folder"
+                    >
+                      <NewFolderIcon />
+                    </button>
+                    <button
+                      className="sidebar-section-btn"
+                      data-testid="new-private"
+                      onClick={() => void newDocument(createDirIn(privateDir))}
+                      title="New private note"
+                      aria-label="New private note"
+                    >
+                      <PlusIcon />
+                    </button>
+                  </>
                 )}
               </SectionHead>
               {!folded.has("private") && (
@@ -1631,7 +1643,7 @@ export default function Sidebar({
             {/* What Finder or an agent put at the workspace's top: in no
                 section, so it stays on this Mac. Nothing is dropped here. */}
             {layout.strays.length > 0 && (
-              <div className="tree-section" data-section-dir="" data-testid="section-strays">
+              <div className="tree-section" data-section="strays" data-section-dir="" data-testid="section-strays">
                 <SectionHead icon={<NowhereIcon />} label="In no section" folded={false} count={0} testid="strays" />
                 <ul className="tree" role="tree">
                   {layout.strays.map((child) => renderItem(child, root, STRAY_LINE))}

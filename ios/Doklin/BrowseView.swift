@@ -173,6 +173,25 @@ struct BrowseView: View {
             case .personal:
                 Image(systemName: "lock")
                 Text("Private")
+                if workspace.may("work") {
+                    Spacer()
+                    Menu {
+                        Button {
+                            acting.newNote(in: group.folder)
+                        } label: {
+                            Label("New note", systemImage: "square.and.pencil")
+                        }
+                        Button {
+                            acting.newFolder(in: group.folder)
+                        } label: {
+                            Label("New folder", systemImage: "folder.badge.plus")
+                        }
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("New in Private")
+                    .accessibilityIdentifier("new-private")
+                }
             case .nowhere:
                 Image(systemName: "icloud.slash")
                 Text("In no section")
