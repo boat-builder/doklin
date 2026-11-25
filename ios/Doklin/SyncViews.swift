@@ -7,12 +7,12 @@ import SwiftUI
 @Observable
 final class Shell {
     enum Tab: Hashable {
-        case home, browse, search
+        case browse, recent, search
     }
 
-    var tab: Tab = .home
-    var home: [Route] = []
+    var tab: Tab = .browse
     var browse: [Route] = []
+    var recent: [Route] = []
     var search: [Route] = []
     /// The workspace switcher.
     var switching = false
@@ -33,8 +33,8 @@ final class Shell {
     /// Push `route` over whatever the showing tab has.
     func open(_ route: Route) {
         switch tab {
-        case .home: home.append(route)
         case .browse: browse.append(route)
+        case .recent: recent.append(route)
         case .search: search.append(route)
         }
     }
@@ -48,8 +48,8 @@ final class Shell {
 
     /// Close every screen that `gone` says goes.
     func close(where gone: (Route) -> Bool) {
-        home.removeAll(where: gone)
         browse.removeAll(where: gone)
+        recent.removeAll(where: gone)
         search.removeAll(where: gone)
     }
 }
@@ -93,7 +93,7 @@ enum SyncWords {
     }
 
     /// Whether sync needs this person: a hold, a question, an error. The
-    /// rest is said quietly, under the workspace's name on Home.
+    /// rest is said quietly, under the workspace's name on Browse.
     static func needsYou(_ status: CloudStatus) -> Bool {
         if status.hold != nil { return true }
         switch status.phase {

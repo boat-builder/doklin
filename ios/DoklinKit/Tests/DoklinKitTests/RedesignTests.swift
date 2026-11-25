@@ -1,4 +1,4 @@
-// Home, what was read, the marks on a note, search and the tree: the parts
+// Recent, what was read, the marks on a note, search and the tree: the parts
 // of the screens that are not views, on folders of the tests' own — no
 // engine, no worker.
 

@@ -111,7 +111,7 @@ class UITestCase: XCTestCase {
         return true
     }
 
-    /// A tab, by its name: Home, Browse, Search. A document hides the tab
+    /// A tab, by its name: Browse, Recent, Search. A document hides the tab
     /// bar, so it is backed out of first.
     func tab(_ name: String) {
         let button = app.tabBars.buttons[name]
@@ -136,17 +136,17 @@ class UITestCase: XCTestCase {
         }
     }
 
-    /// Home, at its top: what changed.
-    func home() {
-        for _ in 0..<2 where !marked("workspace-menu").exists {
-            tab("Home")
-            backTo(marked("workspace-menu"))
+    /// Recent, at its top: what changed.
+    func recent() {
+        for _ in 0..<2 where !app.navigationBars["Recent changes"].exists {
+            tab("Recent")
+            backTo(app.navigationBars["Recent changes"])
         }
     }
 
-    /// The workspace's settings, through its name on Home.
+    /// The workspace's settings, through its name on Browse.
     func settings() {
-        home()
+        browse()
         // A tap the moment the app has launched can be lost: tap again when
         // the switcher did not open.
         for _ in 0..<3 where !marked("workspace-settings").exists {
@@ -248,8 +248,7 @@ class UITestCase: XCTestCase {
         }
         type(line, into: expect(marked("line"), "the line field"))
         marked("join").tap()
-        expect(marked("workspace-menu"), "Home, once joined", timeout: 60)
-        browse()
+        expect(marked("workspace-menu"), "Browse, once joined", timeout: 60)
         expect(marked("entry-Projects"), "the workspace, downloaded", timeout: 60)
         expect(app.staticTexts["Library"], "Library's heading over what everyone has")
     }

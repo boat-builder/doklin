@@ -62,7 +62,7 @@ public final class Workspaces {
     public private(set) var linkProblem: String?
     /// A followed link whose page is still on its way here.
     public private(set) var arrivingPage: Arriving?
-    /// What this person has read on this device (Home's dots).
+    /// What this person has read on this device (Recent's dots).
     public private(set) var seen: SeenStore?
     /// What a person calls this device in a sentence: `iPhone`, `iPad`
     /// (`EngineSetup.deviceKind`).
@@ -540,7 +540,7 @@ public final class Workspace: Identifiable {
         if index != documents { documents = index }
     }
 
-    /// Every document by when it last changed, newest first — Home's rows.
+    /// Every document by when it last changed, newest first — Recent's rows.
     public var recentItems: [RecentItem] {
         _ = reads
         guard let recent else { return [] }

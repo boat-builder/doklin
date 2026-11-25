@@ -1,8 +1,8 @@
 import DoklinKit
 import SwiftUI
 
-/// The Browse tab: the tree, with a document pushed over it — or, on an
-/// iPad's full width, the tree beside the document.
+/// The Browse tab, the first: the tree, with a document pushed over it — or,
+/// on an iPad's full width, the tree beside the document.
 struct BrowseTab: View {
     let workspace: Workspace
     @Binding var path: [Route]
@@ -41,7 +41,9 @@ struct BrowseTab: View {
 }
 
 /// The workspace as one tree: folders open in place, documents open over
-/// it, sections as the Mac's sidebar has them. What is open is kept.
+/// it, sections as the Mac's sidebar has them. What is open is kept. The
+/// workspace's name, top left, switches workspaces and leads to its
+/// settings; how sync stands is the quiet line under it.
 struct BrowseView: View {
     let workspace: Workspace
     @Binding var path: [Route]
@@ -64,6 +66,11 @@ struct BrowseView: View {
     var body: some View {
         ScrollViewReader { proxy in
             List {
+                Section {
+                    SyncQuietLine(workspace: workspace)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
                 ForEach(tree.groups) { group in
                     Section {
                         ForEach(group.rows) { row in
@@ -103,6 +110,9 @@ struct BrowseView: View {
         .searchable(text: filter, placement: .navigationBarDrawer(displayMode: .always), prompt: "Filter the tree")
         .textInputAutocapitalization(.never)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                WorkspaceMenuButton(workspace: workspace)
+            }
             if workspace.may("work") {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {

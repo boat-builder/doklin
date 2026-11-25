@@ -102,8 +102,49 @@ struct WorkspaceSwitcher: View {
 
     private func go(_ route: Route) {
         dismiss()
-        shell.tab = .home
-        shell.home.append(route)
+        shell.tab = .browse
+        shell.browse.append(route)
+    }
+}
+
+/// The workspace's name, top left of Browse: it opens the switcher.
+struct WorkspaceMenuButton: View {
+    let workspace: Workspace
+
+    @Environment(Shell.self) private var shell
+
+    var body: some View {
+        Button {
+            shell.switching = true
+        } label: {
+            HStack(spacing: 6) {
+                WorkspaceBadge(name: workspace.name, size: 24)
+                Text(workspace.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.text3)
+            }
+        }
+        .accessibilityLabel("\(workspace.name), workspaces and settings")
+        .accessibilityIdentifier("workspace-menu")
+    }
+}
+
+/// A workspace's first letter in a rounded square: how the switcher and
+/// its button mark one.
+struct WorkspaceBadge: View {
+    let name: String
+    let size: CGFloat
+
+    var body: some View {
+        Text(String(name.first.map { String($0).uppercased() } ?? "?"))
+            .font(.system(size: size * 0.5, weight: .bold))
+            .foregroundStyle(Theme.sheet)
+            .frame(width: size, height: size)
+            .background(Theme.accent, in: RoundedRectangle(cornerRadius: size * 0.28))
+            .accessibilityHidden(true)
     }
 }
 
