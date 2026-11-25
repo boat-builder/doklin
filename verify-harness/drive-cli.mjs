@@ -257,7 +257,7 @@ async function macWrites(files, { mtime = Date.now() } = {}) {
 
 const COMMANDS = [
   "login", "logout", "whoami", "ls", "info", "read", "search", "links", "comments", "comment", "reply",
-  "write", "edit", "mv", "rm", "publish", "unpublish", "published", "open",
+  "tags", "write", "edit", "tag", "mv", "rm", "publish", "unpublish", "published", "open",
 ];
 
 /** A machine: its own HOME and config directory, and so its own credentials file. */
@@ -388,16 +388,16 @@ await check("help: the overview lists every command; each topic and each command
     "the overview says only documents sync": /Doklin syncs markdown and html documents; any other file in\nthe folder stays on the device it is on\./.test(overview.out),
   };
   for (const name of COMMANDS) facts[`the overview lists ${name}`] = new RegExp(`^  ${name}\\b`, "m").test(overview.out);
-  for (const [topic, headline] of [["documents", "DOCUMENTS"], ["comments", "COMMENTS"], ["publishing", "PUBLISHING"], ["sections", "SECTIONS"], ["drawings", "DRAWINGS"], ["agent", "FOR AN AGENT"]]) {
+  for (const [topic, headline] of [["documents", "DOCUMENTS"], ["comments", "COMMENTS"], ["tags", "TAGS"], ["publishing", "PUBLISHING"], ["sections", "SECTIONS"], ["drawings", "DRAWINGS"], ["agent", "FOR AN AGENT"]]) {
     const r = await doklin(nobody, ["help", topic]);
     facts[`help ${topic}`] = r.code === 0 && r.out.startsWith(headline) && overview.out.includes(`doklin help ${topic}`);
   }
   for (const name of COMMANDS) {
     const own = await doklin(nobody, [name, "--help"]);
     facts[`${name} --help`] = own.code === 0 && own.out.startsWith(`doklin ${name}`) && own.err === "";
-    // `help comments` is the topic above — how comments work — and the one
-    // command of that name keeps its own page under --help.
-    if (name !== "comments") facts[`help ${name}`] = (await doklin(nobody, ["help", name])).out === own.out;
+    // `help comments` and `help tags` are the topics above — how comments and
+    // tags work — and the commands of those names keep their own pages under --help.
+    if (name !== "comments" && name !== "tags") facts[`help ${name}`] = (await doklin(nobody, ["help", name])).out === own.out;
   }
   facts["read -h"] = (await doklin(nobody, ["read", "-h"])).out.startsWith("doklin read <doc>");
   const documents = (await doklin(nobody, ["help", "documents"])).out;
@@ -1397,7 +1397,66 @@ await check("links: a link written through the CLI keeps its document when that 
 });
 
 /* ====================================================================== */
-/* 9 — what an agent may do                                               */
+/* 9 — tags                                                               */
+/* ====================================================================== */
+
+await check("tags: the list is Library/Tags; tag sets values from it and removes one, and a value it lacks is refused with the ones it has; ls and info show a document's tags; --where narrows ls and search, waiting for the index", async () => {
+  const LIST = "---\nstatus: [Todo, Doing, Done]\npriority: [p1, p2]\n---\nWhat the values mean.\n";
+  const made = [
+    await doklin(editorBox, ["write", "Library/Tags"], { input: LIST }),
+    await doklin(editorBox, ["write", "Library/Board/one"], { input: "# One\n\nThe first card.\n" }),
+    await doklin(editorBox, ["write", "Library/Board/two"], { input: "---\nstatus: Doing\n---\n# Two\n" }),
+  ];
+  const badList = await doklin(editorBox, ["edit", "Library/Tags", "--find", "priority: [p1, p2]", "--replace", "priority: p1"]);
+  const list = await doklin(readerBox, ["tags"]);
+  const set = await doklin(editorBox, ["tag", "Library/Board/one", "status=doing", "priority=P1"]);
+  const text = await doklin(editorBox, ["read", "Library/Board/one"]);
+  const wrong = await doklin(editorBox, ["tag", "Library/Board/one", "status=Shipped"]);
+  const noTag = await doklin(editorBox, ["tag", "Library/Board/one", "stage=Done"]);
+  const byWrite = await doklin(editorBox, ["write", "Library/Board/three"], { input: "---\nstatus: Later\n---\n" });
+  const readOnly = await doklin(readerBox, ["tag", "Library/Board/one", "status=Done"]);
+  await macWrites({ "Board/four.md": "---\nstatus: Doing\n---\n# Four\n" });
+  const from = calls.length;
+  const doing = await doklin(editorBox, ["ls", "Library/Board", "--where", "status=Doing"]);
+  const wire = asked(from);
+  const ls = (await doklin(editorBox, ["ls", "Library/Board"])).json;
+  const info = (await doklin(editorBox, ["info", "Library/Board/one"])).json;
+  const search = (await doklin(editorBox, ["search", "first card", "--where", "status=Doing"])).json;
+  const anyPriority = (await doklin(editorBox, ["search", "--where", "priority"])).json;
+  const removed = (await doklin(editorBox, ["tag", "Library/Board/one", "priority="])).json;
+  const lsWords = (await doklin(editorBox, ["ls", "Library/Board"], { tty: true })).out;
+  const tagsWords = (await doklin(editorBox, ["tags"], { tty: true })).out;
+  const setWords = (await doklin(editorBox, ["tag", "Library/Board/two", "status=Done"], { tty: true })).out;
+  const noneWords = (await doklin(editorBox, ["ls", "Library/Board", "--where", "status=Todo"], { tty: true })).out;
+  const gone = await Promise.all(["Library/Board/one", "Library/Board/two", "Library/Board/four", "Library/Tags"].map((d) => doklin(editorBox, ["rm", d])));
+  const doingTag = { name: "status", value: "Doing", known: true };
+  return {
+    "the list and two notes are written": made.every((r) => r.code === 0),
+    "a write that leaves a line of the list unreadable is refused, naming it": refused(badList, 2, /the tag list \(Library\/Tags\) can't hold line 3, "priority: p1"\./),
+    "tags: the list, and where it is": same(list.json, { note: "Library/Tags", exists: true, tags: [{ name: "status", values: ["Todo", "Doing", "Done"] }, { name: "priority", values: ["p1", "p2"] }] }),
+    "tag: the values as the list spells them": set.code === 0 && same(set.json, { path: "Library/Board/one", version: "md", rev: 2, tags: [doingTag, { name: "priority", value: "p1", known: true }] }),
+    "…written at the top of the note": text.out === "---\nstatus: Doing\npriority: p1\n---\n# One\n\nThe first card.\n",
+    "a value the list lacks is refused, saying the ones it has": refused(wrong, 2, /status takes Todo, Doing or Done, not "Shipped"/),
+    "a tag the list lacks": refused(noTag, 2, /there is no tag called "stage"/),
+    "a write that gives one a value the list lacks": refused(byWrite, 2, /status takes Todo, Doing or Done, not "Later"/),
+    "tag needs edit": refused(readOnly, 4),
+    "--where: the notes that have it, a Mac's among them": doing.code === 0 && same(doing.json.documents.map((d) => d.path), ["Library/Board/four", "Library/Board/one", "Library/Board/two"]),
+    "…after the index caught up": wire.length >= 1 && wire.every((w) => w.startsWith("GET tree")) && wire.at(-1) === "GET tree → 200",
+    "ls shows each note's tags": same(ls.documents.find((d) => d.path === "Library/Board/one")?.tags, [doingTag, { name: "priority", value: "p1", known: true }]) && ls.tagsBehind === undefined,
+    "info too": same(info.tags, [doingTag, { name: "priority", value: "p1", known: true }]),
+    "search with text and a tag": same(search.results.map((r) => r.path), ["Library/Board/one"]) && same(search.where, [{ name: "status", value: "Doing" }]),
+    "search with a tag alone, any value": same(anyPriority.results, [{ path: "Library/Board/one", version: "md", matches: [] }]),
+    "tag priority= removes it": same(removed.tags, [doingTag]),
+    "a person reads ls with the tags": /^Library\/Board\/one  \[md\]  status: Doing\r?$/m.test(lsWords),
+    "…and the list": /The tags, from Library\/Tags:\r?\n  status    Todo · Doing · Done\r?\n  priority  p1 · p2/.test(tagsWords),
+    "…and what tag did": setWords.includes("Library/Board/two now has status: Done — revision 2."),
+    "…and that nothing has it": noneWords.includes("No document here has status: Todo."),
+    "and it is all removed again": gone.every((r) => r.code === 0),
+  };
+});
+
+/* ====================================================================== */
+/* 10 — what an agent may do                                              */
 /* ====================================================================== */
 
 await check("permissions: an agent that may only read reads everything and changes nothing — each refusal is exit 4 and names the permission it lacks", async () => {
@@ -1442,7 +1501,7 @@ await check("permissions: comment without edit is a reviewer; edit without publi
 });
 
 /* ====================================================================== */
-/* 10 — what the owner takes away                                         */
+/* 11 — what the owner takes away                                         */
 /* ====================================================================== */
 
 await check("what the owner takes away is gone on the next request: a permission (exit 4), one machine's login (exit 6), the agent itself (exit 6)", async () => {
@@ -1477,7 +1536,7 @@ await check("a machine that was logged out by the owner logs in again with a new
 });
 
 /* ====================================================================== */
-/* 11 — more than one workspace on a machine                              */
+/* 12 — more than one workspace on a machine                              */
 /* ====================================================================== */
 
 // The same worker under two addresses — through the relay, and straight to
@@ -1519,7 +1578,7 @@ await check("-w: a machine logged in to two domains must say which; -w picks one
 });
 
 /* ====================================================================== */
-/* 12 — on a terminal                                                     */
+/* 13 — on a terminal                                                     */
 /* ====================================================================== */
 
 const canTty =
@@ -1669,7 +1728,7 @@ if (!canTty) {
 }
 
 /* ====================================================================== */
-/* 13 — logout                                                            */
+/* 14 — logout                                                            */
 /* ====================================================================== */
 
 await check("logout: --dry-run only says; logout revokes this machine's token on the domain and forgets it here; a login the domain already forgot is still a logout", async () => {
@@ -1701,7 +1760,7 @@ await check("logout: --dry-run only says; logout revokes this machine's token on
 });
 
 /* ====================================================================== */
-/* 14 — the CLI's own allowance                                           */
+/* 15 — the CLI's own allowance                                           */
 /* ====================================================================== */
 
 await check("allowance: every request is counted beside the credentials; the count rides a signed-in request at most every 15 minutes; past the domain's cliDaily nothing is sent and it is exit 8", async () => {
@@ -1734,7 +1793,7 @@ await check("allowance: every request is counted beside the credentials; the cou
 });
 
 /* ====================================================================== */
-/* 15 — a worker that is behind                                           */
+/* 16 — a worker that is behind                                           */
 /* ====================================================================== */
 
 // Not the real worker: a stand-in that answers login and `me` and knows no
@@ -1760,17 +1819,19 @@ await check("a worker that is behind: a route it does not know, or a method, is 
   const searchAsked = behind.asked.slice(from);
   const ls = await doklin(behindBox, ["ls"]);
   const read = await doklin(behindBox, ["read", "Library/Home"]);
+  const tags = await doklin(behindBox, ["tags"]);
   return {
     "login and whoami work": login.code === 0 && whoami.code === 0 && whoami.json.agent.name === "Old bot",
     "a route the worker does not know is exit 7, and says whose worker": refused(search, 7, new RegExp(`the worker on localhost:${behindPort} is too old for this command`)),
     "…it was asked once": same(searchAsked, ["GET search"]),
     "ls too": refused(ls, 7, /too old/),
     "a method it does not know": refused(read, 7, /too old/),
+    "tags too": refused(tags, 7, /too old/),
   };
 });
 
 /* ====================================================================== */
-/* 16 — the whole run                                                     */
+/* 17 — the whole run                                                     */
 /* ====================================================================== */
 
 await check("the whole run: every exit code was seen; the CLI asked only the document API, and always said which client it is", async () => {

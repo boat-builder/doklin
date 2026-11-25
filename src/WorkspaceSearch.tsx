@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { backend, type FileMatches } from "./backend";
+import { searchQuery, type TagDef, type TagFilter } from "./tags";
 
 type Props = {
   root: string;
@@ -14,6 +15,9 @@ type Props = {
   onBackToFiles: () => void;
   // Bumped on ⌘⇧F (or the Search toggle) to focus the input.
   focusToken: number;
+  // The workspace's tags: a `status:Doing` in the query is a tag token
+  // when Status is one of them (src/tags.ts).
+  tagList: TagDef[];
 };
 
 const SEARCH_DEBOUNCE_MS = 250;
@@ -28,6 +32,7 @@ export default function WorkspaceSearch({
   onOpenResult,
   onBackToFiles,
   focusToken,
+  tagList,
 }: Props) {
   const [results, setResults] = useState<FileMatches[]>([]);
   // Documents that matched beyond the ones listed.
@@ -44,10 +49,16 @@ export default function WorkspaceSearch({
     inputRef.current?.select();
   }, [focusToken]);
 
+  // The words the search looks for, and its tag tokens, kept apart: the
+  // backends never read the tag list.
+  const split = useMemo(() => searchQuery(query, tagList), [query, tagList]);
+  const words = split.text;
+  const tagKey = JSON.stringify(split.tags);
+
   // Debounced search whenever the query, case-sensitivity, or workspace changes.
   useEffect(() => {
-    const q = query.trim();
-    if (!q) {
+    const tags = JSON.parse(tagKey) as TagFilter[];
+    if (!words && tags.length === 0) {
       setResults([]);
       setMore(0);
       setError(null);
@@ -58,7 +69,7 @@ export default function WorkspaceSearch({
     let cancelled = false;
     const handle = window.setTimeout(async () => {
       try {
-        const res = await backend.documents.search(root, q, byCase && caseSensitive);
+        const res = await backend.documents.search(root, words, byCase && caseSensitive, tags);
         if (cancelled) return;
         setResults(res.files);
         setMore(res.more);
@@ -76,12 +87,16 @@ export default function WorkspaceSearch({
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [root, query, caseSensitive, byCase]);
+  }, [root, words, tagKey, caseSensitive, byCase]);
 
-  // A name that holds the query is a result of its own, beside its lines.
+  // A name that holds the query is a result of its own, beside its lines,
+  // and so is a note found by its tags alone.
   const totals = useMemo(() => {
     const files = results.length;
-    const matches = results.reduce((n, f) => n + f.matches.length + (f.named ? 1 : 0), 0);
+    const matches = results.reduce(
+      (n, f) => n + f.matches.length + (f.named || f.matches.length === 0 ? 1 : 0),
+      0,
+    );
     return { files, matches };
   }, [results]);
 
@@ -178,7 +193,7 @@ export default function WorkspaceSearch({
                         {!nameOnly && <ChevronRightIcon />}
                       </span>
                       <span className="ws-result-file-name">
-                        {file.named ? highlight(name, query.trim(), byCase && caseSensitive) : name}
+                        {file.named ? highlight(name, words, byCase && caseSensitive) : name}
                       </span>
                       {!nameOnly && (
                         <span className="ws-result-file-count">{file.matches.length}</span>
@@ -190,12 +205,12 @@ export default function WorkspaceSearch({
                           <li key={`${file.path}:${m.line}:${i}`}>
                             <button
                               className="ws-result-row"
-                              onClick={() => onOpenResult(file.path, query.trim())}
+                              onClick={() => onOpenResult(file.path, words)}
                               title={m.line == null ? basename(file.path) : `${basename(file.path)}:${m.line}`}
                             >
                               <span className="ws-result-line">{m.line}</span>
                               <span className="ws-result-preview">
-                                {highlight(m.preview, query.trim(), byCase && caseSensitive)}
+                                {highlight(m.preview, words, byCase && caseSensitive)}
                               </span>
                             </button>
                           </li>

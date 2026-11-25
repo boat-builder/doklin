@@ -23,9 +23,46 @@ body {
 }
 
 #title,
+#tags,
 #editor {
   max-width: 700px;
   margin: 0 auto;
+}
+
+/* The note's tags under the title, as the reader's chips look
+   (ios/Doklin/TagsRow.swift, change both): shown, never changed here. */
+#tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: -6px;
+  margin-bottom: 16px;
+}
+
+#tags[hidden] {
+  display: none;
+}
+
+.tag-chip {
+  display: inline-flex;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--sunken);
+  color: var(--text-1);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.tag-chip.is-unknown {
+  padding: 4px 9px;
+  border: 1px dashed var(--text-3);
+}
+
+.tag-chip-name {
+  color: var(--text-3);
 }
 
 /* The title: the document's name (title.ts), set as the reader sets it —

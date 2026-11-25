@@ -38,6 +38,7 @@ import { followLink, linkTo, ownLink, takeLink } from "./address";
 import { browserHistory } from "./steps";
 import { mintAgentLogin, mintDeviceCode, mintInvite } from "./codes";
 import { Refused, ask, askJson, deviceId } from "./http";
+import type { TagFilter } from "../tags";
 import type { Saving } from "./saving";
 import type { Workspace } from "./workspace";
 
@@ -50,8 +51,13 @@ const SEARCH_AGAIN_MS = 1200;
 /** Every section the person is in, searched by the worker (search.ts): the
  *  first documents that match, each with its first matching lines. What
  *  this page has typed and not yet sent is not in it. */
-async function search(ws: Workspace, query: string): Promise<SearchResults> {
-  const at = `/api/web/search?q=${encodeURIComponent(query)}&limit=${SEARCH_LIMIT_MAX}`;
+async function search(ws: Workspace, query: string, tags: TagFilter[]): Promise<SearchResults> {
+  // A tag token rides as `tag=name:value`, or `tag=name` for a note that has
+  // the tag at all: a name never holds a colon (src/tags.ts).
+  const tagged = tags
+    .map((t) => `&tag=${encodeURIComponent(t.value === null ? t.name : `${t.name}:${t.value}`)}`)
+    .join("");
+  const at = `/api/web/search?q=${encodeURIComponent(query)}&limit=${SEARCH_LIMIT_MAX}${tagged}`;
   for (let tries = 1; ; tries += 1) {
     const res = await ask("GET", at);
     if (res.status !== 202) {
@@ -115,7 +121,7 @@ function documentsOf(ws: Workspace, saving: Saving): Documents {
       ws.watch(docs);
     },
     onChange: (cb) => ws.onChange(cb),
-    search: (_root, query) => search(ws, query),
+    search: (_root, query, _caseSensitive, tags) => search(ws, query, tags),
     // The worker searches a lower-cased mirror.
     searchByCase: false,
   };

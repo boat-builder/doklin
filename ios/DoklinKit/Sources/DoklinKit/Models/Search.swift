@@ -1,8 +1,9 @@
 // Searching one workspace on this iPhone's copy: what it finds is what the
 // Mac's `search_workspace` and the worker's search find (`WorkspaceFiles
-// .search`) — documents by their names, and notes by their words. Here it
-// is put in two groups, narrowed to notes, pages or one folder, and the
-// last few searches are kept on the device.
+// .search`) — documents by their names, and notes by their words, narrowed
+// by the tags typed as `status:Doing` (`Tags.searchQuery`). Here it is put
+// in two groups, narrowed to notes, pages or one folder, and the last few
+// searches are kept on the device.
 
 import Foundation
 import Observation
@@ -76,8 +77,10 @@ public final class SearchModel {
     /// Everything found for the last query, before the scope narrows it.
     public private(set) var results: [SearchResult] = []
     public private(set) var phase: LoadPhase = .idle
-    /// What was last searched for.
+    /// The words that were last searched for, without their tags.
     public private(set) var query = ""
+    /// The tags that were last searched for.
+    public private(set) var tags: [TagFilter] = []
     public var scope: SearchScope = .all
     @ObservationIgnored private var asked = 0
 
@@ -87,37 +90,50 @@ public final class SearchModel {
 
     private var shown: [SearchResult] { results.filter(scope.keeps) }
 
+    /// A search for tags alone: every note that has them, by name.
+    public var onlyTags: Bool { query.isEmpty && !tags.isEmpty }
+
+    /// What a search for tags alone found.
+    public var tagged: [SearchResult] { onlyTags ? shown : [] }
+
     /// Documents called something with the words in it: first.
     public var named: [SearchResult] {
+        guard !onlyTags else { return [] }
         let wanted = query.lowercased()
         return shown.filter { $0.name.lowercased().contains(wanted) }
     }
 
     /// Notes with the words in their text, and not in their name.
     public var inText: [SearchResult] {
+        guard !onlyTags else { return [] }
         let wanted = query.lowercased()
         return shown.filter { !$0.name.lowercased().contains(wanted) }
     }
 
     public var isEmpty: Bool { shown.isEmpty }
 
-    /// Search for `text`; an empty one clears what was found.
+    /// Search for `text`, its tag tokens split off; an empty one clears
+    /// what was found.
     public func run(_ text: String) async {
         asked += 1
         let ticket = asked
-        let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
+        let split = Tags.searchQuery(text, list: workspace.tagList.tags)
+        let query = split.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tags = split.tags
+        guard !query.isEmpty || !tags.isEmpty else {
             results = []
             self.query = ""
+            self.tags = []
             phase = .idle
             return
         }
         phase = .loading
         let files = workspace.files
         // The sections, never what is in none at the top of the workspace.
-        let found = await Task.detached(priority: .userInitiated) { files.search(query, in: files.sectionFolders()) }.value
+        let found = await Task.detached(priority: .userInitiated) { files.search(query, in: files.sectionFolders(), tags: tags) }.value
         guard ticket == asked else { return }
         self.query = query
+        self.tags = tags
         results = found
         phase = .loaded
     }

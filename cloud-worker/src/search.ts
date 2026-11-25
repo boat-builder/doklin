@@ -40,7 +40,9 @@
 //
 // The same catch-up keeps the `links` index: for each note it reads, the
 // files it links to (`targetsOf`), so "which documents link to this one" is
-// one query too (`linkersOf`, for `doklin links --to`).
+// one query too (`linkersOf`, for `doklin links --to`). And the `tags`
+// index: each note's frontmatter pairs (`pairsOf`), so a search or a listing
+// narrows by `status:Doing` in one query (`taggedIn`, `pairsIn`).
 
 import { Refusal, type Committed } from "./commit";
 import { Index, nameOf, type Entry } from "./documents";
@@ -50,13 +52,14 @@ import { LIBRARY_FOLDER, SEARCH_LIMIT_MAX, blobKey } from "./layout";
 import type { Manifest } from "./manifest";
 import { PRIVATE_FOLDER, RESTRICTED_FOLDER } from "./agentPlace";
 import { linksIn } from "./noteLinks";
-import { ensureSchema } from "./schema";
+import { ensureSchema, withDb } from "./schema";
 import { MAX_SECTIONS_READ, sharedEnv, spaceOf, type Where } from "./spaces";
 import { basename, isHtmlPath, isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 import { stripComments } from "../../src/criticMarkup";
 import { keyTarget, linkKey } from "../../src/docLinks";
 import { META_SUFFIX, parseEntityMeta } from "../../src/metaFile";
 import { pageLinkOf } from "../../src/pageLink";
+import { keyedLines, type TagFilter } from "../../src/tags";
 
 /** A document whose text and comments together pass this is not mirrored —
  *  D1 holds a row of two megabytes at most — and is listed as not searchable. */
@@ -205,6 +208,40 @@ function linkRows(db: D1Database, space: string, rows: readonly { fid: string; t
   return out;
 }
 
+/* ---------- A note's pairs ---------- */
+
+type Pair = { name: string; value: string };
+
+/** A note's frontmatter pairs, for the `tags` index: for each name, lower-
+ *  cased, the first line keyed by it, when that line is a pair — the line a
+ *  tag is read from (src/tags.ts, `matchesTags`). */
+function pairsOf(text: string): Pair[] {
+  const seen = new Set<string>();
+  const out: Pair[] = [];
+  for (const line of keyedLines(text)) {
+    const name = line.key.toLowerCase();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    if (line.value !== null) out.push({ name, value: line.value });
+  }
+  return out;
+}
+
+/** Rows of the `tags` index, a statement for each 20. */
+function pairRows(db: D1Database, space: string, rows: readonly { fid: string; pairs: readonly Pair[] }[]): D1PreparedStatement[] {
+  const all = rows.flatMap((r) => r.pairs.map((p) => [space, r.fid, p.name, p.value, p.value.toLowerCase()]));
+  const out: D1PreparedStatement[] = [];
+  for (let i = 0; i < all.length; i += 20) {
+    const chunk = all.slice(i, i + 20);
+    out.push(
+      db
+        .prepare(`INSERT OR IGNORE INTO tags (space_id, fid, name, value, folded) VALUES ${chunk.map(() => "(?, ?, ?, ?, ?)").join(", ")}`)
+        .bind(...chunk.flat()),
+    );
+  }
+  return out;
+}
+
 const readHeld = (etag: string, raw: string): State => {
   try {
     const held: unknown = JSON.parse(raw);
@@ -228,7 +265,7 @@ async function readStates(db: D1Database, spaces: readonly string[]): Promise<Ma
 /**
  * Bring the mirror of the space `env` is scoped to towards its manifest:
  * read what is stale, drop what is gone, and record what the rows now hold —
- * text and links alike, in one batch, so a row and the record of it never
+ * text, links and pairs alike, in one batch, so a row and the record of it never
  * disagree. Answers how many documents are still stale and how many blobs
  * this round read. `around` is asked for once, when a note is read.
  */
@@ -278,20 +315,23 @@ async function catchUp(
   const own = () => (ownPaths ??= lowerPaths(m));
   const library = () => (libraryPaths ??= context.library ? lowerPaths(context.library) : null);
   const rows = await mapLimited(round, READ_CONCURRENCY, async ([fid, w]) => {
-    if (w.text.file.size + (w.meta?.file.size ?? 0) > MAX_MIRRORED_BYTES) return { fid, w, text: null as string | null, targets: [] as string[] };
+    if (w.text.file.size + (w.meta?.file.size ?? 0) > MAX_MIRRORED_BYTES) {
+      return { fid, w, text: null as string | null, targets: [] as string[], pairs: [] as Pair[] };
+    }
     const [text, metaText] = await Promise.all([blobText(env, w.text), w.meta ? blobText(env, w.meta) : Promise.resolve(null)]);
     // A blob that is not there yet is a sync still in flight: leave the row
     // stale, and the next catch-up reads it.
     if (text === null) return null;
     const path = w.text.file.path;
-    const targets = isMarkdownPath(path) ? targetsOf(space, path, text, metaText, own, library, context.workspace) : [];
-    return { fid, w, text: folded(path, text, metaText), targets };
+    const md = isMarkdownPath(path);
+    const targets = md ? targetsOf(space, path, text, metaText, own, library, context.workspace) : [];
+    return { fid, w, text: folded(path, text, metaText), targets, pairs: md ? pairsOf(text) : [] };
   });
 
   const held: Held = { ...state.held };
   for (const fid of dead) delete held[fid];
   const statements: D1PreparedStatement[] = [];
-  const read: { fid: string; targets: string[] }[] = [];
+  const read: { fid: string; targets: string[]; pairs: Pair[] }[] = [];
   let missed = 0;
   for (const row of rows) {
     if (row === null) {
@@ -304,15 +344,18 @@ async function catchUp(
       db.prepare("INSERT OR REPLACE INTO search_text (space_id, fid, folded) VALUES (?, ?, ?)").bind(space, row.fid, row.text),
     );
   }
-  // What a note read again links to replaces what it did; a note gone links to nothing.
+  // What a note read again links to and holds replaces what it did; a note
+  // gone links to nothing and holds nothing.
   const forgotten = [...dead, ...read.map((r) => r.fid)];
   for (let i = 0; i < forgotten.length; i += 50) {
     const chunk = forgotten.slice(i, i + 50);
+    const among = chunk.map(() => "?").join(",");
     statements.push(
-      db.prepare(`DELETE FROM links WHERE space_id = ? AND fid IN (${chunk.map(() => "?").join(",")})`).bind(space, ...chunk),
+      db.prepare(`DELETE FROM links WHERE space_id = ? AND fid IN (${among})`).bind(space, ...chunk),
+      db.prepare(`DELETE FROM tags WHERE space_id = ? AND fid IN (${among})`).bind(space, ...chunk),
     );
   }
-  statements.push(...linkRows(db, space, read));
+  statements.push(...linkRows(db, space, read), ...pairRows(db, space, read));
   for (let i = 0; i < dead.length; i += 50) {
     const chunk = dead.slice(i, i + 50);
     statements.push(
@@ -363,6 +406,12 @@ async function aroundOf(env: Env, library: Manifest | null): Promise<Around> {
 /** A section opened for reading its mirror: its tree and the documents in it. */
 type Opened = { section: Where; ws: Workspace; want: Map<string, Searchable> };
 
+/** A section its caller has opened already, to catch its mirror up and read
+ *  its index (a listing, agentDocs.ts). */
+export type OpenSection = { section: Where; ws: Workspace };
+
+const unavailable = (): Refusal => new Refusal(503, "search needs this domain's database, which isn't answering — try again in a moment");
+
 /**
  * Open `sections` — as many as a request opens, `left` the rest — and catch
  * their mirrors up. `{ indexing }` when there was more to read than one
@@ -372,7 +421,6 @@ async function caughtUp(
   env: Env,
   sections: readonly Where[],
 ): Promise<{ open: Opened[]; left: Where[]; reads: number; db: D1Database } | { indexing: number } | Refusal> {
-  const unavailable = (): Refusal => new Refusal(503, "search needs this domain's database, which isn't answering — try again in a moment");
   const covered = sections.slice(0, 1 + MAX_SECTIONS_READ);
   const left = sections.slice(covered.length);
   const open: Opened[] = [];
@@ -381,6 +429,17 @@ async function caughtUp(
     if (ws) open.push({ section, ws, want: searchable(ws.manifest) });
     else if (section.space === "") return new Refusal(404, "this domain holds no workspace yet");
   }
+  const up = await catchUpOpen(env, open);
+  return up instanceof Refusal || "indexing" in up ? up : { open, left, reads: up.reads, db: up.db };
+}
+
+/** Catch the mirrors of sections already open up, as a search does before
+ *  it answers. `{ indexing }` when there was more to read than one request
+ *  reads; `reads` is what this one read. */
+export async function catchUpOpen(
+  env: Env,
+  open: readonly OpenSection[],
+): Promise<{ reads: number; db: D1Database } | { indexing: number } | Refusal> {
   const db = env.DB;
   if (!db) return unavailable();
   const shared = open.find((o) => o.section.space === "")?.ws;
@@ -404,10 +463,76 @@ async function caughtUp(
       // budget; the answer comes on the next one.
       if (pending > 0 || reads > INLINE_READS) return { indexing: pending };
     }
-    return { open, left, reads, db };
+    return { reads, db };
   } catch {
     return unavailable();
   }
+}
+
+/* ---------- Tags ---------- */
+
+const among = (n: number): string => Array.from({ length: n }, () => "?").join(",");
+
+/** The notes of `spaces` whose pairs hold every filter, keyed
+ *  `<space>/<fid>`: a name lower-cased, and a value whatever its case, or
+ *  any value for a filter with none (src/tags.ts, `matchesTags`). */
+async function taggedIn(db: D1Database, spaces: readonly string[], filters: readonly TagFilter[]): Promise<Set<string>> {
+  const names = [...new Set(filters.map((f) => f.name.toLowerCase()))];
+  const { results } = await db
+    .prepare(`SELECT space_id, fid, name, folded FROM tags WHERE space_id IN (${among(spaces.length)}) AND name IN (${among(names.length)})`)
+    .bind(...spaces, ...names)
+    .all<{ space_id: string; fid: string; name: string; folded: string }>();
+  const held = new Map<string, Map<string, string>>();
+  for (const r of results) {
+    const key = `${r.space_id}/${r.fid}`;
+    let pairs = held.get(key);
+    if (!pairs) held.set(key, (pairs = new Map()));
+    pairs.set(r.name, r.folded);
+  }
+  const out = new Set<string>();
+  for (const [key, pairs] of held) {
+    const holds = filters.every((f) => {
+      const folded = pairs.get(f.name.toLowerCase());
+      return folded !== undefined && (f.value === null || folded === f.value.toLowerCase());
+    });
+    if (holds) out.add(key);
+  }
+  return out;
+}
+
+/**
+ * What the `tags` index holds for the notes of `open`, for the names asked
+ * (lower-cased): `<space>/<fid>` → name → the value as the note spells it.
+ * `behind` when a section's index is not whole at its manifest now — what a
+ * listing says rather than waits for. Null when the database can't say.
+ */
+export async function pairsIn(
+  env: Env,
+  open: readonly OpenSection[],
+  names: readonly string[],
+): Promise<{ pairs: Map<string, Map<string, string>>; behind: boolean } | null> {
+  if (open.length === 0 || names.length === 0) return { pairs: new Map(), behind: false };
+  return withDb(env, async (db) => {
+    const spaces = open.map((o) => o.section.space);
+    const states = await readStates(db, spaces);
+    const behind = open.some((o) => states.get(o.section.space)?.etag !== o.ws.etag);
+    const pairs = new Map<string, Map<string, string>>();
+    // D1 binds at most a hundred values: the sections, and the names in rounds.
+    for (let i = 0; i < names.length; i += 80) {
+      const chunk = names.slice(i, i + 80);
+      const { results } = await db
+        .prepare(`SELECT space_id, fid, name, value FROM tags WHERE space_id IN (${among(spaces.length)}) AND name IN (${among(chunk.length)})`)
+        .bind(...spaces, ...chunk)
+        .all<{ space_id: string; fid: string; name: string; value: string }>();
+      for (const r of results) {
+        const key = `${r.space_id}/${r.fid}`;
+        let held = pairs.get(key);
+        if (!held) pairs.set(key, (held = new Map()));
+        held.set(r.name, r.value);
+      }
+    }
+    return { pairs, behind };
+  });
 }
 
 export type Match = { line?: number; text: string };
@@ -436,21 +561,25 @@ const under = (mount: string, path: string): string => (mount ? `${mount}/${path
 const isCalled = (path: string, needle: string): boolean => basename(nameOf(path).stem).toLowerCase().includes(needle);
 
 /** A document a search found: by its name, by its mirror row — `text` when
- *  the row holds the needle, `big` when it was too large to mirror — or both. */
-type Found = { doc: Searchable; section: Where; path: string; named: boolean; row: "text" | "big" | null };
+ *  the row holds the needle, `big` when it was too large to mirror — or both;
+ *  `tagged` when its pairs hold every tag asked for. */
+type Found = { doc: Searchable; section: Where; path: string; named: boolean; row: "text" | "big" | null; tagged: boolean };
 
 /** What to search for: one line of text, in the documents under `dir` ("" is
- *  everything the sections hold), at most `limit` of them. */
-export type Ask = { query: string; dir: string; limit: number };
+ *  everything the sections hold), at most `limit` of them — and only notes
+ *  that have `tags`. Tags with no text find every such note, listed with no
+ *  lines: that costs no reads, so no limit holds it. */
+export type Ask = { query: string; dir: string; limit: number; tags: TagFilter[] };
 
-/** What a request's `q` and `limit` ask for, or why they ask for nothing. */
-export function askOf(params: URLSearchParams, dir: string): Ask | Refusal {
+/** What a request's `q` and `limit` ask for, beside the tags it narrows by,
+ *  or why they ask for nothing. */
+export function askOf(params: URLSearchParams, dir: string, tags: TagFilter[]): Ask | Refusal {
   const query = (params.get("q") ?? "").trim();
-  if (query === "") return new Refusal(400, "say what to search for");
+  if (query === "" && tags.length === 0) return new Refusal(400, "say what to search for");
   if (/[\r\n]/.test(query)) return new Refusal(400, "search for text within one line");
   const asked = Number(params.get("limit") ?? DEFAULT_LIMIT);
   const limit = Number.isInteger(asked) && asked > 0 ? Math.min(asked, SEARCH_LIMIT_MAX) : DEFAULT_LIMIT;
-  return { query, dir, limit };
+  return { query, dir, limit, tags };
 }
 
 /** One document a search found. */
@@ -474,8 +603,8 @@ export type Searched = {
   hits: Hit[];
   /** Every document that matched, shown or not. */
   total: number;
-  /** Documents too large to mirror, and not found by name either: never
-   *  searched, and said so. */
+  /** Documents too large to mirror, and not found by name either — or, when
+   *  tags were asked for, whatever their name: never searched, and said so. */
   notSearched: { space: string; path: string }[];
   /** Sections beyond what one request opens. */
   left: Where[];
@@ -489,26 +618,29 @@ export type Searched = {
 export async function searchIn(
   env: Env,
   sections: readonly Where[],
-  { query, dir, limit }: Ask,
+  { query, dir, limit, tags }: Ask,
 ): Promise<Searched | { indexing: number } | Refusal> {
   const needle = query.toLowerCase();
-  const unavailable = (): Refusal => new Refusal(503, "search needs this domain's database, which isn't answering — try again in a moment");
   const up = await caughtUp(env, sections);
   if (up instanceof Refusal || "indexing" in up) return up;
   const { open, left, db } = up;
 
   const spent = 2 * open.length + up.reads;
   let rows: { space_id: string; fid: string; big: number }[] = [];
+  let tagged: Set<string> | null = null;
   try {
     if (open.length > 0) {
+      const spaces = open.map((o) => o.section.space);
+      // With no text, only the rows too large to mirror: what is said not searched.
       const found = await db
         .prepare(
           `SELECT space_id, fid, folded IS NULL AS big FROM search_text
-            WHERE space_id IN (${open.map(() => "?").join(",")}) AND (folded IS NULL OR instr(folded, ?) > 0)`,
+            WHERE space_id IN (${among(spaces.length)}) AND (folded IS NULL${needle === "" ? "" : " OR instr(folded, ?) > 0"})`,
         )
-        .bind(...open.map((o) => o.section.space), needle)
+        .bind(...spaces, ...(needle === "" ? [] : [needle]))
         .all<{ space_id: string; fid: string; big: number }>();
       rows = found.results;
+      if (tags.length > 0) tagged = await taggedIn(db, spaces, tags);
     }
   } catch {
     return unavailable();
@@ -519,11 +651,14 @@ export async function searchIn(
   const found = (section: Where, fid: string, doc: Searchable): Found => {
     const k = `${section.space}/${fid}`;
     let f = docs.get(k);
-    if (!f) docs.set(k, (f = { doc, section, path: under(section.mount, doc.text.file.path), named: false, row: null }));
+    if (!f) docs.set(k, (f = { doc, section, path: under(section.mount, doc.text.file.path), named: false, row: null, tagged: false }));
     return f;
   };
   for (const { section, want } of open) {
-    for (const [fid, doc] of want) if (isCalled(doc.text.file.path, needle)) found(section, fid, doc).named = true;
+    for (const [fid, doc] of want) {
+      if (needle !== "" && isCalled(doc.text.file.path, needle)) found(section, fid, doc).named = true;
+      if (tagged?.has(`${section.space}/${fid}`)) found(section, fid, doc).tagged = true;
+    }
   }
   const bySpace = new Map(open.map((o) => [o.section.space, o]));
   for (const r of rows) {
@@ -534,13 +669,13 @@ export async function searchIn(
   const inDir = [...docs.values()].filter((r) => r.path.toLowerCase().startsWith(prefix));
   // What a document is called first: whoever typed a name is after that one.
   const matched = inDir
-    .filter((r) => r.named || r.row === "text")
+    .filter((r) => (tagged === null || r.tagged) && (needle === "" || r.named || r.row === "text"))
     .sort((a, b) => Number(b.named) - Number(a.named) || a.path.localeCompare(b.path, undefined, { sensitivity: "base" }));
   // Only a row's lines cost a read; a name alone is already in the manifest.
   const shown: Found[] = [];
   let reads = Math.max(1, SEARCH_READS - spent);
   for (const hit of matched) {
-    if (shown.length === limit) break;
+    if (needle !== "" && shown.length === limit) break;
     if (hit.row === "text") {
       if (reads === 0) break;
       reads -= 1;
@@ -564,7 +699,9 @@ export async function searchIn(
   return {
     hits,
     total: matched.length,
-    notSearched: inDir.filter((r) => r.row === "big" && !r.named).map((r) => ({ space: r.section.space, path: r.path })),
+    notSearched: inDir
+      .filter((r) => r.row === "big" && (tagged !== null || !r.named))
+      .map((r) => ({ space: r.section.space, path: r.path })),
     left,
   };
 }

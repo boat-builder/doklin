@@ -163,12 +163,7 @@ impl Client {
     fn refusal(&self, reply: Reply) -> Failure {
         let detail: Option<Value> = serde_json::from_slice(&reply.bytes).ok();
         let said = detail.as_ref().and_then(|v| v.get("error")).and_then(Value::as_str).unwrap_or("").to_string();
-        let too_old = || {
-            format!(
-                "the worker on {} is too old for this command — the workspace's owner can update it from Doklin's Cloud panel",
-                self.domain()
-            )
-        };
+        let too_old = || too_old(self.domain()).message;
         let (exit, message) = match reply.status {
             // The gate's own bare word: the token is not one the domain knows.
             401 if said == "unauthorized" && self.token.is_some() => (
@@ -191,6 +186,20 @@ impl Client {
             _ => (1, said),
         };
         Failure { exit, message, status: Some(reply.status), detail }
+    }
+}
+
+/// Exit 7: the domain's worker is older than what this command asks of it —
+/// a route it has never heard of, or an answer without what was asked for.
+pub fn too_old(domain: &str) -> Failure {
+    Failure {
+        exit: 7,
+        message: format!(
+            "the worker on {} is too old for this command — the workspace's owner can update it from Doklin's Cloud panel",
+            domain
+        ),
+        status: None,
+        detail: None,
     }
 }
 

@@ -31,7 +31,8 @@
 // here, restricted folders; HistoryUITests: a note's versions, the
 // workspace's moments, recently deleted; CommentsUITests: a thread read,
 // started, answered and removed, a note published and stopped, published
-// pages), each then checked against what it left on the domain. A journey asks this script, at an address it
+// pages; TagsUITests: a tag made, set and renamed, a note found by it),
+// each then checked against what it left on the domain. A journey asks this script, at an address it
 // serves, for what only the domain's side can do: its line, another device
 // editing a document, and a restricted folder deleted elsewhere. What was on screen at each step is printed (the
 // lines that begin `UI>`), and the whole xcodebuild log and the screenshots
@@ -192,6 +193,19 @@ const ON_THE_DOMAIN = {
       return false;
     }
     console.log("the comments the app wrote are on the domain");
+    return true;
+  },
+  // The list the app made, with the value renamed, and the note that has it
+  // renamed to match — its own text untouched under its block.
+  TagsUITests: async () => {
+    const list = await textOnTheDomain("Tags.md");
+    const ideas = await textOnTheDomain("Ideas.md");
+    const listed = /^---\nStatus: \[Todo, Underway, Done\]\n---\n/;
+    if (!listed.test(list ?? "") || ideas !== `---\nStatus: Underway\n---\n${SEED_FILES["Ideas.md"]}`) {
+      console.error(`the tags the app wrote are not on the domain as a Mac would write them:\n${list}\n${ideas}`);
+      return false;
+    }
+    console.log("the tags the app wrote are on the domain");
     return true;
   },
 };

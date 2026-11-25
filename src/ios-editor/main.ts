@@ -16,11 +16,16 @@
 // blocks every other load.
 //
 // Above the note is its title, the document's name (./title.ts): the page
-// hands a new one to the app, which renames the file.
+// hands a new one to the app, which renames the file. Under the title are
+// the note's tags, read from the block it holds (src/tags.ts), as the reader
+// shows them: shown here, never changed.
 //
 // The bridge (change both sides with NoteEditor.swift):
 //   native → page   window.doklin.load({markdown, meta, note, name, documents,
-//                     recent, workspace, block, prefix, naming})
+//                     recent, workspace, block, prefix, naming, tags})
+//                   window.doklin.head({head, tags})  the block is this now
+//                     (a tag set on another device while nothing in the
+//                     body changed): put back on every write from now on
 //                   window.doklin.documents(list)  the workspace's documents changed
 //                   window.doklin.named({name, note, title, problem})  the
 //                     name now, after the title asked for (problem: why it
@@ -91,6 +96,7 @@ import {
 import { mentionPlugin } from "../mentionMenu";
 import { leaveTopPlugin } from "../leaveTop";
 import { makeTitle } from "./title";
+import { noteTags, type TagDef } from "../tags";
 
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
@@ -125,6 +131,8 @@ export type Load = {
   prefix: string | null;
   /** Open with the caret in the title, not the note: a note just made. */
   naming: boolean;
+  /** The workspace's tag list: which lines of the block are tags. */
+  tags: TagDef[];
 };
 
 /** The note as a write would hold it, and its sidecar's link records. */
@@ -152,6 +160,8 @@ function post(message: Message) {
 let crepe: Crepe | null = null;
 /** The frontmatter block as the file has it: put back on every write. */
 let head = "";
+/** The workspace's tag list, for the chips under the title. */
+let tagList: TagDef[] = [];
 /** The note carried comment bodies inline, which the meta file may not
  *  hold: it is written back in that form, so nothing of them is lost. */
 let keepInline = false;
@@ -171,6 +181,28 @@ const title = makeTitle(document.getElementById("title") as HTMLElement, {
   },
   putBack: (message) => post({ kind: "notice", message }),
 });
+
+/** The note's tags under its title, as the reader shows them
+ *  (ios/Doklin/TagsRow.swift): the name muted, then the value; one the list
+ *  lacks, dashed. */
+function showTags() {
+  const row = document.getElementById("tags");
+  if (!row) return;
+  row.replaceChildren(
+    ...noteTags(head, tagList).map((tag) => {
+      const chip = document.createElement("span");
+      chip.className = tag.known ? "tag-chip" : "tag-chip is-unknown";
+      const name = document.createElement("span");
+      name.className = "tag-chip-name";
+      name.textContent = tag.name;
+      const value = document.createElement("span");
+      value.textContent = tag.value;
+      chip.append(name, value);
+      return chip;
+    }),
+  );
+  row.hidden = row.childElementCount === 0;
+}
 
 /** What the file would hold: the frontmatter, then the editor's markdown
  *  with its comments as bare markers; and the records of its links. */
@@ -222,6 +254,8 @@ async function load(input: Load): Promise<void> {
     base.href = input.base ?? "/";
     const fm = splitFrontmatter(input.markdown);
     head = fm.head;
+    tagList = input.tags;
+    showTags();
     keepInline = extractMarkdown(fm.body).mthreads.length > 0;
     const meta = input.meta ? parseEntityMeta(input.meta) : null;
     const threads = meta?.mthreads ?? [];
@@ -565,6 +599,7 @@ declare global {
   interface Window {
     doklin: {
       load: (input: Load) => Promise<void>;
+      head: (now: { head: string; tags: TagDef[] }) => void;
       documents: (list: WorkspaceDocument[]) => void;
       named: (answer: { name: string; note: string; title: string; problem: string | null }) => void;
       command: (name: string) => void;
@@ -577,6 +612,11 @@ declare global {
 
 window.doklin = {
   load,
+  head: (now) => {
+    head = now.head;
+    tagList = now.tags;
+    showTags();
+  },
   documents,
   named,
   command,

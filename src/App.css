@@ -4574,27 +4574,119 @@ body.tree-dragging.tree-drag-invalid * {
   }
 }
 
-/* ---------- A note's frontmatter, above it ----------
-   Read-only and as the file has it (src/frontmatter.ts): agents and other
-   tools own the block, so it is shown plainly rather than as controls. Lined
-   up with the document canvas below it (the measure, page width and side
-   padding of .editor-wrap .milkdown .ProseMirror — the document font is set
-   here only so `ch` measures the same), so it reads as the head of the note. */
-.doc-frontmatter {
+/* ---------- A note's tags, right below its title ----------
+   Chips from the note's frontmatter (src/tags.ts, src/TagsRow.tsx), lined up
+   with the title above and the document canvas below (the measure, page
+   width and side padding of .doc-title). Plain grey: a tag is read, not
+   decorated. The rest of the block, when there is any, is a closed
+   disclosure under them, as the file has it. */
+.doc-tags {
   max-width: calc(var(--doc-measure) * var(--doc-zoom, 1) + 128px);
   margin: 0 auto;
-  padding: 20px 64px 0;
+  padding: 14px 64px 0;
   box-sizing: border-box;
-  font-family: var(--font-text);
-  font-size: calc(var(--doc-size) * var(--doc-zoom, 1));
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
 }
 
-:root[data-full-width] .doc-frontmatter {
+:root[data-full-width] .doc-tags {
   max-width: none;
 }
 
-.doc-frontmatter pre {
-  margin: 0;
+.doc-tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: var(--hover);
+  color: var(--text-2);
+  font: inherit;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.tag-chip:disabled {
+  cursor: default;
+}
+
+.tag-chip:not(:disabled):hover {
+  background: color-mix(in srgb, var(--hover) 60%, var(--border));
+}
+
+.tag-chip-name {
+  color: var(--text-3);
+}
+
+.tag-chip-value {
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A value that isn't one of the tag's: kept, and marked. */
+.tag-chip.is-unknown {
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+}
+
+.tag-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.tag-add:hover {
+  background: var(--hover);
+  color: var(--text-2);
+}
+
+/* A note with no tags: *Add tag* shows while the pointer is over the top of
+   the note, or the key focus is on it. */
+.doc-tags-row.is-empty .tag-add {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.doc-title:hover + .doc-tags .doc-tags-row.is-empty .tag-add,
+.doc-tags:hover .doc-tags-row.is-empty .tag-add,
+.doc-tags-row.is-empty .tag-add:focus-visible,
+.doc-tags-row.is-empty .tag-add[aria-expanded="true"] {
+  opacity: 1;
+}
+
+.doc-frontmatter-more {
+  margin-top: 8px;
+  color: var(--text-3);
+}
+
+.doc-frontmatter-more > summary {
+  width: fit-content;
+  cursor: pointer;
+  user-select: none;
+}
+
+.doc-frontmatter-more pre {
+  margin: 6px 0 0;
   padding: 8px 12px;
   border-radius: 6px;
   background: var(--hover);
@@ -4606,9 +4698,170 @@ body.tree-dragging.tree-drag-invalid * {
   overflow-wrap: anywhere;
 }
 
+/* The tag list's own note: a row per tag. */
+.doc-taglist-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.doc-taglist-name {
+  flex: none;
+  min-width: 90px;
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+.doc-taglist-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tag-chip.is-value {
+  cursor: default;
+}
+
+.doc-taglist-empty {
+  margin: 0;
+  color: var(--text-3);
+}
+
+/* A title's problem shows over the chips while it's typed, so the note
+   never moves. */
+.editor-wrap:has(> .doc-tags) .doc-title-problem {
+  z-index: 1;
+  background: var(--canvas);
+}
+
+/* Under a title and its tags the note is a viewport tall less both. */
+.editor-wrap:has(> .doc-tags) .milkdown .ProseMirror {
+  min-height: calc(100vh - var(--bar-h) - 1px - var(--doc-title-h, 0px) - var(--doc-tags-h, 0px));
+}
+
+.editor-pane.is-split .editor-wrap:has(> .doc-tags) .milkdown .ProseMirror {
+  min-height: calc(100vh - var(--bar-h) - 1px - 30px - var(--doc-title-h, 0px) - var(--doc-tags-h, 0px));
+}
+
+.editor-wrap.is-html-view > .doc-tags {
+  display: none;
+}
+
+/* A version's own tags, above it in the preview. */
+.version-preview-body > .doc-tags {
+  padding-top: 24px;
+}
+
+/* The menus: a tag's values, checked, and *+ Tag*'s two levels. */
+.tag-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tag-menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-menu-check {
+  flex: none;
+  display: inline-flex;
+  width: 12px;
+  color: var(--text-2);
+}
+
+.tag-menu-hint,
+.tag-menu-more,
+.tag-menu-back {
+  color: var(--text-3);
+}
+
+.tag-menu-more {
+  float: right;
+}
+
+.tag-menu-back {
+  margin-right: 6px;
+}
+
+.tag-menu-rule {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+.sidebar-menu-item.tag-menu-item:disabled {
+  cursor: default;
+  color: var(--text-2);
+}
+
+.sidebar-menu-item.tag-menu-item:disabled:hover {
+  background: transparent;
+}
+
+/* The dialogs: values one per line, or one field each with a handle. */
+.tag-values-text {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.tag-values {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.tag-value-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tag-value-row.is-dragging {
+  opacity: 0.6;
+}
+
+.tag-value-grip {
+  flex: none;
+  display: inline-flex;
+  padding: 4px 2px;
+  color: var(--text-3);
+  cursor: grab;
+  touch-action: none;
+}
+
+.tag-value-remove {
+  flex: none;
+  display: inline-flex;
+  padding: 5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.tag-value-remove:hover {
+  background: var(--hover);
+  color: var(--text-1);
+}
+
+.tag-edit-buttons .tag-edit-gap {
+  flex: 1;
+}
+
 @media (max-width: 720px) {
-  .doc-frontmatter {
-    padding: 20px 28px 0;
+  .doc-tags {
+    padding: 12px 28px 0;
   }
 }
 
@@ -5469,7 +5722,7 @@ body.tree-dragging.tree-drag-invalid * {
    (`data-milkdown-root`); Crepe's `.milkdown` is inside it, not a child. */
 .editor-wrap.is-version-preview > [data-milkdown-root],
 .editor-wrap.is-version-preview > .comments-rail,
-.editor-wrap.is-version-preview > .doc-frontmatter,
+.editor-wrap.is-version-preview > .doc-tags,
 .editor-wrap.is-version-preview > .doc-title,
 .editor-wrap.is-version-preview > .html-view {
   display: none;

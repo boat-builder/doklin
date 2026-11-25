@@ -1,0 +1,1300 @@
+{
+  "about": "Cases the tag rules of the Mac and browser (src/tags.ts), of the iPhone (Markdown/Tags.swift) and of the Mac's search (src-tauri/src/tags.rs) must answer alike. The Rust side reads `lines` and `match` only. Read by verify-harness/tags.test.mjs, ios/DoklinKit/Tests/DoklinKitTests/TagsTests.swift and src-tauri/src/tags.rs: change all three.",
+  "lines": [
+    {
+      "text": "No block.\n",
+      "lines": []
+    },
+    {
+      "text": "---\nstatus: Doing\npriority: p1\n---\nBody\n",
+      "lines": [
+        {
+          "key": "status",
+          "value": "Doing"
+        },
+        {
+          "key": "priority",
+          "value": "p1"
+        }
+      ]
+    },
+    {
+      "text": "---\r\nstatus: Doing\r\n---\r\nBody\r\n",
+      "lines": [
+        {
+          "key": "status",
+          "value": "Doing"
+        }
+      ]
+    },
+    {
+      "text": "---\nstatus: \"In progress\"\nnote: 'it''s'\nesc: \"a \\\"b\\\" \\\\ c\"\n---\n",
+      "lines": [
+        {
+          "key": "status",
+          "value": "In progress"
+        },
+        {
+          "key": "note",
+          "value": "it's"
+        },
+        {
+          "key": "esc",
+          "value": "a \"b\" \\ c"
+        }
+      ]
+    },
+    {
+      "text": "---\nstatus: Doing # set by Ada\nurl: https://x.io/a#b\nq: \"Done\"   # quoted\n---\n",
+      "lines": [
+        {
+          "key": "status",
+          "value": "Doing"
+        },
+        {
+          "key": "url",
+          "value": "https://x.io/a#b"
+        },
+        {
+          "key": "q",
+          "value": "Done"
+        }
+      ]
+    },
+    {
+      "text": "---\nempty:\nlist: [a, b]\nmap: {a: 1}\nblock: |\n  two\n  lines\nfold: >\nanchor: &a x\nalias: *a\ntagged: !!str x\nbad: \"a \\n b\"\nopen: \"never closed\nafter: 'x' y\n---\n",
+      "lines": [
+        {
+          "key": "empty",
+          "value": null
+        },
+        {
+          "key": "list",
+          "value": null
+        },
+        {
+          "key": "map",
+          "value": null
+        },
+        {
+          "key": "block",
+          "value": null
+        },
+        {
+          "key": "fold",
+          "value": null
+        },
+        {
+          "key": "anchor",
+          "value": null
+        },
+        {
+          "key": "alias",
+          "value": null
+        },
+        {
+          "key": "tagged",
+          "value": null
+        },
+        {
+          "key": "bad",
+          "value": null
+        },
+        {
+          "key": "open",
+          "value": null
+        },
+        {
+          "key": "after",
+          "value": null
+        }
+      ]
+    },
+    {
+      "text": "---\nmeta:\n  owner: ada\n\n  team: core\nstatus: Doing\ntags:\n- a\n- b\n---\n",
+      "lines": [
+        {
+          "key": "meta",
+          "value": null
+        },
+        {
+          "key": "status",
+          "value": "Doing"
+        },
+        {
+          "key": "tags",
+          "value": null
+        }
+      ]
+    },
+    {
+      "text": "---\nplain: x\n  more\n---\n",
+      "lines": [
+        {
+          "key": "plain",
+          "value": null
+        }
+      ]
+    },
+    {
+      "text": "---\n# a comment\n - item\n\tindented: x\nno colon here\nkey:value\na:b: c\nDue date : soon\n---\n",
+      "lines": [
+        {
+          "key": "a:b",
+          "value": "c"
+        },
+        {
+          "key": "Due date",
+          "value": "soon"
+        }
+      ]
+    },
+    {
+      "text": "---\nstatus:\tDoing\ntrailing: done   \n---\n",
+      "lines": [
+        {
+          "key": "status",
+          "value": "Doing"
+        },
+        {
+          "key": "trailing",
+          "value": "done"
+        }
+      ]
+    },
+    {
+      "text": "--- \nstatus: Doing\n---\t\nBody",
+      "lines": [
+        {
+          "key": "status",
+          "value": "Doing"
+        }
+      ]
+    },
+    {
+      "text": "---\nstatus: Doing\n",
+      "lines": []
+    },
+    {
+      "text": "Body first\n---\nstatus: Doing\n---\n",
+      "lines": []
+    },
+    {
+      "text": "---\nstatus: Doing\nStatus: Done\n---\n",
+      "lines": [
+        {
+          "key": "status",
+          "value": "Doing"
+        },
+        {
+          "key": "Status",
+          "value": "Done"
+        }
+      ]
+    }
+  ],
+  "match": [
+    {
+      "text": "---\nstatus: doing\npriority: p1\n---\n",
+      "filters": [
+        {
+          "name": "Status",
+          "value": "Doing"
+        }
+      ],
+      "matches": true
+    },
+    {
+      "text": "---\nstatus: doing\npriority: p1\n---\n",
+      "filters": [
+        {
+          "name": "status",
+          "value": "Doing"
+        },
+        {
+          "name": "Priority",
+          "value": "P1"
+        }
+      ],
+      "matches": true
+    },
+    {
+      "text": "---\nstatus: doing\npriority: p1\n---\n",
+      "filters": [
+        {
+          "name": "status",
+          "value": "Doing"
+        },
+        {
+          "name": "priority",
+          "value": "p2"
+        }
+      ],
+      "matches": false
+    },
+    {
+      "text": "---\nstatus: Doing\n---\n",
+      "filters": [
+        {
+          "name": "status",
+          "value": null
+        }
+      ],
+      "matches": true
+    },
+    {
+      "text": "---\nstatus: [Doing]\n---\n",
+      "filters": [
+        {
+          "name": "status",
+          "value": null
+        }
+      ],
+      "matches": false
+    },
+    {
+      "text": "---\nstatus: [a]\nstatus: Doing\n---\n",
+      "filters": [
+        {
+          "name": "status",
+          "value": "Doing"
+        }
+      ],
+      "matches": false
+    },
+    {
+      "text": "---\nstatus: Doing\nstatus: Done\n---\n",
+      "filters": [
+        {
+          "name": "status",
+          "value": "Done"
+        }
+      ],
+      "matches": false
+    },
+    {
+      "text": "No block, status: Doing\n",
+      "filters": [
+        {
+          "name": "status",
+          "value": "Doing"
+        }
+      ],
+      "matches": false
+    },
+    {
+      "text": "---\nstatus: \"In progress\"\n---\n",
+      "filters": [
+        {
+          "name": "status",
+          "value": "in PROGRESS"
+        }
+      ],
+      "matches": true
+    },
+    {
+      "text": "Anything\n",
+      "filters": [],
+      "matches": true
+    }
+  ],
+  "tags": [
+    {
+      "text": "---\npriority: p2\nstatus: doing\nowner: ada\n---\nBody\n",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "name": "Status",
+          "value": "Doing",
+          "known": true
+        },
+        {
+          "name": "priority",
+          "value": "p2",
+          "known": true
+        }
+      ],
+      "other": true
+    },
+    {
+      "text": "---\nSTATUS: Blocked\n---\n",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "name": "Status",
+          "value": "Blocked",
+          "known": false
+        }
+      ],
+      "other": false
+    },
+    {
+      "text": "---\nstatus: [Doing, Done]\nstatus: Doing\n\n---\n",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "tags": [],
+      "other": true
+    },
+    {
+      "text": "---\nstatus: Done\n\n---\n",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "name": "Status",
+          "value": "Done",
+          "known": true
+        }
+      ],
+      "other": false
+    },
+    {
+      "text": "---\nstatus: Done\n---\n",
+      "list": [],
+      "tags": [],
+      "other": true
+    },
+    {
+      "text": "No block\n",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "tags": [],
+      "other": false
+    }
+  ],
+  "write": [
+    {
+      "text": "Body\n",
+      "at": "Status",
+      "tag": {
+        "name": "Status",
+        "value": "Doing"
+      },
+      "out": "---\nStatus: Doing\n---\nBody\n"
+    },
+    {
+      "text": "Body\r\nMore\r\n",
+      "at": "Status",
+      "tag": {
+        "name": "Status",
+        "value": "Doing"
+      },
+      "out": "---\r\nStatus: Doing\r\n---\r\nBody\r\nMore\r\n"
+    },
+    {
+      "text": "",
+      "at": "Status",
+      "tag": {
+        "name": "Status",
+        "value": "Doing"
+      },
+      "out": "---\nStatus: Doing\n---\n"
+    },
+    {
+      "text": "---\nowner: ada\n---\nBody\n",
+      "at": "Status",
+      "tag": {
+        "name": "Status",
+        "value": "Doing"
+      },
+      "out": "---\nowner: ada\nStatus: Doing\n---\nBody\n"
+    },
+    {
+      "text": "---\r\nowner: ada\r\n---\r\nBody\r\n",
+      "at": "Status",
+      "tag": {
+        "name": "Status",
+        "value": "Doing"
+      },
+      "out": "---\r\nowner: ada\r\nStatus: Doing\r\n---\r\nBody\r\n"
+    },
+    {
+      "text": "---\nstatus: doing # old\nowner: ada\n---\nBody\n",
+      "at": "Status",
+      "tag": {
+        "name": "Status",
+        "value": "Done"
+      },
+      "out": "---\nStatus: Done\nowner: ada\n---\nBody\n"
+    },
+    {
+      "text": "---\nstatus:\n  - a\n  - b\nowner: ada\n---\n",
+      "at": "status",
+      "tag": {
+        "name": "Status",
+        "value": "Done"
+      },
+      "out": "---\nStatus: Done\nowner: ada\n---\n"
+    },
+    {
+      "text": "---\nstatus: Doing\nstatus: Done\n---\n",
+      "at": "Status",
+      "tag": {
+        "name": "Status",
+        "value": "Todo"
+      },
+      "out": "---\nStatus: Todo\nstatus: Done\n---\n"
+    },
+    {
+      "text": "---\nowner: ada\nstatus: Doing\n---\nBody\n",
+      "at": "status",
+      "tag": null,
+      "out": "---\nowner: ada\n---\nBody\n"
+    },
+    {
+      "text": "---\nstatus: Doing\n---\nBody\n",
+      "at": "status",
+      "tag": null,
+      "out": "Body\n"
+    },
+    {
+      "text": "---\nstatus: Doing\n---",
+      "at": "status",
+      "tag": null,
+      "out": ""
+    },
+    {
+      "text": "---\nowner: ada\n---\nBody\n",
+      "at": "status",
+      "tag": null,
+      "out": "---\nowner: ada\n---\nBody\n"
+    },
+    {
+      "text": "Body\n",
+      "at": "status",
+      "tag": null,
+      "out": "Body\n"
+    },
+    {
+      "text": "---\n---\nBody\n",
+      "at": "Status",
+      "tag": {
+        "name": "Status",
+        "value": "Doing"
+      },
+      "out": "---\nStatus: Doing\n---\nBody\n"
+    },
+    {
+      "text": "---\nstatus: Doing\n---\n",
+      "at": "status",
+      "tag": {
+        "name": "State",
+        "value": "Doing"
+      },
+      "out": "---\nState: Doing\n---\n"
+    },
+    {
+      "text": "---\nowner: ada\n---\n",
+      "at": "Status",
+      "tag": {
+        "name": "Status",
+        "value": "In: review"
+      },
+      "out": "---\nowner: ada\nStatus: \"In: review\"\n---\n"
+    },
+    {
+      "text": "---\nmeta:\n  owner: ada\nstatus: Doing\n---\n",
+      "at": "meta",
+      "tag": null,
+      "out": "---\nstatus: Doing\n---\n"
+    },
+    {
+      "text": "---\nstatus: Doing\n---\n---\nlooks: like a block\n---\n",
+      "at": "status",
+      "tag": null,
+      "out": "---\n---\n---\nlooks: like a block\n---\n"
+    }
+  ],
+  "quote": [
+    {
+      "value": "Doing",
+      "line": "Doing"
+    },
+    {
+      "value": "In progress",
+      "line": "In progress"
+    },
+    {
+      "value": "p1",
+      "line": "p1"
+    },
+    {
+      "value": "a:b",
+      "line": "\"a:b\""
+    },
+    {
+      "value": "C#",
+      "line": "\"C#\""
+    },
+    {
+      "value": "a, b",
+      "line": "\"a, b\""
+    },
+    {
+      "value": "[x]",
+      "line": "\"[x]\""
+    },
+    {
+      "value": "{x}",
+      "line": "\"{x}\""
+    },
+    {
+      "value": "say \"hi\"",
+      "line": "\"say \\\"hi\\\"\""
+    },
+    {
+      "value": "it's",
+      "line": "\"it's\""
+    },
+    {
+      "value": "-1",
+      "line": "\"-1\""
+    },
+    {
+      "value": "?",
+      "line": "\"?\""
+    },
+    {
+      "value": "!x",
+      "line": "\"!x\""
+    },
+    {
+      "value": "&x",
+      "line": "\"&x\""
+    },
+    {
+      "value": "*x",
+      "line": "\"*x\""
+    },
+    {
+      "value": "|x",
+      "line": "\"|x\""
+    },
+    {
+      "value": ">x",
+      "line": "\">x\""
+    },
+    {
+      "value": "%x",
+      "line": "\"%x\""
+    },
+    {
+      "value": "@ada",
+      "line": "\"@ada\""
+    },
+    {
+      "value": "`x`",
+      "line": "\"`x`\""
+    },
+    {
+      "value": "Yes",
+      "line": "\"Yes\""
+    },
+    {
+      "value": "NULL",
+      "line": "\"NULL\""
+    },
+    {
+      "value": "~",
+      "line": "\"~\""
+    },
+    {
+      "value": "true story",
+      "line": "true story"
+    },
+    {
+      "value": "a\\b",
+      "line": "a\\b"
+    },
+    {
+      "value": "\\\"",
+      "line": "\"\\\\\\\"\""
+    },
+    {
+      "value": "x-1",
+      "line": "x-1"
+    },
+    {
+      "value": "v1.2",
+      "line": "v1.2"
+    }
+  ],
+  "list": [
+    {
+      "text": "",
+      "tags": []
+    },
+    {
+      "text": "Just a note.\n",
+      "tags": []
+    },
+    {
+      "text": "---\nstatus: [Todo, Doing, Done]\npriority: [p1, p2, p3, p4, p5]\n---\nWhat each tag means.\n",
+      "tags": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3",
+            "p4",
+            "p5"
+          ]
+        }
+      ]
+    },
+    {
+      "text": "---\nStatus: [ \"In progress\" , 'it''s', \"a, b\", plain ,]  # trailing comma and a comment\n---\n",
+      "tags": [
+        {
+          "name": "Status",
+          "values": [
+            "In progress",
+            "it's",
+            "a, b",
+            "plain"
+          ]
+        }
+      ]
+    },
+    {
+      "text": "---\nstatus: []\nempty: [a, , b]\nbad name!: [a]\n-dash: [a]\ntwice: [a, A]\nscalar: a\nblock:\n  - a\nunclosed: [a, b\nafter: [a] b\nlong: [aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\nok: [x]\nOK: [y]\n---\n",
+      "tags": [
+        {
+          "name": "ok",
+          "values": [
+            "x"
+          ]
+        }
+      ]
+    },
+    {
+      "text": "---\nDue date: [soon, later]\nwhere_1: [here]\n---\n",
+      "tags": [
+        {
+          "name": "Due date",
+          "values": [
+            "soon",
+            "later"
+          ]
+        },
+        {
+          "name": "where_1",
+          "values": [
+            "here"
+          ]
+        }
+      ]
+    },
+    {
+      "text": "---\r\nstatus: [Todo, Done]\r\n---\r\n",
+      "tags": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Done"
+          ]
+        }
+      ]
+    },
+    {
+      "text": "---\nstatus: [a #b]\nstage: [\"a #b\", c]\n---\n",
+      "tags": [
+        {
+          "name": "stage",
+          "values": [
+            "a #b",
+            "c"
+          ]
+        }
+      ]
+    }
+  ],
+  "writeList": [
+    {
+      "text": "",
+      "at": "status",
+      "def": {
+        "name": "status",
+        "values": [
+          "Todo",
+          "Doing",
+          "Done"
+        ]
+      },
+      "out": "---\nstatus: [Todo, Doing, Done]\n---\nThe workspace's tags. Each line at the top is a tag and the values a note can have. Say here what each value means, for the people and agents who set them.\n"
+    },
+    {
+      "text": "---\nstatus: [Todo, Done]\npriority: [p1]\n---\nBody\n",
+      "at": "Status",
+      "def": {
+        "name": "Status",
+        "values": [
+          "Todo",
+          "In: review",
+          "Done"
+        ]
+      },
+      "out": "---\nStatus: [Todo, \"In: review\", Done]\npriority: [p1]\n---\nBody\n"
+    },
+    {
+      "text": "---\nstatus: [Todo, Done]\npriority: [p1]\n---\nBody\n",
+      "at": "State",
+      "def": {
+        "name": "State",
+        "values": [
+          "Todo",
+          "Done"
+        ]
+      },
+      "after": "status",
+      "out": "---\nstatus: [Todo, Done]\nState: [Todo, Done]\npriority: [p1]\n---\nBody\n"
+    },
+    {
+      "text": "---\nstatus: [Todo, Done]\n---\nBody\n",
+      "at": "area",
+      "def": {
+        "name": "area",
+        "values": [
+          "Web",
+          "iPhone"
+        ]
+      },
+      "out": "---\nstatus: [Todo, Done]\narea: [Web, iPhone]\n---\nBody\n"
+    },
+    {
+      "text": "---\nstatus: [Todo, Done]\npriority: [p1]\n---\nBody\n",
+      "at": "status",
+      "def": null,
+      "out": "---\npriority: [p1]\n---\nBody\n"
+    },
+    {
+      "text": "---\nstatus: [Todo, Done]\n---\nBody\n",
+      "at": "status",
+      "def": null,
+      "out": "Body\n"
+    },
+    {
+      "text": "Body\n",
+      "at": "status",
+      "def": {
+        "name": "status",
+        "values": [
+          "a"
+        ]
+      },
+      "out": "---\nstatus: [a]\n---\nBody\n"
+    }
+  ],
+  "names": [
+    {
+      "name": "status",
+      "ok": true
+    },
+    {
+      "name": "Due date",
+      "ok": true
+    },
+    {
+      "name": "where_1",
+      "ok": true
+    },
+    {
+      "name": "a-b",
+      "ok": true
+    },
+    {
+      "name": "2024",
+      "ok": true
+    },
+    {
+      "name": "Étape",
+      "ok": true
+    },
+    {
+      "name": "状态",
+      "ok": true
+    },
+    {
+      "name": "",
+      "ok": false
+    },
+    {
+      "name": "-a",
+      "ok": false
+    },
+    {
+      "name": "_a",
+      "ok": false
+    },
+    {
+      "name": " a",
+      "ok": false
+    },
+    {
+      "name": "a ",
+      "ok": false
+    },
+    {
+      "name": "a:b",
+      "ok": false
+    },
+    {
+      "name": "a#b",
+      "ok": false
+    },
+    {
+      "name": "a.b",
+      "ok": false
+    },
+    {
+      "name": "a/b",
+      "ok": false
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ok": true
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ok": false
+    }
+  ],
+  "values": [
+    {
+      "value": "Doing",
+      "ok": true
+    },
+    {
+      "value": "In: review",
+      "ok": true
+    },
+    {
+      "value": "#1",
+      "ok": true
+    },
+    {
+      "value": "状态",
+      "ok": true
+    },
+    {
+      "value": "",
+      "ok": false
+    },
+    {
+      "value": " a",
+      "ok": false
+    },
+    {
+      "value": "a ",
+      "ok": false
+    },
+    {
+      "value": "a\nb",
+      "ok": false
+    },
+    {
+      "value": "a\tb",
+      "ok": false
+    },
+    {
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ok": true
+    },
+    {
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ok": false
+    }
+  ],
+  "query": [
+    {
+      "q": "status:Doing",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "text": "",
+      "tags": [
+        {
+          "name": "Status",
+          "value": "Doing"
+        }
+      ]
+    },
+    {
+      "q": "  plan  status:doing  launch ",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "text": "plan launch",
+      "tags": [
+        {
+          "name": "Status",
+          "value": "Doing"
+        }
+      ]
+    },
+    {
+      "q": "status:\"in progress\" PRIORITY:p1",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "text": "",
+      "tags": [
+        {
+          "name": "Status",
+          "value": "In progress"
+        },
+        {
+          "name": "priority",
+          "value": "p1"
+        }
+      ]
+    },
+    {
+      "q": "status:Blocked",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "text": "",
+      "tags": [
+        {
+          "name": "Status",
+          "value": "Blocked"
+        }
+      ]
+    },
+    {
+      "q": "owner:ada notes",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "text": "owner:ada notes",
+      "tags": []
+    },
+    {
+      "q": "  a  b  ",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "text": "a  b",
+      "tags": []
+    },
+    {
+      "q": "status: Doing",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "text": "status: Doing",
+      "tags": []
+    },
+    {
+      "q": "status:",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "text": "status:",
+      "tags": []
+    },
+    {
+      "q": "status:\"\" x",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "text": "status:\"\" x",
+      "tags": []
+    },
+    {
+      "q": "\"Due date\":soon",
+      "list": [
+        {
+          "name": "Due date",
+          "values": [
+            "soon"
+          ]
+        }
+      ],
+      "text": "",
+      "tags": [
+        {
+          "name": "Due date",
+          "value": "soon"
+        }
+      ]
+    },
+    {
+      "q": "https://x.io status:Done",
+      "list": [
+        {
+          "name": "Status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done",
+            "In progress"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ]
+        }
+      ],
+      "text": "https://x.io",
+      "tags": [
+        {
+          "name": "Status",
+          "value": "Done"
+        }
+      ]
+    },
+    {
+      "q": "status:Doing",
+      "list": [],
+      "text": "status:Doing",
+      "tags": []
+    }
+  ]
+}

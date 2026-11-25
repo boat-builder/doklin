@@ -43,8 +43,10 @@
 //                                      what was in it becomes what is in the section
 //   POST   /api/web/copy               the same body: the document or the folder again, at `to`,
 //                                      every file of it a new one. 16 files at most
-//   GET    /api/web/search?q=&limit=   every section the person is in (search.ts); 202
-//                                      {indexing, pending} while the mirror catches up
+//   GET    /api/web/search?q=&limit=&tag=   every section the person is in (search.ts); 202
+//                                      {indexing, pending} while the mirror catches up. `tag`
+//                                      (repeatable) is name:value, or a name for any value; q may
+//                                      then be empty, and every such note is listed
 //   PUT    /api/web/pages              {space, path, kind, slug?, title?, desc?} → {slug, url, …}
 //   DELETE /api/web/pages?slug=        stop a page, in whichever section of theirs holds it
 //   PUT    /api/web/home               {slug: string | null}: the page at `/`, or none

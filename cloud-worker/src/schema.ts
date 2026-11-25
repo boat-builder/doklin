@@ -301,6 +301,28 @@ const STEPS: readonly Step[] = [
       `CREATE INDEX IF NOT EXISTS links_by_target ON links(target)`,
     ],
   },
+  {
+    // A note's frontmatter pairs (search.ts, `pairsOf`), so "which notes
+    // have status Doing" is one look-up, filtered by the sections the asker
+    // can see. Every pair, not only the listed tags', so a tag added to the
+    // list later needs no note read again. The name is lower-cased, and so
+    // is `folded`, the value a filter matches: tags match whatever their
+    // case (src/tags.ts). Derived like `links` beside it: the same catch-up
+    // fills both, and a wipe empties it.
+    to: 12,
+    tables: ["tags"],
+    sql: [
+      `CREATE TABLE IF NOT EXISTS tags (
+         space_id TEXT NOT NULL,                -- '' the shared workspace
+         fid      TEXT NOT NULL,                -- the note's markdown file
+         name     TEXT NOT NULL,                -- the pair's key, lower-cased: the first line keyed so
+         value    TEXT NOT NULL,                -- its value as the note spells it
+         folded   TEXT NOT NULL,                -- the value, lower-cased
+         PRIMARY KEY (space_id, fid, name)
+       )`,
+      `CREATE INDEX IF NOT EXISTS tags_by_value ON tags(space_id, name, folded)`,
+    ],
+  },
 ];
 
 /** What a fully migrated database reports. */

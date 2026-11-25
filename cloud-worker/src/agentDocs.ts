@@ -2,9 +2,9 @@
 // folder holds, a document's content and what is known about it, and the
 // three ways an agent changes the tree — write, remove, move.
 //
-//   GET    /api/agent/tree?dir=&deep=1
+//   GET    /api/agent/tree?dir=&deep=1[&where=]
 //   GET    /api/agent/doc?path=&v=md|html[&clean=1][&info=1]
-//   GET    /api/agent/search?q=&dir=&limit=
+//   GET    /api/agent/search?q=&dir=&limit=[&where=]
 //   PUT    /api/agent/doc?path=&v=[&force=1][&dry=1]      if-rev: <n> | *
 //   DELETE /api/agent/doc?path=&v=[&dry=1]
 //   POST   /api/agent/move                                 {from, to, dryRun?}
@@ -25,6 +25,12 @@
 // `Restricted`, and a move from one section to another. A note's links are
 // read and written as they are now, wherever their documents are
 // (agentLinks.ts).
+//
+// A listing's notes carry their tags, and `where=name:value` (repeatable, or
+// a name alone for any value) narrows a listing or a search to the notes
+// that have them, from the index the search catch-up keeps (search.ts). A
+// write of a note is held to the tag list where it changes a tag's line,
+// and a write of the list itself to the list's format (tagList.ts).
 
 import { change, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
 import type { Section } from "./agentPlace";
@@ -47,6 +53,7 @@ import {
   versionFlag,
   type Doc,
   type Entry,
+  type DocRow,
   type Listing,
   type Named,
   type Version,
@@ -58,11 +65,14 @@ import { json, readJsonObject } from "./http";
 import { ID_RE, MAX_FILE_BYTES, SPACE_ID_RE, blobKey, contentTypeOf } from "./layout";
 import type { Manifest } from "./manifest";
 import { listDirectory } from "./members";
-import { askOf, mirrorAfter, searchIn } from "./search";
+import { mounted } from "./mount";
+import { askOf, catchUpOpen, mirrorAfter, pairsIn, searchIn, type OpenSection } from "./search";
 import { MAX_SECTIONS_READ, sharedEnv, spaceOf } from "./spaces";
-import { isHtmlPath } from "./workspace";
+import { filtersOf, isTagNote, listKept, listedFilters, readTagList, tagsKept, type TagList } from "./tagList";
+import { isHtmlPath, isMarkdownPath, openWorkspace } from "./workspace";
 import { CRITIC_BLOCK_RE, parseSpans, stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, emptyMeta, metaFileOf, metaIsEmpty, parseEntityMeta, serializeEntityMeta, type LinkRecord } from "../../src/metaFile";
+import { keyedLines, noteTags, type NoteTag, type TagDef, type TagFilter } from "../../src/tags";
 
 /** A header value that survives the wire: paths are not always ASCII. */
 const headerText = (s: string): string => encodeURIComponent(s);
@@ -85,18 +95,20 @@ export async function getTree(c: Call): Promise<Response> {
   const { url, places } = c;
   const dir = (url.searchParams.get("dir") ?? "").replace(/^\/+|\/+$/g, "");
   const deep = url.searchParams.get("deep") === "1";
+  const asked = filtersOf(url.searchParams, "where");
+  if (asked instanceof Refusal) return refuse(asked);
   const at = await places.at(dir);
   if (at instanceof Refusal) return refuse(at);
 
   // A folder of one section, the section's own included.
   if (at !== "workspace" && at !== "restricted") {
-    const tree = await openTree(inSection(c, at));
-    if (!tree) return notBound();
-    const listing = listTree(tree.manifest, dir, deep);
+    const ws = await openWorkspace(at.env);
+    if (!ws) return notBound();
+    const listing = listTree(mounted(ws.manifest, at.mount), dir, deep);
     const nothing = listing.folders.length + listing.documents.length === 0;
     // A section is there with nothing in it; any other folder is its files.
     if (nothing && !sameName(dir, at.mount)) return json({ error: `there is no folder "${dir}"` }, 404);
-    return json(listing);
+    return withTags(c, listing, [{ section: at, ws }], asked, {});
   }
 
   // The workspace itself, or `Restricted`: what is in more than one section.
@@ -107,30 +119,101 @@ export async function getTree(c: Call): Promise<Response> {
   const sections = all.filter((s) => at === "workspace" || s.kind === "restricted");
   const listing: Listing = { dir, folders: [], documents: [] };
   const notListed: string[] = [];
-  let opened = 0;
+  const opened: OpenSection[] = [];
+  let count = 0;
   for (const s of sections) {
     const top = s.mount.split("/")[0];
     if (at === "workspace" && !listing.folders.includes(top)) listing.folders.push(top);
     if ((at === "restricted" || deep) && !listing.folders.includes(s.mount)) listing.folders.push(s.mount);
     if (!deep) continue;
     // Library is one read like the others; the rest are what a request opens.
-    if (s.kind !== "shared" && (opened += 1) > MAX_SECTIONS_READ) {
+    if (s.kind !== "shared" && (count += 1) > MAX_SECTIONS_READ) {
       notListed.push(s.mount);
       continue;
     }
-    const tree = await openTree(inSection(c, s));
-    if (!tree) {
+    const ws = await openWorkspace(s.env);
+    if (!ws) {
       if (s.kind === "shared") return notBound();
       continue;
     }
-    const inside = listTree(tree.manifest, s.mount, true);
+    opened.push({ section: s, ws });
+    const inside = listTree(mounted(ws.manifest, s.mount), s.mount, true);
     listing.folders.push(...inside.folders);
     listing.documents.push(...inside.documents);
   }
   listing.folders.sort(byName);
   listing.documents.sort((a, b) => byName(a.path, b.path));
   // Said, never left out silently: list one of these on its own.
-  return json({ ...listing, ...(notListed.length > 0 ? { notListed } : {}) });
+  return withTags(c, listing, opened, asked, notListed.length > 0 ? { notListed } : {});
+}
+
+/** A note's tags from what the index holds for it, as `noteTags` reads them
+ *  from its text: in the list's order, spelled as the list spells them. */
+function tagsHeld(pairs: Map<string, string>, list: readonly TagDef[]): NoteTag[] {
+  const out: NoteTag[] = [];
+  for (const def of list) {
+    const value = pairs.get(def.name.toLowerCase());
+    if (value === undefined) continue;
+    const known = def.values.find((v) => sameName(v, value));
+    out.push({ name: def.name, value: known ?? value, known: known !== undefined });
+  }
+  return out;
+}
+
+/** Whether a note's tags hold every filter. */
+const holds = (tags: readonly NoteTag[], where: readonly TagFilter[]): boolean =>
+  where.every((f) => tags.some((t) => sameName(t.name, f.name) && (f.value === null || sameName(t.value, f.value))));
+
+/**
+ * A listing with each note's tags, as the index holds them — and with
+ * `where`, only the notes that have them, once the index has caught up (a
+ * `202` while it reads, as a search's). Without `where` the index is not
+ * waited for: `tagsBehind` says it has not read the latest changes yet.
+ */
+async function withTags(c: Call, listing: Listing, opened: readonly OpenSection[], asked: readonly TagFilter[], extra: Record<string, unknown>): Promise<Response> {
+  if (listing.documents.length === 0 && asked.length === 0) return json({ ...listing, ...extra });
+  const list = await readTagList(c.env);
+  if (list instanceof Refusal) return refuse(list);
+  const where = listedFilters(asked, list);
+  if (where instanceof Refusal) return refuse(where);
+  if (list.tags.length === 0) return json({ ...listing, ...extra });
+  if (where.length > 0) {
+    const up = await catchUpOpen(c.env, opened);
+    if (up instanceof Refusal) return refuse(up);
+    if ("indexing" in up) return json({ indexing: true, pending: up.indexing }, 202);
+  }
+  const held = await pairsIn(c.env, opened, list.tags.map((d) => d.name.toLowerCase()));
+  if (held === null) {
+    if (where.length > 0) return json({ error: "this needs the domain's database, which isn't answering — try again in a moment" }, 503);
+    return json({ ...listing, ...extra, tagsBehind: true });
+  }
+  // Each note's file, by the path a listing row names it by.
+  const keys = new Map<string, string>();
+  for (const { section, ws } of opened) {
+    for (const [fid, f] of Object.entries(ws.manifest.files)) {
+      if (!isMarkdownPath(f.path)) continue;
+      const path = section.mount ? `${section.mount}/${f.path}` : f.path;
+      const key = `${section.space}/${fid}`;
+      keys.set(path.toLowerCase(), key);
+      if (!keys.has(nameOf(path).stem.toLowerCase())) keys.set(nameOf(path).stem.toLowerCase(), key);
+    }
+  }
+  const documents: (DocRow & { tags?: NoteTag[] })[] = [];
+  for (const row of listing.documents) {
+    const key = row.md ? keys.get(row.path.toLowerCase()) : undefined;
+    const pairs = key === undefined ? undefined : held.pairs.get(key);
+    const tags = pairs ? tagsHeld(pairs, list.tags) : [];
+    if (!holds(tags, where)) continue;
+    documents.push(tags.length > 0 ? { ...row, tags } : row);
+  }
+  return json({
+    ...listing,
+    // Narrowed to notes, the folders they are in say nothing.
+    ...(where.length > 0 ? { folders: [], where } : {}),
+    documents,
+    ...extra,
+    ...(held.behind && where.length === 0 ? { tagsBehind: true } : {}),
+  });
 }
 
 /**
@@ -185,7 +268,17 @@ export async function getFind(c: Call): Promise<Response> {
 export async function getSearch(c: Call): Promise<Response> {
   const { env, url, places } = c;
   const dir = (url.searchParams.get("dir") ?? "").replace(/^\/+|\/+$/g, "");
-  const ask = askOf(url.searchParams, dir);
+  const asked = filtersOf(url.searchParams, "where");
+  if (asked instanceof Refusal) return refuse(asked);
+  let where: TagFilter[] = [];
+  if (asked.length > 0) {
+    const list = await readTagList(env);
+    if (list instanceof Refusal) return refuse(list);
+    const listed = listedFilters(asked, list);
+    if (listed instanceof Refusal) return refuse(listed);
+    where = listed;
+  }
+  const ask = askOf(url.searchParams, dir, where);
   if (ask instanceof Refusal) return refuse(ask);
   const at = await places.at(dir);
   if (at instanceof Refusal) return refuse(at);
@@ -214,6 +307,7 @@ export async function getSearch(c: Call): Promise<Response> {
   return json({
     query: ask.query,
     dir,
+    ...(where.length > 0 ? { where } : {}),
     results,
     total: found.total,
     ...(found.total > results.length ? { truncated: true } : {}),
@@ -315,12 +409,13 @@ export async function namesOf(env: Env): Promise<Map<string, string>> {
  * has one. The ids, never the link: its form is the CLI's to write.
  */
 async function docInfo(env: Env, m: Manifest, origin: string, doc: Doc): Promise<Record<string, unknown>> {
-  const [names, metaText, workspace] = await Promise.all([
+  const [names, metaText, workspace, tags] = await Promise.all([
     namesOf(env),
     doc.meta
       ? env.DATA.get(blobKey(doc.meta.fid, doc.meta.file.hash)).then((o) => (o ? o.text() : ""))
       : Promise.resolve(""),
     readWorkspace(sharedEnv(env)),
+    tagsOfNote(env, doc),
   ]);
   const meta = parseEntityMeta(metaText);
   const row = docRow(doc);
@@ -334,9 +429,20 @@ async function docInfo(env: Env, m: Manifest, origin: string, doc: Doc): Promise
     ...(row.md ? { md: named(row.md) } : {}),
     ...(row.html ? { html: named(row.html) } : {}),
     comments: meta.mthreads.length + meta.hthreads.length,
+    ...(tags.length > 0 ? { tags } : {}),
     ...(addresses.length > 0 ? { public: addresses } : {}),
     ...(workspace && opened ? { linkTo: { workspace: workspace.id, space: spaceOf(env), file: opened.fid } } : {}),
   };
+}
+
+/** A note's tags, read from its text as it is now — none for a document
+ *  with no markdown, or when the list or the text can't be read yet. */
+async function tagsOfNote(env: Env, doc: Doc): Promise<NoteTag[]> {
+  if (!doc.md) return [];
+  const list = await readTagList(env);
+  if (list instanceof Refusal || list.tags.length === 0) return [];
+  const text = await blobText(env, doc.md);
+  return text === null ? [] : noteTags(text, list.tags);
 }
 
 /* ---------- Writing ---------- */
@@ -389,13 +495,15 @@ export async function putDoc(c: Call): Promise<Response> {
 
   // Read once for every attempt; the section written to is the change's own.
   const person = new PersonDocs(c);
+  let listed: Promise<TagList | Refusal> | undefined;
+  const tagList = (): Promise<TagList | Refusal> => (listed ??= readTagList(c.env));
   const done = await change(
     c,
     async (tx) => {
       const index = new Index(tx.files);
       const at = locate(index, path, flag);
       if (at instanceof Refusal) return at;
-      const value = await writeVersion(tx, index, at, bytes, pre, force, person.own(tx.files), sectionOfCall(c));
+      const value = await writeVersion(tx, index, at, bytes, pre, force, person.own(tx.files), sectionOfCall(c), tagList);
       if (!(value instanceof Refusal)) keepPublic(tx);
       return value;
     },
@@ -418,6 +526,7 @@ async function writeVersion(
   force: boolean,
   person: PersonDocs,
   section: string | null,
+  tagList: () => Promise<TagList | Refusal>,
 ): Promise<Written | Refusal> {
   const { doc } = at;
   let version: Version;
@@ -457,6 +566,8 @@ async function writeVersion(
   // Compared with what the agent read; the text as stored passes too.
   const lost = markersKept(shown, text, doc.stem);
   if (lost && (shown === now || markersKept(now, text, doc.stem))) return lost;
+  const untagged = await tagsChecked(tagList, section, target, now, text);
+  if (untagged) return untagged;
   const written = await linksWritten(person, { path: target, section }, text, { text: now, records: meta.links });
   const value = await finish(tx, doc, version, current, target, written.text === text ? bytes : new TextEncoder().encode(written.text));
   // The sidecar in the same write: what a note is linked by never lands apart from its text.
@@ -472,12 +583,32 @@ async function writeVersion(
   return value;
 }
 
+/**
+ * What the tag list says of a note's new text (tagList.ts): the list itself
+ * must read whole, and a note keep to it where the write changes a tag's
+ * line. The list is read only for a write that changes a keyed line.
+ */
+async function tagsChecked(
+  tagList: () => Promise<TagList | Refusal>,
+  section: string | null,
+  target: string,
+  now: string,
+  text: string,
+): Promise<Refusal | null> {
+  if (isTagNote(section ?? "", target)) return listKept(text, nameOf(target).stem);
+  const before = keyedLines(now);
+  const after = keyedLines(text);
+  if (after.every((l, i) => before[i] && before[i].key === l.key && before[i].value === l.value)) return null;
+  const list = await tagList();
+  return list instanceof Refusal ? list : tagsKept(now, text, list.tags);
+}
+
 /** Whether two sets of link records say the same. */
 const sameRecords = (a: readonly LinkRecord[], b: readonly LinkRecord[]): boolean =>
   a.length === b.length && a.every((r) => b.some((o) => o.id === r.id && o.file === r.file));
 
 /** Store a version's new bytes, and answer what the write did. */
-async function finish(
+export async function finish(
   tx: Tx,
   doc: Doc,
   version: Version,

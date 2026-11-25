@@ -316,6 +316,7 @@ const menu = () =>
         workspace: "Acme",
         block: null,
         prefix: null,
+        tags: [],
       }),
     meta,
   );
@@ -342,6 +343,44 @@ const menu = () =>
       now?.markdown === relinked.markdown &&
       JSON.stringify(now.links) === JSON.stringify(relinked.links),
     JSON.stringify(relinked),
+  );
+
+  // A note's tags under its title, read from the block the page holds; a
+  // block changed elsewhere is what a write puts back from then on.
+  const list = [
+    { name: "Status", values: ["Todo", "Doing"] },
+    { name: "priority", values: ["p1"] },
+  ];
+  await phone.evaluate(
+    (tags) =>
+      window.doklin.load({
+        markdown: "---\nstatus: doing\nowner: Ada\n---\n# Tagged\n",
+        base: "/doc/Library/",
+        meta: null,
+        note: "Library/Tagged.md",
+        name: "Tagged",
+        documents: [],
+        recent: [],
+        workspace: "Acme",
+        block: null,
+        prefix: null,
+        naming: false,
+        tags,
+      }),
+    list,
+  );
+  const chips = () =>
+    phone.$$eval("#tags .tag-chip", (els) => els.map((e) => `${e.textContent}${e.classList.contains("is-unknown") ? " (unknown)" : ""}`));
+  const shown = await chips();
+  step("the iPhone's editor shows the note's tags under its title", JSON.stringify(shown) === JSON.stringify(["StatusDoing"]), JSON.stringify(shown));
+  await phone.evaluate((tags) => window.doklin.head({ head: "---\nstatus: Done\npriority: p1\n---\n", tags }), list);
+  const after = await chips();
+  const written = await phone.evaluate(() => window.doklin.markdown());
+  step(
+    "and takes a block changed elsewhere, for its chips and its writes",
+    JSON.stringify(after) === JSON.stringify(["StatusDone (unknown)", "priorityp1"]) &&
+      written?.markdown === "---\nstatus: Done\npriority: p1\n---\n# Tagged\n",
+    `${JSON.stringify(after)} ${JSON.stringify(written)}`,
   );
   await phone.close();
 }

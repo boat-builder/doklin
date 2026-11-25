@@ -13,6 +13,9 @@ import { useDismiss } from "./dismiss";
 import Editor from "./Editor";
 import { type FileVersion } from "./versions";
 import { backend, type Versions } from "./backend";
+import { splitFrontmatter } from "./frontmatter";
+import { TagsRow } from "./TagsRow";
+import type { TagDef } from "./tags";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -80,6 +83,7 @@ export default function VersionPreview({
   onRestore,
   onOpenFile,
   onError,
+  tagList,
 }: {
   /** The version store: what this reads and restores from. */
   store: Versions;
@@ -97,6 +101,8 @@ export default function VersionPreview({
   onRestore: (version: FileVersion, text: string | null) => void;
   onOpenFile: (path: string) => void;
   onError: (message: string) => void;
+  /** The workspace's tags: the version's own show above it, as they were. */
+  tagList: TagDef[];
 }) {
   const [text, setText] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -213,14 +219,19 @@ export default function VersionPreview({
         )}
         {!failed && text != null && !showChanges && (
           // The same editor the user writes in, with writing off: an old
-          // version reads exactly like the document it is a version of.
-          <Editor
-            key={`${version.ts}-${version.hash}`}
-            initialMarkdown={text}
-            onChange={() => {}}
-            readOnly
-            commentsVisible={false}
-          />
+          // version reads exactly like the document it is a version of,
+          // its tags above it and its frontmatter kept out of the editor
+          // (src/frontmatter.ts).
+          <>
+            <TagsRow head={splitFrontmatter(text).head} list={tagList} readOnly />
+            <Editor
+              key={`${version.ts}-${version.hash}`}
+              initialMarkdown={splitFrontmatter(text).body}
+              onChange={() => {}}
+              readOnly
+              commentsVisible={false}
+            />
+          </>
         )}
       </div>
     </div>

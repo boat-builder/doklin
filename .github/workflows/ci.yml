@@ -78,6 +78,11 @@ jobs:
       - name: Comment code against the shared cases
         run: node verify-harness/comments.test.mjs
 
+      # The tag rules, against the cases the iPhone's port and the Mac's
+      # search in Rust read too.
+      - name: Tag rules against the shared cases
+        run: node verify-harness/tags.test.mjs
+
       # A code made in a browser is hashed there and typed back to the
       # worker: both ends of that, and the bytes the engine's tests hold.
       - name: The codes a browser makes, against the worker's reading of them

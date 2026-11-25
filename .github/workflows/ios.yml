@@ -32,9 +32,10 @@ on:
       - "src/flowchart/**"
       - "vite.ios-flowchart.config.ts"
       - "verify-harness/drive-ios.mjs"
-      # The comment and flowchart cases the core's tests read, beside the Mac's.
+      # The comment, flowchart and tag cases the core's tests read, beside the Mac's.
       - "verify-harness/comments-fixture.json"
       - "verify-harness/flowchart-fixture.json"
+      - "verify-harness/tags-fixture.json"
       - ".github/workflows/ios.yml"
   workflow_dispatch:
 

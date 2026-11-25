@@ -50,6 +50,7 @@ import type {
   EveryPage,
 } from "./cloud";
 import type { WorkspaceDocument } from "./docLinks";
+import type { TagFilter } from "./tags";
 import type { StoredTab } from "./tabs";
 import type {
   DeletedFile,
@@ -185,7 +186,11 @@ export interface Documents {
    *  `onChange` speaks only of these. */
   watch(docs: WatchedDocument[]): Promise<void>;
   onChange(cb: (change: DocumentChange) => void): Unsubscribe;
-  search(root: string, query: string, caseSensitive: boolean): Promise<SearchResults>;
+  /** The documents whose name or text holds `query`, among the notes that
+   *  have every one of `tags` (src/tags.ts: tokens split off the text, spelled
+   *  as the tag list spells them). With tags and no query, every note that
+   *  has them, with no lines. */
+  search(root: string, query: string, caseSensitive: boolean, tags: TagFilter[]): Promise<SearchResults>;
   /** Whether a search can be told to match case. */
   readonly searchByCase: boolean;
 }
@@ -527,6 +532,8 @@ export interface Windows {
   destroy(): void;
   /** The app is quitting: it waits, briefly, for `flush` to settle in every window. */
   onQuit(flush: () => Promise<unknown>): Unsubscribe;
+  /** The Edit menu's *Add Tag…* was chosen with this window in front. */
+  onAddTag(cb: () => void): Unsubscribe;
   /** Move the window with the pointer that is down on it. */
   startDragging(): void;
   toggleMaximize(): void;
