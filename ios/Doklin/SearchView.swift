@@ -53,6 +53,15 @@ struct SearchView: View {
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                 }
+                if !model.tagged.isEmpty {
+                    Section("With \(TagWords.filters(model.tags)) · \(model.tagged.count)") {
+                        ForEach(model.tagged) { result in
+                            row(result, opens: .document(result.path)) {
+                                NameResult(result: result, workspace: workspace)
+                            }
+                        }
+                    }
+                }
                 if !model.named.isEmpty {
                     Section("Names · \(model.named.count)") {
                         ForEach(model.named) { result in
@@ -77,7 +86,7 @@ struct SearchView: View {
         .overlay { state }
         .navigationTitle("Search")
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $query, prompt: "A name, or words in a note")
+        .searchable(text: $query, prompt: workspace.tagList.tags.isEmpty ? "A name, or words in a note" : "A name, words, or a tag")
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
         .onSubmit(of: .search) { remember() }
@@ -189,7 +198,7 @@ struct SearchView: View {
                 ContentUnavailableView(
                     "Search \(workspace.name)",
                     systemImage: "magnifyingglass",
-                    description: Text("Type part of a name, or a few words that are in a note.")
+                    description: Text(TagWords.searchHint(workspace.tagList.tags))
                 )
             }
         } else {
@@ -307,5 +316,22 @@ struct DocumentPeek: View {
             }
         }
         .frame(width: 360, height: 520)
+    }
+}
+
+/// Tags in the search's words.
+enum TagWords {
+    /// What a search's tags are, as a heading says them: "status: Doing".
+    static func filters(_ tags: [TagFilter]) -> String {
+        tags.map { tag in tag.value.map { "\(tag.name): \($0)" } ?? tag.name }.joined(separator: ", ")
+    }
+
+    /// What can be searched for, with a tag the workspace has to show how.
+    static func searchHint(_ list: [TagDef]) -> String {
+        guard let def = list.first, let value = def.values.first else {
+            return "Type part of a name, or a few words that are in a note."
+        }
+        let quote = { (s: String) in s.contains(" ") ? "\"\(s)\"" : s }
+        return "Type part of a name, a few words that are in a note, or a tag, as \(quote(def.name)):\(quote(value))."
     }
 }

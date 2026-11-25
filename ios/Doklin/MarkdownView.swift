@@ -86,16 +86,19 @@ struct MarkdownView: View {
     let file: String
     let workspace: Workspace
     var actions = MarkdownActions()
-    /// Shown under the note's title, which is its name, above the rest: who
-    /// made it, what changed.
+    /// Shown under the note's title, which is its name, above the rest: its
+    /// tags, who made it, what changed.
     var underTitle: AnyView?
+    /// The block at the top, as a closed disclosure. A screen that shows the
+    /// note's tags shows the rest of it in `underTitle` instead.
+    var showsFrontmatter = true
 
     @Environment(\.readerMarks) private var marks
 
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 16) {
             if let underTitle { underTitle }
-            if let frontmatter = document.frontmatter {
+            if showsFrontmatter, let frontmatter = document.frontmatter {
                 FrontmatterView(text: frontmatter)
             }
             ForEach(Array(document.blocks.enumerated()), id: \.element.id) { index, node in
@@ -202,8 +205,10 @@ private struct RemovedBlocks: View {
     }
 }
 
-/// The YAML block at the top of a note, as it is: shown, never interpreted.
-private struct FrontmatterView: View {
+/// The YAML block at the top of a note, as it is, closed: what Doklin reads
+/// of it is the note's tags, shown as chips.
+struct FrontmatterView: View {
+    var title = "Frontmatter"
     let text: String
     @State private var open = false
 
@@ -215,7 +220,7 @@ private struct FrontmatterView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 6)
         } label: {
-            Text("Frontmatter")
+            Text(title)
                 .font(.footnote)
                 .foregroundStyle(Theme.text3)
         }

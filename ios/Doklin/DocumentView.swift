@@ -2,9 +2,9 @@ import DoklinKit
 import SwiftUI
 import UIKit
 
-/// One document, open for reading: its title, which is its name; where it
-/// is, who made it or changed it last, and — when it changed since this
-/// person last read it here — what changed, marked. *Edit*, or a double tap
+/// One document, open for reading: its title, which is its name; its tags;
+/// where it is, who made it or changed it last, and — when it changed since
+/// this person last read it here — what changed, marked. *Edit*, or a double tap
 /// on a paragraph, edits it right here, and a double tap on the title edits
 /// that: a new title renames the file. Its comments, its link, its page on
 /// the web and its history are in the bar along the bottom.
@@ -23,6 +23,8 @@ struct DocumentView: View {
     /// The comments sheet, and what it opens on: a thread, or words for a new one.
     @State private var commentStart: CommentStart?
     @State private var publishing = false
+    /// *New tag* or *Edit*, while one is up.
+    @State private var tagSheet: TagSheet?
     /// The words a search found, while the find bar is up.
     @State private var find: String?
     @State private var found: FindResult?
@@ -120,6 +122,7 @@ struct DocumentView: View {
             .sheet(isPresented: $publishing) {
                 PublishView(workspace: workspace, path: model.path, kind: .file) { route.append(.publishedPages) }
             }
+            .sheet(item: $tagSheet) { sheet in tagSheetView(sheet) }
             .alert("Doklin", isPresented: problemShown) {
                 Button("OK", role: .cancel) { model.problem = nil }
             } message: {
@@ -198,7 +201,7 @@ struct DocumentView: View {
                     title
                     MarkdownView(
                         document: document, file: model.path, workspace: workspace, actions: actions,
-                        underTitle: AnyView(header)
+                        underTitle: AnyView(underTitle), showsFrontmatter: false
                     )
                 }
                 .padding(.horizontal, 20)
@@ -244,8 +247,75 @@ struct DocumentView: View {
             }
     }
 
-    /// Under the title: who made it or changed it last, and what changed
-    /// since it was read here.
+    /// Under the title: the note's tags — or, for the tag list's own note,
+    /// the list — then who made it or changed it last and what changed,
+    /// then the rest of the block at its top.
+    private var underTitle: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if model.isTagList, let text = model.text {
+                TagListView(
+                    text: text,
+                    edit: mayTag ? { tagSheet = .edit($0) } : nil,
+                    newTag: mayTag ? { tagSheet = .new(forNote: false) } : nil
+                )
+            } else {
+                TagsRow(tags: model.tags, list: workspace.tagList.tags, actions: mayTag ? tagActions : nil)
+            }
+            header
+            if let block = model.otherFrontmatter {
+                FrontmatterView(text: block)
+            }
+        }
+    }
+
+    /// Tags are changed here when the note is: no other device holds it,
+    /// and the editor, which puts its own block back as it saves, is closed.
+    private var mayTag: Bool { model.canEdit && model.lease == nil && session == nil && !showingPage }
+
+    private var tagActions: TagActions {
+        TagActions(
+            set: { name, value in Task { await model.setTag(name, to: value) } },
+            newTag: { tagSheet = .new(forNote: true) },
+            edit: { tagSheet = .edit($0) }
+        )
+    }
+
+    @ViewBuilder private func tagSheetView(_ sheet: TagSheet) -> some View {
+        let list = workspace.tagList.tags
+        switch sheet {
+        case .new(let forNote):
+            NewTagSheet(list: list, forNote: forNote) { def, value in
+                await workspace.createTag(def, value: value, on: forNote ? model.path : nil)
+            }
+        case .edit(let name):
+            if let def = workspace.tagList.tag(name) {
+                EditTagSheet(def: def, list: list) { edit in
+                    if let failed = await workspace.saveTagEdit(edit) { return failed }
+                    if edit.rewritesNotes { renameInNotes(edit) }
+                    return nil
+                } delete: {
+                    await workspace.deleteTag(def.name)
+                }
+            }
+        }
+    }
+
+    /// The rest of a rename, once its sheet is down: every note on this
+    /// iPhone that has the tag, counted as it goes.
+    private func renameInNotes(_ edit: TagEdit) {
+        let toaster = toaster
+        Task {
+            toaster.show("Changing notes…", tone: .info)
+            let done = await workspace.renameInNotes(edit) { count in
+                toaster.show("Changing notes: \(count) so far…", tone: .info)
+            }
+            let ok = done.failed.isEmpty && done.listLeft == nil
+            toaster.show([done.words, done.listLeft].compactMap { $0 }.joined(separator: " "), tone: ok ? .done : .error)
+        }
+    }
+
+    /// Who made it or changed it last, and what changed since it was read
+    /// here.
     @ViewBuilder private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let item = workspace.recentItem(model.path) {
@@ -605,6 +675,14 @@ struct DocumentView: View {
                 startFinding()
             } label: {
                 Label("Find in note", systemImage: "text.magnifyingglass")
+            }
+        }
+        // A note with no tags has no row of chips: its first is added here.
+        if mayTag, model.isNote, !model.isTagList, model.tags.isEmpty {
+            Menu {
+                TagMenus.add(workspace.tagList.tags, actions: tagActions)
+            } label: {
+                Label("Add tag", systemImage: "tag")
             }
         }
         if let text = model.text {

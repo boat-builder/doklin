@@ -385,10 +385,12 @@ public struct WorkspaceFiles: Sendable {
     /// whose text holds it, ignoring case — the ones named for it first:
     /// each line it is on, trimmed. A note is read for its text; a page is
     /// found by its name alone (the Mac's `search_workspace` and the worker's
-    /// search match the same name). Not other files.
-    public func search(_ query: String, in folders: [String], limit: Int = 2000) -> [SearchResult] {
+    /// search match the same name). Not other files. `tags` narrows it to
+    /// the notes that have every one (Tags.swift); with tags and no text, it
+    /// is every such note, by name, with no lines.
+    public func search(_ query: String, in folders: [String], tags: [TagFilter] = [], limit: Int = 2000) -> [SearchResult] {
         let wanted = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !wanted.isEmpty else { return [] }
+        guard !wanted.isEmpty || !tags.isEmpty else { return [] }
         var named: [SearchResult] = []
         var others: [SearchResult] = []
         var documents: [DocumentRow] = []
@@ -405,14 +407,17 @@ public struct WorkspaceFiles: Sendable {
         for folder in folders { walk(folder, depth: 0) }
         for row in documents.prefix(limit) {
             var hits: [SearchHit] = []
-            if !row.isHTML, let text = try? text(row.path) {
+            let text = row.isHTML ? nil : try? text(row.path)
+            // Only a note has a frontmatter block, and so tags.
+            if !tags.isEmpty, !(text.map { Tags.matches($0, tags) } ?? false) { continue }
+            if !wanted.isEmpty, let text {
                 for (number, line) in MarkdownLines.split(text).enumerated() where line.lowercased().contains(wanted) {
                     hits.append(SearchHit(line: number, preview: String(line.trimmingCharacters(in: .whitespaces).prefix(200))))
                     if hits.count == 200 { break }
                 }
             }
             let result = SearchResult(path: row.path, hits: hits)
-            if result.name.lowercased().contains(wanted) {
+            if wanted.isEmpty || result.name.lowercased().contains(wanted) {
                 named.append(result)
             } else if !hits.isEmpty {
                 others.append(result)

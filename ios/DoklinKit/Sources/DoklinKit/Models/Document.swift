@@ -66,6 +66,48 @@ public final class DocumentModel {
     /// The other device that has it open for editing.
     public var lease: LeaseHolder? { workspace.lease(of: path) }
 
+    /* ---------- Tags ---------- */
+
+    /// The workspace's tag list's own note, which shows as the list.
+    public var isTagList: Bool { isNote && workspace.tagList.isNote(path) }
+
+    /// The note's tags, in the list's order.
+    public var tags: [NoteTag] {
+        guard isNote, !isTagList, let text else { return [] }
+        return Tags.noteTags(text, list: workspace.tagList.tags)
+    }
+
+    /// What its *Frontmatter* disclosure shows: the block, unless it holds
+    /// the note's tags alone. The list's own note shows its block as the
+    /// list.
+    public var otherFrontmatter: String? {
+        guard let text, !isTagList else { return nil }
+        return workspace.tagList.frontmatter(of: text, reader: document?.frontmatter)
+    }
+
+    /// Give the note `value` for the tag `name`, both spelled as the list
+    /// spells them, or (nil) clear it: the tag's line alone changes, and the
+    /// note is saved as any change of it is. A change sync made meanwhile is
+    /// read first, and the tag set on it.
+    public func setTag(_ name: String, to value: String?) async {
+        guard canEdit, lease == nil else { return }
+        for _ in 0..<2 {
+            guard let source = text else { return }
+            let next = Tags.writeTag(source, at: name, tag: value.map { (name: name, value: $0) })
+            guard next != source else { return }
+            do {
+                try await save(next, over: source)
+                return
+            } catch is ChangedElsewhere {
+                load()
+            } catch {
+                problem = (error as? DoklinError)?.message ?? error.localizedDescription
+                return
+            }
+        }
+        problem = "\(title) kept changing while its tags were saved. Try again in a moment."
+    }
+
     /// Whether a change of the workspace's files is this document's: one of
     /// its files, or a folder it is in.
     public func isAffected(by changed: Set<String>) -> Bool {

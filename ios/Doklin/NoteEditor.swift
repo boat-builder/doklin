@@ -122,10 +122,12 @@ final class EditorPage: NSObject {
     /// Hand the editor a note, as the file has it, with the caret at the
     /// start of its top-level block `block` (whose text starts `prefix`) —
     /// or, `naming`, in its title, which is `name`. `path` is where it is in
-    /// the workspace, for its links, and `documents` what they can lead to.
+    /// the workspace, for its links, and `documents` what they can lead to;
+    /// `tags`, the workspace's list, says which lines of its block are the
+    /// tags shown under the title.
     func open(
         _ markdown: String, meta: String?, path: String, name: String, workspace: String, documents: [WorkspaceDocument],
-        recent: [String], files: WorkspaceFiles, block: Int?, prefix: String?, naming: Bool
+        recent: [String], files: WorkspaceFiles, block: Int?, prefix: String?, naming: Bool, tags: [TagDef]
     ) async {
         await whenReady()
         self.files = files
@@ -144,8 +146,20 @@ final class EditorPage: NSObject {
             "block": block.map { $0 as Any } ?? nothing,
             "prefix": prefix.map { $0 as Any } ?? nothing,
             "naming": naming,
+            "tags": tags.map(Self.json),
         ]
         _ = await run("await window.doklin.load(input)", ["input": input])
+    }
+
+    /// The note's block is `head` now, and the list `tags`: what a write
+    /// puts back from now on, and the chips under the title.
+    func head(_ head: String, tags: [TagDef]) {
+        let now: [String: Any] = ["head": head, "tags": tags.map(Self.json)]
+        Task { _ = await run("window.doklin.head(now)", ["now": now]) }
+    }
+
+    private static func json(_ tag: TagDef) -> [String: Any] {
+        ["name": tag.name, "values": tag.values]
     }
 
     /// What a title came to: the note's name and where it is now, and why
@@ -379,6 +393,10 @@ final class NoteEditing {
     private var current: EditorText?
     /// What this editing last wrote, or is writing.
     private var written: EditorText?
+    /// The block at the note's top that the editor puts back on every
+    /// write, and the tag list its chips were drawn with.
+    private var head = ""
+    private var shownTags: [TagDef] = []
     private(set) var saving = false
     /// The file changed elsewhere while something typed here was unsaved.
     var changedElsewhere = false
@@ -409,10 +427,12 @@ final class NoteEditing {
         await model.editing(true)
         let meta = try? model.workspace.files.text(DocLinks.metaFile(of: model.path))
         let workspace = model.workspace
+        head = Frontmatter.split(saved).head
+        shownTags = workspace.tagList.tags
         await page.open(
             saved, meta: meta, path: model.path, name: model.title, workspace: workspace.name,
             documents: workspace.documents.documents, recent: workspace.recent?.files.map(\.path) ?? [], files: workspace.files,
-            block: block, prefix: prefix, naming: naming
+            block: block, prefix: prefix, naming: naming, tags: shownTags
         )
         page.editable(lease == nil && !changedElsewhere)
     }
@@ -517,6 +537,10 @@ final class NoteEditing {
     /// not by this editing's hand, take the new text — or, with unsaved
     /// typing here, ask. True when the note is gone and editing is over.
     func heardChange() async -> Bool {
+        if model.workspace.tagList.tags != shownTags {
+            shownTags = model.workspace.tagList.tags
+            EditorPage.shared.head(head, tags: shownTags)
+        }
         guard model.isAffected(by: model.workspace.lastChanged) else { return false }
         if !model.exists {
             // Moved or removed on another device, or its folder left this
@@ -526,6 +550,13 @@ final class NoteEditing {
             return true
         }
         guard let disk = try? model.workspace.files.text(model.path), disk != saved, disk != written?.markdown else { return false }
+        // Only the block changed — a tag set on another device: the editor
+        // puts the new one back from now on, and nothing typed is in the way.
+        let now = Frontmatter.split(disk)
+        if now.body == Frontmatter.split(saved).body {
+            adopt(now.head, of: disk)
+            return false
+        }
         if unsaved {
             pending?.cancel()
             changedElsewhere = true
@@ -535,6 +566,23 @@ final class NoteEditing {
             await start(at: nil, prefix: nil)
         }
         return false
+    }
+
+    /// The file is `disk`, which differs from what this editing knows only
+    /// in its block, `newHead`: every text it holds takes that block.
+    private func adopt(_ newHead: String, of disk: String) {
+        let old = head
+        let rehead = { (text: EditorText?) -> EditorText? in
+            guard var text, text.markdown.unicodeScalars.starts(with: old.unicodeScalars) else { return text }
+            text.markdown = newHead + String(text.markdown.unicodeScalars.dropFirst(old.unicodeScalars.count))
+            return text
+        }
+        saved = disk
+        baseline = rehead(baseline)
+        current = rehead(current)
+        written = rehead(written)
+        head = newHead
+        EditorPage.shared.head(newHead, tags: shownTags)
     }
 
     func reload() async {
