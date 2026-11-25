@@ -61,6 +61,7 @@ Read a doc only when the change is in its area.
 | `.github/workflows/`, updater | `docs/release.md` |
 | Building live sync (deferred, not built): the Durable Object doorbell | `docs/live-sync-plan.md` |
 | Building links phase 2 (not built): backlinks, rewriting links on a move, dates and people in `@` | `docs/links-phase2-plan.md` |
+| Building backup hardening (not built): limits on removing cloud history, a deleted restricted folder's 30 days, scheduled export | `docs/backup-hardening-plan.md` |
 
 Docs hold rules, shared formats and traps — nothing else. Update one when a
 change alters those; never add history, "as built" notes or test walkthroughs.
