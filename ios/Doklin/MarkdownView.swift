@@ -86,29 +86,19 @@ struct MarkdownView: View {
     let file: String
     let workspace: Workspace
     var actions = MarkdownActions()
-    /// Shown under the note's title (its first heading, when it starts with
-    /// one), above the rest: who made it, what changed.
+    /// Shown under the note's title, which is its name, above the rest: who
+    /// made it, what changed.
     var underTitle: AnyView?
 
     @Environment(\.readerMarks) private var marks
 
-    /// Whether the note starts with a title of its own.
-    static func hasTitle(_ document: MarkdownDocument) -> Bool {
-        if case .heading(1, _)? = document.blocks.first?.block { return true }
-        return false
-    }
-
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 16) {
-            let titled = Self.hasTitle(document)
-            if titled, let first = document.blocks.first {
-                block(first, at: 0)
-            }
             if let underTitle { underTitle }
             if let frontmatter = document.frontmatter {
                 FrontmatterView(text: frontmatter)
             }
-            ForEach(Array(document.blocks.enumerated()).dropFirst(titled ? 1 : 0), id: \.element.id) { index, node in
+            ForEach(Array(document.blocks.enumerated()), id: \.element.id) { index, node in
                 block(node, at: index)
             }
             if let gone = marks.changes?.removedAtEnd, !gone.isEmpty {

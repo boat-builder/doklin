@@ -2,9 +2,11 @@
 // boots <App/> over an in-memory backend that survives a reload the way the
 // real one survives a quit).
 //
-// The walk: ⌘N opens a note and writes nothing; typing titles the tab from
-// the first line, marks it unsaved for good, and autosaves into the note's
-// buffer — without a registry report per keystroke; closing an unsaved note
+// The walk: ⌘N opens a note with its title focused and writes nothing; the
+// title names the tab, Enter goes into the note, and typing marks it unsaved
+// for good and autosaves into the note's buffer — without a registry report
+// per keystroke; a note with only a title comes back after a relaunch, and
+// leaves nothing behind once discarded; closing an unsaved note
 // asks (Esc / Cancel keep it, the question owns the keyboard), a reload
 // brings it back unsaved, ⌘S and "Save…" turn it into a file and delete the
 // buffer, "Don't Save" deletes it and writes nothing, an empty note closes
@@ -71,6 +73,19 @@ const buffers = () =>
   page.evaluate(() => [...window.__fs].filter(([p]) => p.startsWith("/untitled/")));
 const file = (path) => page.evaluate((p) => window.__fs.get(p) ?? null, path);
 const editor = () => page.locator(".editor-pane.is-focused .ProseMirror");
+const title = () => page.locator(".editor-pane.is-focused .doc-title textarea");
+const storedTitles = () =>
+  page.evaluate(() =>
+    Object.keys(localStorage)
+      .filter((k) => k.startsWith("doklin:untitled-title:"))
+      .map((k) => [k.slice("doklin:untitled-title:".length), localStorage.getItem(k)]),
+  );
+// A note's title, typed over whatever it said.
+const typeTitle = async (text) => {
+  await title().click();
+  await title().selectText();
+  await page.keyboard.type(text);
+};
 const typeInNote = async (text) => {
   await editor().click();
   await page.keyboard.type(text);
@@ -112,20 +127,22 @@ step(
   (await ask().count()) === 0 && (await buffers()).length === 0,
 );
 
-/* 4 — typing: the first line names the tab, the note is unsaved, and its
-       text is autosaved into its buffer. The dot is not the transient one. */
+/* 4 — ⌘N puts the caret in the title: it names the tab, Enter goes into the
+       note, and the note's text is autosaved into its buffer — the title is
+       not part of it. The dot is not the transient one. */
 await newNote();
-await typeInNote("# Meeting notes");
+step("⌘N puts the caret in the note's title", await title().evaluate((el) => el === document.activeElement));
+await page.keyboard.type("Meeting notes");
+await poll(async () => (await activeLabel()) === "Meeting notes");
 await page.keyboard.press("Enter");
 await page.keyboard.type("hello world");
-await poll(async () => (await activeLabel()) === "Meeting notes");
 await poll(async () => (await buffers()).some(([, c]) => c.includes("hello world")));
 await settle(AFTER_AUTOSAVE);
-const [bufferPath] = (await buffers())[0];
+const [bufferPath, bufferText] = (await buffers())[0];
 step(
-  "typing titles the tab from the first line and autosaves into the buffer",
-  /^\/untitled\/[^/]+\.md$/.test(bufferPath),
-  bufferPath,
+  "the title names the tab; Enter goes into the note, whose text alone is autosaved into the buffer",
+  /^\/untitled\/[^/]+\.md$/.test(bufferPath) && bufferText.trim() === "hello world",
+  `${bufferPath} ${JSON.stringify(bufferText)}`,
 );
 step(
   "the note stays unsaved after its autosave lands",
@@ -137,11 +154,10 @@ step(
   await page.evaluate(() => window.__title),
 );
 
-/* 5 — the title follows the first line as it changes, and none of that is
+/* 5 — the tab follows the title as it changes, and none of that is
        reported to the registry: the report is the persisted descriptor. */
 const reportsBefore = await page.evaluate(() => window.__reports);
-await editor().locator("h1").click({ clickCount: 3 }); // select the heading's text
-await page.keyboard.type("Meeting notes today");
+await typeTitle("Meeting notes today");
 await poll(async () => (await activeLabel()) === "Meeting notes today");
 await settle();
 step(
@@ -188,16 +204,17 @@ await ask().locator("button", { hasText: "Cancel" }).click();
 await poll(async () => (await ask().count()) === 0);
 step("Cancel keeps the note open", same(await unsavedLabels(), ["Meeting notes today"]));
 
-/* 8 — quit and relaunch: the note is back, unsaved, with its text. Only the
-       descriptor was persisted; the title and the dot are read back. */
+/* 8 — quit and relaunch: the note is back, unsaved, with its title and its
+       text. The session holds the descriptor; the title is kept beside it. */
 await settle(AFTER_AUTOSAVE);
 await page.reload();
 await poll(async () => same(await labels(), ["notes", "Meeting notes today"]));
 await poll(async () => (await editor().innerText()).includes("hello world"));
 step(
-  "a relaunch brings the note back unsaved, active, with its text",
+  "a relaunch brings the note back unsaved, active, with its title and text",
   (await activeLabel()) === "Meeting notes today" &&
-    same(await unsavedLabels(), ["Meeting notes today"]),
+    same(await unsavedLabels(), ["Meeting notes today"]) &&
+    (await title().inputValue()) === "Meeting notes today",
 );
 step(
   "the session stores a tab's descriptor and nothing else",
@@ -208,11 +225,11 @@ step(
   ),
 );
 
-/* 9 — ⌘S asks for a name, offering the note's first line; Esc backs out. */
+/* 9 — ⌘S asks for a name, offering the note's title; Esc backs out. */
 await page.keyboard.press("Meta+KeyS");
 await poll(async () => (await saveAs().count()) === 1);
 step(
-  "⌘S offers the note's first line as its file name",
+  "⌘S offers the note's title as its file name",
   (await page.locator(".saveas-input").inputValue()) === "Meeting notes today",
 );
 await page.screenshot({ path: SHOTS + "untitled-02-save.png" });
@@ -230,11 +247,33 @@ await page.keyboard.press("Enter");
 await poll(async () => same(await labels(), ["notes"]));
 const saved = await file("/docs/Meeting notes today.md");
 step(
-  "Save… writes the file, deletes the buffer and closes the tab",
-  saved?.includes("# Meeting notes today") &&
-    saved.includes("hello world") &&
+  "Save… writes the file, deletes the buffer and its title, and closes the tab",
+  saved?.trim() === "hello world" &&
     (await buffers()).length === 0 &&
+    (await storedTitles()).length === 0 &&
     (await page.evaluate((p) => window.__discarded.includes(p), bufferPath)),
+  JSON.stringify(saved),
+);
+
+/* 10b — a note with only a title is unsaved too: a relaunch brings it back
+         though it has no buffer, and Don't Save leaves nothing of it. */
+await newNote();
+await page.keyboard.type("Only a title");
+await poll(async () => same(await unsavedLabels(), ["Only a title"]));
+await settle(AFTER_AUTOSAVE);
+await page.reload();
+await poll(async () => same(await labels(), ["notes", "Only a title"]));
+step(
+  "a note with only a title comes back after a relaunch, unsaved",
+  same(await unsavedLabels(), ["Only a title"]) && (await title().inputValue()) === "Only a title",
+);
+await page.keyboard.press("Meta+KeyW");
+await poll(async () => (await ask().count()) === 1);
+await ask().locator("button", { hasText: "Don’t Save" }).click();
+await poll(async () => same(await labels(), ["notes"]));
+step(
+  "Don't Save on it leaves no buffer and no title behind",
+  (await buffers()).length === 0 && (await storedTitles()).length === 0,
 );
 
 /* 11 — Don't Save (⌘D): the note is gone, and nothing was written. */
@@ -259,7 +298,9 @@ step(
 /* 12 — ⌘S without closing: the tab becomes the file's, in place, and from
         then on it autosaves like any file and closes without a question. */
 await newNote();
-await typeInNote("Keep me");
+await page.keyboard.type("Keep me");
+await page.keyboard.press("Enter");
+await page.keyboard.type("for now");
 await poll(async () => (await buffers()).length === 1);
 await page.keyboard.press("Meta+KeyS");
 await poll(async () => (await saveAs().count()) === 1);
@@ -277,13 +318,19 @@ step(
 await editor().locator("p").first().click({ clickCount: 3 });
 await page.keyboard.type("Keep me for later");
 await poll(async () => (await file("/docs/Keep me.md"))?.includes("Keep me for later"));
+step(
+  "the saved note's title is its file's name",
+  (await title().inputValue()) === "Keep me",
+);
 await page.keyboard.press("Meta+KeyW");
 await poll(async () => same(await labels(), ["notes"]));
 step("a saved note autosaves to its file and closes without asking", (await ask().count()) === 0);
 
 /* 13 — a name that is taken is refused in the prompt; the note stays. */
 await newNote();
-await typeInNote("notes");
+await page.keyboard.type("notes");
+await page.keyboard.press("Enter");
+await page.keyboard.type("a second notes");
 await page.keyboard.press("Meta+KeyS");
 await poll(async () => (await saveAs().count()) === 1);
 await page.keyboard.press("Enter");
@@ -308,7 +355,7 @@ await page.keyboard.press("Meta+KeyW");
 await poll(async () => (await ask().count()) === 1);
 step(
   "⌘W straight after typing still asks: the close hears the editor first",
-  (await ask().innerText()).includes("typed a moment ago"),
+  (await ask().innerText()).includes("Untitled"),
 );
 await ask().locator("button", { hasText: "Don’t Save" }).click();
 await poll(async () => same(await labels(), ["notes"]));
@@ -332,7 +379,7 @@ await poll(async () => (await buffers()).some(([, c]) => c.includes("after the o
 await settle(AFTER_AUTOSAVE);
 step(
   "an overtaken load stands down: the new note's text goes to its own buffer",
-  (await activeLabel()) === "after the overlap" &&
+  (await activeLabel()) === "Untitled" &&
     (await file("/docs/notes.md")) === "# Notes\n\nA saved file.\n" &&
     (await editor().innerText()).trim() === "after the overlap",
   JSON.stringify(await file("/docs/notes.md")),
@@ -346,12 +393,14 @@ await poll(async () => same(await labels(), ["notes"]));
          folder takes it along instead of filing it under the one being left,
          and it is still there — in front — on the way back. */
 await newNote();
-await typeInNote("Carried note");
+await page.keyboard.type("Carried note");
+await page.keyboard.press("Enter");
+await page.keyboard.type("carried along");
 await poll(async () => (await buffers()).length === 1);
 await page.evaluate(() => (window.__openAnswer = "/elsewhere"));
 await page.keyboard.press("Meta+Shift+KeyO");
 await poll(async () => same(await labels(), ["Carried note"]));
-await poll(async () => (await editor().innerText()).includes("Carried note"));
+await poll(async () => (await editor().innerText()).includes("carried along"));
 const sessionsAway = await page.evaluate(
   () => JSON.parse(localStorage.getItem("doklin:session")).sessions,
 );
@@ -365,10 +414,12 @@ step(
 await page.evaluate(() => (window.__openAnswer = "/docs"));
 await page.keyboard.press("Meta+Shift+KeyO");
 await poll(async () => same(await labels(), ["notes", "Carried note"]));
-await poll(async () => (await editor().innerText()).includes("Carried note"));
+await poll(async () => (await editor().innerText()).includes("carried along"));
 step(
   "…and brings it back: the folder's own tabs return around it",
-  (await activeLabel()) === "Carried note" && (await buffers()).length === 1,
+  (await activeLabel()) === "Carried note" &&
+    (await title().inputValue()) === "Carried note" &&
+    (await buffers()).length === 1,
 );
 await page.keyboard.press("Meta+KeyW");
 await poll(async () => (await ask().count()) === 1);
@@ -378,9 +429,11 @@ await poll(async () => same(await labels(), ["notes"]));
 /* 14 — a note no window has open is recovered at launch, an empty buffer is
         swept, and a note ANOTHER window holds is left to that window. */
 await page.evaluate(() => {
-  window.__fs.set("/untitled/lost-1.md", "# Lost note\n\nfound again\n");
+  window.__fs.set("/untitled/lost-1.md", "found again\n");
+  localStorage.setItem("doklin:untitled-title:/untitled/lost-1.md", "Lost note");
   window.__fs.set("/untitled/blank-1.md", "\n");
-  window.__fs.set("/untitled/s-note.md", "# Window note\n\nin a second window\n");
+  window.__fs.set("/untitled/s-note.md", "in a second window\n");
+  localStorage.setItem("doklin:untitled-title:/untitled/s-note.md", "Window note");
   window.__registry["win-1"] = {
     folder: null,
     tabs: [
@@ -449,7 +502,9 @@ await page.evaluate(() => localStorage.clear());
 await page.goto(url("?bare=1"));
 await poll(async () => (await page.locator(".scratch-empty").count()) === 1);
 await newNote();
-await typeInNote("Loose note");
+await page.keyboard.type("Loose note");
+await page.keyboard.press("Enter");
+await page.keyboard.type("loose text");
 await poll(async () => (await buffers()).length === 1);
 await page.evaluate(() => (window.__saveAnswer = "/readonly/Loose.md"));
 await page.keyboard.press("Meta+KeyS");
@@ -460,7 +515,7 @@ step(
   (await page.locator(".toast.is-error").innerText()).includes("Couldn't save") &&
     same(await unsavedLabels(), ["Loose note"]) &&
     (await buffers()).length === 1 &&
-    (await buffers())[0][1].includes("Loose note"),
+    (await buffers())[0][1].includes("loose text"),
 );
 
 /* 19 — a dismissed dialog on the way out keeps the tab open. */
@@ -482,7 +537,7 @@ await poll(async () => (await file("/elsewhere/Loose.md")) !== null);
 await poll(async () => (await buffers()).length === 0);
 step(
   "the native dialog's answer becomes the note's file",
-  (await file("/elsewhere/Loose.md")).includes("Loose note") &&
+  (await file("/elsewhere/Loose.md")).includes("loose text") &&
     same(await labels(), ["Loose"]) &&
     (await unsavedLabels()).length === 0,
 );

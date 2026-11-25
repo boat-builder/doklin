@@ -107,12 +107,12 @@ struct BrowseView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
-                            acting.create(.note, in: TreeModel.libraryFolder)
+                            acting.newNote(in: TreeModel.libraryFolder)
                         } label: {
                             Label("New note", systemImage: "square.and.pencil")
                         }
                         Button {
-                            acting.create(.folder, in: TreeModel.libraryFolder)
+                            acting.newFolder(in: TreeModel.libraryFolder)
                         } label: {
                             Label("New folder", systemImage: "folder.badge.plus")
                         }

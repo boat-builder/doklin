@@ -40,9 +40,10 @@ export const pruneNestedSelection = (sels: SidebarSelection[]): SidebarSelection
       ),
   );
 
-// Where an in-progress "New File…" / "New Folder…" will land. The input row is
-// rendered inline inside `parentDir`, like VS Code's explorer.
-type PendingCreate = { parentDir: string; kind: "file" | "dir" };
+// A folder being made: its name row sits at the top of `parentDir`. A
+// document is never named here: it is made as "Untitled" and named by its
+// title.
+type PendingCreate = { parentDir: string };
 
 // An in-progress inline rename: the row at `path` is replaced by a name input.
 // `openable: false` (an unsupported file in show-all mode) keeps the row's own
@@ -88,6 +89,9 @@ type Props = {
   // name); null or absent when it is purely local.
   cloud?: CloudStatus | null;
   currentPath: string | null;
+  // The title being typed over the open document's name, which its row
+  // shows until the file is renamed to it.
+  currentTitle?: string;
   selection: SidebarSelection[];
   // A folder to bring into view — asked for from outside the app
   // (`doklin open <folder>`); a new `seq` asks again.
@@ -97,6 +101,8 @@ type Props = {
   refreshToken: number;
   onSelect: (sels: SidebarSelection[]) => void;
   onOpenFile: (path: string) => void;
+  // A document just made here: opened with the caret in its title.
+  onOpenNewDocument: (path: string) => void;
   // This computer's own files and folders: absent where the platform has no
   // way to them, and then their rows are not shown.
   onOpenFolder?: () => void;
@@ -315,12 +321,14 @@ export default function Sidebar({
   root,
   cloud = null,
   currentPath,
+  currentTitle,
   selection,
   reveal = null,
   clipboard,
   refreshToken,
   onSelect,
   onOpenFile,
+  onOpenNewDocument,
   onOpenFolder,
   onOpenFilePicker,
   onRevealInFinder,
@@ -601,7 +609,7 @@ export default function Sidebar({
     [visibleEntries, selection, onSelect],
   );
 
-  // The primary selection — the creation context for the header's New File /
+  // The primary selection — the creation context for the header's New Document /
   // New Folder buttons.
   const primarySelection = selection[selection.length - 1] ?? null;
 
@@ -962,12 +970,12 @@ export default function Sidebar({
 
   /* ---------- Create & rename ---------- */
 
-  // Begin inline creation inside `parentDir`, opening it (and the folders
-  // above it, and its list) so the input row is actually visible.
-  const startCreate = useCallback(
-    (kind: "file" | "dir", wantedDir: string) => {
-      // Nothing is made straight under Restricted from here: a note there
-      // would be in no folder, and a folder there is made with its people.
+  // Where something new is made for `wantedDir`, opened (with the folders
+  // above it, and its list) so what is made there shows. Nothing is made
+  // straight under Restricted from here: a note there would be in no folder,
+  // and a folder there is made with its people.
+  const makeRoomIn = useCallback(
+    (wantedDir: string): string => {
       const parentDir = sectioned && wantedDir === restrictedDir ? libraryDir : wantedDir;
       setCtxMenu(null);
       setMenuOpen(false);
@@ -976,12 +984,46 @@ export default function Sidebar({
         foldersDownTo(root, parentDir).filter((d) => d !== libraryDir && d !== restrictedDir && d !== privateDir),
       );
       unfoldSectionOf(parentDir);
-      setPendingCreate({ parentDir, kind });
+      return parentDir;
     },
     [root, sectioned, libraryDir, restrictedDir, privateDir, openFolders, unfoldSectionOf],
   );
 
-  // Where "New File" / "New Folder" (and Paste) land for a given target:
+  // New Folder: its name row, at the top of the folder.
+  const startNewFolder = useCallback(
+    (wantedDir: string) => setPendingCreate({ parentDir: makeRoomIn(wantedDir) }),
+    [makeRoomIn],
+  );
+
+  // New Document: "Untitled" in the folder (else "Untitled 2", and so on),
+  // opened with the caret in its title. A document's name is either of its
+  // versions', so a name with an html file is taken too.
+  const newDocument = useCallback(
+    async (wantedDir: string) => {
+      const dir = makeRoomIn(wantedDir);
+      setPendingCreate(null);
+      let path = "";
+      for (let n = 1; !path; n++) {
+        const stem = `${dir}/${n === 1 ? "Untitled" : `Untitled ${n}`}`;
+        const taken = await Promise.all(
+          [`${stem}.md`, `${stem}.html`].map((p) => backend.documents.exists(p).catch(() => false)),
+        );
+        if (!taken.some(Boolean)) path = `${stem}.md`;
+      }
+      try {
+        await backend.documents.create(path, "file");
+      } catch (e) {
+        window.alert(String(e));
+        return;
+      }
+      await refresh();
+      onSelect([{ path, kind: "file" }]);
+      onOpenNewDocument(path);
+    },
+    [makeRoomIn, refresh, onSelect, onOpenNewDocument],
+  );
+
+  // Where "New Document" / "New Folder" (and Paste) land for a given target:
   // inside a folder, next to a file, in the first list's folder for
   // empty-space actions — and in Library for anything that would land at a
   // connected workspace's top, where it would be in no section.
@@ -994,8 +1036,8 @@ export default function Sidebar({
     [root, libraryDir],
   );
 
-  // Commit the pending inline creation. Returns an error message to show under
-  // the input, or null on success (the row closes; new files open in a tab).
+  // Commit the new folder's name. Returns an error message to show under the
+  // input, or null on success (the row closes).
   const commitCreate = useCallback(
     async (rawName: string): Promise<string | null> => {
       const pc = pendingCreate;
@@ -1004,22 +1046,19 @@ export default function Sidebar({
       if (!name) return "A name is required.";
       if (/[/\\:]/.test(name)) return "Names can't contain /, \\ or :";
       if (name.startsWith(".")) return "Names can't start with a dot.";
-      if (sectioned && pc.kind === "dir" && pc.parentDir === libraryDir && isSectionName(name)) return SECTION_NAMED;
-      // Bare names become markdown; an explicit .html (or md) extension is kept.
-      const fileName = pc.kind === "file" && !DOC_EXT_RE.test(name) ? `${name}.md` : name;
-      const path = `${pc.parentDir}/${fileName}`;
+      if (sectioned && pc.parentDir === libraryDir && isSectionName(name)) return SECTION_NAMED;
+      const path = `${pc.parentDir}/${name}`;
       try {
-        await backend.documents.create(path, pc.kind);
+        await backend.documents.create(path, "dir");
       } catch (e) {
         return String(e);
       }
       setPendingCreate(null);
       await refresh();
-      onSelect([{ path, kind: pc.kind }]);
-      if (pc.kind === "file") onOpenFile(path);
+      onSelect([{ path, kind: "dir" }]);
       return null;
     },
-    [pendingCreate, sectioned, libraryDir, refresh, onSelect, onOpenFile],
+    [pendingCreate, sectioned, libraryDir, refresh, onSelect],
   );
 
   const cancelCreate = useCallback(() => setPendingCreate(null), []);
@@ -1132,14 +1171,14 @@ export default function Sidebar({
     if (target.kind === "section" && target.section === "restricted") {
       return onNewRestricted ? [{ label: "New restricted folder…", onClick: () => onNewRestricted() }] : [];
     }
-    // A row straight under Restricted offers no New File / New Folder: see
-    // `startCreate`.
+    // A row straight under Restricted offers no New Document / New Folder:
+    // see `makeRoomIn`.
     const underRestricted = sectioned && createDirFor(target) === restrictedDir;
     const items: ContextMenuItem[] = [];
     if (!underRestricted) {
       items.push(
-        { label: "New File…", onClick: () => startCreate("file", createDirFor(target)) },
-        { label: "New Folder…", onClick: () => startCreate("dir", createDirFor(target)) },
+        { label: "New Document", onClick: () => void newDocument(createDirFor(target)) },
+        { label: "New Folder…", onClick: () => startNewFolder(createDirFor(target)) },
       );
     }
     if (onRevealInFinder) {
@@ -1243,7 +1282,7 @@ export default function Sidebar({
         }
       }
     }
-    // Cut/Copy/Paste, VS Code's explorer trio. Paste lands where New File
+    // Cut/Copy/Paste, VS Code's explorer trio. Paste lands where New Document
     // would (`createDirFor`) — and stays visible-but-disabled while the
     // clipboard is empty. A restricted folder is copied, never cut: it leaves
     // by its own dialog.
@@ -1279,7 +1318,8 @@ export default function Sidebar({
     spacesByAbs,
     sectioned,
     restrictedDir,
-    startCreate,
+    newDocument,
+    startNewFolder,
     startRename,
     createDirFor,
     onRevealInFinder,
@@ -1325,13 +1365,13 @@ export default function Sidebar({
     [onResizeWidth],
   );
 
-  // The inline name input at the top of a section's list.
+  // The new folder's name input at the top of a section's list.
   const createRow = pendingCreate && (
     <NameRow
       depth={0}
-      icon={createRowIcon(pendingCreate.kind)}
-      placeholder={createRowLabel(pendingCreate.kind)}
-      ariaLabel={`New ${createRowLabel(pendingCreate.kind).toLowerCase()}`}
+      icon={<NewFolderIcon />}
+      placeholder="Folder name"
+      ariaLabel="New folder"
       onCommit={commitCreate}
       onCancel={cancelCreate}
     />
@@ -1347,6 +1387,7 @@ export default function Sidebar({
       depth={0}
       parentDir={parentDir}
       currentPath={currentPath}
+      currentTitle={currentTitle}
       selection={selection}
       cutPaths={cutPaths}
       openDirs={openDirs}
@@ -1395,7 +1436,7 @@ export default function Sidebar({
         showAll={showAll}
         onToggleShowAll={toggleShowAll}
         onSwitchToSearch={onSwitchToSearch}
-        onNewFile={() => startCreate("file", createDirFor(primarySelection))}
+        onNewFile={() => void newDocument(createDirFor(primarySelection))}
         onOpenCloud={onOpenCloud}
         onOpenPeople={onOpenPeople}
         onOpenDevices={onOpenDevices}
@@ -1449,7 +1490,7 @@ export default function Sidebar({
           >
             <button
               className="sidebar-section-btn"
-              onClick={() => startCreate("dir", createDirFor(primarySelection))}
+              onClick={() => startNewFolder(createDirFor(primarySelection))}
               title="New folder"
               aria-label="New folder"
             >
@@ -1563,7 +1604,7 @@ export default function Sidebar({
                   <button
                     className="sidebar-section-btn"
                     data-testid="new-private"
-                    onClick={() => startCreate("file", privateDir)}
+                    onClick={() => void newDocument(privateDir)}
                     title="New private note"
                     aria-label="New private note"
                   >
@@ -1864,8 +1905,8 @@ function SidebarHeader({
         <button
           className="sidebar-new"
           onClick={onNewFile}
-          title="New file"
-          aria-label="New file"
+          title="New document"
+          aria-label="New document"
         >
           <PlusIcon />
         </button>
@@ -1935,6 +1976,7 @@ function TreeItem({
   depth,
   parentDir,
   currentPath,
+  currentTitle,
   selection,
   cutPaths,
   openDirs,
@@ -1961,6 +2003,7 @@ function TreeItem({
   depth: number;
   parentDir: string;
   currentPath: string | null;
+  currentTitle?: string;
   selection: SidebarSelection[];
   // Roots of a pending Cut (dimmed until pasted or replaced).
   cutPaths: Set<string>;
@@ -2061,7 +2104,9 @@ function TreeItem({
           }
         >
           {openable ? <DocTypeIcon node={node} /> : <FileIcon />}
-          <span className="tree-label">{openable ? stripDocExt(node.name) : node.name}</span>
+          <span className="tree-label">
+            {active && currentTitle ? currentTitle : openable ? stripDocExt(node.name) : node.name}
+          </span>
           {loose && <NowhereMark line={loose} />}
           {page?.kind === "file" && (
             <span className="tree-published" title={`Published at /${page.slug}`} data-testid="tree-published" />
@@ -2147,9 +2192,9 @@ function TreeItem({
           {creatingHere && pendingCreate && (
             <NameRow
               depth={depth + 1}
-              icon={createRowIcon(pendingCreate.kind)}
-              placeholder={createRowLabel(pendingCreate.kind)}
-              ariaLabel={`New ${createRowLabel(pendingCreate.kind).toLowerCase()}`}
+              icon={<NewFolderIcon />}
+              placeholder="Folder name"
+              ariaLabel="New folder"
               onCommit={onCommitCreate}
               onCancel={onCancelCreate}
             />
@@ -2161,6 +2206,7 @@ function TreeItem({
               depth={depth + 1}
               parentDir={node.path}
               currentPath={currentPath}
+              currentTitle={currentTitle}
               selection={selection}
               cutPaths={cutPaths}
               openDirs={openDirs}
@@ -2198,7 +2244,7 @@ function NowhereMark({ line }: { line: string }) {
   );
 }
 
-// The inline name input for New File / New Folder / Rename, rendered in place
+// The inline name input for New Folder / Rename, rendered in place
 // in the tree (VS Code-style). Enter commits — a validation or backend error
 // keeps the row open with the message under it; Esc cancels; clicking away
 // commits a valid name and otherwise abandons the row. A pre-filled value
@@ -2479,10 +2525,6 @@ function BundledDocIcon() {
     </svg>
   );
 }
-
-const createRowLabel = (kind: "file" | "dir") => (kind === "dir" ? "Folder name" : "File name");
-
-const createRowIcon = (kind: "file" | "dir") => (kind === "dir" ? <NewFolderIcon /> : <FileIcon />);
 
 function FolderIcon() {
   return (

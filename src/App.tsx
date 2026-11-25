@@ -49,6 +49,8 @@ import RecentlyDeleted, { deletedDocuments } from "./RecentlyDeleted";
 import { dragWindowFromGap } from "./windowDrag";
 import { keys } from "./keys";
 import Editor, { type EditorHandle } from "./Editor";
+import DocTitle, { type DocTitleHandle } from "./DocTitle";
+import { titleProblem } from "./titleText";
 import type { SearchInfo } from "./searchPlugin";
 import Sidebar, {
   forgetTreeView,
@@ -58,11 +60,11 @@ import Sidebar, {
 } from "./Sidebar";
 import TabBar from "./TabBar";
 import {
+  docName,
   isUnsaved,
   isUnsupportedTab,
   isUntitled,
   noteHasText,
-  noteTitle,
   remapSteps,
   stepOnto,
   tabLabel,
@@ -357,8 +359,7 @@ function readStoredSplitRatio(): number {
 }
 
 // The file name (no extension) the Save prompt offers for an untitled note:
-// what the note is called — its first line — with the characters a file name
-// can't hold swapped out.
+// its title, with the characters a file name can't hold swapped out.
 const suggestedFileName = (title: string) =>
   title.replace(/[/\\:]/g, "-").trim() || "Untitled";
 
@@ -465,22 +466,48 @@ const openTabDoc = async (tab: StoredTab): Promise<LoadedDoc> => {
   }
 };
 
-// An untitled note's tab, read back out of its buffer — or null when the
-// buffer has no text in it: then it is not a note any more, and what is left
-// of it is deleted. (A buffer that fails to read is left alone; if it does
-// hold a note, the next launch finds it.)
+// An untitled note's title, kept by its buffer's path: the buffer holds the
+// text alone, and a note with a title and no text yet has no buffer at all.
+const UNTITLED_TITLE_PREFIX = "doklin:untitled-title:";
+const storedUntitledTitle = (path: string): string => {
+  try {
+    return localStorage.getItem(UNTITLED_TITLE_PREFIX + path) ?? "";
+  } catch {
+    return "";
+  }
+};
+const storeUntitledTitle = (path: string, title: string) => {
+  try {
+    if (title) localStorage.setItem(UNTITLED_TITLE_PREFIX + path, title);
+    else localStorage.removeItem(UNTITLED_TITLE_PREFIX + path);
+  } catch {
+    // ignore
+  }
+};
+
+// An untitled note is finished with: its buffer, and the title kept for it.
+const discardUntitled = async (path: string) => {
+  storeUntitledTitle(path, "");
+  await backend.untitled?.discard(path);
+};
+
+// An untitled note's tab, read back out of its buffer and its kept title —
+// or null when it has neither text nor a title: then it is not a note any
+// more, and what is left of it is deleted. (A buffer that fails to read is
+// left alone; if it does hold a note, the next launch finds it.)
 const restoreUntitled = async (id: string, path: string): Promise<UntitledTab | null> => {
-  let md: string;
+  const title = storedUntitledTitle(path);
+  let md = "";
   try {
     md = (await backend.documents.read(path)).text;
   } catch {
+    if (!title) return null;
+  }
+  if (!noteHasText(md) && !title) {
+    void discardUntitled(path).catch(() => {});
     return null;
   }
-  if (!noteHasText(md)) {
-    void backend.untitled?.discard(path).catch(() => {});
-    return null;
-  }
-  return { id, kind: "untitled", path, title: noteTitle(md), unsaved: true };
+  return { id, kind: "untitled", path, title, unsaved: true };
 };
 
 // What can be done with an untitled note whose tab is about to close.
@@ -706,6 +733,11 @@ export default function App() {
   // The question an untitled note with text in it raises before its tab
   // closes (see closeTab): which note, and the resolver for the answer.
   const [unsavedPrompt, setUnsavedPrompt] = useState<{ title: string } | null>(null);
+  // The document whose title takes the caret once it shows: a new document,
+  // a new note.
+  const [titleFocus, setTitleFocus] = useState<string | null>(null);
+  // The title above the focused pane's note.
+  const docTitleRef = useRef<DocTitleHandle>(null);
   const unsavedAnswerRef = useRef<((choice: UnsavedChoice) => void) | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => readStoredSidebarOpen());
   // The comment layer: visible by default, hideable app-wide (persisted) so a
@@ -2206,15 +2238,12 @@ export default function App() {
     if (!backend.untitled) return;
     catchUpWithEditor();
     const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
-    if (active?.kind === "untitled" && !noteHasText(currentMarkdownRef.current)) return;
+    if (active?.kind === "untitled" && !active.title && !noteHasText(currentMarkdownRef.current)) return;
     const id = uuid();
-    await appendAndActivate({
-      id,
-      kind: "untitled",
-      path: untitledPathFor(id),
-      title: "",
-      unsaved: false,
-    });
+    const path = untitledPathFor(id);
+    await appendAndActivate({ id, kind: "untitled", path, title: "", unsaved: false });
+    // A new note starts at its title, as a new document does.
+    setTitleFocus(path);
   }, [catchUpWithEditor, appendAndActivate]);
 
   const selectSidebarEntries = useCallback((sels: SidebarSelection[]) => {
@@ -3620,9 +3649,7 @@ export default function App() {
       await writeToDisk(chosen, contents);
       // The buffer is finished with — before the tab changes, so a crash in
       // between leaves a saved file and nothing to "recover" beside it.
-      await backend.untitled
-        ?.discard(note.path)
-        .catch((e) => console.error("discard untitled failed", e));
+      await discardUntitled(note.path).catch((e) => console.error("discard untitled failed", e));
       // The tab becomes the file's, in place.
       const nextTabs = tabsRef.current.map(
         (t): Tab => (t.id === note.id ? { id: t.id, kind: "file", path: chosen } : t),
@@ -3659,7 +3686,7 @@ export default function App() {
     catchUpWithEditor();
     const note = tabsRef.current.find((t) => t.id === activeIdRef.current);
     if (!note || note.kind !== "untitled") return false;
-    const suggested = suggestedFileName(noteTitle(currentMarkdownRef.current));
+    const suggested = suggestedFileName(note.title);
     const sels = sidebarSelectionRef.current;
     const sel = sels[sels.length - 1] ?? null; // primary selection
     const selDir = sel ? (sel.kind === "dir" ? sel.path : dirname(sel.path)) : null;
@@ -3801,9 +3828,7 @@ export default function App() {
       }
       const isActive = id === activeIdRef.current;
       if (tab.kind === "untitled") {
-        await backend.untitled
-          ?.discard(tab.path)
-          .catch((e) => console.error("discard untitled failed", e));
+        await discardUntitled(tab.path).catch((e) => console.error("discard untitled failed", e));
       } else if (isActive) {
         flushPendingAutosave();
       }
@@ -4059,6 +4084,71 @@ export default function App() {
       return null;
     },
     [flushPendingAutosave, flushSidecarWrite, repointMoved],
+  );
+
+  /* ---------- The title above the note ---------- */
+
+  // The active note's title as it is typed: its tab, and with it the sidebar
+  // row, the split pane's header and the window's title, say it at once. A
+  // file's title shows over its name until the file is renamed to it; an
+  // untitled note's title is its name, kept as it is typed.
+  const draftTitle = useCallback((title: string) => {
+    const id = activeIdRef.current;
+    const tab = tabsRef.current.find((t) => t.id === id);
+    if (!tab) return;
+    let next: Tab;
+    if (tab.kind === "untitled") {
+      if (tab.title === title) return;
+      storeUntitledTitle(tab.path, title);
+      next = { ...tab, title, unsaved: title !== "" || noteHasText(currentMarkdownRef.current) };
+    } else {
+      const over = title && title !== docName(tab) ? title : undefined;
+      if (tab.title === over) return;
+      next = { ...tab, title: over };
+    }
+    const nextTabs = tabsRef.current.map((t) => (t.id === id ? next : t));
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+  }, []);
+
+  // The active note's title became `title`: its file is renamed to it where
+  // it is, keeping its extension. Resolves to why it couldn't be, or null.
+  const renameActiveTo = useCallback(
+    async (title: string): Promise<string | null> => {
+      const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      if (tab?.kind !== "file") return null;
+      const from = tab.path;
+      const to = `${dirname(from)}/${title}${from.match(MD_EXT_RE)?.[0] ?? ".md"}`;
+      if (to === from) return null;
+      // A document is its markdown or its html: a name either has is taken.
+      // A change of case alone is this document's own name.
+      if (to.toLowerCase() !== from.toLowerCase()) {
+        const taken = await Promise.all(
+          [to, htmlSiblingOf(to)].map((p) => backend.documents.exists(p).catch(() => false)),
+        );
+        if (taken.some(Boolean)) return `There’s already a document called “${title}” here.`;
+      }
+      const problem = await movePath(from, to, "file");
+      if (problem) return problem;
+      // The tab followed the file; what it shows over the name is the name now.
+      const moved = tabsRef.current.find((t) => t.id === tab.id);
+      if (moved?.kind === "file" && moved.title === title) {
+        const nextTabs = tabsRef.current.map((t) => (t.id === tab.id ? { ...moved, title: undefined } : t));
+        tabsRef.current = nextTabs;
+        setTabs(nextTabs);
+      }
+      return null;
+    },
+    [movePath],
+  );
+
+  // A document made from the sidebar opens with the caret in its title.
+  const openNewDocument = useCallback(
+    async (path: string) => {
+      await openTab(path);
+      setTitleFocus(path);
+    },
+    [openTab],
   );
 
   /* ---------- Sections: who can open what ---------- */
@@ -4681,19 +4771,17 @@ export default function App() {
   );
 
 
-  // An untitled note is known by its first line and is unsaved for as long
-  // as it has text: keep its tab saying both as the text changes. Neither is
-  // persisted — a restore reads them back out of the buffer — so this is tab
-  // state only.
+  // An untitled note is unsaved for as long as it has a title or text: keep
+  // its tab saying so as the text changes. A restore reads it back out of the
+  // buffer and the kept title, so this is tab state only.
   const syncUntitledTab = useCallback((md: string) => {
     const id = activeIdRef.current;
     const tab = tabsRef.current.find((t) => t.id === id);
     if (tab?.kind !== "untitled") return;
-    const title = noteTitle(md);
-    const unsaved = noteHasText(md);
-    if (tab.title === title && tab.unsaved === unsaved) return;
+    const unsaved = tab.title !== "" || noteHasText(md);
+    if (tab.unsaved === unsaved) return;
     const next = tabsRef.current.map(
-      (t): Tab => (t.id === id && t.kind === "untitled" ? { ...t, title, unsaved } : t),
+      (t): Tab => (t.id === id && t.kind === "untitled" ? { ...t, unsaved } : t),
     );
     tabsRef.current = next;
     setTabs(next);
@@ -5044,7 +5132,7 @@ export default function App() {
 
   useEffect(() => {
     const active = tabs.find((t) => t.id === activeId);
-    // A file goes by its full name here; an untitled note by its first line.
+    // A file goes by its full name here; an untitled note by its title.
     const name = !active
       ? "Doklin"
       : active.kind === "untitled"
@@ -5594,6 +5682,24 @@ export default function App() {
           {leasedHere && activeLease && showEditorHere && paneView === "md" && !previewHere && (
             <LeaseBanner lease={activeLease.lease} onTakeOver={takeOverActive} />
           )}
+          {showEditorHere && paneTab && (
+            // The note's title: its file's name, which typing here renames.
+            // Only the focused pane's is written; the other pane's shows it.
+            <DocTitle
+              // Its own key: the html view beside it is keyed by the tab.
+              key={`title:${paneTab.id}`}
+              ref={focused ? docTitleRef : undefined}
+              name={focused ? docName(paneTab) : tabLabel(paneTab)}
+              readOnly={!focused || leasedHere}
+              focusNow={focused && titleFocus === paneTab.path}
+              onFocused={() => setTitleFocus(null)}
+              onDraft={focused ? draftTitle : undefined}
+              problemOf={focused && paneTab.kind === "file" ? titleProblem : undefined}
+              onRename={focused && paneTab.kind === "file" ? renameActiveTo : undefined}
+              onEnterBody={focused ? () => editorRef.current?.focusStart() : undefined}
+              onPutBack={(sentence) => pushToast("info", sentence)}
+            />
+          )}
           {focused && showEditorHere && frontmatter && (
             // The note's frontmatter, as the file has it. Read-only: the
             // editor never sees the block, and agents and other tools own it
@@ -5656,6 +5762,7 @@ export default function App() {
                     ? undefined
                     : onCompanionRelinked
               }
+              onLeaveTop={focused && !leasedHere ? () => docTitleRef.current?.focus() : undefined}
             />
           )}
           {previewHere && versionPreview && versionStore && (
@@ -5927,12 +6034,14 @@ export default function App() {
           root={workspaceRoot}
           cloud={cloudForRoot}
           currentPath={activeFilePath}
+          currentTitle={activeTab?.kind === "file" ? activeTab.title : undefined}
           selection={sidebarSelection}
           reveal={revealRequest}
           clipboard={fileClipboard}
           refreshToken={treeRefreshToken}
           onSelect={selectSidebarEntries}
           onOpenFile={(p) => void openTab(p)}
+          onOpenNewDocument={(p) => void openNewDocument(p)}
           onOpenFolder={onPickFolder}
           onOpenFilePicker={onPickFile}
           onRevealInFinder={backend.localFiles ? revealInFinder : undefined}

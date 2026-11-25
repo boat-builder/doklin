@@ -274,7 +274,7 @@ step(
     libraryHistoryRoot === "/docs/Library" &&
     libraryHistoryTitle === "Library history" &&
     libraryDeleted === "/docs/Library" &&
-    topMenu.includes("New File…") &&
+    topMenu.includes("New Document") &&
     !topMenu.some((t) => /history|Publish|Recently deleted/.test(t)) &&
     libraryCount.startsWith("Library — 4 notes will be public") &&
     libraryTitle === "Notes" &&
@@ -288,24 +288,27 @@ await page.evaluate(() => {
 });
 
 /* 2d — a new note lands in Library, whatever would have put it at the
-       workspace's top: nothing selected, or a stray selected. */
+       workspace's top: nothing selected, or a stray selected. It is made
+       as Untitled and named by its title. */
+const activeTab = () => page.locator(".tab.is-active .tab-label").textContent();
+const docTitle = () => page.locator(".editor-pane.is-focused .doc-title textarea");
 await page.locator(".sidebar-body").dispatchEvent("click");
 await page.locator(".sidebar-new").click();
-await poll(async () => (await tid("section-library").locator(".tree-create-input").count()) === 1);
-await tid("section-library").locator(".tree-create-input").fill("Fresh");
+await poll(async () => (await tid("section-library").locator('[data-tree-path="/docs/Library/Untitled.md"]').count()) === 1);
+await poll(async () => (await activeTab()) === "Untitled" && (await docTitle().evaluate((el) => el === document.activeElement)));
+const untitledInLibrary = await page.evaluate(() => window.__fs.has("/docs/Library/Untitled.md") && !window.__fs.has("/docs/Untitled.md"));
+await page.keyboard.type("Fresh");
 await page.keyboard.press("Enter");
 await poll(async () => (await tid("section-library").locator('[data-tree-path="/docs/Library/Fresh.md"]').count()) === 1);
-const madeInLibrary = await page.evaluate(() => window.__fs.has("/docs/Library/Fresh.md") && !window.__fs.has("/docs/Fresh.md"));
+const madeInLibrary = await page.evaluate(() => window.__fs.has("/docs/Library/Fresh.md") && !window.__fs.has("/docs/Library/Untitled.md"));
 await row("/docs/todo.md").click();
-await poll(async () => (await page.locator(".tab.is-active .tab-label").textContent()) === "todo");
+await poll(async () => (await activeTab()) === "todo");
 await page.locator(".sidebar-new").click();
-await poll(async () => (await page.locator(".tree-create-input").count()) === 1);
-const fromStrayInLibrary = (await tid("section-library").locator(".tree-create-input").count()) === 1;
-await page.keyboard.press("Escape");
-await poll(async () => (await page.locator(".tree-create-input").count()) === 0);
+await poll(async () => (await activeTab()) === "Untitled");
+const fromStrayInLibrary = await page.evaluate(() => window.__fs.has("/docs/Library/Untitled.md") && !window.__fs.has("/docs/Untitled.md"));
 step(
-  "a new note with nothing selected, or with a stray at the top selected, is made in Library",
-  madeInLibrary && fromStrayInLibrary,
+  "a new note with nothing selected, or with a stray at the top selected, is made in Library as Untitled, with the caret in its title; typing there names it",
+  untitledInLibrary && madeInLibrary && fromStrayInLibrary,
 );
 
 /* 2d′ — no folder at the top of Library has a section's name: making one
@@ -502,6 +505,7 @@ step(
 
 /* 5 — dragging a folder everyone has onto Restricted restricts it, and says
       what that means before anything moves. */
+const movesBeforeRestrict = (await moves()).length;
 await drag(row("/docs/Library/Projects"), tid("section-restricted").locator(".sidebar-section-label"));
 await poll(async () => (await tid("question-prompt").count()) === 1);
 const restrictAsk = await tid("question-prompt").innerText();
@@ -511,7 +515,7 @@ step(
   "a folder dropped on Restricted: asked first, in words — and Cancel moves nothing",
   restrictAsk.includes("Restrict “Projects”?") &&
     restrictAsk.includes("removed from everyone else’s devices") &&
-    (await moves()).length === 0 &&
+    (await moves()).length === movesBeforeRestrict &&
     (await row("/docs/Library/Projects").count()) === 1,
   restrictAsk.replace(/\n/g, " "),
 );

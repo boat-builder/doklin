@@ -125,13 +125,17 @@ final class EngineLiveTests: XCTestCase {
         let before = try XCTUnwrap(device.status(root)?.lastSyncMs)
         let folder = FolderModel(workspace: workspace, dir: TreeModel.libraryFolder)
         XCTAssertEqual(folder.whoSeesNew, "Everyone in \(workspace.name) will see it.")
-        let made = try await folder.createNote(named: "From the phone")
-        XCTAssertEqual(made, "Library/From the phone.md")
-        let note = DocumentModel(workspace: workspace, path: made)
+        let untitled = try await folder.createNote()
+        XCTAssertEqual(untitled, "Library/Untitled.md")
+        let note = DocumentModel(workspace: workspace, path: untitled)
         note.load()
-        try await note.save("# From the phone\n\nWritten on a device.\n\n- [ ] a box to tick\n", over: "# From the phone\n\n")
-        await note.toggleTask(line: 4)
-        XCTAssertEqual(note.text, "# From the phone\n\nWritten on a device.\n\n- [x] a box to tick\n")
+        // Named by its title: the file is renamed.
+        try await note.rename(to: "From the phone")
+        let made = note.path
+        XCTAssertEqual(made, "Library/From the phone.md")
+        try await note.save("Written on a device.\n\n- [ ] a box to tick\n", over: "")
+        await note.toggleTask(line: 2)
+        XCTAssertEqual(note.text, "Written on a device.\n\n- [x] a box to tick\n")
         await device.syncNow(root)
         try await synced(device, root, after: before)
 
@@ -230,20 +234,20 @@ final class EngineLiveTests: XCTestCase {
         await history.load()
         let kept = history.versions.count
         XCTAssertGreaterThanOrEqual(kept, 1, "\(history.versions)")
-        try await note.save("# From the phone\n\nA second thought.\n", over: try workspace.files.text(made))
+        try await note.save("A second thought.\n", over: try workspace.files.text(made))
         await history.load()
         XCTAssertEqual(history.versions.count, kept + 1, "\(history.versions)")
         XCTAssertTrue(history.versions[0].current)
         let older = try XCTUnwrap(history.open(history.versions[1]))
         let reader = VersionReader(workspace: workspace, opened: older)
         await reader.load()
-        XCTAssertEqual(reader.text, "# From the phone\n\nWritten on a device.\n\n- [x] a box to tick\n")
+        XCTAssertEqual(reader.text, "Written on a device.\n\n- [x] a box to tick\n")
         await reader.compare()
         XCTAssertTrue(reader.changes?.contains { $0.kind == .added && $0.text == "A second thought." } ?? false, "\(String(describing: reader.changes))")
         let outcome = try await reader.restore()
         XCTAssertEqual(try workspace.files.text(made), reader.text)
         try await VersionReader.undo(outcome, of: older, in: workspace)
-        XCTAssertEqual(try workspace.files.text(made), "# From the phone\n\nA second thought.\n")
+        XCTAssertEqual(try workspace.files.text(made), "A second thought.\n")
 
         // Library's moments start where this device joined; restoring that
         // one would take away the note made since. A moment's paths are
@@ -277,7 +281,7 @@ final class EngineLiveTests: XCTestCase {
         await removed.load(stores: device.stores(of: workspace))
         XCTAssertTrue(removed.documents.contains { $0.store == library && $0.primary.path == inLibrary }, "\(removed.documents)")
         try await MomentPlan.undo(report, paths: paths, store: library)
-        XCTAssertEqual(try workspace.files.text(made), "# From the phone\n\nA second thought.\n")
+        XCTAssertEqual(try workspace.files.text(made), "A second thought.\n")
 
         // A note removed here is under Recently deleted, and comes back where
         // it was: into Library, the store's own folder.

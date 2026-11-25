@@ -42,9 +42,9 @@ public final class FolderModel {
         }
     }
 
-    /// Make a note here and answer its path.
-    public func createNote(named name: String) async throws -> String {
-        let path = try workspace.files.createNote(in: dir, named: name)
+    /// Make a note here, "Untitled" until it is named, and answer its path.
+    public func createNote() async throws -> String {
+        let path = try workspace.files.createNote(in: dir)
         await workspace.wrote([path])
         load()
         return path

@@ -15,10 +15,16 @@
 // fetches: the app serves this page and the workspace's pictures itself, and
 // blocks every other load.
 //
+// Above the note is its title, the document's name (./title.ts): the page
+// hands a new one to the app, which renames the file.
+//
 // The bridge (change both sides with NoteEditor.swift):
-//   native → page   window.doklin.load({markdown, meta, note, documents,
-//                     recent, workspace, block, prefix})
+//   native → page   window.doklin.load({markdown, meta, note, name, documents,
+//                     recent, workspace, block, prefix, naming})
 //                   window.doklin.documents(list)  the workspace's documents changed
+//                   window.doklin.named({name, note, title, problem})  the
+//                     name now, after the title asked for (problem: why it
+//                     could not be; null when it is)
 //                   window.doklin.command(name)    bold, italic, strike, code,
 //                     text, heading1…3, bullet, ordered, todo, quote,
 //                     codeBlock, indent, outdent, undo, redo
@@ -30,7 +36,9 @@
 //                   {kind: "changed", markdown, links}, {kind: "relinked",
 //                   markdown, links} (its links shown anew: not an edit),
 //                   {kind: "selection", marks, block}, {kind: "notice",
-//                   message}, {kind: "failed", message}
+//                   message}, {kind: "failed", message}, {kind: "title",
+//                   title, left} (make it the name; `left`: the title was
+//                   left that way)
 // `links` are the records the note's sidecar is to hold, `[id, file]` each.
 
 import { Crepe } from "@milkdown/crepe";
@@ -51,7 +59,7 @@ import {
 } from "@milkdown/kit/preset/commonmark";
 import { toggleStrikethroughCommand } from "@milkdown/kit/preset/gfm";
 import { redoCommand, undoCommand } from "@milkdown/kit/plugin/history";
-import { TextSelection } from "@milkdown/kit/prose/state";
+import { Selection, TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import {
   FLOWCHART_PREVIEW_WAITING,
@@ -81,6 +89,8 @@ import {
   type LinkContext,
 } from "../linkMark";
 import { mentionPlugin } from "../mentionMenu";
+import { leaveTopPlugin } from "../leaveTop";
+import { makeTitle } from "./title";
 
 import "@milkdown/crepe/theme/common/style.css";
 import "@milkdown/crepe/theme/frame.css";
@@ -102,6 +112,8 @@ export type Load = {
   meta: string | null;
   /** Where it is in the workspace, workspace-relative. */
   note: string;
+  /** What it is called: its file's name, without the extension. */
+  name: string;
   /** The workspace's documents (`cloud_documents`), what changed lately
    *  (workspace-relative paths, latest first), and its name. */
   documents: WorkspaceDocument[];
@@ -111,6 +123,8 @@ export type Load = {
   block: number | null;
   /** What that block's text begins with: the check that it is the one meant. */
   prefix: string | null;
+  /** Open with the caret in the title, not the note: a note just made. */
+  naming: boolean;
 };
 
 /** The note as a write would hold it, and its sidecar's link records. */
@@ -123,7 +137,8 @@ type Message =
   | ({ kind: "relinked" } & Written)
   | { kind: "selection"; marks: string[]; block: string }
   | { kind: "notice"; message: string }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; message: string }
+  | { kind: "title"; title: string; left: boolean };
 
 type Native = { postMessage(message: Message): void };
 
@@ -143,6 +158,19 @@ let keepInline = false;
 
 /** Where the note is and what the workspace holds, for its links. */
 let links: LinkContext = NO_LINKS;
+/** The workspace's documents, as the app last listed them. */
+let listed: WorkspaceDocument[] = [];
+
+const title = makeTitle(document.getElementById("title") as HTMLElement, {
+  rename: (wanted, left) => post({ kind: "title", title: wanted, left }),
+  enterBody: () => {
+    const v = view();
+    if (!v) return;
+    v.dispatch(v.state.tr.setSelection(Selection.atStart(v.state.doc)).scrollIntoView());
+    v.focus();
+  },
+  putBack: (message) => post({ kind: "notice", message }),
+});
 
 /** What the file would hold: the frontmatter, then the editor's markdown
  *  with its comments as bare markers; and the records of its links. */
@@ -197,7 +225,9 @@ async function load(input: Load): Promise<void> {
     keepInline = extractMarkdown(fm.body).mthreads.length > 0;
     const meta = input.meta ? parseEntityMeta(input.meta) : null;
     const threads = meta?.mthreads ?? [];
+    listed = input.documents;
     links = contextFor(input.note, input.documents, input.recent, input.workspace);
+    title.load(input.name);
     const editor = new Crepe({
       root,
       defaultValue: expandMarkdown(fm.body, threads).md,
@@ -242,6 +272,8 @@ async function load(input: Load): Promise<void> {
     editor.editor.use(linkPlugins);
     editor.editor.use(mentionPlugin);
     editor.editor.use(criticCopyPlugin);
+    // Last, so the menus and the editor's own keys have them first.
+    editor.editor.use(leaveTopPlugin(() => () => title.focus(false)));
     editor.editor.config((ctx) => {
       configureLinkMark(ctx);
       configureLinkClipboard(ctx);
@@ -271,9 +303,15 @@ async function load(input: Load): Promise<void> {
     post({ kind: "loaded", ...toDisk(editor.getMarkdown()) });
     const v = view();
     if (v) {
+      // Named, so it is told apart from the title above it.
+      v.dom.setAttribute("aria-label", "Note");
       v.dom.addEventListener(CALLOUT_PICK_EVENT, (e) => openPicker(v, (e as CustomEvent<CalloutPickDetail>).detail));
-      place(v, input.block, input.prefix);
-      v.focus();
+      if (input.naming) {
+        title.focus(true);
+      } else {
+        place(v, input.block, input.prefix);
+        v.focus();
+      }
     }
     report();
   } catch (error) {
@@ -356,12 +394,22 @@ function blockAt(v: EditorView): string {
  *  now. The app hears what the note held first, then what it holds. */
 function documents(list: WorkspaceDocument[]) {
   if (!links.note) return;
+  listed = list;
   links = contextFor(links.note.path, list, links.recent, links.workspace);
   const v = view();
   if (!crepe || !v) return;
   crepe.editor.ctx.set(linkContextCtx.key, links);
   post({ kind: "changed", ...toDisk(crepe.getMarkdown()) });
   if (relinkDocument(v, links)) post({ kind: "relinked", ...toDisk(crepe.getMarkdown()) });
+}
+
+/** The app answered a title: the note's name, and where it is, now. Its
+ *  folder is the same, so its links lead where they did. */
+function named(answer: { name: string; note: string; title: string; problem: string | null }) {
+  title.named(answer.name, answer.title, answer.problem);
+  if (!links.note || links.note.path === answer.note) return;
+  links = contextFor(answer.note, listed, links.recent, links.workspace);
+  crepe?.editor.ctx.set(linkContextCtx.key, links);
 }
 
 /** One thing the bar asked for. */
@@ -518,6 +566,7 @@ declare global {
     doklin: {
       load: (input: Load) => Promise<void>;
       documents: (list: WorkspaceDocument[]) => void;
+      named: (answer: { name: string; note: string; title: string; problem: string | null }) => void;
       command: (name: string) => void;
       markdown: () => Written | null;
       editable: (on: boolean) => void;
@@ -529,13 +578,14 @@ declare global {
 window.doklin = {
   load,
   documents,
+  named,
   command,
   markdown: () => (crepe ? toDisk(crepe.getMarkdown()) : null),
-  editable: (on: boolean) => crepe?.setReadonly(!on),
-  blur: () => {
-    const v = view();
-    if (v) (v.dom as HTMLElement).blur();
+  editable: (on: boolean) => {
+    crepe?.setReadonly(!on);
+    title.editable(on);
   },
+  blur: () => (document.activeElement as HTMLElement | null)?.blur(),
 };
 
 post({ kind: "ready" });

@@ -108,7 +108,8 @@ export async function notePage(linked: Linked, loc: Located, o: NoteOptions): Pr
   // reader: a page leaves it off. Comments never leave the sidecar: only
   // their markers are in the file, and those go too.
   const body = stripComments(splitFrontmatter(text).body);
-  const title = o.title?.trim() || leadTitle(body) || stemName;
+  const lead = leadTitle(body);
+  const title = o.title?.trim() || lead || stemName;
   const description = o.desc?.trim() || deriveDescription(body) || `${title} on ${o.url.hostname}`;
   const meta: PageMeta = { title, description, hostname: o.url.hostname, pageUrl, ogType: "article" };
 
@@ -119,7 +120,11 @@ export async function notePage(linked: Linked, loc: Located, o: NoteOptions): Pr
   const sidecar = await ws.meta(stemOf(path));
   const links = linkResolver(linked, dirOf(path), o.dirSlug, sidecar?.links ?? []);
   const bodyHtml = markdownHtml(body, { tcols: sidecar?.tcols ?? [], links });
-  return html(notePageHtml({ meta, crumb: o.crumb, hasHtml, bodyHtml, webTag: WEB_TAG }));
+  // The name above a note in the app is its file's, so a note seldom opens
+  // with a heading of its own: the page draws its title there instead. One
+  // that does keeps its own, so the page never says it twice.
+  const heading = lead ? null : title;
+  return html(notePageHtml({ meta, crumb: o.crumb, hasHtml, heading, bodyHtml, webTag: WEB_TAG }));
 }
 
 /** Resolve a link written inside a note (`./plan.md`, `../x/y.md`) to a workspace path, or null when it isn't one. */

@@ -64,16 +64,10 @@ final class DoklinUITests: UITestCase {
         record("a note, edited")
         back()
 
-        // A new note, made in Library, a task in it, and the box ticked from
-        // the reading view.
-        marked("new").tap()
-        expect(app.buttons["New note"], "New note in the menu").tap()
-        expect(text(containing: "Everyone in"), "who will see a note made in Library")
-        type("Phone list", into: expect(app.alerts.textFields.firstMatch, "the new note's name field"))
-        answerAlert("New note", with: "Create")
-        expect(app.staticTexts["Phone list"], "the new note's heading")
-        let fresh = editAtTheEnd()
-        fresh.typeText("\n- [ ] ")
+        // A new note, made in Library and named by its title, a task in it,
+        // and the box ticked from the reading view.
+        let fresh = newNote(named: "Phone list")
+        fresh.typeText("- [ ] ")
         // The line is drawn again as a to-do, with its box, and words typed
         // while that happens can land in the line above: they wait until the
         // bar says the caret is in a to-do.
@@ -83,7 +77,7 @@ final class DoklinUITests: UITestCase {
         expect(app.buttons["Not done"], "the unticked box").tap()
         expect(app.buttons["Done"], "the ticked box")
         expect(app.staticTexts["milk"], "the task's words")
-        expect(app.staticTexts["Phone list"], "the new note's heading after the edit")
+        expect(app.staticTexts["Phone list"], "the new note's title, its name, after the edit")
         record("a box, ticked")
         back()
         expect(marked("entry-Phone list"), "the new note in the tree, under Library")

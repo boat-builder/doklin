@@ -12,8 +12,6 @@
 //             is gone when the tab closes. Saving it turns the tab into a
 //             `file` tab, in place.
 
-import { stripComments } from "./criticMarkup";
-
 export type TabKind = "file" | "untitled";
 
 /** What is persisted of a tab — in the window session, and in the backend's
@@ -30,19 +28,20 @@ export type Steps = { back: Step[]; forward: Step[] };
 
 /** `missing` marks a file whose path failed to read — the drive is
  *  unmounted, the file moved — kept visible as a "ghost" tab instead of being
- *  silently dropped. Every activation re-checks, so the flag heals itself. */
+ *  silently dropped. Every activation re-checks, so the flag heals itself.
+ *  `title` is the title being typed over the file's name, until the file
+ *  is renamed to it. */
 export type DocTab = StoredTab & {
   kind: "file";
   missing?: boolean;
   steps?: Steps;
-  title?: never;
+  title?: string;
   unsaved?: never;
 };
 
-/** `title` is the note's first line ("" until it has one) and `unsaved`
- *  whether it has any text: both follow the text as it is typed, and are read
- *  back out of the buffer when a session is restored. An untitled note never
- *  follows a link in its own tab, so it has no steps: it would be gone. */
+/** `title` is what the note's title says ("" until something is typed
+ *  there) and `unsaved` whether it has a title or any text. An untitled note
+ *  never follows a link in its own tab, so it has no steps: it would be gone. */
 export type UntitledTab = StoredTab & {
   kind: "untitled";
   title: string;
@@ -92,46 +91,22 @@ const DOC_EXT_RE = /\.(md|markdown|mdown|mkd|html)$/i;
 export const isUnsupportedTab = (t: Pick<Tab, "kind" | "path">): boolean =>
   t.kind === "file" && !DOC_EXT_RE.test(t.path);
 
-/** The name a tab goes by: a document's file name without its extension, an
- *  untitled note's first line. */
-export const tabLabel = (t: Tab): string =>
-  t.kind === "untitled" ? t.title || "Untitled" : basename(t.path).replace(DOC_EXT_RE, "");
+/** What a document is called: its file's name without the extension, or an
+ *  untitled note's title ("" for none). */
+export const docName = (t: Tab): string =>
+  t.kind === "untitled" ? t.title : basename(t.path).replace(DOC_EXT_RE, "");
+
+/** The name a tab goes by: the document's, or the title being typed over it. */
+export const tabLabel = (t: Tab): string => t.title || docName(t) || "Untitled";
 
 /** Whether a tab is holding work that exists nowhere else: an untitled note
- *  with text in it. Files autosave, so a file tab never is. */
+ *  with a title or text in it. Files autosave, so a file tab never is. */
 export const isUnsaved = (t: Tab): boolean => t.kind === "untitled" && t.unsaved;
 
 // A line the editor writes for an empty paragraph says nothing.
 const BLANK_RE = /^(?:\s|<br\s*\/?>)*$/;
 
-/** Whether a note's markdown has anything in it. An untitled note that does
- *  not is not unsaved: it closes without a question and is not restored. */
+/** Whether a note's markdown has anything in it. An untitled note with
+ *  neither text nor a title is not unsaved: it closes without a question and
+ *  is not restored. */
 export const noteHasText = (md: string): boolean => !BLANK_RE.test(md);
-
-const TITLE_MAX = 60;
-
-// One line of markdown as plain words: comment markers, link targets and
-// block / inline syntax taken off.
-const plainLine = (line: string): string =>
-  stripComments(line)
-    .replace(/<br\s*\/?>/gi, "")
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1") // links and images: their text
-    .replace(/^[#>\s*+-]+/, "") // heading, quote and bullet markers
-    .replace(/^(?:\d+[.)]|\[[ xX]\])\s+/, "") // "1." and task boxes
-    .replace(/[*_`~[\]]/g, "") // inline emphasis and code
-    .trim();
-
-/** What an untitled note is called: its first line that says anything, as
- *  plain words — "" when there is none. It is also the name the Save prompt
- *  offers, so a note that opens with a heading saves as ⌘S, Enter. Scans
- *  line by line because it runs on every keystroke. */
-export function noteTitle(md: string): string {
-  for (let start = 0; start < md.length; ) {
-    let end = md.indexOf("\n", start);
-    if (end < 0) end = md.length;
-    const title = plainLine(md.slice(start, end));
-    if (title) return title.slice(0, TITLE_MAX).trim();
-    start = end + 1;
-  }
-  return "";
-}

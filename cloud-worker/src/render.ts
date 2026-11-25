@@ -288,6 +288,8 @@ export type NotePageInputs = {
   crumb: Crumb | null;
   /** Whether the note has an html rendition — the pill shows when it does. */
   hasHtml: boolean;
+  /** The title drawn above the body, or null when the body opens with its own H1. */
+  heading: string | null;
   bodyHtml: string;
   /** The tag the flowchart module is served under (/__web/<tag>/flowchart.js). */
   webTag: string;
@@ -305,7 +307,7 @@ ${FONT_PRELOAD}
 ${crumbHtml(p.crumb)}
 ${p.hasHtml ? pillHtml(p.meta.pageUrl, "md") : ""}
 <main class="doc">
-${p.bodyHtml}
+${p.heading === null ? "" : `<h1>${escapeHtml(p.heading)}</h1>\n`}${p.bodyHtml}
 </main>
 ${footerHtml(p.meta.hostname)}
 ${p.bodyHtml.includes(FLOWCHART_MARK) ? flowchartScript(p.webTag) : ""}
