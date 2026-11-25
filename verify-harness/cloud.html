@@ -1025,6 +1025,12 @@
               window.__fs.set(args.path, "");
               return Promise.resolve(null);
             }
+            // A folder made: kept in `__madeDirs`, which the tree does not list.
+            case "create_dir": {
+              (window.__madeDirs ??= []).push(args.path);
+              window.__dirs.add(args.path);
+              return Promise.resolve(null);
+            }
             case "move_path": {
               (window.__moves ??= []).push({ from: args.from, to: args.to });
               const sec = window.__sections;

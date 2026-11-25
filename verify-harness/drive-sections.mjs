@@ -14,7 +14,8 @@
 // more people see a note asking first, and one that narrows asking nothing;
 // who is in a folder — adding, removing, the last person handing it on;
 // a folder taken away elsewhere saying so; deleting one for everyone; an
-// owner taking down a page published from a section they are not in.
+// owner taking down a page published from a section they are not in; empty
+// space being the list it is in, and each heading making in its own list.
 import { chromium } from "playwright";
 import { existsSync, mkdirSync } from "node:fs";
 
@@ -240,9 +241,7 @@ step(
 );
 
 /* 2c — Library's heading carries what the whole shared section has: its
-       history (Library's own store), and publishing it. The workspace's top
-       is in no section: its empty space makes things, and has no history
-       or publishing of its own. */
+       history (Library's own store), and publishing it. */
 const libraryMenu = await menuOn(tid("section-library-toggle"));
 await pick("Library history");
 await poll(async () => (await tid("workspace-history").count()) === 1);
@@ -251,10 +250,6 @@ const libraryHistoryTitle = (await tid("workspace-history").locator(".modal-titl
 await page.keyboard.press("Escape");
 await poll(async () => (await tid("workspace-history").count()) === 0);
 const libraryDeleted = (await versionCalls("versions_deleted")).at(-1).args.root;
-await page.locator(".sidebar-body").dispatchEvent("contextmenu", { clientX: 40, clientY: 860, bubbles: true });
-await poll(async () => (await page.locator(".sidebar-menu-item").count()) > 0);
-const topMenu = await page.locator(".sidebar-menu-item").allTextContents();
-await closeMenu();
 await menuOn(tid("section-library-toggle"));
 await pick("Publish Library");
 await poll(async () => (await dialog("Publish folder").count()) === 1);
@@ -267,15 +262,13 @@ const libraryPublish = (await lastCall("cloud_publish")).args;
 const publishedMenu = await menuOn(tid("section-library-toggle"));
 await closeMenu();
 step(
-  "Library's heading: Library history… over Library's own store, Publish Library… with Library's notes counted and the workspace's name; the workspace's top makes things and offers no history or publishing",
+  "Library's heading: Library history… over Library's own store, Publish Library… with Library's notes counted and the workspace's name",
   libraryMenu.includes("Library history…") &&
     libraryMenu.includes("Publish Library…") &&
     !libraryMenu.some((t) => /workspace/i.test(t)) &&
     libraryHistoryRoot === "/docs/Library" &&
     libraryHistoryTitle === "Library history" &&
     libraryDeleted === "/docs/Library" &&
-    topMenu.includes("New Document") &&
-    !topMenu.some((t) => /history|Publish|Recently deleted/.test(t)) &&
     libraryCount.startsWith("Library — 4 notes will be public") &&
     libraryTitle === "Notes" &&
     libraryPublish.path === "/docs/Library" &&
@@ -742,6 +735,108 @@ step(
 );
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Published pages").count()) === 0);
+
+/* 15 — empty space is the list it is in: beside its rows, down to the next
+       heading's line, and under the last list. A right-click there makes
+       things in that list; under what is in no section nothing is made, so
+       there is no menu. */
+const menuAt = async (x, y) => {
+  await page.mouse.click(x, y, { button: "right" });
+  await settle(150);
+  const items = await page.locator(".sidebar-menu-item").allTextContents();
+  if (items.length > 0) await closeMenu();
+  return items;
+};
+const bodyBox = await page.locator(".sidebar-body").boundingBox();
+const spaceX = bodyBox.x + 60;
+let privateBox = await tid("section-private").boundingBox();
+const straysBox = await tid("section-strays").boundingBox();
+const bodyBottom = bodyBox.y + bodyBox.height - 4;
+const beforePrivateLine = await menuAt(spaceX, privateBox.y - 4);
+const besidePrivateRows = await menuAt(bodyBox.x + 1, privateBox.y + privateBox.height - 8);
+const beforeStraysLine = await menuAt(spaceX, straysBox.y - 4);
+const underStrays = await menuAt(spaceX, bodyBottom);
+await page.mouse.click(spaceX, straysBox.y - 4, { button: "right" });
+await poll(async () => (await page.locator(".sidebar-menu-item").count()) > 0);
+await pick("New Folder");
+await poll(async () => (await tid("section-private").locator(".tree-create-input").count()) === 1);
+await page.keyboard.type("Ideas");
+await page.keyboard.press("Enter");
+await poll(async () => (await page.locator(".tree-create-input").count()) === 0);
+const madeDirs = () => page.evaluate(() => window.__madeDirs ?? []);
+const isPrivateMenu = (items) => items.includes("New Folder…") && items.includes("Private history…") && !items.includes("Library history…");
+step(
+  "empty space is the list it is in: before Private's line is Restricted's, beside and under Private's rows is Private's — New Folder… there makes it in Private — and under what is in no section there is no menu",
+  beforePrivateLine.join("|") === "New restricted folder…" &&
+    isPrivateMenu(besidePrivateRows) &&
+    isPrivateMenu(beforeStraysLine) &&
+    underStrays.length === 0 &&
+    straysBox.y + straysBox.height < bodyBottom &&
+    (await madeDirs()).includes("/docs/Private/Ideas"),
+  `${beforePrivateLine.join(" · ")} // ${beforeStraysLine.slice(0, 3).join(" · ")} // ${(await madeDirs()).join(", ")}`,
+);
+
+/* 15b — a list's heading makes in that list, whatever is selected in
+        another: Private's makes a folder as well as a note. */
+await row("/docs/Library/notes.md").click();
+await tid("new-private-folder").click();
+const privateFromLibrary =
+  (await tid("section-private").locator(".tree-create-input").count()) === 1 &&
+  (await tid("section-library").locator(".tree-create-input").count()) === 0;
+await page.keyboard.press("Escape");
+await poll(async () => (await page.locator(".tree-create-input").count()) === 0);
+// Private's + makes a note there, and selects it.
+await tid("new-private").click();
+await poll(async () => (await row("/docs/Private/Untitled.md").count()) === 1);
+await poll(async () => (await row("/docs/Private/Untitled.md").locator("xpath=..").getAttribute("aria-selected")) === "true");
+await tid("section-library").locator('[aria-label="New folder"]').click();
+const libraryFromPrivate =
+  (await tid("section-library").locator(".tree-create-input").count()) === 1 &&
+  (await tid("section-private").locator(".tree-create-input").count()) === 0;
+await page.keyboard.type("Drafts");
+await page.keyboard.press("Enter");
+await poll(async () => (await page.locator(".tree-create-input").count()) === 0);
+step(
+  "a heading makes in its own list: Private's New folder with a Library note selected, Library's with a private note selected",
+  (await tid("new-private-folder").getAttribute("title")) === "New private folder" &&
+    privateFromLibrary &&
+    libraryFromPrivate &&
+    (await madeDirs()).includes("/docs/Library/Drafts"),
+  (await madeDirs()).join(", "),
+);
+
+/* 15c — with nothing in no section, Private is the last list: the space
+        under it is Private's, for a right-click and for a drop. */
+await page.evaluate(() => {
+  window.__strays.length = 0;
+  for (const name of Object.keys(window.__strayDirs)) delete window.__strayDirs[name];
+  window.__emit("cloud-applied", { root: "/docs", paths: [] });
+});
+await poll(async () => (await tid("section-strays").count()) === 0);
+privateBox = await tid("section-private").boundingBox();
+const underPrivate = await menuAt(spaceX, bodyBottom);
+const dragged = await tid("section-library").locator('[data-tree-path$=".md"]').first().getAttribute("data-tree-path");
+const movesUnder = (await moves()).length;
+{
+  const a = await row(dragged).boundingBox();
+  await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(a.x + a.width / 2 + 9, a.y + a.height / 2 + 9, { steps: 3 });
+  await page.mouse.move(spaceX, bodyBottom, { steps: 8 });
+  await settle(120);
+  await page.mouse.up();
+}
+await poll(async () => (await moves()).length > movesUnder);
+const droppedUnder = (await moves()).at(-1);
+await page.screenshot({ path: SHOTS + "sections-15-under-private.png" });
+step(
+  "with nothing in no section, the space under Private is Private's: its menu, and a note dropped there moves into Private",
+  privateBox.y + privateBox.height < bodyBottom &&
+    isPrivateMenu(underPrivate) &&
+    droppedUnder.from === dragged &&
+    droppedUnder.to === `/docs/Private/${dragged.split("/").at(-1)}`,
+  `${underPrivate.slice(0, 3).join(" · ")} // ${droppedUnder.from} → ${droppedUnder.to}`,
+);
 
 await settle();
 const failed = results.filter((r) => !r.ok).length;
