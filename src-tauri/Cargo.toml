@@ -1,6 +1,6 @@
 [package]
 name = "doklin"
-version = "0.1.144"
+version = "0.1.145"
 description = "Markdown editor"
 authors = ["Sherin"]
 edition = "2021"
@@ -33,8 +33,9 @@ doklin-engine = { path = "../engine" }
 # the emitted PDF (structure via lopdf — default features off, its `time`
 # datetime feature doesn't compile; text via pdf-extract, which builds its
 # own lopdf 0.42 so features never unify with ours). The engine download is
-# fetched over HTTPS and sha256-verified, into a randomly named staging dir.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# fetched over HTTPS — certificates checked by the OS (doklin_engine::https)
+# — and sha256-verified, into a randomly named staging dir.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 sha2 = "0.10"
 getrandom = "0.2"
 tokio-tungstenite = "0.30.0"

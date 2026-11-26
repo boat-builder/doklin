@@ -11,7 +11,8 @@
 //! an account past today's requests stops at once. Either is exit 8.
 
 use std::collections::HashMap;
-use std::io::{IsTerminal, Read};
+use std::io::IsTerminal;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -58,10 +59,14 @@ pub struct Client {
 
 impl Client {
     pub fn new(endpoint: &str, token: Option<&str>) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(15))
-            .timeout(Duration::from_secs(120))
-            .build();
+        let agent = ureq::Agent::config_builder()
+            .tls_config(tls())
+            .timeout_connect(Some(Duration::from_secs(15)))
+            .timeout_global(Some(Duration::from_secs(120)))
+            // A refusal is an answer like any other: a status and the worker's sentence.
+            .http_status_as_error(false)
+            .build()
+            .new_agent();
         Client { agent, endpoint: endpoint.trim_end_matches('/').to_string(), token: token.map(String::from) }
     }
 
@@ -95,7 +100,7 @@ impl Client {
         loop {
             let used = usage::count(self.domain(), reports)?;
             let reply = self.once(method, &url, headers, body, used)?;
-            // ureq's own line between an answer and a refusal.
+            // Below 400 is an answer; the rest is a refusal, a wait or a limit.
             if reply.status < 400 {
                 return Ok(reply);
             }
@@ -135,27 +140,36 @@ impl Client {
     /// The request itself, once, and whatever the domain answered to it.
     /// `used` is the count it reports, when it is the one that does.
     fn once(&self, method: &str, url: &str, headers: &[(&str, &str)], body: Option<Body>, used: Option<u64>) -> Result<Reply, Failure> {
-        let mut req = self
-            .agent
-            .request(method, url)
-            .set("x-doklin-client", concat!("cli/", env!("CARGO_PKG_VERSION")));
+        let mut req = ureq::http::Request::builder()
+            .method(method)
+            .uri(url)
+            .header("x-doklin-client", concat!("cli/", env!("CARGO_PKG_VERSION")));
         if let Some(token) = &self.token {
-            req = req.set("authorization", &format!("Bearer {}", token));
+            req = req.header("authorization", format!("Bearer {}", token));
         }
         if let Some(n) = used {
-            req = req.set("x-doklin-used", &n.to_string());
+            req = req.header("x-doklin-used", n.to_string());
         }
         for (name, value) in headers {
-            req = req.set(name, value);
+            req = req.header(*name, *value);
         }
-        let sent = match body {
-            Some(Body::Json(v)) => req.set("content-type", "application/json").send_bytes(v.to_string().as_bytes()),
-            Some(Body::Bytes(b)) => req.set("content-type", "application/octet-stream").send_bytes(b),
-            None => req.call(),
-        };
-        match sent {
-            Ok(res) | Err(ureq::Error::Status(_, res)) => read(res),
-            Err(ureq::Error::Transport(t)) => Err(Failure::other(format!("could not reach {}: {}", self.domain(), t))),
+        match body {
+            Some(Body::Json(v)) => self.run(req.header("content-type", "application/json").body(v.to_string())),
+            Some(Body::Bytes(b)) => self.run(req.header("content-type", "application/octet-stream").body(b)),
+            None => self.run(req.body(())),
+        }
+    }
+
+    fn run(&self, req: Result<ureq::http::Request<impl ureq::AsSendBody>, ureq::http::Error>) -> Result<Reply, Failure> {
+        let req = req.map_err(|e| Failure::other(format!("that request could not be made: {}", e)))?;
+        match self.agent.run(req) {
+            Ok(res) => read(res),
+            Err(e) if unknown_issuer(&e) => Err(Failure::other(format!(
+                "could not reach {}: its certificate is signed by an authority this machine does not trust — if HTTPS here goes through a proxy with a CA of its own, {}",
+                self.domain(),
+                TRUST_IT
+            ))),
+            Err(e) => Err(Failure::other(format!("could not reach {}: {}", self.domain(), e))),
         }
     }
 
@@ -209,6 +223,37 @@ pub fn too_old(domain: &str) -> Failure {
     }
 }
 
+/// Who may sign a domain's certificate: whoever the machine trusts, as for
+/// every program on it. On a Mac the OS checks it — Apple's own check, so a
+/// CA a company installs counts. Elsewhere it is the system's CA store, or
+/// `SSL_CERT_FILE` / `SSL_CERT_DIR` in its place when either is set, as curl,
+/// git and Go read them. No roots are bundled. (A proxy is ureq's to find, in
+/// `HTTPS_PROXY` and `NO_PROXY`, as curl does.)
+fn tls() -> ureq::tls::TlsConfig {
+    ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .build()
+}
+
+/// How a CA comes to be trusted here, said where an unknown one is refused.
+/// macOS-only: the Mac's is Keychain Access, which the OS's check reads.
+#[cfg(target_os = "macos")]
+const TRUST_IT: &str = "add that CA in Keychain Access and set it to Always Trust";
+#[cfg(not(target_os = "macos"))]
+const TRUST_IT: &str = "add it to this machine's CA certificates, or set SSL_CERT_FILE to its PEM file";
+
+/// A certificate no trusted root signed. The handshake's refusal comes as
+/// rustls's own error, or inside the `io::Error` the handshake returned.
+fn unknown_issuer(e: &ureq::Error) -> bool {
+    let tls = match e {
+        ureq::Error::Rustls(tls) => Some(tls),
+        ureq::Error::Io(io) => io.get_ref().and_then(|e| e.downcast_ref::<rustls::Error>()),
+        _ => None,
+    };
+    matches!(tls, Some(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)))
+}
+
 /// What a non-2xx answer is, before it is a refusal.
 #[derive(Debug, PartialEq)]
 enum Answer {
@@ -233,20 +278,23 @@ fn classify(status: u16, retry_after: Option<&str>, body: &[u8]) -> Answer {
     Answer::Refusal
 }
 
-fn read(res: ureq::Response) -> Result<Reply, Failure> {
-    let status = res.status();
+fn read(res: ureq::http::Response<ureq::Body>) -> Result<Reply, Failure> {
+    let status = res.status().as_u16();
     let mut headers = HashMap::new();
-    for name in res.headers_names() {
+    for (name, value) in res.headers() {
+        let name = name.as_str();
         if name.starts_with("x-doklin-") || name == "retry-after" {
-            if let Some(value) = res.header(&name) {
-                headers.insert(name.clone(), decode(value));
+            if let Ok(value) = value.to_str() {
+                // The first of a name, as it was always read.
+                headers.entry(name.to_string()).or_insert_with(|| decode(value));
             }
         }
     }
-    let mut bytes = Vec::new();
-    res.into_reader()
-        .take(MAX_ANSWER_BYTES)
-        .read_to_end(&mut bytes)
+    let bytes = res
+        .into_body()
+        .into_with_config()
+        .limit(MAX_ANSWER_BYTES)
+        .read_to_vec()
         .map_err(|e| Failure::other(format!("the answer was cut short: {}", e)))?;
     Ok(Reply { status, headers, bytes })
 }
