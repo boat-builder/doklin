@@ -71,7 +71,8 @@ More
 
 Exit codes: 0 done · 2 bad usage · 3 not found · 4 not permitted · 5 conflict ·
 6 not logged in · 7 the workspace's worker is too old for the command ·
-8 the domain asked to slow down, or today's Cloudflare requests are used up"#;
+8 the domain asked to slow down, or today's Cloudflare requests are used up ·
+9 this doklin is too old for the domain: update it"#;
 
 const DOCUMENTS: &str = r#"DOCUMENTS
 
@@ -494,8 +495,10 @@ Output is JSON whenever it is not going to a terminal. A refusal is one sentence
 on stderr that says what to do next, with an exit code: 2 bad usage, 3 not found,
 4 not permitted, 5 conflict (the document changed, or the name is taken), 6 not
 logged in, 7 the workspace's worker is too old for the command, 8 the domain asked
-to slow down, or today's Cloudflare requests are used up. On 8, stop: wait as long
-as its sentence says before the next command, and never retry it in a loop."#;
+to slow down, or today's Cloudflare requests are used up, 9 this doklin is too old
+for the domain. On 8, stop: wait as long as its sentence says before the next
+command, and never retry it in a loop. On 9, update doklin the way its sentence
+says, then run the command again."#;
 
 /// Print the overview, a topic, or one command's own help. A topic wins over
 /// a command of the same name: `doklin help comments` is how comments work,

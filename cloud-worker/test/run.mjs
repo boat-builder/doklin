@@ -52,9 +52,18 @@ if (bundlePath) {
   anotherIsolate = async (tag) => withAssets((await import(`${href}?isolate=${tag}`)).default, webDir);
   console.log(`testing the bundle at ${bundlePath}, its web directory in front`);
 } else {
+  const source = await compileWorker();
+  ({ default: worker } = await import(source));
+  anotherIsolate = async (tag) => (await import(`${source}${encodeURIComponent(`\n// isolate ${tag}`)}`)).default;
+}
+
+/** The worker compiled from src/, as a module to import; `plugins` change
+ *  the sources on the way in. */
+async function compileWorker(plugins = []) {
   const out = await build({
     configFile: false,
     logLevel: "warn",
+    plugins,
     build: {
       write: false,
       target: "es2022",
@@ -62,9 +71,7 @@ if (bundlePath) {
     },
   });
   const chunk = (Array.isArray(out) ? out[0] : out).output.find((o) => o.type === "chunk");
-  const source = `data:text/javascript,${encodeURIComponent(chunk.code)}`;
-  ({ default: worker } = await import(source));
-  anotherIsolate = async (tag) => (await import(`${source}${encodeURIComponent(`\n// isolate ${tag}`)}`)).default;
+  return `data:text/javascript,${encodeURIComponent(chunk.code)}`;
 }
 
 /* ---------- Harness ---------- */
@@ -7441,6 +7448,93 @@ await test("wipe: the superadmin's, confirmed, empties the bucket and frees the 
   assert.ok(landing.text.includes("<h1>Sherin&#39;s &lt;Notes&gt;</h1>"), "the name is escaped on the landing page");
   assert.ok(landing.text.includes("<title>Sherin&#39;s &lt;Notes&gt; · Doklin</title>"));
 });
+
+/* ---------- Clients older than the release marked mandatory ---------- */
+
+/** version.ts's minimums, as the worker under test was built with them. */
+const shippedMinimum = (name) =>
+  readFileSync(path.join(workerDir, "src", "version.ts"), "utf8").match(new RegExp(`^export const ${name} = "([^"]+)";$`, "m"))[1];
+
+/** A plugin giving the compiled worker these minimums instead. */
+const minimums = (app, ios) => ({
+  name: "doklin:minimums",
+  transform(code, id) {
+    if (!id.endsWith(`${path.sep}src${path.sep}version.ts`)) return null;
+    return code
+      .replace(/^export const MINIMUM_APP = "[^"]+";$/m, `export const MINIMUM_APP = "${app}";`)
+      .replace(/^export const MINIMUM_IOS = "[^"]+";$/m, `export const MINIMUM_IOS = "${ios}";`);
+  },
+});
+
+/** One request to `w` as `client` says it is (null: no header). */
+async function asClient(w, client, pathname = "/api/meta", init = {}) {
+  const headers = client === null ? {} : { "x-doklin-client": client };
+  const res = await w.fetch(new Request(`https://notes.example.com${pathname}`, { ...init, headers }), env);
+  const text = await res.text();
+  let body = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // a page
+  }
+  return { status: res.status, body };
+}
+
+await test(
+  bundlePath
+    ? "clients: the bundle turns away nobody at its own minimums"
+    : "clients: a Mac, a doklin or an iPhone older than its minimum is refused on every route with a 410 and a sentence; one at it or newer, a build run from Xcode, a browser and a header nobody can read are answered",
+  async () => {
+    if (bundlePath) {
+      assert.notEqual((await asClient(worker, shippedMinimum("MINIMUM_APP"))).status, 410);
+      assert.notEqual((await asClient(worker, `cli/${shippedMinimum("MINIMUM_APP")}`)).status, 410);
+      assert.notEqual((await asClient(worker, `ios/${shippedMinimum("MINIMUM_IOS")}`)).status, 410);
+      return;
+    }
+    const w = (await import(await compileWorker([minimums("0.1.150", "0.1.0+57")]))).default;
+    const refused = async (client, pathname, init) => {
+      const r = await asClient(w, client, pathname, init);
+      assert.equal(r.status, 410, `${client} on ${pathname ?? "/api/meta"}`);
+      return r.body.error;
+    };
+    const answered = async (client, pathname, init) =>
+      assert.notEqual((await asClient(w, client, pathname, init)).status, 410, `${client} on ${pathname ?? "/api/meta"}`);
+
+    assert.equal(
+      await refused("0.1.149"),
+      "This is Doklin 0.1.149, and notes.example.com needs 0.1.150 or newer. Update Doklin to keep working.",
+    );
+    assert.equal(
+      await refused("cli/0.1.9"),
+      "This is doklin 0.1.9, and notes.example.com needs 0.1.150 or newer. Update it: curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh | sh — or, on a Mac with the Doklin app, update the app.",
+    );
+    assert.equal(
+      await refused("ios/0.1.0+56"),
+      "This is Doklin 0.1.0 (56), and notes.example.com needs 0.1.0 (57) or newer. Update Doklin to keep working.",
+    );
+    assert.equal(
+      await refused("ios/0.1.0"),
+      "This is Doklin 0.1.0, and notes.example.com needs 0.1.0 (57) or newer. Update Doklin to keep working.",
+      "an iPhone that names no build is older than any",
+    );
+    // Before the routes that take no bearer, and before the key.
+    await refused("0.1.149", "/api/auth/join", { method: "POST" });
+    await refused("cli/0.1.149", "/api/agent/login", { method: "POST" });
+    await refused("0.0.9", "/api/nothing-here");
+
+    for (const client of ["0.1.150", "0.2.0", "cli/0.1.150", "cli/1.0.0", "ios/0.1.0+57", "ios/0.1.1", "ios/0.1.0+dev"]) {
+      await answered(client);
+    }
+    for (const client of [null, "0.0.0-test", "ios/drive", "cli/", "something else"]) await answered(client);
+    assert.equal((await asClient(w, "0.0.1", "/")).status, 200, "a public page is nobody's client");
+
+    // Once every iPhone release has a version of its own, the minimum names no build.
+    const later = (await import(await compileWorker([minimums("0.0.0", "1.2.0")]))).default;
+    assert.equal((await asClient(later, "ios/1.1.9+900")).status, 410);
+    assert.notEqual((await asClient(later, "ios/1.2.0+1")).status, 410);
+    assert.notEqual((await asClient(later, "0.0.1")).status, 410, "0.0.0 turns nobody away");
+  },
+);
 
 /* ---------- Summary ---------- */
 

@@ -566,8 +566,24 @@
             case "open_external":
               (window.__opened ??= []).push(args.url);
               return Promise.resolve(null);
+            // The updater, unavailable unless a drive scripts it before the
+            // page loads: `__update` is what the check finds (the plugin's
+            // metadata, `rawJson` the manifest; null for none), `__install`
+            // what the download does with its channel (its promise is the
+            // download's), `__appVersion` the running version.
+            case "plugin:app|version":
+              return Promise.resolve(window.__appVersion ?? null);
             case "plugin:updater|check":
-              return Promise.reject("updater unavailable in harness");
+              (window.__updaterCalls ??= []).push(cmd);
+              return window.__update === undefined
+                ? Promise.reject("updater unavailable in harness")
+                : Promise.resolve(window.__update);
+            case "plugin:updater|download_and_install":
+              (window.__updaterCalls ??= []).push(cmd);
+              return window.__install ? window.__install((m) => args.onEvent.onmessage(m)) : Promise.resolve(null);
+            case "plugin:process|restart":
+              (window.__updaterCalls ??= []).push(cmd);
+              return Promise.resolve(null);
             case "plugin:dialog|open":
               // Counted, so a drive can show a flow asked for no folder.
               window.__cloud.pickerOpens = (window.__cloud.pickerOpens ?? 0) + 1;

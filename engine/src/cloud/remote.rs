@@ -307,6 +307,10 @@ pub enum RemoteError {
     Conflict,
     /// `426`: the worker predates this app's manifest schema — update it.
     Outdated(String),
+    /// `410`: this app is older than the release the domain's worker marks
+    /// mandatory (cloud-worker/src/clients.ts; change both) — update the app.
+    /// The worker's sentence, which says so.
+    TooOld(String),
     /// `409` on a bind: the domain already holds this workspace.
     AlreadyBound(WorkspaceRecord),
     /// `409 {taken}` on a manifest: these public addresses are another
@@ -331,6 +335,7 @@ impl std::fmt::Display for RemoteError {
             RemoteError::NotFound => write!(f, "not found"),
             RemoteError::Conflict => write!(f, "manifest conflict"),
             RemoteError::Outdated(m) => write!(f, "worker outdated: {}", m),
+            RemoteError::TooOld(m) => write!(f, "{}", m),
             RemoteError::AlreadyBound(w) => write!(f, "already bound to \"{}\"", w.name),
             RemoteError::Taken(slugs) => write!(f, "already taken on this domain: {}", slugs.join(", ")),
             RemoteError::Slowed(_) => write!(f, "the domain asked this device to slow down"),
@@ -843,6 +848,9 @@ async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response
                 },
             }
         }
+        // Every route's, before anything else is looked at: the domain's
+        // worker answers nothing this old (cloud-worker/src/clients.ts).
+        410 => RemoteError::TooOld(said("this Doklin is too old for the domain — update it")),
         412 => RemoteError::Conflict,
         426 => RemoteError::Outdated(said("the worker predates this app's manifest")),
         429 => RemoteError::Slowed(retry_after.unwrap_or(60)),

@@ -38,6 +38,16 @@ name: release
 # lives in src-tauri/tauri.conf.json (plugins.updater.pubkey).
 #
 # workflow_dispatch cuts a release manually (same bump + build path).
+#
+# A release can be MANDATORY: every Mac app and `doklin` older than it stops
+# working — Macs as soon as it is out (latest.json's `minimum`), the command
+# and the iPhone once a domain runs its worker (cloud-worker/src/clients.ts).
+# It is mandatory when a PR merged since the last release carries the label
+# `mandatory`, or when Run workflow has *mandatory* ticked; `bump` then writes
+# this version into MINIMUM_APP in cloud-worker/src/version.ts. Run workflow's
+# *iphone* field sets MINIMUM_IOS the same way, to a build that is on
+# TestFlight. Either moves WORKER_VERSION too when the release has not, or no
+# domain is told to update its worker and the minimum never reaches it.
 
 on:
   push:
@@ -49,9 +59,19 @@ on:
       - "site/**"
       - "ios/**"
   workflow_dispatch:
+    inputs:
+      mandatory:
+        description: "Mandatory: every Mac app and doklin older than this release stops working"
+        type: boolean
+        default: false
+      iphone:
+        description: "iPhone minimum, a build on TestFlight as it shows it — 0.1.0 (57) — or a version alone (1.2.0). Empty leaves it."
+        type: string
+        default: ""
 
 permissions:
-  contents: write   # push bump commit + tag, create the GitHub Release
+  contents: write        # push bump commit + tag, create the GitHub Release
+  pull-requests: read    # the `mandatory` label on what was merged
 
 # Serialize runs: a second push during a release waits, then checks out the
 # just-bumped main head, so its version bump lands on top (never non-fast-forward).
@@ -67,6 +87,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
+      mandatory: ${{ steps.m.outputs.mandatory }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -97,6 +118,7 @@ jobs:
           fi
           echo "version=$next" >> "$GITHUB_OUTPUT"
           echo "tag=v$next" >> "$GITHUB_OUTPUT"
+          echo "last_tag=$last_tag" >> "$GITHUB_OUTPUT"
           echo "Releasing v$next (previous tag: ${last_tag:-none})"
 
       - name: Stamp version into package.json, tauri.conf.json and both crates
@@ -126,6 +148,81 @@ jobs:
           }
           stamp_crate src-tauri doklin
           stamp_crate cli doklin-cli
+
+      # The oldest clients the release's worker answers (version.ts, read by
+      # cloud-worker/src/clients.ts and by latest.json below). They only go
+      # up, and only here.
+      - name: Mark the release mandatory, when it is
+        id: m
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+          LAST_TAG: ${{ steps.v.outputs.last_tag }}
+          TICKED: ${{ inputs.mandatory }}
+          IPHONE: ${{ inputs.iphone }}
+        run: |
+          set -euo pipefail
+          F=cloud-worker/src/version.ts
+          mandatory=false
+          if [ "${TICKED:-false}" = "true" ]; then
+            mandatory=true
+            echo "Mandatory: ticked on Run workflow"
+          elif [ -n "$LAST_TAG" ]; then
+            # Each commit main took since the last release (a merge, or a
+            # squashed PR), and the PR it came from.
+            for sha in $(git rev-list --first-parent "$LAST_TAG..HEAD"); do
+              prs="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/pulls" \
+                --jq '[.[] | select(any(.labels[]; .name == "mandatory")) | .number | tostring] | join(" ")')"
+              if [ -n "$prs" ]; then
+                mandatory=true
+                echo "Mandatory: PR $prs carries the label"
+                break
+              fi
+            done
+          fi
+          echo "mandatory=$mandatory" >> "$GITHUB_OUTPUT"
+
+          minimum() { sed -nE "s/^export const MINIMUM_$1 = \"([^\"]+)\";\$/\1/p" "$F"; }
+          set_minimum() { # $1 = APP | IOS, $2 = the version
+            sed -i -E "s/^export const MINIMUM_$1 = \"[^\"]+\";\$/export const MINIMUM_$1 = \"$2\";/" "$F"
+            [ "$(minimum "$1")" = "$2" ] || { echo "::error::$F: MINIMUM_$1 stamp failed"; exit 1; }
+          }
+          # "0.1.0+57" and "1.2.0" as one sortable line: 0.1.0.57, 1.2.0.0.
+          sortable() { case "$1" in *+*) echo "${1%+*}.${1#*+}" ;; *) echo "$1.0" ;; esac; }
+
+          if [ "$mandatory" = true ]; then
+            set_minimum APP "$VERSION"
+          fi
+          iphone=""
+          if [ -n "${IPHONE// /}" ]; then
+            # As TestFlight shows a build, "0.1.0 (57)"; or "0.1.0+57"; or a version alone.
+            if [[ "$IPHONE" =~ ^[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*(\(([0-9]+)\)|\+([0-9]+))?[[:space:]]*$ ]]; then
+              build="${BASH_REMATCH[3]}${BASH_REMATCH[4]}"
+              iphone="${BASH_REMATCH[1]}${build:++$build}"
+            else
+              echo "::error::the iPhone minimum '$IPHONE' is neither a build as TestFlight shows it, 0.1.0 (57), nor a version, 1.2.0"
+              exit 1
+            fi
+            was="$(minimum IOS)"
+            if [ "$(printf '%s\n%s\n' "$(sortable "$was")" "$(sortable "$iphone")" | sort -V | head -n1)" != "$(sortable "$was")" ]; then
+              echo "::error::the iPhone minimum is $was already, and it never goes down: $iphone is older"
+              exit 1
+            fi
+            set_minimum IOS "$iphone"
+          fi
+          echo "Minimums: Mac and doklin $(minimum APP), iPhone $(minimum IOS)"
+
+          # A domain is told to update its worker when WORKER_VERSION moves,
+          # and a new minimum is something every domain needs.
+          if { [ "$mandatory" = true ] || [ -n "$iphone" ]; } && [ -n "$LAST_TAG" ]; then
+            worker_version() { sed -nE 's/^export const WORKER_VERSION = ([0-9]+);$/\1/p'; }
+            now="$(worker_version < "$F")"
+            was="$(git show "$LAST_TAG:$F" | worker_version)"
+            if [ "$now" = "$was" ]; then
+              sed -i -E "s/^export const WORKER_VERSION = [0-9]+;$/export const WORKER_VERSION = $((now + 1));/" "$F"
+              echo "WORKER_VERSION $now -> $((now + 1)), so domains are told to update"
+            fi
+          fi
 
       - name: Commit, tag and push
         env:
@@ -392,11 +489,23 @@ jobs:
       # (the endpoint in tauri.conf.json). The .tar.gz + .sig are produced by the
       # build (createUpdaterArtifacts + TAURI_SIGNING_PRIVATE_KEY); we publish
       # them as-is. Only darwin-aarch64 is listed.
+      # `minimum` is the oldest version this release lets keep running
+      # (MINIMUM_APP, version.ts): an app older than it covers its windows
+      # until it updates (src/updater.ts). Tauri reads only the fields it
+      # knows; the app reads this one off the manifest's raw JSON.
       - name: Stage updater artifacts + latest.json
         env:
           TAG: ${{ needs.bump.outputs.tag }}
+          MANDATORY: ${{ needs.bump.outputs.mandatory }}
         run: |
           set -euo pipefail
+          MINIMUM="$(sed -nE 's/^export const MINIMUM_APP = "([^"]+)";$/\1/p' cloud-worker/src/version.ts)"
+          [ -n "$MINIMUM" ] || { echo "::error::cloud-worker/src/version.ts has no MINIMUM_APP"; exit 1; }
+          if [ "$MANDATORY" = "true" ]; then
+            NOTES="Required update to Doklin v$VERSION: older versions stop working."
+          else
+            NOTES="Automatic update to Doklin v$VERSION. See the releases page for details."
+          fi
           MACOS_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
           TARBALL="$(ls "$MACOS_DIR"/*.app.tar.gz | head -n1)"
           SIG="$(cat "$MACOS_DIR"/*.app.tar.gz.sig)"
@@ -404,12 +513,15 @@ jobs:
           URL="https://github.com/boat-builder/doklin/releases/download/${TAG}/Doklin.app.tar.gz"
           jq -n \
             --arg v "$VERSION" \
+            --arg notes "$NOTES" \
+            --arg min "$MINIMUM" \
             --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg sig "$SIG" \
             --arg url "$URL" \
             '{
               version: $v,
-              notes: "Automatic update to Doklin v\($v). See the releases page for details.",
+              notes: $notes,
+              minimum: $min,
               pub_date: $d,
               platforms: {
                 "darwin-aarch64": { signature: $sig, url: $url }
@@ -485,6 +597,8 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
+            ${{ needs.bump.outputs.mandatory == 'true' && format('**Mandatory.** Doklin and `doklin` older than {0} stop working: a Mac as soon as this release is out, the command once a domain runs its worker.', needs.bump.outputs.tag) || '' }}
+
             **macOS** Apple Silicon (M-series) `.dmg`, Developer ID signed and notarized — opens with no Gatekeeper prompt. Intel Macs are not supported.
 
             **`doklin` command** for agents (Linux x64 and arm64, macOS arm64): `curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh | sh`

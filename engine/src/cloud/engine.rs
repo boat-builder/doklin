@@ -363,6 +363,10 @@ pub struct Engine<R: Remote> {
     /// Set when the worker answered `426`: the worker version we saw it at.
     /// Cycles stop until `/api/meta` reports a newer worker.
     outdated: Option<u32>,
+    /// Set when the worker answered `410`: this app is older than the domain
+    /// answers. Cycles stop until a probe is answered — after the update,
+    /// which restarts the app, or once the domain's minimum comes down.
+    too_old: bool,
     worker_version: Option<u32>,
     /// The member id this Mac signs with here, as `/api/meta` last said it.
     /// None until the domain has answered, and nothing syncs until it has:
@@ -448,6 +452,7 @@ impl<R: Remote> Engine<R> {
             last_sync_ms: None,
             paused: false,
             outdated: None,
+            too_old: false,
             worker_version: None,
             me: None,
             can: Vec::new(),
@@ -522,10 +527,16 @@ impl<R: Remote> Engine<R> {
         !self.paused && self.answered()
     }
 
-    /// The domain answers this engine: its worker is not one this app
-    /// waits to see updated, and it has said who this device is.
+    /// The domain answers this engine: neither side waits on an update, and
+    /// it has said who this device is.
     fn answered(&self) -> bool {
-        self.outdated.is_none() && self.me.is_some()
+        !self.waiting_on_update() && self.me.is_some()
+    }
+
+    /// One side is too old for the other: the worker for this app (`426`,
+    /// a worker from before the limits) or this app for the worker (`410`).
+    fn waiting_on_update(&self) -> bool {
+        self.outdated.is_some() || self.too_old
     }
 
     /// The shared workspace's unit.
@@ -735,7 +746,8 @@ impl<R: Remote> Engine<R> {
     /* ----- who the domain says this Mac is ----- */
 
     /// `/api/meta`: learn the worker's version — and, after a `426`, whether
-    /// the worker has been updated since.
+    /// the worker has been updated since; after a `410`, whether the domain
+    /// answers this app again.
     pub(crate) async fn probe_worker(&mut self) {
         let _ = self.probe().await;
     }
@@ -745,6 +757,7 @@ impl<R: Remote> Engine<R> {
         match self.remote.meta().await {
             Ok(meta) => {
                 self.worker_version = Some(meta.version);
+                self.too_old = false;
                 // Identity rides on the probe because the probe is what happens
                 // before this engine writes anything: `me` is what a manifest it
                 // publishes signs with, `can` is what this Mac's role may do,
@@ -786,7 +799,7 @@ impl<R: Remote> Engine<R> {
             // request this engine makes, so its failure is the status — and
             // so is the account's daily limit, whenever it is heard.
             Err(e) => {
-                if self.me.is_none() || matches!(e, RemoteError::DailyLimit) {
+                if self.me.is_none() || matches!(e, RemoteError::DailyLimit | RemoteError::TooOld(_)) {
                     self.heard_failure(&e);
                 }
                 Err(e)
@@ -844,7 +857,7 @@ impl<R: Remote> Engine<R> {
     /// leaves the old one, and the workspace's one status says how it went.
     pub(crate) async fn pass(&mut self, which: Which) -> RemoteResult<()> {
         if !self.answered() {
-            return Ok(()); // waiting for the worker update, or to be told who this device is
+            return Ok(()); // waiting on an update, or to be told who this device is
         }
         if !self.cfg.root.is_dir() {
             // Root missing (unmounted disk, renamed folder…): touch nothing.
@@ -955,6 +968,7 @@ impl<R: Remote> Engine<R> {
                                 | RemoteError::Unauthorized
                                 | RemoteError::Removed
                                 | RemoteError::Outdated(_)
+                                | RemoteError::TooOld(_)
                         );
                         if failure.is_none() {
                             failure = Some(e);
@@ -995,7 +1009,7 @@ impl<R: Remote> Engine<R> {
         }
         self.remote.usage().save();
         match failure {
-            None | Some(RemoteError::Conflict) | Some(RemoteError::Outdated(_)) => Ok(()),
+            None | Some(RemoteError::Conflict) | Some(RemoteError::Outdated(_)) | Some(RemoteError::TooOld(_)) => Ok(()),
             Some(e) => Err(e),
         }
     }
@@ -1017,6 +1031,10 @@ impl<R: Remote> Engine<R> {
                     Phase::WorkerOutdated,
                     Some(format!("this {}'s changes are waiting on a worker update ({})", self.cfg.device_kind, m)),
                 );
+            }
+            RemoteError::TooOld(m) => {
+                self.too_old = true;
+                self.set_status(Phase::AppOutdated, Some(m.clone()));
             }
             RemoteError::NotFound => self.set_status(
                 Phase::Error,
@@ -1651,7 +1669,7 @@ impl<R: Remote> Engine<R> {
     /// the lane gives (`MIRROR_BUDGET` at most) — what is left goes on the
     /// next pass that has room.
     pub(crate) async fn mirror_versions(&mut self) {
-        if self.paused || self.outdated.is_some() || self.limited.is_some() {
+        if self.paused || self.waiting_on_update() || self.limited.is_some() {
             return;
         }
         let mut budget = lock(&self.pacer).take(MIRROR_BUDGET);
@@ -1908,7 +1926,7 @@ impl<R: Remote> Engine<R> {
     /// the next one forward would spin on a domain that is not answering.
     fn next_poll_after_cycle(&self) -> Instant {
         let clock = Instant::now() + self.poll_gap();
-        if self.outdated.is_none() && !self.paused {
+        if !self.waiting_on_update() && !self.paused {
             clock.min(self.beat_deadline())
         } else {
             clock
@@ -2044,7 +2062,7 @@ impl<R: Remote> Engine<R> {
     /// not polling, and a lease it last heard about may have lapsed a minute
     /// ago.
     fn lease_holders(&self) -> Vec<LeaseHolder> {
-        if self.paused || self.outdated.is_some() {
+        if self.paused || self.waiting_on_update() {
             return Vec::new();
         }
         let Some(leases) = &self.leases else { return Vec::new() };
@@ -2189,9 +2207,9 @@ impl<R: Remote> Engine<R> {
                         self.adds.declined = None;
                     }
                     Some(EngineCmd::Probe) => {
-                        let was_outdated = self.outdated.is_some();
+                        let was_waiting = self.waiting_on_update();
                         self.probe_worker().await;
-                        if was_outdated && self.outdated.is_none() {
+                        if was_waiting && !self.waiting_on_update() {
                             cycle_now = true;
                             everywhere = true;
                         } else {
@@ -2382,7 +2400,7 @@ impl<R: Remote> Engine<R> {
                 next_poll = self.next_poll_after_cycle();
             } else if now >= next_poll {
                 if !self.answered() {
-                    // Waiting on a worker update, or for the domain to say
+                    // Waiting on an update, or for the domain to say
                     // who this device is — an engine that started offline:
                     // ask, and resume the moment it answers.
                     let probed = self.probe().await;

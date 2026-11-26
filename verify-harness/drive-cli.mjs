@@ -7,7 +7,7 @@
 //   0 done · 1 anything else · 2 bad usage · 3 not found · 4 not permitted ·
 //   5 conflict · 6 not logged in, or the login was revoked · 7 the worker is
 //   too old for the command · 8 the domain asked to slow down, or today's
-//   Cloudflare requests are used up
+//   Cloudflare requests are used up · 9 this doklin is too old for the domain
 //
 // It needs no browser and builds nothing. It starts the harness worker
 // itself, on a port of its own, and stops it when it is done. Run:
@@ -1831,13 +1831,36 @@ await check("a worker that is behind: a route it does not know, or a method, is 
 });
 
 /* ====================================================================== */
-/* 17 — the whole run                                                     */
+/* 17 — a doklin older than the domain answers                            */
+/* ====================================================================== */
+
+// A stand-in again: the real worker turns nobody away until a release is
+// marked mandatory (cloud-worker/src/version.ts), and what it says then is
+// the worker's tests'. This one answers every request the way it would.
+const TOO_OLD = `This is doklin ${CLI_VERSION}, and the domain needs 99.0.0 or newer. Update it: curl -fsSL https://github.com/boat-builder/doklin/releases/latest/download/install-doklin.sh | sh — or, on a Mac with the Doklin app, update the app.`;
+const newerAsked = [];
+const newerPort = await serve(async (req) => {
+  newerAsked.push(`${req.method} ${new URL(req.url, "http://x").pathname}`);
+  return [410, { error: TOO_OLD }];
+});
+
+await check("a domain that needs a newer doklin: every command, a login included, is exit 9 in the worker's words, which say how to update", async () => {
+  const box = machine("too-old");
+  const login = await doklin(box, ["login", `http://localhost:${newerPort}`, mintCode().shown]);
+  return {
+    "a login is exit 9 with the worker's sentence": refused(login, 9) && login.problem.error === TOO_OLD,
+    "asked once": same(newerAsked, ["POST /api/agent/login"]),
+  };
+});
+
+/* ====================================================================== */
+/* 18 — the whole run                                                     */
 /* ====================================================================== */
 
 await check("the whole run: every exit code was seen; the CLI asked only the document API, and always said which client it is", async () => {
   const facts = {};
-  for (const code of [0, 1, 2, 3, 4, 5, 6, 7, 8]) facts[`exit ${code}`] = seen.has(code);
-  facts["no other exit code"] = [...seen].every((code) => Number.isInteger(code) && code >= 0 && code <= 8);
+  for (const code of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) facts[`exit ${code}`] = seen.has(code);
+  facts["no other exit code"] = [...seen].every((code) => Number.isInteger(code) && code >= 0 && code <= 9);
   facts["only /api/agent/ was asked"] = calls.length > 0 && calls.every((c) => c.url.startsWith("/api/agent/"));
   facts["x-doklin-client on every request"] = calls.every((c) => c.headers["x-doklin-client"] === `cli/${CLI_VERSION}`);
   return facts;

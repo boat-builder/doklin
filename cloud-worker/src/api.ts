@@ -209,6 +209,7 @@ import {
   spaceEnv,
   spaceOf,
 } from "./spaces";
+import { tooOld } from "./clients";
 import { WORKER_VERSION } from "./version";
 import type { MetaAnswer, PollAnswer, Who, WorkspaceRecord } from "./wire";
 import { browserMay, handleWeb, signIn } from "./web";
@@ -234,6 +235,11 @@ export async function handleApi(
   ctx: ExecutionContext | undefined,
 ): Promise<Response> {
   const parts = url.pathname.split("/").filter(Boolean); // ["api", section, …]
+
+  // A client older than the release marked mandatory is turned away before
+  // anything else, a join and a login included (clients.ts).
+  const old = tooOld(request.headers.get("x-doklin-client"), url.host);
+  if (old) return old;
 
   // The one route above the gate. Redeeming an invite is how a Mac GETS a
   // bearer, so it cannot be behind one — and the carve-out is method AND

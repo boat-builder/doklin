@@ -60,6 +60,9 @@ struct FakeWorker {
     d1_down: bool,
     offline: bool,
     reject_schema: bool,
+    /// The worker's sentence for an app older than its minimum: every route
+    /// answers `410` with it.
+    too_old: Option<String>,
     worker_version: u32,
     put_manifest_calls: u64,
     /// Every blob a device asked for — what "a move fetches no bytes" is
@@ -377,6 +380,9 @@ impl FakeRemote {
         }
         // Reached the domain: counted, as `HttpRemote::auth` counts it.
         self.usage.count();
+        if let Some(said) = &be.too_old {
+            return Err(RemoteError::TooOld(said.clone()));
+        }
         if be.daily_limit {
             return Err(RemoteError::DailyLimit);
         }
@@ -3507,6 +3513,40 @@ async fn a_426_pauses_with_the_right_phase() {
     a.cycle().await;
     assert_eq!(a.phase(), Phase::Idle);
     assert_eq!(a.status().worker_version, Some(2));
+    assert_eq!(manifest_of(&be).files.len(), 2);
+}
+
+/// A worker that marks this app too old (`410`) turns every request away:
+/// the engine stops syncing and says so in the worker's words, sends nothing
+/// more but its probe, and resumes once the domain answers it again.
+#[tokio::test]
+async fn a_410_stops_the_sync_until_the_domain_answers_again() {
+    const SAID: &str = "This is Doklin 0.1.1, and notes.example.com needs 0.1.2 or newer. Update Doklin to keep working.";
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("doc.md", "# doc\n");
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).files.len(), 1);
+
+    be.lock().unwrap().too_old = Some(SAID.into());
+    a.write("more.md", "# more\n");
+    a.cycle().await;
+    assert_eq!(a.phase(), Phase::AppOutdated);
+    assert_eq!(a.status().error.as_deref(), Some(SAID));
+
+    // Nothing more goes, not even a cycle asked for…
+    let requests = be.lock().unwrap().requests;
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().requests, requests);
+    // …and the probe is turned away like everything else.
+    a.engine.probe_worker().await;
+    assert_eq!(a.phase(), Phase::AppOutdated);
+    assert_eq!(manifest_of(&be).files.len(), 1);
+
+    be.lock().unwrap().too_old = None;
+    a.engine.probe_worker().await;
+    a.cycle().await;
+    assert_eq!(a.phase(), Phase::Idle);
     assert_eq!(manifest_of(&be).files.len(), 2);
 }
 

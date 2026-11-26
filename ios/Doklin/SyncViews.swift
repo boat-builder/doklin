@@ -71,6 +71,7 @@ enum SyncWords {
         case .pendingDeletes: return "\(status.pendingDeletes) deletion\(status.pendingDeletes == 1 ? "" : "s") to confirm"
         case .pendingAdds: return LimitWords.pendingAdds(status.pendingAdds)
         case .workerOutdated: return "Worker update needed — update it from a Mac"
+        case .appOutdated: return "Update Doklin from TestFlight"
         case .revoked: return "Not signed in"
         case .limited: return status.error ?? "Today’s Cloudflare requests are used up"
         case .error: return status.error.map { "Can't sync: \($0)" } ?? "Can't sync"
@@ -88,7 +89,7 @@ enum SyncWords {
         case .syncing: return Theme.accent
         case .offline, .paused: return Theme.text3
         case .pendingDeletes, .pendingAdds, .workerOutdated, .limited: return Theme.warnInk
-        case .revoked, .error: return Theme.errorInk
+        case .revoked, .appOutdated, .error: return Theme.errorInk
         }
     }
 
@@ -98,7 +99,7 @@ enum SyncWords {
         if status.hold != nil { return true }
         switch status.phase {
         case .idle, .syncing, .offline, .paused: return false
-        case .pendingDeletes, .pendingAdds, .workerOutdated, .revoked, .limited, .error: return true
+        case .pendingDeletes, .pendingAdds, .workerOutdated, .appOutdated, .revoked, .limited, .error: return true
         }
     }
 }

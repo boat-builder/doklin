@@ -195,6 +195,12 @@ impl Client {
             405 => (7, too_old()),
             404 => (3, said),
             409 | 412 | 428 => (5, said),
+            // This doklin is older than the release the domain marks
+            // mandatory, and every route says so before anything else
+            // (cloud-worker/src/clients.ts — change both). The sentence says
+            // how to update.
+            410 if said.is_empty() => (9, format!("this doklin is too old for {} — update it", self.domain())),
+            410 => (9, said),
             400 | 413 => (2, said),
             _ if said.is_empty() => (1, format!("{} answered {}", self.domain(), reply.status)),
             _ => (1, said),
