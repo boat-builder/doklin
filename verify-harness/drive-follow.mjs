@@ -15,7 +15,8 @@
 //     shortcuts (⌘] ⌘W ⌘T Ctrl+Tab ⌘\ ⌘⇧F ⌘⇧\) pressed inside its frame
 //     still work, while one the page fakes is taken only from the app's
 //     list and only while the page holds focus;
-//   - in a split, the pane the link is in follows it, and in a
+//   - in a split, the pane the link is in follows it (the press that
+//     promotes the pane moves nothing under the pointer), and in a
 //     same-document split the pane that stays keeps the note in a tab of
 //     its own.
 //
@@ -265,6 +266,7 @@ step(
   (await at("F", "right")) && (await heading("left")) === "A" && (await labels()) === before.replace("d", "f"),
   `${before} → ${await labels()}`,
 );
+step("…and the press that made that pane the focused one opened no menu", (await page.locator(".tag-menu").count()) === 0);
 await key("Meta+BracketLeft");
 step("…and Back takes that pane back", (await at("D", "right")) && (await heading("left")) === "A");
 await page.locator(".pane-header-close").first().click();

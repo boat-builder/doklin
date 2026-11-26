@@ -148,7 +148,10 @@ export function TagsRow({
   onSet?: (name: string, value: string | null) => void;
   onNewTag?: () => void;
   onEditTag?: (name: string) => void;
-  /** Bumped to open *+ Tag*'s menu (the Edit menu's *Add Tag…*). */
+  /** Bumped to open *+ Tag*'s menu (the Edit menu's *Add Tag…*). Every
+   *  pane gets the same token: a read-only row takes a bump in and opens
+   *  nothing, so a pane promoted later doesn't read the token it then sees
+   *  as a new one. */
   addToken?: number;
 }) {
   const tags = useMemo(() => noteTags(head, list), [head, list]);
@@ -174,8 +177,10 @@ export function TagsRow({
   const missing = list.filter((d) => !tags.some((t) => t.name === d.name));
   const editable = !readOnly && onSet !== undefined;
 
-  if (!editable && tags.length === 0 && !other) return null;
-
+  // Read-only with nothing to show, the row still takes its room: the other
+  // pane is promoted on a press, and a row appearing then would move the
+  // note under the pointer, so the click lands somewhere else (a link in it
+  // never followed).
   return (
     <div className="doc-tags" ref={rowRef} data-testid="doc-tags">
       <div className={`doc-tags-row ${tags.length === 0 ? "is-empty" : ""}`}>

@@ -383,6 +383,11 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   ([cloud-people-agents.md](cloud-people-agents.md) *Search*).
 - **No tags** on untitled notes, html-only documents, or in the html view.
   Read-only where the note is: a leased note, the other pane, a version.
+- **Promoting the other pane changes nothing under the pointer.** It is
+  promoted on a press, so a read-only row with no tags keeps its room, and
+  every pane gets the *Add Tag…* token (a read-only row takes a bump in and
+  opens nothing): a row appearing, or the menu opening and taking focus,
+  would move the note, and the click (on a link, say) lands somewhere else.
 
 ## Editor traps
 

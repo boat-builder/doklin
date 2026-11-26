@@ -6061,7 +6061,7 @@ export default function App() {
                 onSet={focused && !leasedHere ? setActiveTag : undefined}
                 onNewTag={() => setTagDialog({ kind: "new", note: paneTab.path })}
                 onEditTag={(name) => setTagDialog({ kind: "edit", name })}
-                addToken={focused ? addTagToken : undefined}
+                addToken={addTagToken}
               />
             )
           )}
