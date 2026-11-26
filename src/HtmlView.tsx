@@ -10,6 +10,7 @@ import {
 import { createPortal } from "react-dom";
 import { pressedOutside } from "./dismiss";
 import { backend } from "./backend";
+import { isAppShortcut, type AppShortcut } from "./keys";
 import Avatar from "./Avatar";
 import { ThreadCard, type EditTarget, type RailThread } from "./CommentsRail";
 import {
@@ -78,12 +79,9 @@ type Props = {
   // the frame; hosts that don't zoom (the web share, where the browser's own
   // zoom does the job) leave it at 1.
   zoom?: number;
-  // A zoom chord pressed while focus is inside the frame (1 in, -1 out, 0
-  // reset) — the app's own key handler can't see those.
-  onZoomKey?: (dir: number) => void;
-  // ⌘[ or ⌘] pressed while focus is inside the frame: Back (-1) or Forward
-  // (1).
-  onStepKey?: (by: -1 | 1) => void;
+  // One of the app's shortcuts pressed while focus is inside the frame —
+  // the app's own key handlers can't see those.
+  onShortcut?: (shortcut: AppShortcut) => void;
   // Absolute path of the rendition on disk — presence enables the "PDF"
   // button (desktop only; web hosts omit it). The export itself runs in the
   // Rust backend against a pinned headless engine (see pdf_export.rs) and
@@ -130,8 +128,7 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
     onScrollRatio,
     onGesture,
     zoom = 1,
-    onZoomKey,
-    onStepKey,
+    onShortcut,
     pdfExportPath,
     controlsSlot,
   }: Props,
@@ -177,10 +174,8 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
   onGestureRef.current = onGesture;
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
-  const onZoomKeyRef = useRef(onZoomKey);
-  onZoomKeyRef.current = onZoomKey;
-  const onStepKeyRef = useRef(onStepKey);
-  onStepKeyRef.current = onStepKey;
+  const onShortcutRef = useRef(onShortcut);
+  onShortcutRef.current = onShortcut;
   const pdfPathRef = useRef(pdfExportPath);
   pdfPathRef.current = pdfExportPath;
 
@@ -294,10 +289,11 @@ const HtmlView = forwardRef<HtmlViewHandle, Props>(function HtmlView(
         // the open popover, if any, it was pressed outside.
         pressedOutside();
         onGestureRef.current?.();
-      } else if (msg.type === "zoom-key") {
-        onZoomKeyRef.current?.(msg.dir);
-      } else if (msg.type === "step-key") {
-        if (msg.by === -1 || msg.by === 1) onStepKeyRef.current?.(msg.by);
+      } else if (msg.type === "shortcut") {
+        // Taken only while the frame holds focus, where the key can have been
+        // pressed: the page's own scripts can post this as well as the bridge.
+        const focusedHere = document.hasFocus() && document.activeElement === iframeRef.current;
+        if (focusedHere && isAppShortcut(msg.shortcut)) onShortcutRef.current?.(msg.shortcut);
       } else if (msg.type === "canvas") {
         // The frame is untrusted: a single colour value or nothing, so the
         // string can never smuggle a url() into the app's own styles.

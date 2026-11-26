@@ -11,9 +11,12 @@
 //   - a document open in another tab brings that tab forward, and its Back
 //     returns to where the link was clicked;
 //   - ⌘[ and ⌘] never indent or outdent a list item, and Tab still does;
-//   - a link in an html document follows the same way, and ⌘] pressed inside
-//     its frame still steps;
-//   - in a split, the pane the link is in follows it, and in a
+//   - a link in an html document follows the same way, and the app's
+//     shortcuts (⌘] ⌘W ⌘T Ctrl+Tab ⌘\ ⌘⇧F ⌘⇧\) pressed inside its frame
+//     still work, while one the page fakes is taken only from the app's
+//     list and only while the page holds focus;
+//   - in a split, the pane the link is in follows it (the press that
+//     promotes the pane moves nothing under the pointer), and in a
 //     same-document split the pane that stays keeps the note in a tab of
 //     its own.
 //
@@ -174,6 +177,75 @@ await isActive("web");
 await frame.locator("h1").click();
 await key("Meta+BracketRight");
 step("⌘] pressed inside the html document steps too", (await isActive("e")) && (await at("E")));
+await key("Meta+BracketLeft");
+await isActive("web");
+{
+  const open = await labels();
+  await frame.locator("h1").click();
+  await key("Meta+KeyW");
+  const closed = await poll(async () => !(await labels()).split(",").includes("web"), 2000);
+  step("⌘W pressed inside the html document closes its tab", closed && (await labels()) === open.replace(/(^|,)web(?=,|$)/, "").replace(/^,/, ""), `${open} → ${await labels()}`);
+}
+
+/* 9b — the app's other shortcuts, pressed inside an html document */
+const tabCount = () => page.locator(".tab").count();
+const tree = page.locator('[data-tree-path="/docs/web.html"]');
+const intoWeb = async () => {
+  if ((await labels()).split(",").includes("web")) await page.locator(".tab", { hasText: /^web$/ }).locator(".tab-main").click();
+  else await tree.click();
+  await isActive("web");
+  await frame.locator("h1").click();
+};
+await intoWeb();
+{
+  const count = await tabCount();
+  await key("Meta+KeyT");
+  const opened = await poll(async () => (await tabCount()) === count + 1 && (await activeLabel()) !== "web", 2000);
+  step("⌘T pressed inside it opens a new note", opened, await labels());
+  await key("Meta+KeyW"); // the new note, empty: it closes without a question
+  await poll(async () => (await tabCount()) === count, 2000);
+}
+await intoWeb();
+await key("Control+Tab");
+step("Ctrl+Tab pressed inside it moves to the next tab", await poll(async () => (await activeLabel()) !== "web", 2000), await activeLabel());
+await intoWeb();
+await key("Meta+Backslash");
+const hid = await poll(async () => !(await tree.isVisible()), 2000);
+await frame.locator("h1").click();
+await key("Meta+Backslash");
+step("⌘\\ pressed inside it hides the sidebar, and shows it again", hid && (await poll(() => tree.isVisible(), 2000)));
+await frame.locator("h1").click();
+await key("Meta+Shift+KeyF");
+step("⌘⇧F pressed inside it opens the workspace search", await poll(async () => (await page.locator(".ws-search-input").count()) === 1, 2000));
+await page.locator(".ws-search .sidebar-header-button").click();
+await poll(() => tree.isVisible(), 2000);
+{
+  // The page's own scripts can post what the bridge posts: the app takes a
+  // shortcut only from its list, and only while the frame holds focus.
+  const fake = async (shortcut) =>
+    (await (await page.locator("iframe.html-preview").elementHandle()).contentFrame()).evaluate(
+      (s) => parent.postMessage({ dk: "doklin-comments", type: "shortcut", shortcut: s }, "*"),
+      shortcut,
+    );
+  const count = await tabCount();
+  await frame.locator("h1").click();
+  await fake("delete-file");
+  await fake("new-tab");
+  const heard = await poll(async () => (await tabCount()) === count + 1, 2000);
+  await key("Meta+KeyW");
+  await poll(async () => (await tabCount()) === count, 2000);
+  await intoWeb();
+  await page.locator(".tab.is-active .tab-label").click(); // focus leaves the frame
+  await fake("new-tab");
+  await new Promise((r) => setTimeout(r, 600));
+  step("a shortcut the page fakes is taken only from the app's list, and only while the page holds focus", heard && (await tabCount()) === count, `${count} → ${await tabCount()}`);
+}
+await intoWeb();
+await key("Meta+Shift+Backslash");
+const splitOpen = await poll(async () => (await page.locator(".pane-header").count()) > 0, 2000);
+await page.frameLocator("iframe.html-preview").first().locator("h1").click();
+await key("Meta+Shift+Backslash");
+step("⌘⇧\\ pressed inside it opens the split, and closes it again", splitOpen && (await poll(async () => (await page.locator(".pane-header").count()) === 0, 2000)));
 
 /* 10 — split view: the pane the link is in follows it */
 await page.locator(".tab", { hasText: /^a$/ }).locator(".tab-main").click();
@@ -194,6 +266,7 @@ step(
   (await at("F", "right")) && (await heading("left")) === "A" && (await labels()) === before.replace("d", "f"),
   `${before} → ${await labels()}`,
 );
+step("…and the press that made that pane the focused one opened no menu", (await page.locator(".tag-menu").count()) === 0);
 await key("Meta+BracketLeft");
 step("…and Back takes that pane back", (await at("D", "right")) && (await heading("left")) === "A");
 await page.locator(".pane-header-close").first().click();

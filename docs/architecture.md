@@ -285,8 +285,8 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
 - **⌘[ and ⌘] are taken in the capture phase on the window** (`goStep`):
   Milkdown binds them to list indent and table cells, CodeMirror to a code
   block's indent, and only stopping them first keeps a Back from also
-  indenting. Tab and ⇧Tab still indent. In an html view the bridge forwards
-  them (`step-key`), as it does the zoom chords.
+  indenting. Tab and ⇧Tab still indent. In an html view the bridge passes
+  them out, as it does the app's other shortcuts (below).
 - In a browser each follow pushes a numbered entry onto its history
   (`src/web/steps.ts`), and the browser moving between two is a step for the
   tab in front. The app's own Back and Forward go through `history.go` while
@@ -383,6 +383,11 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   ([cloud-people-agents.md](cloud-people-agents.md) *Search*).
 - **No tags** on untitled notes, html-only documents, or in the html view.
   Read-only where the note is: a leased note, the other pane, a version.
+- **Promoting the other pane changes nothing under the pointer.** It is
+  promoted on a press, so a read-only row with no tags keeps its room, and
+  every pane gets the *Add Tag…* token (a read-only row takes a bump in and
+  opens nothing): a row appearing, or the menu opening and taking focus,
+  would move the note, and the click (on a link, say) lands somewhere else.
 
 ## Editor traps
 
@@ -482,6 +487,14 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
 - Sidebar and tab drags are pointer-based: Tauri intercepts HTML5 drag.
 - Zoom (`⌘+`/`⌘-`/`⌘0`) scales the markdown editor through `--doc-zoom` and
   the html rendition through its frame's bridge; app chrome never scales.
+- **Keys pressed in the html rendition stop at its frame**: the window's
+  key handlers never see them. The bridge matches the app's shortcuts as
+  they do (`appShortcut`, `htmlBridge.ts`: change both) and passes them out
+  by name (`APP_SHORTCUTS`, `src/keys.ts`); both paths run `runShortcut`.
+  The page keeps `⌘F`, `⌘S`, `⌘⌫`, `⌘C`/`⌘X`/`⌘V` and `⌘Z`.
+- **A page can fake any shortcut it passes**: its own scripts post whatever
+  the bridge can. So only a shortcut that is harmless when faked goes in
+  `APP_SHORTCUTS`, and the app takes one only while the frame holds focus.
 
 ## Popups
 
