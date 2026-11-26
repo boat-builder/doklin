@@ -12,14 +12,61 @@ import "./web.css";
 import { installBackend } from "../backend";
 import { applyTheme, readStoredTheme } from "../theme";
 import { webBackend } from "./backend";
-import { Unreachable, onSignedOut, refused, send } from "./http";
+import { Unreachable, onOutdated, onSignedOut, refused, send } from "./http";
 import { Saving } from "./saving";
 import SignIn from "./SignIn";
 import { Workspace } from "./workspace";
 
 applyTheme(readStoredTheme());
 
-const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
+const rootElement = document.getElementById("root") as HTMLElement;
+const root = ReactDOM.createRoot(rootElement);
+
+/** How the page reloads: once the app is up, keeping what waits (`Saving.reload`). */
+let reload = (): void => location.reload();
+let updated = false;
+
+/** The domain was updated while this page was open: the worker refused a
+ *  request as being of another release (http.ts), or a file the page asked
+ *  for went with the release it came from. Everything beneath is inert, and
+ *  one button reloads into the page the domain serves now. */
+function Updated() {
+  return (
+    <div className="update-required" role="alertdialog" aria-modal="true" aria-labelledby="web-updated-title" data-testid="web-updated">
+      <div className="update-required-card">
+        <h1 id="web-updated-title" className="update-required-title">
+          Doklin was updated
+        </h1>
+        <p className="update-required-text">
+          Doklin on {location.host} was updated while this page was open. Reload it to keep going: what you typed is
+          kept.
+        </p>
+        <button autoFocus className="modal-btn is-primary update-required-button" onClick={() => reload()}>
+          Reload
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function showUpdated(): void {
+  if (updated) return;
+  updated = true;
+  rootElement.inert = true;
+  ReactDOM.createRoot(document.body.appendChild(document.createElement("div"))).render(<Updated />);
+}
+onOutdated(showUpdated);
+addEventListener("vite:preloadError", showUpdated);
+// The app's shortcuts are the window's, so `inert` does not reach them:
+// listening before the app does, this stops a key before any of them hears
+// it. What the browser does with the key (Tab, Enter on the button) stays.
+addEventListener(
+  "keydown",
+  (e) => {
+    if (updated) e.stopImmediatePropagation();
+  },
+  true,
+);
 
 function Waiting() {
   return (
@@ -72,6 +119,7 @@ async function start(): Promise<void> {
     // said to drop the cookie and what the page kept. Back to the sign-in.
     onSignedOut(() => location.reload());
     const saving = new Saving(ws);
+    reload = () => saving.reload();
     // What a closed tab left unsent is taken over before the app reads a
     // document, so the one it opens shows what was typed.
     await saving.recover();

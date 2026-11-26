@@ -597,10 +597,11 @@ impl HttpRemote {
         format!("{}/api/{}{}", self.endpoint, self.scope, tail)
     }
 
-    /// The two attribution headers every request carries: which device
-    /// speaks (presence, the binding's `createdBy`) and which app version
-    /// (the logs). Never authority — `redeem` sends these and nothing else,
-    /// because it has nothing else to send.
+    /// The two headers every request carries: which device speaks
+    /// (presence, the binding's `createdBy`) and which app version (a worker
+    /// turns away one older than its minimum, `410`). Never authority —
+    /// `redeem` sends these and nothing else, because it has nothing else to
+    /// send.
     fn tags(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         req.header("x-doklin-device", &self.device_id)
             .header("x-doklin-client", &self.app)

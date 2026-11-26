@@ -4,7 +4,8 @@
 // cookie that is its sign-in (auth.ts). Every caller is the engine or a page
 // this domain served, so there is no CORS and no preflight. Every request
 // also carries `x-doklin-device` (attribution for presence and the binding)
-// and `x-doklin-client` (the app version, for the logs — nothing reads it);
+// and `x-doklin-client` (which app and version: an older one than the
+// minimums is turned away first, clients.ts);
 // now and then, `x-doklin-used` (the caller's requests today, limits.ts).
 //
 // A bearer that sends too much is a loop, and is told so with a 429 before
@@ -209,7 +210,7 @@ import {
   spaceEnv,
   spaceOf,
 } from "./spaces";
-import { tooOld } from "./clients";
+import { turnedAway } from "./clients";
 import { WORKER_VERSION } from "./version";
 import type { MetaAnswer, PollAnswer, Who, WorkspaceRecord } from "./wire";
 import { browserMay, handleWeb, signIn } from "./web";
@@ -236,10 +237,11 @@ export async function handleApi(
 ): Promise<Response> {
   const parts = url.pathname.split("/").filter(Boolean); // ["api", section, …]
 
-  // A client older than the release marked mandatory is turned away before
-  // anything else, a join and a login included (clients.ts).
-  const old = tooOld(request.headers.get("x-doklin-client"), url.host);
-  if (old) return old;
+  // A client older than the release marked mandatory, or a browser tab of
+  // another release, is turned away before anything else, a join and a login
+  // included (clients.ts).
+  const away = turnedAway(request.headers.get("x-doklin-client"), url.host);
+  if (away) return away;
 
   // The one route above the gate. Redeeming an invite is how a Mac GETS a
   // bearer, so it cannot be behind one — and the carve-out is method AND

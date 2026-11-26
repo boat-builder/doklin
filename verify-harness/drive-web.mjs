@@ -48,6 +48,9 @@
 //   - closing with unsaved text asks first, and what was typed is sent as
 //     the page goes; what could not be sent is sent the next time the
 //     workspace is opened in that browser;
+//   - every request says which release the page is, and a worker of another
+//     release covers the page with a Reload, which asks nothing, stops the
+//     app's shortcuts, and keeps what was typed for the page it brings;
 //   - two tabs ask the worker as one;
 //   - a browser that kept a draft, its tabs and its tree from before the
 //     Library layout has them moved into Library once, and the draft is sent.
@@ -178,6 +181,9 @@ const answered = [];
 /** A request the front answers in the worker's place, when a part of the
  *  drive wants one refused: `(req) => {status, error} | null`. */
 let refusing = null;
+/** What the front tells the worker a page's release is, in the page's place:
+ *  a tab of another release than the worker's, when a part of the drive wants one. */
+let staleAs = null;
 /** The worker behind a front of this file's own, which writes down what passes. */
 function front(listen) {
   return listen((req, res) => {
@@ -199,7 +205,13 @@ function front(listen) {
     const sent = [];
     if (save || publish || coded) req.on("data", (chunk) => sent.push(chunk));
     const upstream = httpRequest(
-      { host: "localhost", port: WORKER_PORT, method: req.method, path: req.url, headers: req.headers },
+      {
+        host: "localhost",
+        port: WORKER_PORT,
+        method: req.method,
+        path: req.url,
+        headers: staleAs && req.headers["x-doklin-client"] ? { ...req.headers, "x-doklin-client": staleAs } : req.headers,
+      },
       (answer) => {
         let parts;
         let slug;
@@ -210,7 +222,7 @@ function front(listen) {
           // not a body of the app's
         }
         const body = coded ? Buffer.concat(sent).toString() : undefined;
-        answered.push({ method: req.method, path: req.url, status: answer.statusCode, at: Date.now(), parts, slug, body, cookie: Boolean(req.headers.cookie), dest: req.headers["sec-fetch-dest"], site: req.headers["sec-fetch-site"] });
+        answered.push({ method: req.method, path: req.url, status: answer.statusCode, at: Date.now(), parts, slug, body, cookie: Boolean(req.headers.cookie), dest: req.headers["sec-fetch-dest"], site: req.headers["sec-fetch-site"], client: req.headers["x-doklin-client"] });
         res.writeHead(answer.statusCode, answer.headers);
         answer.pipe(res);
       },
@@ -978,7 +990,54 @@ async function driveWriting(name) {
   const cleared = await until(() => page.evaluate(() => !Object.keys(localStorage).some((k) => k.startsWith("doklin:web:draft:"))), 10_000);
   say("and is kept no longer once it is saved", cleared);
 
-  /* 10 — two tabs ask as one */
+  /* 10 — the domain is updated while the page is open */
+  stage = "the domain is updated while the page is open";
+  const release = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
+  const named = [...new Set(answered.filter((a) => a.client !== undefined).map((a) => a.client))];
+  say("every request the page makes says which release it is", named.length === 1 && named[0] === `web/${release}`, named.join(", "));
+  staleAs = "web/0.0.1";
+  from = answered.length;
+  let leaveAsked = null;
+  page.on("dialog", (d) => {
+    leaveAsked = d.type();
+    void d.accept();
+  });
+  const updatedCover = page.locator('[data-testid="web-updated"]');
+  await typeAfter("First paragraph.", " Typed as the domain was updated.");
+  const covered = await updatedCover.waitFor({ timeout: 40_000 }).then(() => true, () => false);
+  const coverSays = covered ? (await updatedCover.innerText()).replace(/\s+/g, " ").trim() : "";
+  say(
+    "a worker of another release refuses the page, which is covered with one button: Reload",
+    covered &&
+      answered.slice(from).some((a) => a.status === 410) &&
+      coverSays.includes(`Doklin on localhost:${PORT} was updated while this page was open. Reload it to keep going: what you typed is kept.`) &&
+      (await updatedCover.getByRole("button").count()) === 1 &&
+      (await page.locator("#root").evaluate((r) => r.inert === true)),
+    coverSays,
+  );
+  // The app's shortcuts listen on the window, after the page's own guard.
+  await page.evaluate(() => {
+    window.__heard = 0;
+    addEventListener("keydown", () => (window.__heard += 1), true);
+  });
+  await page.keyboard.press("Meta+n");
+  await page.keyboard.press("Control+n");
+  say("a shortcut under it reaches nothing of the app's", (await page.evaluate(() => window.__heard)) === 0);
+  const keptForReload = await until(() => page.evaluate(() => Object.keys(localStorage).some((k) => k.startsWith("doklin:web:draft:"))), 5000);
+  staleAs = null;
+  const loaded = page.waitForEvent("load", { timeout: 30_000 });
+  await updatedCover.getByRole("button", { name: "Reload" }).click();
+  await loaded;
+  const backAfterReload = await editorHas("Typed as the domain was updated.");
+  const sentAfterReload = await until(async () => (await storedAt(DRAFT)).text.includes("Typed as the domain was updated."), 20_000);
+  say(
+    "Reload asks nothing, and the page it brings has what was typed, and sends it",
+    keptForReload && leaveAsked === null && backAfterReload && sentAfterReload && (await updatedCover.count()) === 0,
+    `${leaveAsked ? `asked: ${leaveAsked}` : "nothing asked"}, ${backAfterReload ? "on the page" : "not on the page"}, ${sentAfterReload ? "sent" : "not sent"}`,
+  );
+  page.removeAllListeners("dialog");
+
+  /* 11 — two tabs ask as one */
   stage = "two tabs ask as one";
   const beside = await context.newPage();
   watch(beside);

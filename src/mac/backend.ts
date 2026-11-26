@@ -533,11 +533,9 @@ const updater: Updater = {
   async check() {
     const found = await check();
     if (!found) return null;
-    const minimum = found.rawJson.minimum;
     return {
       version: found.version,
       notes: found.body ?? "",
-      minimum: typeof minimum === "string" ? minimum : null,
       async install(onProgress) {
         let total = 0;
         let done = 0;

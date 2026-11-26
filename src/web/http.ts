@@ -10,6 +10,13 @@
 // (engine/src/cloud/pace.rs): the domain's worker runs on an account whose
 // requests are capped a day, and a request it refuses has been counted
 // already.
+//
+// Every request also says which release this page is (`x-doklin-client`,
+// cloud-worker/src/clients.ts: change both). The page is the worker's own, so
+// a worker of another release refuses it with a 410: this tab was open
+// across an update of the domain, and a reload brings the page it serves now.
+
+import { version as RELEASE } from "../../package.json";
 
 /** Where this browser keeps its device id: what presence, leases and the
  *  Devices list know it by. One per browser, shared by its tabs. */
@@ -124,6 +131,13 @@ export function onSignedOut(cb: () => void): void {
   signedOut = cb;
 }
 
+let outdated: () => void = () => {};
+/** What happens when the worker says this page is of another release than
+ *  its own: a request it answered `410`. */
+export function onOutdated(cb: () => void): void {
+  outdated = cb;
+}
+
 export type Ask = {
   body?: unknown;
   headers?: Record<string, string>;
@@ -142,15 +156,20 @@ export async function send(method: string, path: string, ask: Ask = {}): Promise
   const now = Date.now();
   const used = readUsed(now);
   used.sent += 1;
-  const headers: Record<string, string> = { "x-doklin-device": deviceId(), ...ask.headers };
+  const headers: Record<string, string> = {
+    "x-doklin-device": deviceId(),
+    "x-doklin-client": `web/${RELEASE}`,
+    ...ask.headers,
+  };
   if (now - used.told >= REPORT_EVERY_MS) {
     headers["x-doklin-used"] = String(used.sent);
     used.told = now;
   }
   store(USED_KEY, JSON.stringify(used));
   if (ask.body !== undefined) headers["content-type"] = "application/json";
+  let res: Response;
   try {
-    return await fetch(path, {
+    res = await fetch(path, {
       method,
       headers,
       body: ask.body === undefined ? undefined : JSON.stringify(ask.body),
@@ -163,6 +182,8 @@ export async function send(method: string, path: string, ask: Ask = {}): Promise
   } catch {
     throw new Unreachable();
   }
+  if (res.status === 410) outdated();
+  return res;
 }
 
 /** A refusal, read as the engine reads one (`expect_status`,

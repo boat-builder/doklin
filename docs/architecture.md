@@ -119,6 +119,15 @@ Its sign-in and the worker's routes: [cloud-people-agents.md](cloud-people-agent
 - `src/web/http.ts` is the only code that fetches. It holds no credential
   (the sign-in is a cookie it cannot read), asks this origin only, and counts
   every request per UTC day as the engine does (`x-doklin-used`).
+- **Every request says the page's release** (`x-doklin-client: web/<release>`,
+  `package.json`), and a worker of another release refuses it (`410`,
+  `cloud-worker/src/clients.ts`): the tab was open across an update of the
+  domain. `start.tsx` then covers the page with a Reload, as it does when a
+  file the page asks for is gone (`vite:preloadError`). `inert` does not
+  reach the app's shortcuts, which listen on the window, so a capture
+  listener added before the app's stops every key while the cover is up.
+  The reload is `Saving.reload`: what waits is in the drafts, so it goes
+  without the leave question, and the page it brings sends them.
 - `workspace.ts` holds every section's manifest and derives from them what
   the engine tells the UI on a Mac: one `CloudStatus`, the tree, what changed
   elsewhere. A path is the workspace's name as a root, then where the Mac

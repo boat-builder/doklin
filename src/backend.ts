@@ -578,9 +578,6 @@ export type UpdateProgress = { phase: "downloading"; fraction: number } | { phas
 export type AvailableUpdate = {
   version: string;
   notes: string;
-  /** The oldest version this release lets keep running (its manifest's
-   *  `minimum`, written by release.yml), or null when it names none. */
-  minimum: string | null;
   /** Download, verify and install it, then restart into it. */
   install(onProgress: (p: UpdateProgress) => void): Promise<void>;
 };

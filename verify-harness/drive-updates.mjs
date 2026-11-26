@@ -1,10 +1,10 @@
 // Drives the REAL App (cloud.html boots <App/> over the scripted fake engine)
-// through a release marked mandatory: the release manifest naming a minimum
-// newer than this app covers the window with Update Doklin, nothing beneath
-// it answers a click or a shortcut, and its button downloads, installs and
-// restarts; a minimum this app meets changes nothing; a domain's worker
-// turning the app away (`app-outdated`) covers it too, naming the domain,
-// with the words for an update not out yet and for one that could not be
+// through a release marked mandatory, which only a domain's worker enforces:
+// a newer release alone is the ordinary update and covers nothing; a worker
+// turning the app away (`app-outdated`) covers the window with Update Doklin,
+// naming the domain, and looks for the update again; nothing beneath it
+// answers a click or a shortcut; its button downloads, installs and restarts;
+// it has words for an update not out yet and for one that could not be
 // fetched, and lifts when the domain answers again. `PORT` picks the vite
 // server (default 1420).
 import { chromium } from "playwright";
@@ -41,14 +41,14 @@ const browser = await chromium.launch(
     : {},
 );
 
-/** The plugin's answer to a check that found `version`, its manifest naming `minimum`. */
-const found = (version, minimum) => ({
+/** The plugin's answer to a check that found `version`. */
+const found = (version) => ({
   rid: 1,
   currentVersion: "0.1.140",
   version,
   date: null,
   body: "",
-  rawJson: { version, notes: "", minimum, platforms: {} },
+  rawJson: { version, notes: "", platforms: {} },
 });
 
 const status = (over = {}) => ({
@@ -94,11 +94,30 @@ const cover = (page) => page.locator('[data-testid="update-required"]');
 const coverText = async (page) => ((await cover(page).textContent()) ?? "").replace(/\s+/g, " ").trim();
 const updaterCalls = (page) => page.evaluate(() => window.__updaterCalls ?? []);
 
-/* 1 — the manifest names a minimum newer than this app */
+const said = "This is Doklin 0.1.140, and notes.example.com needs 0.1.150 or newer. Update Doklin to keep working.";
+
+/* 1 — a newer release, and no domain turning this app away */
 {
-  const { page, close } = await open(found("0.1.150", "0.1.150"));
-  // The download waits until the drive lets it finish.
-  await page.evaluate(() => {
+  const { page, close } = await open(found("0.1.150"));
+  await page.evaluate((s) => window.__setStatuses([s]), status());
+  await poll(async () => (await updaterCalls(page)).includes("plugin:updater|check"));
+  await page.waitForTimeout(500);
+  step(
+    "a newer release alone is the ordinary update: nothing is covered",
+    (await cover(page).count()) === 0 && (await page.evaluate(() => document.querySelector(".app")?.inert === false)),
+  );
+  await close();
+}
+
+/* 2 — a domain's worker turns this app away, and the release is out */
+{
+  // The app found nothing at launch; the release comes out while it is open.
+  const { page, close } = await open(null);
+  await page.evaluate((s) => window.__setStatuses([s]), status());
+  await poll(async () => (await updaterCalls(page)).includes("plugin:updater|check"));
+  await page.evaluate((u) => {
+    window.__update = u;
+    // The download waits until the drive lets it finish.
     window.__install = (send) =>
       new Promise((resolve) => {
         send({ event: "Started", data: { contentLength: 100 } });
@@ -108,16 +127,20 @@ const updaterCalls = (page) => page.evaluate(() => window.__updaterCalls ?? []);
           resolve(null);
         };
       });
-  });
+  }, found("0.1.150"));
+  await page.evaluate((s) => window.__setStatuses([s]), status({ phase: "app-outdated", error: said }));
   const shown = await holds(async () => (await cover(page).count()) === 1);
+  const offered = await holds(async () => (await cover(page).getByRole("button", { name: "Update to v0.1.150 and restart" }).count()) === 1);
   const text = shown ? await coverText(page) : "";
   step(
-    "a minimum newer than this app covers the window: Update Doklin, the version that stops working, and one button",
+    "the cover names the domain, looks for the update again, and has one button for it",
     shown &&
+      offered &&
       text.includes("Update Doklin") &&
-      text.includes("This version of Doklin (v0.1.140) no longer works. Update it to keep going: everything you wrote stays as it is.") &&
-      (await cover(page).getByRole("button").count()) === 1 &&
-      (await cover(page).getByRole("button").textContent()) === "Update to v0.1.150 and restart",
+      text.includes(
+        "This version of Doklin (v0.1.140) no longer works with notes.example.com. Update it to keep going: everything you wrote stays as it is.",
+      ) &&
+      (await cover(page).getByRole("button").count()) === 1,
     text,
   );
   step(
@@ -145,23 +168,12 @@ const updaterCalls = (page) => page.evaluate(() => window.__updaterCalls ?? []);
   await close();
 }
 
-/* 2 — a minimum this app meets: the ordinary update, and no cover */
+/* 3 — a domain's worker turns this app away before the release is out */
 {
-  const { page, close } = await open(found("0.1.150", "0.1.100"));
-  await poll(async () => (await updaterCalls(page)).includes("plugin:updater|check"));
-  await page.waitForTimeout(500);
-  step("an update whose minimum this app meets covers nothing", (await cover(page).count()) === 0 && (await page.evaluate(() => document.querySelector(".app")?.inert === false)));
-  await close();
-}
-
-/* 3 — a domain's worker turns this app away */
-{
-  // No newer release is out yet.
   const { page, close } = await open(null);
   await page.evaluate((s) => window.__setStatuses([s]), status());
   await page.waitForTimeout(300);
   const before = await cover(page).count();
-  const said = "This is Doklin 0.1.140, and notes.example.com needs 0.1.150 or newer. Update Doklin to keep working.";
   await page.evaluate((s) => window.__setStatuses([s]), status({ phase: "app-outdated", error: said }));
   const shown = await holds(async () => (await cover(page).count()) === 1);
   const text = shown ? await coverText(page) : "";

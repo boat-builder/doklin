@@ -7449,7 +7449,10 @@ await test("wipe: the superadmin's, confirmed, empties the bucket and frees the 
   assert.ok(landing.text.includes("<title>Sherin&#39;s &lt;Notes&gt; · Doklin</title>"));
 });
 
-/* ---------- Clients older than the release marked mandatory ---------- */
+/* ---------- Clients older than the release marked mandatory, and tabs of another release ---------- */
+
+/** The release this worker and its browser version are built from: package.json's. */
+const RELEASE = JSON.parse(readFileSync(path.join(workerDir, "..", "package.json"), "utf8")).version;
 
 /** version.ts's minimums, as the worker under test was built with them. */
 const shippedMinimum = (name) =>
@@ -7482,15 +7485,26 @@ async function asClient(w, client, pathname = "/api/meta", init = {}) {
 
 await test(
   bundlePath
-    ? "clients: the bundle turns away nobody at its own minimums"
-    : "clients: a Mac, a doklin or an iPhone older than its minimum is refused on every route with a 410 and a sentence; one at it or newer, a build run from Xcode, a browser and a header nobody can read are answered",
+    ? "clients: the bundle turns away nobody at its own minimums, and a tab of any release but its own"
+    : "clients: a Mac, a doklin or an iPhone older than its minimum is refused on every route with a 410 and a sentence, and so is a browser tab of any release but the worker's; one at the minimum or newer, a build run from Xcode, a tab of this release, no header and a header nobody can read are answered",
   async () => {
+    // A tab is held to the release, whatever the minimums.
+    const tabs = async (w) => {
+      assert.notEqual((await asClient(w, `web/${RELEASE}`)).status, 410, "a tab of this release");
+      const stale = await asClient(w, "web/0.0.1", "/api/web/doc?space=&path=Home.md", { method: "PUT" });
+      assert.equal(stale.status, 410, "a tab of another release");
+      assert.equal(stale.body.error, `This page is from Doklin 0.0.1, and notes.example.com runs ${RELEASE} now. Reload the page to keep going.`);
+      assert.equal((await asClient(w, "web/99.0.0")).status, 410, "a tab of a later release, the worker since put back");
+      for (const client of ["web/", "web/dev", "web/0.1"]) assert.notEqual((await asClient(w, client)).status, 410, client);
+    };
     if (bundlePath) {
       assert.notEqual((await asClient(worker, shippedMinimum("MINIMUM_APP"))).status, 410);
       assert.notEqual((await asClient(worker, `cli/${shippedMinimum("MINIMUM_APP")}`)).status, 410);
       assert.notEqual((await asClient(worker, `ios/${shippedMinimum("MINIMUM_IOS")}`)).status, 410);
+      await tabs(worker);
       return;
     }
+    await tabs(worker);
     const w = (await import(await compileWorker([minimums("0.1.150", "0.1.0+57")]))).default;
     const refused = async (client, pathname, init) => {
       const r = await asClient(w, client, pathname, init);
