@@ -57,11 +57,18 @@ struct Entry {
     body: String,
 }
 
+/// Where an html thread is (`HtmlAnchor`, src/htmlComments.ts): its part,
+/// the ids around it nearest first, and for a thread on words, the words and
+/// the text either side. `quote` empty is a thread on the part.
 #[derive(Clone, Debug, PartialEq)]
 struct Anchor {
     path: String,
     tag: String,
     text: String,
+    ids: Vec<String>,
+    quote: String,
+    prefix: String,
+    suffix: String,
 }
 
 /// A thread: an html one has an anchor, a markdown one's is in its text.
@@ -149,13 +156,43 @@ fn entries(value: Option<&Value>) -> Option<Vec<Entry>> {
         .collect()
 }
 
+/// An anchor as the app reads one (`storedAnchor`, src/htmlComments.ts):
+/// `ids` only when it is a list of strings with some in it, the words only
+/// when there are some, and then the text either side or nothing.
 fn anchor(value: Option<&Value>) -> Option<Anchor> {
     let a = value?;
+    let string = |key: &str| a.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let ids = a
+        .get("ids")
+        .and_then(Value::as_array)
+        .and_then(|list| list.iter().map(|id| id.as_str().map(str::to_string)).collect::<Option<Vec<String>>>())
+        .unwrap_or_default();
+    let quote = string("quote");
+    let (prefix, suffix) = if quote.is_empty() { (String::new(), String::new()) } else { (string("prefix"), string("suffix")) };
     Some(Anchor {
         path: a.get("path")?.as_str()?.to_string(),
         tag: a.get("tag")?.as_str()?.to_string(),
         text: a.get("text")?.as_str()?.to_string(),
+        ids,
+        quote,
+        prefix,
+        suffix,
     })
+}
+
+/// The app's bytes for an anchor: its keys in its order, `ids` and the words
+/// only when there are some.
+fn anchor_json(a: &Anchor) -> String {
+    let mut out = format!(r#"{{"path":{},"tag":{},"text":{}"#, js_string(&a.path), js_string(&a.tag), js_string(&a.text));
+    if !a.ids.is_empty() {
+        let ids: Vec<String> = a.ids.iter().map(|id| js_string(id)).collect();
+        out.push_str(&format!(r#","ids":[{}]"#, ids.join(",")));
+    }
+    if !a.quote.is_empty() {
+        out.push_str(&format!(r#","quote":{},"prefix":{},"suffix":{}"#, js_string(&a.quote), js_string(&a.prefix), js_string(&a.suffix)));
+    }
+    out.push('}');
+    out
 }
 
 /// Column widths: finite, not negative, at least one; rounded as the app
@@ -261,9 +298,7 @@ fn comments_json(comments: &[Entry]) -> String {
 fn serialize(meta: &Meta) -> String {
     let mut rows: Vec<(String, String)> = Vec::new();
     for t in &meta.hthreads {
-        let none = Anchor { path: String::new(), tag: String::new(), text: String::new() };
-        let a = t.anchor.as_ref().unwrap_or(&none);
-        let anchor = format!(r#"{{"path":{},"tag":{},"text":{}}}"#, js_string(&a.path), js_string(&a.tag), js_string(&a.text));
+        let Some(anchor) = t.anchor.as_ref().map(anchor_json) else { continue };
         let line = format!(r#"{{"t":"hthread","id":{},"anchor":{anchor},"comments":{}}}"#, js_string(&t.id), comments_json(&t.comments));
         rows.push((format!("hthread {}", t.id), line));
     }

@@ -143,6 +143,35 @@ final class CommentsTests: XCTestCase {
         }
     }
 
+    /* ---------- A page, read from its file ---------- */
+
+    func testAPageAsItsFileHasIt() {
+        for c in cases("pages") {
+            let about = text(c["about"]) ?? ""
+            let page = HtmlText.page(text(c["html"])!)
+            XCTAssertEqual(page.text, js(c["text"]), about)
+            XCTAssertEqual(page.runsScript, c["runsScript"] == .bool(true), "\(about): runs script")
+            let want = (c["elements"]?.array ?? []).map { $0.array?.compactMap(\.string) ?? [] }
+            XCTAssertEqual(page.elements.map { [JSString($0.tag), $0.id, $0.text] }, want, about)
+        }
+    }
+
+    /// How much of a thread's place a file has, and whether a file that has
+    /// none of it can say the thread is gone. A case's `state` is the Mac's
+    /// answer, in the page as drawn.
+    func testAThreadsPlaceInAPage() {
+        for c in cases("places") {
+            let about = text(c["about"]) ?? ""
+            guard let anchor = MetaFile.anchor(c["anchor"]) else {
+                XCTFail("\(about): not an anchor")
+                continue
+            }
+            let place = HtmlText.place(of: anchor, in: HtmlText.page(text(c["html"])!))
+            XCTAssertEqual(place.level, c["level"]?.number.map { Int($0) }, "\(about): level")
+            XCTAssertEqual(place.known, c["known"] == .bool(true), "\(about): known")
+        }
+    }
+
     /* ---------- What the phone does ---------- */
 
     private func kind(_ refusal: CommentRefusal) -> JSValue {

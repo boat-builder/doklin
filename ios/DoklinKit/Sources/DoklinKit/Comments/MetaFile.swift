@@ -23,13 +23,22 @@ public struct MdThread: Equatable, Sendable {
     public var comments: [CommentEntry]
 }
 
-/// How an html thread finds its element again: a path of selectors from
-/// the top, and the element's tag and the start of its text for when the
-/// page was made again and the path no longer leads there.
+/// Where an html thread is (`HtmlAnchor`, src/htmlComments.ts). `path`,
+/// `tag` and `text` are its part: a path of selectors from the top (a hint
+/// only), the part's tag, and the start of what it says — a picture's alt
+/// text, else its file name.
 public struct HtmlAnchor: Equatable, Sendable {
     public var path: JSString
     public var tag: JSString
     public var text: JSString
+    /// The ids of the part and of everything around it, nearest first.
+    public var ids: [JSString] = []
+    /// A thread on words has them here, and its part is then the smallest
+    /// one holding all of them. Empty is a thread on the part.
+    public var quote: JSString = ""
+    /// The text either side of the words.
+    public var prefix: JSString = ""
+    public var suffix: JSString = ""
 }
 
 public struct HtmlThread: Equatable, Sendable {
@@ -106,6 +115,29 @@ public enum MetaFile {
         return read.count == items.count ? read : nil
     }
 
+    /// An anchor as it is stored, from anything that claims to be one: `ids`
+    /// only when it is a list of strings with some in it, the words only
+    /// when there are some, and then the text either side or nothing. Nil
+    /// for what is no anchor at all. A port of `storedAnchor`
+    /// (src/htmlComments.ts); the engine reads one the same way
+    /// (engine/src/sidecar.rs `anchor`) — change all three.
+    static func anchor(_ value: JSValue?) -> HtmlAnchor? {
+        guard let value, case .object = value,
+              let path = value["path"]?.string, let tag = value["tag"]?.string, let text = value["text"]?.string
+        else { return nil }
+        var out = HtmlAnchor(path: path, tag: tag, text: text)
+        if let items = value["ids"]?.array {
+            let ids = items.compactMap(\.string)
+            if ids.count == items.count { out.ids = ids }
+        }
+        if let quote = value["quote"]?.string, !quote.isEmpty {
+            out.quote = quote
+            out.prefix = value["prefix"]?.string ?? ""
+            out.suffix = value["suffix"]?.string ?? ""
+        }
+        return out
+    }
+
     /// Every record the file holds. A line that is not one — a conflict
     /// marker, a hand edit — is passed over, never the end of the rest; a
     /// record given twice is the first valid one.
@@ -126,12 +158,9 @@ public enum MetaFile {
                 seen.insert(key)
                 meta.mthreads.append(MdThread(id: id, comments: comments))
             case "hthread":
-                guard !id.isEmpty, let anchor = value["anchor"], case .object = anchor,
-                      let path = anchor["path"]?.string, let tag = anchor["tag"]?.string, let text = anchor["text"]?.string,
-                      let comments = entries(value["comments"])
-                else { continue }
+                guard !id.isEmpty, let anchor = anchor(value["anchor"]), let comments = entries(value["comments"]) else { continue }
                 seen.insert(key)
-                meta.hthreads.append(HtmlThread(id: id, anchor: HtmlAnchor(path: path, tag: tag, text: text), comments: comments))
+                meta.hthreads.append(HtmlThread(id: id, anchor: anchor, comments: comments))
             case "tcols":
                 guard !id.isEmpty, let items = value["cols"]?.array, !items.isEmpty else { continue }
                 let cols = items.compactMap(\.number).filter { $0.isFinite && $0 >= 0 }
@@ -154,14 +183,24 @@ public enum MetaFile {
         .object([("author", .string(entry.author)), ("at", .number(entry.at)), ("body", .string(entry.body))])
     }
 
+    /// An anchor's keys in the order every device writes them: `ids` only
+    /// when there are some, and the words only when there are some.
+    private static func json(_ anchor: HtmlAnchor) -> JSValue {
+        var fields: [(JSString, JSValue)] = [("path", .string(anchor.path)), ("tag", .string(anchor.tag)), ("text", .string(anchor.text))]
+        if !anchor.ids.isEmpty { fields.append(("ids", .array(anchor.ids.map(JSValue.string)))) }
+        if !anchor.quote.isEmpty {
+            fields += [("quote", .string(anchor.quote)), ("prefix", .string(anchor.prefix)), ("suffix", .string(anchor.suffix))]
+        }
+        return .object(fields)
+    }
+
     /// The file's bytes for these records: the same records, in any order,
     /// always the same bytes.
     public static func serialize(_ meta: EntityMeta) -> String {
         var rows: [(key: JSString, line: String)] = []
         for thread in meta.hthreads {
-            let anchor = JSValue.object([("path", .string(thread.anchor.path)), ("tag", .string(thread.anchor.tag)), ("text", .string(thread.anchor.text))])
             let line = JSValue.object([
-                ("t", .string("hthread")), ("id", .string(thread.id)), ("anchor", anchor), ("comments", .array(thread.comments.map(json))),
+                ("t", .string("hthread")), ("id", .string(thread.id)), ("anchor", json(thread.anchor)), ("comments", .array(thread.comments.map(json))),
             ]).json
             rows.append(("hthread " + thread.id, line))
         }

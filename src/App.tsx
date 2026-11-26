@@ -763,6 +763,8 @@ export default function App() {
     }
   });
   const [commentCount, setCommentCount] = useState(0);
+  const showComments = useCallback(() => setCommentsVisible(true), []);
+  const toggleComments = useCallback(() => setCommentsVisible((v) => !v), []);
   const [treeRefreshToken, setTreeRefreshToken] = useState(0);
   // A new one remounts the sidebar, which then reads how its tree was left
   // afresh: after the stored paths have moved under it (moveIntoLibrary).
@@ -942,7 +944,7 @@ export default function App() {
     left: null,
     right: null,
   });
-  // Where an html pane docks its own controls (Comment mode, PDF export):
+  // Where an html pane docks its own controls (Comment, PDF export):
   // the tab bar when a single pane is open, that pane's header when split —
   // the same rule the MD/HTML switcher follows. HtmlView portals its button
   // row into the node, so these are STATE, not refs: the portal has to
@@ -5068,6 +5070,13 @@ export default function App() {
       }
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
+      // ⌘⌥M: comment on the selected words. In a note it is the selection
+      // toolbar's Comment; an html page hears the key itself (HtmlView), and
+      // its frame takes it before the shortcuts below, as this does.
+      if (e.altKey && e.code === "KeyM") {
+        if (docViewRef.current === "md" && editorRef.current?.commentSelection()) e.preventDefault();
+        return;
+      }
       // An html view's frame matches these as this does, branch for branch
       // and in this order (appShortcut, htmlBridge.ts) — change both.
       const k = e.key.toLowerCase();
@@ -6096,7 +6105,7 @@ export default function App() {
               commentAuthor={deviceName}
               commentsVisible={commentsVisible && !isMirror}
               onCommentsCount={focused ? setCommentCount : undefined}
-              onRequestShowComments={focused ? () => setCommentsVisible(true) : undefined}
+              onRequestShowComments={focused ? showComments : undefined}
               readOnly={!focused || leasedHere}
               orphans={focused ? mdOrphanOps : undefined}
               // A mirror shows the active document, so it renders the active
@@ -6161,6 +6170,10 @@ export default function App() {
               onThreadsChange={focused || !doc ? onHtmlThreadsChange : noopThreadsChange}
               commentAuthor={deviceName}
               commentsEnabled={focused || !doc}
+              commentsVisible={commentsVisible}
+              onRequestShowComments={showComments}
+              onToggleComments={toggleComments}
+              keysActive={focused}
               // Validated PDF export (a host that omits the prop hides the
               // button). Panes showing the ACTIVE
               // document get it; a two-document split's unfocused pane has
@@ -6322,14 +6335,13 @@ export default function App() {
                   onOpenPublished={() => setPublishedOpen(true)}
                 />
               )}
-              {/* Markdown only: an html view docks its own comment-mode
-                  toggle (and PDF export) into the slot below instead —
-                  comment mode itself lives inside HtmlView. */}
-              {docView === "md" && commentCount > 0 && (
+              {/* One switch for a note's comments and a page's: shown only
+                  when the document on screen has some to hide. */}
+              {(docView === "md" ? commentCount : htmlThreads.length) > 0 && (
                 <CommentsToggle
-                  count={commentCount}
+                  count={docView === "md" ? commentCount : htmlThreads.length}
                   visible={commentsVisible}
-                  onToggle={() => setCommentsVisible((v) => !v)}
+                  onToggle={toggleComments}
                 />
               )}
               {/* The unsplit html view's controls dock here; split mode moves

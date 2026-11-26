@@ -595,6 +595,9 @@ body,
 }
 
 .editor-wrap {
+  /* The room a document gives its comment cards: a note's rail, and the
+     column beside an html page. */
+  --comments-gutter: 312px;
   position: relative;
   flex: 1 1 auto;
   overflow-y: auto;
@@ -903,13 +906,21 @@ body,
   display: none;
 }
 
-/* The html view: sandboxed preview iframe + its comment layer, overlaying
-   the same box so the bridge's iframe-viewport anchor rects are directly the
-   layer's coordinate space. Pins and cards are repositioned by the bridge's
-   layout messages as the iframe scrolls internally. */
+/* The html view: the sandboxed preview frame in its box, what the app draws
+   over that box, and the column of comment cards beside it. While comments
+   are shown and the page has some, the frame's box gives the column its
+   width — the gutter a note reserves for its own cards. */
 .html-view {
   position: absolute;
   inset: 0;
+}
+
+.html-frame-box {
+  position: absolute;
+  inset: 0;
+}
+.html-view.has-margin .html-frame-box {
+  right: var(--comments-gutter);
 }
 
 .html-preview {
@@ -920,21 +931,172 @@ body,
   border: 0;
   /* Most generated documents assume a white canvas; let them own the look.
      HtmlView layers the page's own canvas colour over this (from the
-     bridge), so the scrollbar gutter, which lies outside the page's
+     script), so the scrollbar gutter, which lies outside the page's
      canvas, doesn't show as a white strip. */
   background: var(--html-page);
 }
 
-/* The comment layer over the iframe: never eats clicks itself — only its
-   children (button, pins, cards) do. */
+/* What the app draws over the frame: never eats clicks itself — only its
+   children (the Comment button, markers, the picking bar) do. Clipped to
+   the frame's box, as the page is. */
 .html-comment-layer {
   position: absolute;
   inset: 0;
+  overflow: hidden;
   pointer-events: none;
   z-index: 5;
 }
 
-/* The rendition's controls (PDF export + the way into comment mode). The row
+/* The layers that follow the page's scroll, moved by a transform as each
+   scroll arrives (HtmlView `applyScroll`): what is drawn on the page moves
+   both ways, what sits at its edge or beside it only up and down. Their
+   children are placed in the page's own coordinates. */
+.html-page-layer,
+.html-edge-layer,
+.html-cards-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 0;
+  will-change: transform;
+}
+
+/* The column of cards beside the page: the app's own surface, so the cards
+   read as the app's and never as part of the page. */
+.html-comments-margin {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--comments-gutter);
+  box-sizing: border-box;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+  background: var(--sheet);
+}
+
+/* A part with a thread on it, outlined while the thread is open or under the
+   pointer; dashed, and saying what it is, for the part offered while
+   picking. */
+.html-part-outline {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid color-mix(in srgb, var(--accent) 85%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.html-part-outline.is-picking {
+  border-width: 1.5px;
+  border-style: dashed;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+.html-part-outline-label {
+  position: absolute;
+  left: -2px;
+  bottom: 100%;
+  max-width: 320px;
+  margin-bottom: 4px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--accent);
+  color: var(--on-fill);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.html-part-outline-title {
+  font-weight: 400;
+}
+
+/* A thread on a part: a small marker on the part's top-right corner. */
+.html-comment-marker {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 2px solid var(--html-page);
+  border-radius: 999px 999px 999px 3px; /* speech-bubble tail */
+  background: var(--accent);
+  color: var(--on-fill);
+  cursor: pointer;
+  pointer-events: auto;
+  filter: var(--shadow-drop);
+  transition: transform 0.12s ease;
+}
+.html-comment-marker:hover,
+.html-comment-marker.is-lit {
+  transform: scale(1.15);
+}
+
+/* "Comment", at the page's right edge level with the selected words. */
+.html-select-comment {
+  position: absolute;
+  right: 14px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--sheet);
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: var(--shadow-card-hover);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.html-select-comment:hover {
+  background: color-mix(in srgb, var(--accent) 10%, var(--sheet));
+}
+
+/* While picking a part: what a click will do, and the keys. */
+.html-pick-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 7px 6px 14px;
+  border-radius: 999px;
+  background: var(--text-1);
+  color: var(--sheet);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: var(--shadow-pop);
+  pointer-events: auto;
+}
+.html-pick-bar-keys {
+  font-weight: 400;
+  opacity: 0.75;
+}
+.html-pick-bar-stop {
+  padding: 3px 10px;
+  border: none;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sheet) 18%, transparent);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.html-pick-bar-stop:hover {
+  background: color-mix(in srgb, var(--sheet) 30%, transparent);
+}
+
+/* The rendition's controls (PDF export + Comment, which picks a part). The row
    docks into the host's chrome — the tab bar, a split pane's header — via a
    portal from HtmlView, so it wears the same compact
    look as the MD/HTML and comments toggles beside it rather than standing on
@@ -982,14 +1144,6 @@ body,
 .html-comment-btn.is-on:hover {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
-}
-.html-comment-btn-count {
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
-  font-size: var(--fs-xs);
-  font-variant-numeric: tabular-nums;
 }
 .html-pdf-btn:disabled {
   cursor: default;
@@ -1071,74 +1225,40 @@ body,
   overflow-wrap: anywhere;
 }
 
-/* A thread's pin: the opener's avatar sitting on its element's top-right
-   corner, with a reply count when the thread grew. */
-.html-comment-pin {
-  position: absolute;
-  padding: 0;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  pointer-events: auto;
-  filter: var(--shadow-drop);
-}
-.html-comment-pin .avatar {
-  width: 24px;
-  height: 24px;
+/* What a page's thread is on, at the top of its card: the quoted words, or
+   the kind of part and what it is called; and a line for when that is no
+   longer quite what was commented on. */
+.comment-on-quote {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  margin: 0 0 8px;
+  padding-left: 8px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  overflow: hidden;
+  overflow-wrap: anywhere;
   font-size: var(--fs-xs);
-  border: 2px solid var(--html-page);
-  border-radius: 999px 999px 999px 3px; /* speech-bubble tail */
-  transition: transform 0.12s ease;
+  line-height: 1.4;
+  color: var(--text-3);
 }
-.html-comment-pin:hover .avatar {
-  transform: scale(1.12);
+.comment-on-part {
+  margin-bottom: 8px;
+  overflow: hidden;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-2);
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
-.html-comment-pin-count {
-  position: absolute;
-  top: -5px;
-  right: -7px;
-  min-width: 14px;
-  padding: 1px 3px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--on-fill);
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 1.3;
-  text-align: center;
+.comment-on-title {
+  font-weight: 400;
+  color: var(--text-3);
 }
-
-/* The open thread, floating at its element (the rail card, repositioned).
-   The wrapper carries the spot and the height cap; the card scrolls inside
-   it when the thread is long. */
-.html-comment-pop {
-  position: absolute;
-  width: 300px;
-  display: flex;
-  pointer-events: none;
-  z-index: 6;
-}
-.html-comment-pop .comment-card,
-.html-comment-orphans .comment-card {
-  position: static;
-  width: 100%;
-  overflow-y: auto;
-  box-shadow: var(--shadow-pop);
-}
-
-/* Threads whose anchor no longer exists in the regenerated rendition: a
-   stack under the Comment button — kept visible, never silently dropped. */
-.html-comment-orphans {
-  position: absolute;
-  top: 52px;
-  right: 16px;
-  width: 300px;
-  max-height: calc(100% - 64px);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  overflow-y: auto;
-  pointer-events: auto;
+.comment-on-note {
+  margin: -2px 0 8px;
+  font-size: var(--fs-xs);
+  font-style: italic;
+  color: var(--text-3);
 }
 
 /* A thread whose anchor no longer exists in the regenerated rendition. */
@@ -3723,7 +3843,7 @@ body.tree-dragging.tree-drag-invalid * {
 /* Reserve a right-hand gutter for the comment rail when comments exist; the
    centered content column shifts left into the remaining space. */
 .editor-wrap.has-comments .milkdown .ProseMirror {
-  margin-right: 312px;
+  margin-right: var(--comments-gutter);
 }
 
 /* ---------- The outline ("On this page", DocOutline.tsx) ----------
@@ -3902,6 +4022,10 @@ body.tree-dragging.tree-drag-invalid * {
 }
 .comment-card:hover {
   border-color: color-mix(in srgb, var(--text-1) 16%, transparent);
+}
+/* Its place on the page is under the pointer (the html view). */
+.comment-card.is-lit {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 .comment-card.is-active {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));

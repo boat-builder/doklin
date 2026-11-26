@@ -1,8 +1,8 @@
-// Verification harness: mounts the REAL HtmlView (bridge, comment-mode
-// overlay, thread model — no reimplementation) the way App.tsx does, with
-// in-memory state in place of the entity meta file. Driven by Playwright;
-// not part of the app.
-import { StrictMode, useEffect, useState } from "react";
+// Verification harness: mounts the REAL HtmlView (the page's script, the
+// overlay, the column of cards, the thread model — no reimplementation) the
+// way App.tsx does, with in-memory state in place of the entity meta file.
+// Driven by Playwright (drive.mjs); not part of the app.
+import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import HtmlView from "../src/HtmlView";
 import type { HtmlThread } from "../src/htmlComments";
@@ -31,12 +31,14 @@ const PAGE_V1 = `<!doctype html>
       <button id="counter" onclick="this.textContent='clicked ' + (++window.__count || (window.__count=1)) + 'x'">clicked 0x</button>
     </div>
     <p>Read the <a id="ext" href="https://example.com/details">full details</a> online.</p>
+    <div style="height: 900px"></div>
     <p id="tail">A closing remark at the end of the document.</p>
   </main>
 </body></html>`;
 
-// Same text for #intro but the structure around it changed (re-anchor case);
-// the subtitle paragraph is gone entirely (orphan case).
+// Same text for #intro but the structure around it changed (found again by
+// its words); the card and the paragraph with the link are gone entirely
+// (lost).
 const PAGE_V2 = `<!doctype html>
 <html><head><style>
   body { font-family: Georgia, serif; margin: 0; background: #fff; }
@@ -54,12 +56,50 @@ declare global {
   interface Window {
     __setHtml: (v: "v1" | "v2") => void;
     __threads: () => HtmlThread[];
+    __setVisible: (v: boolean) => void;
+    // Document zoom (⌘+ / ⌘-), as the app hands it to the view.
+    __setZoom: (z: number) => void;
+    // A page and the threads on it, for one case of the shared fixture: the
+    // threads are handed over only once the new page's script is ready, so
+    // no place is ever read off the page before it.
+    __setCase: (html: string, threads: HtmlThread[]) => void;
+    // What the page's script last said of each thread's place, by thread id.
+    __places: Record<string, { state: string }>;
   }
 }
 
 function Harness() {
   const [threads, setThreads] = useState<HtmlThread[]>([]);
   const [html, setHtml] = useState(PAGE_V1);
+  const [visible, setVisible] = useState(true);
+  const [zoom, setZoom] = useState(1);
+  const awaited = useRef<HtmlThread[] | null>(null);
+  const cases = useRef(0);
+
+  useEffect(() => {
+    window.__places = {};
+    window.__setVisible = setVisible;
+    window.__setZoom = setZoom;
+    window.__setCase = (page, list) => {
+      window.__places = {};
+      awaited.current = list;
+      setThreads([]);
+      // A page the same as the last still has to load afresh.
+      setHtml(`${page}<!-- case ${(cases.current += 1)} -->`);
+    };
+    const onMessage = (e: MessageEvent) => {
+      const msg = e.data as { dk?: string; type?: string; places?: { id: string; state: string }[] } | null;
+      if (!msg || msg.dk !== "doklin-comments") return;
+      if (msg.type === "ready" && awaited.current) {
+        setThreads(awaited.current);
+        awaited.current = null;
+      } else if (msg.type === "layout" && !awaited.current) {
+        window.__places = Object.fromEntries((msg.places ?? []).map((p) => [p.id, p]));
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
 
   useEffect(() => {
     window.__setHtml = (v) => setHtml(v === "v2" ? PAGE_V2 : PAGE_V1);
@@ -83,6 +123,10 @@ function Harness() {
       threads={threads}
       onThreadsChange={setThreads}
       commentAuthor="Sherin's Mac"
+      commentsVisible={visible}
+      zoom={zoom}
+      onRequestShowComments={() => setVisible(true)}
+      onToggleComments={() => setVisible((v) => !v)}
     />
   );
 }

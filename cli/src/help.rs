@@ -116,7 +116,7 @@ refused.
 whatever extension you type. `rm --md` or `rm --html` removes one version, and
 never the last one."#;
 
-const COMMENTS: &str = r#"COMMENTS
+const COMMENTS: &str = r##"COMMENTS
 
 A comment thread sits on some text of a document.
 
@@ -132,7 +132,10 @@ A comment thread sits on some text of a document.
                 formatting marks. If they occur more than once, quote more of the
                 sentence; the refusal lists every place.
   In html       (--html) They are the opening words of one element: a heading, a
-                paragraph, a list item.
+                paragraph, a list item. Or the element's id, as #id: the way
+                to comment on a picture or a chart, which has no words.
+
+                  doklin comment Library/Projects/plan --html --on "#revenue-chart" -m "Which year?"
 
 In markdown, a thread's place is marked in the text itself:
 
@@ -140,11 +143,19 @@ In markdown, a thread's place is marked in the text itself:
 
 `read` shows these markers. A write must keep each one exactly as it is; it may
 move with its words. A write that removes, changes or adds one is refused: start a
-thread with `doklin comment`, remove one with `doklin comment rm`. In html, a write
-that takes away the element a thread is on is refused the same way.
+thread with `doklin comment`, remove one with `doklin comment rm`.
+
+In html, a thread is on words of the page or on one element of it, and is found
+again by what the page says. A write may reword what a thread is on a little, and
+may move it. A write that takes it away is refused the same way: the refusal says
+which words or which element to keep.
+
+So that comments keep their place when you write a page again, give its sections,
+figures, charts and tables an id that says what they are (id="revenue-chart", not
+id="s3"), and keep the ids a page already has.
 
 `read --clean` gives the text without markers, to read or to make an html version
-from. Written back over the markdown, it is refused."#;
+from. Written back over the markdown, it is refused."##;
 
 const TAGS: &str = r#"TAGS
 
@@ -292,7 +303,9 @@ Callouts
 Pictures and pages
   · A diagram is a ```svg drawing: doklin help drawings.
   · A designed page (layout, columns, colour) is the document's html version:
-    doklin help documents."#;
+    doklin help documents. Give its sections, figures, charts and tables an id
+    that says what they are, and keep those ids when you write the page again:
+    comments find their place by them (doklin help comments)."#;
 
 const DRAWINGS: &str = r##"DRAWINGS
 
@@ -468,6 +481,9 @@ What matters here
     of date: write it again, or remove it. The answer to your write tells you.
   · Text like {==these words==}{>>#c7k2x9<<} marks a comment. Keep it exactly as
     it is, or the write is refused (doklin help comments).
+  · An html page's comments are on its words and its elements. When you write a
+    page again, keep what they are on and the ids the page has; a write that
+    takes a commented part away is refused, and says what to keep.
   · To say something about a document without changing it, comment on it:
     doklin comment <doc> --on "<words in it>" -m "<what you think>"
   · To point your person at a document, give its link from doklin info, not its

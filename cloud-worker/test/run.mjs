@@ -4746,6 +4746,84 @@ await test("comments: an html thread sits on the element whose text begins with 
   assert.deepEqual((await threads("Library/Talk/both")).map((t) => t.version), ["md", "md"]);
 });
 
+await test("comments: an html thread by an element's id, and one on words — a write may reword or move what a thread is on, and may not take it away", async () => {
+  const PAGE = [
+    "<!doctype html>",
+    "<html><body>",
+    '<section id="launch"><h2>Launch</h2>',
+    "<p>The boat ships in June if the paint dries.</p>",
+    '<figure id="revenue-chart"><svg width="40" height="20"></svg></figure>',
+    '<figure id="twice"></figure><figure id="twice"></figure>',
+    "</section>",
+    "</body></html>",
+    "",
+  ].join("\n");
+  // A thread on words is the app's to start: here as a Mac left it.
+  const WORDS = { path: "", tag: "p", text: "The boat ships in June if the paint dries.", ids: ["launch"], quote: "ships in June", prefix: "The boat ", suffix: " if the paint dries." };
+  await freshWorkspace({
+    "Talk/page.html": PAGE,
+    "Talk/page.meta.jsonl": sidecar({ t: "hthread", id: "words1", anchor: WORDS, comments: [{ author: "Ada", at: 1757000000000, body: "Still June?" }] }),
+  });
+  const bot = await addAgent("Page reviewer", ["comment", "edit"]);
+  const api = as(bot);
+  const say = (body) => api("/api/agent/comments", { method: "POST", body });
+  const threads = async () => (await api(commentsUrl("Library/Talk/page"))).json.threads;
+  const anchorOf = (id) => recordsOf(textAt("Talk/page.meta.jsonl")).find((r) => r.id === id).anchor;
+  const put = (body) => api(docUrl("Library/Talk/page", "html", "&force=1"), { method: "PUT", body });
+
+  // An element with no words is named by its id, and the thread keeps the ids around it.
+  const chart = await say({ path: "Library/Talk/page", on: "#revenue-chart", body: "Which year?" });
+  assert.deepEqual([chart.status, chart.json.tag, chart.json.on], [201, "figure", ""]);
+  assert.deepEqual(anchorOf(chart.json.thread), { path: "", tag: "figure", text: "", ids: ["revenue-chart", "launch"] });
+  const none = await say({ path: "Library/Talk/page", on: "#no-such", body: "?" });
+  assert.deepEqual([none.status, none.json.code], [404, "anchor"]);
+  assert.ok(none.json.error.includes('has the id "no-such"'), none.json.error);
+  const two = await say({ path: "Library/Talk/page", on: "#twice", body: "?" });
+  assert.deepEqual([two.status, two.json.code, two.json.candidates.length], [409, "anchor", 2]);
+  // One started by its opening words keeps them too.
+  const heading = await say({ path: "Library/Talk/page", on: "Launch", body: "Good." });
+  assert.deepEqual(anchorOf(heading.json.thread), { path: "", tag: "h2", text: "Launch", ids: ["launch"] });
+  assert.deepEqual(anchorOf("words1"), WORDS, "a thread on words comes through the worker's writes whole");
+  assert.deepEqual((await threads()).map((t) => [t.id, t.on, t.tag, t.orphaned ?? false]).sort(), [
+    [chart.json.thread, "", "figure", false],
+    [heading.json.thread, "Launch", "h2", false],
+    ["words1", "ships in June", "p", false],
+  ].sort());
+
+  // The page written again. The paragraph around the words changes, the words
+  // are reworded a little, everything moves into another section: all fine.
+  const moved = PAGE.replace('<section id="launch">', '<section id="plan">')
+    .replace("<p>The boat ships in June if the paint dries.</p>", "<p>Weather allowing, the boat ships in Juni.</p>")
+    .replace('<figure id="revenue-chart"><svg width="40" height="20"></svg></figure>', '<div><figure id="revenue-chart"><svg width="80" height="20"></svg></figure></div>');
+  assert.equal((await put(moved)).status, 200);
+  assert.deepEqual((await threads()).map((t) => t.orphaned ?? false), [false, false, false]);
+
+  // Taking the words away is refused, and the refusal says which words.
+  const seq = storedManifest().seq;
+  const noWords = await put(moved.replace("<p>Weather allowing, the boat ships in Juni.</p>", "<p>Weather allowing, we wait.</p>"));
+  assert.deepEqual([noWords.status, noWords.json.code, noWords.json.threads], [400, "comments", ["words1"]]);
+  assert.ok(noWords.json.error.includes('the words comment #words1 is on ("ships in June") — keep those words'), noWords.json.error);
+  // And so is taking away an element named by its id, which says the id.
+  const noChart = await put(moved.replace('<div><figure id="revenue-chart"><svg width="80" height="20"></svg></figure></div>', ""));
+  assert.deepEqual([noChart.status, noChart.json.threads], [400, [chart.json.thread]]);
+  assert.ok(noChart.json.error.includes(`the <figure id="revenue-chart"> comment #${chart.json.thread} is on — keep that element and its id`), noChart.json.error);
+  // Both at once: each is named.
+  const neither = await put(moved.replace("<p>Weather allowing, the boat ships in Juni.</p>", "").replace("<h2>Launch</h2>", "<h2>Leaving</h2>"));
+  assert.deepEqual([neither.status, neither.json.threads.slice().sort()], [400, [heading.json.thread, "words1"].sort()]);
+  assert.ok(neither.json.error.includes("keep them"), neither.json.error);
+  assert.equal(storedManifest().seq, seq, "a refused write writes nothing");
+
+  // A page that builds itself: what its file never had is not this write's to keep.
+  await freshWorkspace({
+    "Talk/built.html": '<!doctype html><html><body><div id="app"></div><script>render()</script></body></html>\n',
+    "Talk/built.meta.jsonl": sidecar({ t: "hthread", id: "built1", anchor: { path: "", tag: "p", text: "Built by the page.", ids: ["app"], quote: "the page", prefix: "Built by ", suffix: "." }, comments: [{ author: "Ada", at: 1757000000000, body: "Says who?" }] }),
+  });
+  const bot2 = await addAgent("Page writer", ["comment", "edit"]);
+  const built = await as(bot2)(docUrl("Library/Talk/built", "html", "&force=1"), { method: "PUT", body: '<!doctype html><html><body><div id="app"></div><script>render(2)</script></body></html>\n' });
+  assert.equal(built.status, 200);
+  assert.deepEqual((await as(bot2)(commentsUrl("Library/Talk/built"))).json.threads.map((t) => [t.id, t.on, t.orphaned ?? false]), [["built1", "the page", false]], "and nobody can say it is gone");
+});
+
 /* ---------- The document API: search ---------- */
 
 const searchUrl = (q, more = "") => `/api/agent/search?q=${encodeURIComponent(q)}${more}`;

@@ -505,6 +505,46 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   the bridge can. So only a shortcut that is harmless when faked goes in
   `APP_SHORTCUTS`, and the app takes one only while the frame holds focus.
 
+## Comments on an html page (`HtmlView.tsx`, `htmlBridge.ts`)
+
+- **The script leaves the page as it found it.** It sets no attribute and
+  adds no element: words are tinted through `CSS.highlights`, its rules are
+  an adopted sheet, and its own `<script>` is gone before the page's run.
+  Everything a person presses (cards, a part's marker, the Comment button,
+  the picking bar) is drawn by the app outside the frame. Document zoom on
+  `<body>` is the one thing it writes.
+- **Comments sit beside the page**, in the same cards and stacking a note
+  uses (`CommentsRail`). The frame's box gives the column `--comments-gutter`
+  only while comments are shown and the page has a thread, so the first
+  thread reflows the page: a draft card takes its place from the script's
+  next `layout`, never from the click.
+- The script says where a thread is **on the page**, not on screen, and the
+  page's scroll apart (`scroll`); the app moves its layers by a transform as
+  each scroll arrives. Every box goes through the script's one `box`, which
+  carries the zoom correction; a range's rects too.
+- **The page is all that scrolls**, and the cards follow it. The wheel over
+  the column scrolls the page; when the browser scrolls the column itself
+  to show something in a card (the caret, a control the Tab key lands on),
+  the view hands that move to the page (`scroll-by`) and puts the column
+  back, or every card would sit that far from its place. Nothing scrolls
+  past the page's end, so the rail keeps a card above it (`floor`, from the
+  script's `pageHeight`).
+- Outside picking, the page's clicks are its own. Picking (`C`) pauses the
+  page's presses, links and selection, and a click anywhere in a part picks
+  it. A part is a box of its own with words, an id, or a picture's name; one
+  with none of them is not offered, because nothing could find it again.
+- Keys pressed inside the frame never reach the app, so the script passes
+  out `C`, `⇧C`, `⌘⌥M` and Esc (`key`) beside the app's shortcuts (above),
+  and the app takes one only while the frame holds focus. Nothing else
+  crosses.
+- What arrives from the frame is positions and quoted words, checked and cut
+  to an anchor's limits (`anchorFromFrame`) before it is saved: the sidecar
+  is synced to every device.
+- Without `CSS.highlights` (Safari before 17.2) no words are tinted; the app
+  outlines them while their card is open (`painted`).
+- How a thread finds its place, and what the worker and the iPhone answer
+  from the file: [cloud-people-agents.md](cloud-people-agents.md), *Comments*.
+
 ## Popups
 
 - Every modal, panel, popover and menu closes through `useDismiss`

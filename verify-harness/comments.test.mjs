@@ -1,8 +1,10 @@
 // The comment code of the Mac and of the iPhone, held to one set of cases:
 // verify-harness/comments-fixture.json. This side checks the TypeScript —
 // src/criticMarkup.ts, src/metaFile.ts, the worker's reading and placing of
-// threads (cloud-worker/src/agentComments.ts) and the merge of a sidecar
-// (src/web/merge.ts, which the engine's must answer alike) — and
+// threads (cloud-worker/src/agentComments.ts), its reading of a page and of
+// how much of a thread's place the file has (cloud-worker/src/htmlText.ts)
+// and the merge of a sidecar (src/web/merge.ts, which the engine's must
+// answer alike) — and
 // ios/DoklinKit/Tests/DoklinKitTests/CommentsTests.swift checks the Swift
 // port against the same file. A change to either side's rule fails here or
 // there until both say the same again. Run:
@@ -31,6 +33,7 @@ const cm = await load("src/criticMarkup.ts");
 const mf = await load("src/metaFile.ts");
 const ac = await load("cloud-worker/src/agentComments.ts");
 const mg = await load("src/web/merge.ts");
+const ht = await load("cloud-worker/src/htmlText.ts");
 const fx = JSON.parse(readFileSync(path.join(repoRoot, "verify-harness/comments-fixture.json"), "utf8"));
 
 let checked = 0;
@@ -69,6 +72,22 @@ for (const c of fx.extract) {
 const metaOf = (raw) => (raw === null ? mf.emptyMeta() : mf.parseEntityMeta(raw));
 
 for (const c of fx.threads) same(ac.threadsOf(c.md, c.html, metaOf(c.meta)), c.threads, `threads: ${c.about}`);
+
+// A page read from its file: what it says as one run of text, and each
+// element's tag, id and the start of what it says. Then how much of a
+// thread's place a file has (`level`), and whether a 0 says it is gone
+// (`known`). A case's `state` is the app's script's, in the page as drawn:
+// drive.mjs checks it.
+for (const c of fx.pages) {
+  const page = ht.readPage(c.html);
+  same(page.text, c.text, `page, text: ${c.about}`);
+  same(page.runsScript, c.runsScript, `page, script: ${c.about}`);
+  same(page.elements.map((el) => [el.tag, el.id, el.text]), c.elements, `page, elements: ${c.about}`);
+}
+for (const c of fx.places) {
+  const place = ht.placeOf(ht.readPage(c.html), c.anchor);
+  same([place.level, place.known], [c.level, c.known], `place: ${c.about}`);
+}
 
 /* ---------- What the phone does to a document, done the worker's way ---------- */
 

@@ -7,8 +7,8 @@
 //
 // Nothing about where comments live changes for an agent: a markdown thread
 // is still a marker in the text (`{==words==}{>>#id<<}`) with its conversation
-// in the sidecar, and an html thread is still wholly in the sidecar, anchored
-// to an element (src/metaFile.ts, src/htmlComments.ts). What changes is that
+// in the sidecar, and an html thread is still wholly in the sidecar, on words
+// of the page or on a part of it (src/metaFile.ts, src/htmlComments.ts). What changes is that
 // the agent never sees either half. It names a document and some words, and
 // the worker writes the marker and the record in one manifest write — so a
 // thread can never be half-made.
@@ -18,7 +18,8 @@ import { documentAt } from "./agentDocs";
 import { Refusal, newFileId, type Tx } from "./commit";
 import { Index, askedVersion, versionFlag, type Doc, type Version } from "./documents";
 import { json, readJsonObject } from "./http";
-import { ANCHOR_TEXT_LEN, anchorResolves, elementsOf, elementsStartingWith, normalizeText } from "./htmlText";
+import { ANCHOR_TEXT_LEN } from "../../src/htmlComments";
+import { elementsStartingWith, elementsWithId, idsAround, normalizeText, placeOf, readPage, type HtmlElement } from "./htmlText";
 import { blobKey, contentTypeOf } from "./layout";
 import { mirrorAfter } from "./search";
 import {
@@ -44,13 +45,13 @@ import {
 export type Thread = {
   id: string;
   version: Version;
-  /** The text it is anchored on: the marked words, or the start of the element. */
+  /** The text it is on: the marked words; on a page, its words, or the start of the part it is on. */
   on: string;
   /** Markdown only: the line its marker is on, 1-based. */
   line?: number;
-  /** Html only: the element it is on. */
+  /** Html only: the part it is on, or the part its words are in. */
   tag?: string;
-  /** Its anchor is gone — the marker was removed, or no element matches any more. */
+  /** Its place is gone — the marker was removed, or the page's file has neither its words nor its part. */
   orphaned?: true;
   comments: { author: string; at: number; body: string }[];
 };
@@ -125,15 +126,17 @@ export function threadsOf(md: string | null, html: string | null, meta: EntityMe
     for (const t of meta.mthreads) out.push({ id: t.id, version: "md", on: "", orphaned: true, comments: entries(t.comments) });
   }
 
-  const elements = html !== null && meta.hthreads.length > 0 ? elementsOf(html) : null;
+  // A thread is gone when the file has neither its words nor its part, and
+  // the file can say so (`placeOf`): what a page's script builds is not in it.
+  const page = html !== null && meta.hthreads.length > 0 ? readPage(html) : null;
   for (const t of meta.hthreads) {
-    const resolves = elements !== null && anchorResolves(elements, t.anchor);
+    const place = page ? placeOf(page, t.anchor) : { level: 0, known: true };
     out.push({
       id: t.id,
       version: "html",
-      on: t.anchor.text,
+      on: t.anchor.quote ?? t.anchor.text,
       tag: t.anchor.tag,
-      ...(resolves ? {} : { orphaned: true as const }),
+      ...(place.level === 0 && place.known ? { orphaned: true as const } : {}),
       comments: entries(t.comments),
     });
   }
@@ -362,21 +365,40 @@ async function start(
   if (!doc.html) return new Refusal(404, `${doc.stem} has no html version`);
   const html = await tx.readText(doc.html.fid);
   if (html === null) return new Refusal(503, "its content has not finished syncing — try again in a moment");
-  // An html thread sits on an element, found by how its text begins — the
-  // same handle the app falls back to when a page is regenerated.
-  const hits = elementsStartingWith(elementsOf(html), on);
-  if (hits.length !== 1) {
-    const candidates = hits.slice(0, 20).map((el) => ({ tag: el.tag, text: el.text }));
-    return new Refusal(
-      hits.length === 0 ? 404 : 409,
-      hits.length === 0
-        ? `nothing on the html page of ${doc.stem} begins with "${normalizeText(on).slice(0, ANCHOR_TEXT_LEN)}" — give the opening words of a heading, a paragraph or a list item`
-        : `${hits.length} elements on the html page of ${doc.stem} begin with those words — give more of them`,
-      { code: "anchor", candidates },
-    );
+  // An html thread an agent starts sits on an element: the one whose text
+  // begins with the words, or the one with an id (`#name`) — the handle for
+  // a picture or a drawing, which has no words to begin with.
+  const page = readPage(html);
+  const byId = /^#(\S+)$/.exec(on.trim());
+  let hits: HtmlElement[];
+  if (byId) {
+    hits = elementsWithId(page.elements, byId[1]);
+    if (hits.length !== 1) {
+      return new Refusal(
+        hits.length === 0 ? 404 : 409,
+        hits.length === 0
+          ? `nothing on the html page of ${doc.stem} has the id "${byId[1]}" — give an element's id after the #, or its opening words`
+          : `${hits.length} elements on the html page of ${doc.stem} have the id "${byId[1]}" — give the opening words of the one you mean`,
+        { code: "anchor", candidates: hits.slice(0, 20).map((el) => ({ tag: el.tag, text: el.text })) },
+      );
+    }
+  } else {
+    hits = elementsStartingWith(page.elements, on);
+    if (hits.length !== 1) {
+      const candidates = hits.slice(0, 20).map((el) => ({ tag: el.tag, text: el.text }));
+      return new Refusal(
+        hits.length === 0 ? 404 : 409,
+        hits.length === 0
+          ? `nothing on the html page of ${doc.stem} begins with "${normalizeText(on).slice(0, ANCHOR_TEXT_LEN)}" — give the opening words of a heading, a paragraph or a list item, or an element's id as #id`
+          : `${hits.length} elements on the html page of ${doc.stem} begin with those words — give more of them`,
+        { code: "anchor", candidates },
+      );
+    }
   }
   const el = hits[0];
-  open.meta.hthreads = [...open.meta.hthreads, { id, anchor: { path: "", tag: el.tag, text: el.text }, comments: [entry] }];
+  const ids = idsAround(page.elements, el);
+  const anchor = { path: "", tag: el.tag, text: el.text, ...(ids.length > 0 ? { ids } : {}) };
+  open.meta.hthreads = [...open.meta.hthreads, { id, anchor, comments: [entry] }];
   return { md: open.md, answer: { path: doc.stem, thread: id, version, on: el.text, tag: el.tag } };
 }
 
