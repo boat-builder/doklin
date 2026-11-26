@@ -6,6 +6,8 @@
 //     was scrolled;
 //   - a *Copy link* of the workspace is followed in place too, one that
 //     opens nothing says why, and the web goes to the browser;
+//   - the tree opens the folders above the note a link went to, once: one
+//     closed again stays closed;
 //   - ⌘-click opens a new tab beside, several in a row line up, and nothing
 //     else moves;
 //   - a document open in another tab brings that tab forward, and its Back
@@ -132,6 +134,28 @@ step("one that opens nothing says why, and stays", said && (await heading()) ===
 await link("the web").click();
 const web = await poll(() => page.evaluate(() => window.__opened.includes("https://example.com/")));
 step("the web goes to the browser, and the tab stays", web && (await heading()) === "A" && (await labels()) === "a,d");
+
+/* 5b — the tree shows where the note a link went to is */
+{
+  const sub = page.locator('[data-tree-path="/docs/sub"]');
+  const subOpen = async () => (await sub.locator("xpath=..").getAttribute("aria-expanded")) === "true";
+  const c = page.locator('[data-tree-path="/docs/sub/c.md"]');
+  const closedBefore = !(await subOpen()) && (await c.count()) === 0;
+  await link("to c").click();
+  await at("C");
+  const shown = await poll(async () => (await subOpen()) && (await c.isVisible()), 2000).catch(() => false);
+  step(
+    "a link to a note in a closed folder opens that folder in the tree, on the note's row",
+    closedBefore && shown && (await c.getAttribute("class")).includes("is-active"),
+  );
+  await sub.click();
+  await poll(async () => !(await subOpen()), 2000);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus"))); // the tree reads the disk again
+  await page.waitForTimeout(500);
+  step("…and closed again, it stays closed", !(await subOpen()) && (await c.count()) === 0);
+  await key("Meta+BracketLeft");
+  await at("A");
+}
 
 /* 6 — ⌘-click */
 await link("to c").click({ modifiers: ["Meta"] });

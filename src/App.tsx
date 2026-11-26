@@ -2293,7 +2293,8 @@ export default function App() {
   // folder of this workspace shown in the sidebar. Taken once the window is
   // ready and again each time something arrives. One that cannot be shown is
   // said in the backend's own sentence.
-  const [revealRequest, setRevealRequest] = useState<{ path: string; seq: number } | null>(null);
+  const [revealRequest, setRevealRequest] = useState<{ path: string; kind: "file" | "dir" } | null>(null);
+  const clearRevealRequest = useCallback(() => setRevealRequest(null), []);
   const openTabRef = useRef(openTab);
   useEffect(() => {
     openTabRef.current = openTab;
@@ -2314,7 +2315,7 @@ export default function App() {
           setSidebarOpen(true);
           setSidebarMode("files");
           selectSidebarEntries([{ path: show.path, kind: "dir" }]);
-          setRevealRequest((r) => ({ path: show.path, seq: (r?.seq ?? 0) + 1 }));
+          setRevealRequest({ path: show.path, kind: "dir" });
         } else {
           await openTabRef.current(show.path);
         }
@@ -5327,6 +5328,12 @@ export default function App() {
   const ownWindows = backend.localFiles != null && backend.windows != null;
   const onHistory = versionStore ? (path: string) => void openHistory(path) : undefined;
   const activeFilePath = activeTab?.kind === "file" ? activeTab.path : null;
+  // The tree shows where the open document is: each time another becomes
+  // the active tab (from search, a link, another tab, an open from outside)
+  // the folders above it open and its row scrolls into view.
+  useEffect(() => {
+    setRevealRequest(activeFilePath ? { path: activeFilePath, kind: "file" } : null);
+  }, [activeFilePath]);
   // The document this window is editing — never a file that isn't one.
   const activeDocPath = activeUnsupported ? null : activeFilePath;
   // Presence: tell the engines which document this window is editing (a
@@ -6397,6 +6404,7 @@ export default function App() {
           currentTitle={activeTab?.kind === "file" ? activeTab.title : undefined}
           selection={sidebarSelection}
           reveal={revealRequest}
+          onRevealTaken={clearRevealRequest}
           clipboard={fileClipboard}
           refreshToken={treeRefreshToken}
           onSelect={selectSidebarEntries}

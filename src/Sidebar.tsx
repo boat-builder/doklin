@@ -93,9 +93,13 @@ type Props = {
   // shows until the file is renamed to it.
   currentTitle?: string;
   selection: SidebarSelection[];
-  // A folder to bring into view — asked for from outside the app
-  // (`doklin open <folder>`); a new `seq` asks again.
-  reveal?: { path: string; seq: number } | null;
+  // What to bring into view: the open document each time another becomes
+  // active, or a folder asked for from outside the app (`doklin open
+  // <folder>`). One asked for while the tree is not drawn (in Search, the
+  // sidebar hidden) is taken when it is; `onRevealTaken` says it was, and
+  // the app then clears it, so a tree drawn again stays as it was left.
+  reveal?: { path: string; kind: "file" | "dir" } | null;
+  onRevealTaken?: () => void;
   // The shared file clipboard (null/empty = nothing to paste).
   clipboard: FileClipboardPayload | null;
   refreshToken: number;
@@ -324,6 +328,7 @@ export default function Sidebar({
   currentTitle,
   selection,
   reveal = null,
+  onRevealTaken,
   clipboard,
   refreshToken,
   onSelect,
@@ -514,42 +519,35 @@ export default function Sidebar({
     [sectionOf],
   );
 
-  // Bring the folder an open from outside asked for into view: unfold its
-  // list, open the folders above it (and it), then scroll to its row once the
-  // tree has drawn it. A folder the tree never shows (a hidden one) simply
-  // never scrolls.
-  const revealedRef = useRef(0);
+  // Bring what the app asked for into view: unfold its list and open the
+  // folders above it (and a folder itself) once, then scroll to its row as
+  // soon as the tree draws it. Opening only once means a folder closed
+  // afterwards stays closed. Something the tree never shows (a hidden file,
+  // a note outside the workspace) simply never scrolls.
+  const revealedRef = useRef<Props["reveal"]>(null);
+  const [scrollTarget, setScrollTarget] = useState<string | null>(null);
   useEffect(() => {
-    if (!reveal || revealedRef.current === reveal.seq || !tree) return;
-    const target = reveal.path;
+    if (!reveal || revealedRef.current === reveal || !tree) return;
+    revealedRef.current = reveal;
+    onRevealTaken?.();
+    const { path, kind } = reveal;
+    if (!path.startsWith(`${root}/`)) return;
     // A section's own folder has no row to open.
-    const shut = foldersDownTo(root, target).filter(
-      (dir) => !openDirs.has(dir) && !(sectioned && [libraryDir, restrictedDir, privateDir].includes(dir)),
+    openFolders(
+      foldersDownTo(root, kind === "dir" ? path : dirname(path)).filter(
+        (dir) => !(sectioned && [libraryDir, restrictedDir, privateDir].includes(dir)),
+      ),
     );
-    const list = sectionOf(target);
-    if (shut.length > 0 || (list && folded.has(list))) {
-      openFolders(shut);
-      unfoldSectionOf(target);
-      return; // this runs again once they are open
-    }
-    const row = document.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(target)}"]`);
-    if (!row) return;
-    revealedRef.current = reveal.seq;
+    unfoldSectionOf(path);
+    setScrollTarget(path);
+  }, [reveal, tree, root, sectioned, libraryDir, restrictedDir, privateDir, openFolders, unfoldSectionOf, onRevealTaken]);
+  useEffect(() => {
+    if (!scrollTarget) return;
+    const row = document.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(scrollTarget)}"]`);
+    if (!row) return; // not drawn yet: this runs again as the tree changes
+    setScrollTarget(null);
     row.scrollIntoView({ block: "nearest" });
-  }, [
-    reveal,
-    tree,
-    openDirs,
-    folded,
-    root,
-    sectioned,
-    libraryDir,
-    restrictedDir,
-    privateDir,
-    openFolders,
-    sectionOf,
-    unfoldSectionOf,
-  ]);
+  }, [scrollTarget, tree, openDirs, folded]);
 
   /* ---------- Selection (single, ⌘-toggle, ⇧-range) ---------- */
 
