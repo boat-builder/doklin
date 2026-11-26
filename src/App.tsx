@@ -47,7 +47,7 @@ import WorkspaceHistory from "./WorkspaceHistory";
 import VersionsSettings from "./VersionsSettings";
 import RecentlyDeleted, { deletedDocuments } from "./RecentlyDeleted";
 import { dragWindowFromGap } from "./windowDrag";
-import { keys } from "./keys";
+import { keys, type AppShortcut } from "./keys";
 import Editor, { type EditorHandle } from "./Editor";
 import DocTitle, { type DocTitleHandle } from "./DocTitle";
 import { titleProblem } from "./titleText";
@@ -4967,12 +4967,72 @@ export default function App() {
     [openTab, selectDocView, wsCase],
   );
 
-  // The one place document zoom moves: the window key handler below and the
-  // rendition frame's forwarded chords (it swallows keys of its own — see
-  // HtmlView) both land here. 1 = in, -1 = out, 0 = reset.
-  const nudgeDocZoom = useCallback((dir: number) => {
-    setDocZoom((z) => (dir === 0 ? DOC_ZOOM_DEFAULT : stepDocZoom(z, dir > 0 ? 1 : -1)));
-  }, []);
+  // The shortcuts that work wherever focus is (APP_SHORTCUTS): the window key
+  // handlers below and an html view's frame, which keys stop at and which
+  // passes these out by name (see HtmlView), both land here.
+  const runShortcut = useCallback(
+    (shortcut: AppShortcut) => {
+      switch (shortcut) {
+        case "back":
+          return goStep(-1);
+        case "forward":
+          return goStep(1);
+        case "zoom-in":
+          return setDocZoom((z) => stepDocZoom(z, 1));
+        case "zoom-out":
+          return setDocZoom((z) => stepDocZoom(z, -1));
+        case "zoom-reset":
+          return setDocZoom(DOC_ZOOM_DEFAULT);
+        case "close-tab":
+          // Asking first if it is an untitled note with text; with none left
+          // it closes the window (see onCloseRequested).
+          if (activeIdRef.current) void closeTab(activeIdRef.current);
+          else backend.windows?.close();
+          return;
+        case "new-tab":
+          return void newUntitled();
+        case "search":
+          return void openWorkspaceSearch();
+        case "open-file":
+          return void openFilePicker();
+        case "open-folder":
+          return void openFolderPicker();
+        case "open-file-window":
+          return void openFileInNewWindow();
+        case "open-folder-window":
+          return void openFolderInNewWindow();
+        case "next-tab":
+          return cycleTab(1);
+        case "previous-tab":
+          return cycleTab(-1);
+        case "next-window":
+          return backend.windows?.focusNext(false);
+        case "previous-window":
+          return backend.windows?.focusNext(true);
+        case "split":
+          return void toggleSplit();
+        case "sidebar":
+          if (workspaceRoot) setSidebarOpen((v) => !v);
+          return;
+        case "history":
+          return toggleHistory();
+      }
+    },
+    [
+      goStep,
+      closeTab,
+      newUntitled,
+      openWorkspaceSearch,
+      openFilePicker,
+      openFolderPicker,
+      openFileInNewWindow,
+      openFolderInNewWindow,
+      cycleTab,
+      toggleSplit,
+      workspaceRoot,
+      toggleHistory,
+    ],
+  );
 
   // ⌘[ and ⌘]: Back and Forward, wherever focus is. Taken in the capture
   // phase, before the editor's own bindings for the two (Milkdown's list
@@ -4985,11 +5045,11 @@ export default function App() {
       if (e.code !== "BracketLeft" && e.code !== "BracketRight") return;
       e.preventDefault();
       e.stopPropagation();
-      goStep(e.code === "BracketLeft" ? -1 : 1);
+      runShortcut(e.code === "BracketLeft" ? "back" : "forward");
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [goStep]);
+  }, [runShortcut]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -5007,10 +5067,12 @@ export default function App() {
       }
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
+      // An html view's frame matches these as this does, branch for branch
+      // and in this order (appShortcut, htmlBridge.ts) — change both.
       const k = e.key.toLowerCase();
       if (k === "f" && e.shiftKey) {
         e.preventDefault();
-        void openWorkspaceSearch();
+        runShortcut("search");
       } else if (k === "f" && !e.shiftKey) {
         e.preventDefault();
         const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
@@ -5027,15 +5089,12 @@ export default function App() {
         // ⌘N and ⌘T both open a new untitled tab (⌘T is the macOS/VS Code
         // "new tab" convention; the tab-per-document model makes them the same).
         e.preventDefault();
-        void newUntitled();
+        runShortcut("new-tab");
       } else if (k === "w" && !e.shiftKey) {
-        // ⌘W closes the active tab — asking first if it is an untitled note
-        // with text; with none left it closes the window (see
-        // onCloseRequested). ⌘⇧W always closes the window (native menu item).
-        // VS Code / Chrome convention.
+        // ⌘W closes the active tab; ⌘⇧W always closes the window (native
+        // menu item). VS Code / Chrome convention.
         e.preventDefault();
-        if (activeIdRef.current) void closeTab(activeIdRef.current);
-        else backend.windows?.close();
+        runShortcut("close-tab");
       } else if (k === "backspace") {
         // ⌘⌫ moves the selected entries to the Trash — but only when focus is
         // outside the editor, so it stays Milkdown's delete-to-line-start while
@@ -5095,30 +5154,28 @@ export default function App() {
         // Use e.code, not e.key: on macOS holding ⌥ remaps e.key (⌥O → "ø").
         // ⌥ → open in a NEW window; ⇧ → folder instead of file.
         e.preventDefault();
-        if (e.altKey && e.shiftKey) void openFolderInNewWindow();
-        else if (e.altKey) void openFileInNewWindow();
-        else if (e.shiftKey) void openFolderPicker();
-        else void openFilePicker();
+        if (e.altKey) runShortcut(e.shiftKey ? "open-folder-window" : "open-file-window");
+        else runShortcut(e.shiftKey ? "open-folder" : "open-file");
       } else if (e.code === "Tab" && e.ctrlKey) {
         // Ctrl+Tab / Ctrl+⇧Tab: cycle tabs within this window (VS Code style).
         e.preventDefault();
-        cycleTab(e.shiftKey ? -1 : 1);
+        runShortcut(e.shiftKey ? "previous-tab" : "next-tab");
       } else if (e.code === "Backquote" && e.metaKey) {
         // ⌘` / ⌘⇧`: cycle between this app's windows (Safari style).
         e.preventDefault();
-        backend.windows?.focusNext(e.shiftKey);
+        runShortcut(e.shiftKey ? "previous-window" : "next-window");
       } else if (e.code === "Backslash" && e.shiftKey) {
         // ⌘⇧\ (reads as "|" in e.key, hence e.code): toggle the split view.
         e.preventDefault();
-        void toggleSplit();
+        runShortcut("split");
       } else if (k === "\\") {
         e.preventDefault();
-        if (workspaceRoot) setSidebarOpen((v) => !v);
+        runShortcut("sidebar");
       } else if (e.code === "KeyH" && e.altKey) {
         // ⌘⌥H: the version rail for the open document. e.code, not e.key:
         // on macOS ⌥ remaps e.key (⌥H → "˙").
         e.preventDefault();
-        toggleHistory();
+        runShortcut("history");
       } else if (e.code === "Equal" || e.code === "NumpadAdd") {
         // ⌘+ / ⌘- / ⌘0: document zoom, both versions (see DOC_ZOOM_STEPS).
         // e.code, not e.key: on most layouts ⌘+ arrives as ⌘⇧= — matching the
@@ -5126,13 +5183,13 @@ export default function App() {
         // It fires wherever focus is (typing included): resizing the text you
         // are reading is never ambiguous.
         e.preventDefault();
-        nudgeDocZoom(1);
+        runShortcut("zoom-in");
       } else if (e.code === "Minus" || e.code === "NumpadSubtract") {
         e.preventDefault();
-        nudgeDocZoom(-1);
+        runShortcut("zoom-out");
       } else if (e.code === "Digit0" || e.code === "Numpad0") {
         e.preventDefault();
-        nudgeDocZoom(0);
+        runShortcut("zoom-reset");
       } else if (k === "z" && !e.shiftKey) {
         // ⌘Z restores a trashed file — but only when focus is outside the
         // editor, so it stays as Milkdown's text-undo while typing.
@@ -5148,26 +5205,14 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [
     handleSave,
-    newUntitled,
-    toggleHistory,
-    closeTab,
-    deleteEntry,
+    runShortcut,
     deleteEntries,
     copyEntries,
     pasteEntries,
-    openFolderPicker,
-    openFilePicker,
-    openFileInNewWindow,
-    openFolderInNewWindow,
-    cycleTab,
     workspaceRoot,
     libraryDir,
     sidebarOpen,
     undoDelete,
-    openWorkspaceSearch,
-    selectDocView,
-    toggleSplit,
-    nudgeDocZoom,
   ]);
 
   useEffect(() => {
@@ -6122,9 +6167,8 @@ export default function App() {
                   : barToolSlot
               }
               zoom={docZoom}
-              onZoomKey={nudgeDocZoom}
+              onShortcut={runShortcut}
               onFollowLink={(href, newTab) => followLink(href, side, newTab)}
-              onStepKey={goStep}
               onScrollRatio={side === "left" ? htmlRatioLeft : htmlRatioRight}
               onGesture={
                 side === effectiveSplit?.side && !focused

@@ -46,6 +46,7 @@
 // file surface as "orphaned" cards in the rail — never silently dropped.
 
 import type { HtmlAnchor, HtmlThread } from "./htmlComments";
+import type { AppShortcut } from "./keys";
 
 // What the app sends the bridge. `threads` carries anchors only — bodies stay
 // app-side. Sent on ready and on every change (threads are few; simplicity
@@ -108,13 +109,10 @@ export type BridgeScrollMsg = { dk: "doklin-comments"; type: "scroll"; ratio: nu
 // Any pointerdown inside the rendition. The iframe swallows clicks (separate
 // browsing context), so this is how the app knows to move pane focus there.
 export type BridgeGestureMsg = { dk: "doklin-comments"; type: "gesture" };
-// A zoom chord pressed while focus sits inside the frame: 1 = in, -1 = out,
-// 0 = reset. Key events don't cross the frame boundary either, so without
-// this the shortcuts would go dead the moment the reader clicks the page.
-export type BridgeZoomKeyMsg = { dk: "doklin-comments"; type: "zoom-key"; dir: number };
-// ⌘[ or ⌘] pressed inside the frame: Back (-1) or Forward (1), for the same
-// reason.
-export type BridgeStepKeyMsg = { dk: "doklin-comments"; type: "step-key"; by: -1 | 1 };
+// One of the app's shortcuts (`APP_SHORTCUTS`, keys.ts) pressed while focus
+// sits inside the frame. Key events don't cross the frame boundary either,
+// so without this they would go dead the moment the reader clicks the page.
+export type BridgeShortcutMsg = { dk: "doklin-comments"; type: "shortcut"; shortcut: AppShortcut };
 // The computed colour the rendition paints its canvas with (may be
 // transparent), re-sent whenever it changes. The frame's scrollbar gutter
 // lies outside that canvas and shows the iframe element's own backdrop, so
@@ -129,8 +127,7 @@ export type BridgeOutMsg =
   | BridgeFollowMsg
   | BridgeScrollMsg
   | BridgeGestureMsg
-  | BridgeZoomKeyMsg
-  | BridgeStepKeyMsg
+  | BridgeShortcutMsg
   | BridgeCanvasMsg;
 
 export function isBridgeMsg(data: unknown): data is BridgeOutMsg {
@@ -637,26 +634,46 @@ const BRIDGE_SCRIPT = `
   );
 
   // Once the reader clicks into the rendition, keystrokes stop at the frame
-  // boundary — the app's window listener never sees them. Forward the three
-  // zoom chords so ⌘+ / ⌘- / ⌘0 keep working here, and ⌘[ / ⌘] for Back and
-  // Forward; nothing else crosses (this is not a general key tunnel out of
-  // arbitrary markup).
+  // boundary — the app's window listeners never see them. Pass the app's
+  // shortcuts out by name (APP_SHORTCUTS, keys.ts); nothing else crosses
+  // (this is not a general key tunnel out of arbitrary markup), and the page
+  // keeps the rest: ⌘F, ⌘S, ⌘⌫, ⌘C / ⌘X / ⌘V and ⌘Z are its own here.
+  //
+  // Matched as the window's key handlers match them (App.tsx: the ⌘[ / ⌘]
+  // handler, then onKey, branch for branch and in its order) — change both.
+  function appShortcut(e) {
+    if (!e.metaKey && !e.ctrlKey) return null;
+    if ((e.code === "BracketLeft" || e.code === "BracketRight") && !e.altKey && !e.shiftKey) {
+      return e.code === "BracketLeft" ? "back" : "forward";
+    }
+    var k = (e.key || "").toLowerCase();
+    if (k === "f") return e.shiftKey ? "search" : null;
+    if (k === "s" && !e.shiftKey) return null;
+    if ((k === "n" || k === "t") && !e.shiftKey) return "new-tab";
+    if (k === "w" && !e.shiftKey) return "close-tab";
+    if (k === "backspace") return null;
+    if ((k === "c" || k === "x" || k === "v") && !e.shiftKey && !e.altKey) return null;
+    if (e.code === "KeyO") {
+      if (e.altKey) return e.shiftKey ? "open-folder-window" : "open-file-window";
+      return e.shiftKey ? "open-folder" : "open-file";
+    }
+    if (e.code === "Tab" && e.ctrlKey) return e.shiftKey ? "previous-tab" : "next-tab";
+    if (e.code === "Backquote" && e.metaKey) return e.shiftKey ? "previous-window" : "next-window";
+    if (e.code === "Backslash" && e.shiftKey) return "split";
+    if (k === "\\\\") return "sidebar";
+    if (e.code === "KeyH" && e.altKey) return "history";
+    if (e.code === "Equal" || e.code === "NumpadAdd") return "zoom-in";
+    if (e.code === "Minus" || e.code === "NumpadSubtract") return "zoom-out";
+    if (e.code === "Digit0" || e.code === "Numpad0") return "zoom-reset";
+    return null;
+  }
   document.addEventListener(
     "keydown",
     function (e) {
-      if (!e.metaKey && !e.ctrlKey) return;
-      if ((e.code === "BracketLeft" || e.code === "BracketRight") && !e.altKey && !e.shiftKey) {
-        e.preventDefault();
-        post({ type: "step-key", by: e.code === "BracketLeft" ? -1 : 1 });
-        return;
-      }
-      var dir = null;
-      if (e.code === "Equal" || e.code === "NumpadAdd") dir = 1;
-      else if (e.code === "Minus" || e.code === "NumpadSubtract") dir = -1;
-      else if (e.code === "Digit0" || e.code === "Numpad0") dir = 0;
-      if (dir === null) return;
+      var shortcut = appShortcut(e);
+      if (shortcut === null) return;
       e.preventDefault();
-      post({ type: "zoom-key", dir: dir });
+      post({ type: "shortcut", shortcut: shortcut });
     },
     true
   );
