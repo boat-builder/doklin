@@ -165,6 +165,8 @@ export class Saving {
    *  apart). */
   private readonly tab = Math.random().toString(36).slice(2, 10);
   private drafts = false;
+  /** The page is going by `reload`, with what waits kept for the next. */
+  private reloading = false;
   /** Hands over what the app still holds: the text typed since its last save. */
   private handOver: () => unknown = () => {};
 
@@ -528,6 +530,14 @@ export class Saving {
     this.forget(() => true);
   }
 
+  /** Reload the page. The page that comes back sends what waits (`recover`),
+   *  so this one goes without asking — unless this browser keeps nothing,
+   *  when it asks as a closing tab does. */
+  reload(): void {
+    this.reloading = this.drafts;
+    location.reload();
+  }
+
   /** Let go of everything held under a path: it is being removed. */
   private forget(under: (file: string) => boolean): void {
     for (const [path, doc] of [...this.docs]) {
@@ -688,7 +698,7 @@ export class Saving {
     });
     addEventListener("beforeunload", (e) => {
       hand();
-      if (this.docs.size === 0) return;
+      if (this.docs.size === 0 || this.reloading) return;
       this.pushAll(false);
       e.preventDefault();
       // What the browsers that predate `preventDefault` here ask for.
