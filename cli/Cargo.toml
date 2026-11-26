@@ -10,14 +10,22 @@ name = "doklin"
 path = "src/main.rs"
 
 [dependencies]
-# Blocking HTTP with rustls and bundled roots: one static binary, nothing to
-# install beside it on a bot's machine.
-ureq = "2"
+# Blocking HTTP with rustls: one static binary, nothing to install beside it
+# on a bot's machine. The machine decides which certificates to trust, as for
+# every program on it (ureq's platform verifier, http.rs `tls`); no roots are
+# bundled. rustls is ureq's own, for its crypto (ring) and its errors.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "gzip"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gethostname = "0.5"
 # The local time zone (`localtime_r`), to say when a day's allowance comes back.
 libc = "0.2"
+
+[dev-dependencies]
+# A certificate authority of a test's own, for a loopback HTTPS stand-in
+# (tests/tls.rs).
+rcgen = "0.14"
 
 [profile.release]
 opt-level = "z"

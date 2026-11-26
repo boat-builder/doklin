@@ -23,7 +23,11 @@ futures-util = "0.3.34"
 # HTTPS to the workspace's worker, content hashing, three-way merge for
 # concurrent edits, random ids and tokens, and local-time labels on conflict
 # copies.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "json"] }
+# The OS checks every certificate (src/https.rs). rustls is reqwest's own,
+# with its crypto (ring).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
 sha2 = "0.10"
 diffy = "0.4"
 getrandom = "0.2"
@@ -43,3 +47,6 @@ notify-debouncer-full = "0.3"
 tempfile = "3"
 # Paused virtual time for the engine's settle-timing tests (src/cloud/tests.rs).
 tokio = { version = "1", features = ["test-util", "rt-multi-thread"] }
+# A certificate authority of a test's own, for a loopback HTTPS stand-in
+# (src/https.rs).
+rcgen = "0.14"

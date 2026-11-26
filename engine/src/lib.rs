@@ -10,6 +10,7 @@
 //! host.rs       Core, Setup and the Host trait: the app, as the engine sees it
 //! paths.rs      paths as they are written down, where the app's folder can move
 //! cloud/        the sync engine, its manager and its commands
+//! https.rs      every HTTPS client the apps build: the OS checks certificates
 //! versions/     the version store, its manager and its commands
 //! sidecar.rs    a document's `.meta.jsonl`, merged by its records
 //! command.rs    every command by name, JSON in and JSON out
@@ -18,6 +19,7 @@
 pub mod cloud;
 pub mod command;
 mod host;
+pub mod https;
 pub mod paths;
 pub mod sidecar;
 pub mod versions;
