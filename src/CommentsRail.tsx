@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -108,36 +109,39 @@ export default function CommentsRail({
   onDeleteThread,
   onDeleteReply,
 }: Props) {
-  // Real card heights, measured by a shared ResizeObserver: the stacking
-  // layout needs them, and they change as threads grow or cards expand.
+  // Real card heights: the stacking layout needs them, and they change as
+  // threads grow or cards expand. Read after every render, before the
+  // browser paints, so a card that opened in that render is stacked by the
+  // height it has now; and by a shared ResizeObserver, for a change no render
+  // of the rail brings (a reply box growing as it is typed in).
   const heightsRef = useRef<Map<string, number>>(new Map());
+  const nodesRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const [measureTick, setMeasureTick] = useState(0);
-  const observerRef = useRef<ResizeObserver | null>(null);
-  const idOfNode = useRef<WeakMap<Element, string>>(new WeakMap());
-
-  if (!observerRef.current && typeof ResizeObserver !== "undefined") {
-    observerRef.current = new ResizeObserver((entries) => {
-      let changed = false;
-      for (const entry of entries) {
-        const id = idOfNode.current.get(entry.target);
-        if (!id) continue;
-        const height = (entry.target as HTMLElement).offsetHeight;
-        if (Math.abs((heightsRef.current.get(id) ?? 0) - height) > 0.5) {
-          heightsRef.current.set(id, height);
-          changed = true;
-        }
+  const measure = useCallback(() => {
+    let changed = false;
+    for (const [id, node] of nodesRef.current) {
+      const height = node.offsetHeight;
+      if (Math.abs((heightsRef.current.get(id) ?? 0) - height) > 0.5) {
+        heightsRef.current.set(id, height);
+        changed = true;
       }
-      if (changed) setMeasureTick((t) => t + 1);
-    });
+    }
+    if (changed) setMeasureTick((t) => t + 1);
+  }, []);
+  const observerRef = useRef<ResizeObserver | null>(null);
+  if (!observerRef.current && typeof ResizeObserver !== "undefined") {
+    observerRef.current = new ResizeObserver(measure);
   }
   useEffect(() => () => observerRef.current?.disconnect(), []);
+  useLayoutEffect(measure);
 
   const cardRef = useCallback((id: string) => {
     return (node: HTMLDivElement | null) => {
       if (node) {
-        idOfNode.current.set(node, id);
-        heightsRef.current.set(id, node.offsetHeight);
+        nodesRef.current.set(id, node);
         observerRef.current?.observe(node);
+      } else {
+        nodesRef.current.delete(id);
       }
     };
   }, []);
