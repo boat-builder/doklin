@@ -331,7 +331,9 @@ async fn download_verified(
         let _ = app.emit("pdf-export-progress", json!({ "stage": stage, "pct": pct }));
     };
     emit(Some(0));
-    let client = reqwest::Client::new();
+    let client = doklin_engine::https::builder()
+        .build()
+        .map_err(|e| format!("download failed ({url}): {e}"))?;
     let mut resp = client
         .get(url)
         .send()

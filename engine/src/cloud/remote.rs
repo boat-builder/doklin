@@ -763,7 +763,7 @@ impl HttpRemote {
 }
 
 fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::https::builder()
         .timeout(Duration::from_secs(60))
         .connect_timeout(Duration::from_secs(10))
         .build()
