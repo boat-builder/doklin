@@ -41,6 +41,13 @@ public struct Notice: Identifiable, Equatable, Sendable {
 public final class Workspaces {
     /// Every connected workspace, as the engine last said.
     public private(set) var statuses: [CloudStatus] = []
+    /// The domains whose worker turns this app away (`app-outdated`): a
+    /// release marked mandatory. The app covers itself until it is updated.
+    public var turnedAwayBy: [String] {
+        statuses.filter { $0.phase == .appOutdated }.map(\.domain).reduce(into: []) { domains, domain in
+            if !domains.contains(domain) { domains.append(domain) }
+        }
+    }
     /// Every version store, as the engine last said.
     public private(set) var versions: [VersionsStatus] = []
     /// The root of the workspace being looked at.

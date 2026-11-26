@@ -29,7 +29,8 @@ use serde_json::Value;
 /// `2` bad usage · `3` not found · `4` not permitted · `5` conflict ·
 /// `6` not logged in, or the login was revoked · `7` the workspace's worker
 /// is too old for this command · `8` the domain asked to slow down, or
-/// today's Cloudflare requests are used up · `1` anything else. The Doklin
+/// today's Cloudflare requests are used up · `9` this doklin is too old for
+/// the domain: update it · `1` anything else. The Doklin
 /// app reads `6` off the bundled copy (engine/src/cloud/terminal.rs) —
 /// change both.
 #[derive(Debug)]

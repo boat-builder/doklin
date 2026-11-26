@@ -124,6 +124,7 @@ public enum Publishing {
             case .paused: return "Sync is paused, so the page keeps what it had."
             case .pendingDeletes: return "Sync is holding a deletion for your go, and the page waits with it."
             case .workerOutdated: return "\(status.domain) needs a worker update before the page changes again."
+            case .appOutdated: return "\(status.domain) turns this Doklin away until it is updated, so the page keeps what it had."
             case .limited: return "Today’s Cloudflare requests are used up, so the page keeps what it had."
             default: return "Sync stopped: \(status.error ?? "an error")."
             }

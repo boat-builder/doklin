@@ -90,6 +90,7 @@ import {
   type Theme,
 } from "./theme";
 import { useUpdateCheck, RELEASES_PAGE, type UpdateController } from "./updater";
+import UpdateRequired from "./UpdateRequired";
 import HtmlView, { type HtmlViewHandle } from "./HtmlView";
 import { mergeHtmlThreads, type HtmlThread } from "./htmlComments";
 import { sanitizeAuthor, sanitizeBody } from "./criticMarkup";
@@ -1067,6 +1068,19 @@ export default function App() {
     () => cloudForWorkspace(cloudStatuses, workspaceRoot),
     [cloudStatuses, workspaceRoot],
   );
+  // A release marked mandatory: its manifest says this app is too old, or a
+  // domain's worker turns it away. UpdateRequired covers the window until the
+  // update is in.
+  const turnedAwayBy = useMemo(
+    () => [...new Set(cloudStatuses.filter((s) => s.phase === "app-outdated").map((s) => s.domain))],
+    [cloudStatuses],
+  );
+  const updateRequired = !!update && (update.required || turnedAwayBy.length > 0);
+  // The window's shortcuts reach nothing beneath the cover either.
+  const updateRequiredRef = useRef(updateRequired);
+  useEffect(() => {
+    updateRequiredRef.current = updateRequired;
+  }, [updateRequired]);
   // The folder the sidebar's first list is: a connected workspace's Library,
   // its top being in no section, or a folder that is not connected itself.
   // Where something new lands when nothing says where, and whose version
@@ -4966,6 +4980,7 @@ export default function App() {
   // Tab and ⇧Tab still do those.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (updateRequiredRef.current) return;
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
       if (e.code !== "BracketLeft" && e.code !== "BracketRight") return;
       e.preventDefault();
@@ -4978,6 +4993,7 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (updateRequiredRef.current) return;
       // Esc dismisses an active in-file highlight even when the find bar isn't
       // shown (e.g. after landing on a workspace-search result). When the bar IS
       // open and its input is focused, FindBar handles Esc itself; this is the
@@ -6202,9 +6218,11 @@ export default function App() {
   );
 
   return (
+    <>
     <div
       className={`app ${showSidebar ? "with-sidebar" : ""}`}
       style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
+      inert={updateRequired}
     >
       {showSidebar && titleLead}
       {zoomDiagramSvg && (
@@ -6697,6 +6715,10 @@ export default function App() {
         settingsMenu
       )}
     </div>
+    {updateRequired && update && (
+      <UpdateRequired update={update} domains={turnedAwayBy} onOpenExternal={openExternal} />
+    )}
+    </>
   );
 }
 

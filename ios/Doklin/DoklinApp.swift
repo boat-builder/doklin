@@ -61,23 +61,51 @@ extension EngineSetup {
         try? files.createDirectory(at: support, withIntermediateDirectories: true)
         try? support.setResourceValues(notBackedUp)
         try? documents.setResourceValues(notBackedUp)
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
         return EngineSetup(
             secrets: KeychainSecretStore(service: Bundle.main.bundleIdentifier ?? "doklin"),
             dataDirectory: support,
             workspacesDirectory: documents,
             anchor: URL(fileURLWithPath: NSHomeDirectory()),
-            client: "ios/\(version)",
+            client: "ios/\(AppVersion.client)",
             deviceName: UIDevice.current.name,
             deviceKind: UIDevice.current.model
         )
     }
 }
 
+/// What this build is, as TestFlight shows it and as `x-doklin-client` says
+/// it (cloud-worker/src/clients.ts — change both): the version, and the
+/// build Xcode numbered it on upload. A build run from Xcode says `dev`, which
+/// no domain turns away: its number is the project's, never one TestFlight
+/// gave.
+enum AppVersion {
+    static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+    #if DEBUG
+    static let build = "dev"
+    #else
+    static let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+    #endif
+    /// `0.1.0+57`.
+    static var client: String { "\(version)+\(build)" }
+    /// `0.1.0 (57)`.
+    static var shown: String { "\(version) (\(build))" }
+}
+
 struct RootView: View {
     @Environment(Workspaces.self) private var device
 
     var body: some View {
+        ZStack {
+            content
+                .accessibilityHidden(!device.turnedAwayBy.isEmpty)
+                .allowsHitTesting(device.turnedAwayBy.isEmpty)
+            if !device.turnedAwayBy.isEmpty {
+                UpdateRequiredView(domains: device.turnedAwayBy)
+            }
+        }
+    }
+
+    private var content: some View {
         Group {
             if !device.ready {
                 ProgressView()

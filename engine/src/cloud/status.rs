@@ -51,6 +51,10 @@ pub enum Phase {
     PendingAdds,
     Revoked,
     WorkerOutdated,
+    /// The domain's worker turns this app away until it is updated
+    /// (`RemoteError::TooOld`): the app asks for the update, and nothing
+    /// syncs meanwhile.
+    AppOutdated,
     /// Cloudflare's daily requests for the account are used up: nothing is
     /// sent until 00:00 UTC but a probe every half hour.
     Limited,

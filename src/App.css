@@ -5073,6 +5073,7 @@ body.tree-dragging.tree-drag-invalid * {
 }
 
 .cloud-dot.phase-revoked,
+.cloud-dot.phase-app-outdated,
 .cloud-dot.phase-error {
   background: var(--error);
   opacity: 1;
@@ -6591,4 +6592,82 @@ button.published-row-name:hover {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* ---------- Update required ----------
+   A version a release marked mandatory: the whole window, nothing else
+   (UpdateRequired.tsx). The bar along the top moves the window, as the title
+   row does. */
+
+.update-required {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--canvas);
+}
+
+.update-required-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--bar-h);
+}
+
+.update-required-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  max-width: 400px;
+  text-align: center;
+}
+
+.update-required-title {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--doc-h2);
+  font-weight: var(--doc-heading-weight);
+  color: var(--text-1);
+}
+
+.update-required-text,
+.update-required-note {
+  margin: 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.update-required-note {
+  color: var(--text-3);
+}
+
+.update-required-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.update-required-button {
+  padding: 7px 14px;
+  font-size: var(--fs-md);
+}
+
+.update-required-progress {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 240px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+.update-required-progress .settings-update-bar {
+  width: 100%;
+  margin: 0;
 }

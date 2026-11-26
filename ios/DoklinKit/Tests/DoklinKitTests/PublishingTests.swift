@@ -44,6 +44,11 @@ final class PublishingTests: XCTestCase {
             Publishing.reason(.stale, in: try status(phase: "offline", lastSyncMs: 0), now: 180_000),
             "Offline, so the page keeps what it had (synced 3 min ago)."
         )
+        XCTAssertEqual(Publishing.state(of: plan, in: try status(phase: "app-outdated", pages: pages), pending: false), .stale)
+        XCTAssertEqual(
+            Publishing.reason(.stale, in: try status(phase: "app-outdated"), now: 0),
+            "notes.example.com turns this Doklin away until it is updated, so the page keeps what it had."
+        )
         XCTAssertEqual(PageState.updating.label, "Updating")
         XCTAssertEqual(PageState.stale.heading, "isn’t updating")
     }

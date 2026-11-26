@@ -23,6 +23,7 @@ export type CloudPhase =
   | "pending-adds"
   | "revoked"
   | "worker-outdated"
+  | "app-outdated"
   | "limited"
   | "error";
 
@@ -730,6 +731,8 @@ export function phaseLine(s: CloudStatus, now = Date.now()): string {
       return "this Mac's token isn't accepted";
     case "worker-outdated":
       return "waiting on a worker update";
+    case "app-outdated":
+      return "this Doklin is too old for the domain";
     case "limited":
       return `Cloudflare’s requests are used up${resumesWords(s)}`;
     case "error":
@@ -776,6 +779,8 @@ export function syncWords(s: CloudStatus): { tone: SyncTone; text: string } {
       };
     case "worker-outdated":
       return { tone: "warn", text: "Worker update needed" };
+    case "app-outdated":
+      return { tone: "error", text: "Update Doklin" };
     case "limited":
       return { tone: "warn", text: `Cloudflare’s requests are used up${resumesWords(s)}` };
     case "revoked":
@@ -826,6 +831,8 @@ export function pageStateLine(s: CloudStatus, state: PageState, now = Date.now()
           return "Sync is holding a deletion for your go, and the page waits with it.";
         case "worker-outdated":
           return `${s.domain} needs a worker update before the page changes again.`;
+        case "app-outdated":
+          return `${s.domain} turns this Doklin away until it is updated, so the page keeps what it had.`;
         case "limited":
           return "Today’s Cloudflare requests are used up, so the page keeps what it had.";
         default:

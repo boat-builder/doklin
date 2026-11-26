@@ -22,6 +22,9 @@ public enum CloudPhase: String, Decodable, Sendable {
     case pendingAdds = "pending-adds"
     case revoked
     case workerOutdated = "worker-outdated"
+    /// The domain's worker turns this app away until it is updated: a
+    /// release marked mandatory. `error` is the worker's sentence.
+    case appOutdated = "app-outdated"
     /// Today's Cloudflare requests are used up: nothing is sent until the
     /// next UTC day. `error` says so in a sentence.
     case limited
