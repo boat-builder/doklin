@@ -67,10 +67,16 @@ pub struct Manifest {
     /// The public map, keyed by slug — the only truth about what is public.
     #[serde(default)]
     pub public: BTreeMap<String, PublicEntry>,
-    /// The workspace's tags, in order (`super::tags`). Only the shared
-    /// workspace's manifest holds any.
+    /// The workspace's tags, in order (`super::tags`). Only Library's
+    /// manifest holds any.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<TagDef>,
+    /// Where the shares in this section sit, keyed by the share's id. Who
+    /// can open a share is never read from here: this only says where. A
+    /// share with no entry sits at the section's top; an entry for a share
+    /// that is not this section's is read by nobody.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mounts: BTreeMap<String, Mount>,
 }
 
 impl Default for Manifest {
@@ -83,8 +89,26 @@ impl Default for Manifest {
             tombstones: BTreeMap::new(),
             public: BTreeMap::new(),
             tags: Vec::new(),
+            mounts: BTreeMap::new(),
         }
     }
+}
+
+/// Where one share sits in the section it is in (`Mount`,
+/// cloud-worker/src/manifest.ts).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Mount {
+    /// The folder of this section its item is in; `""` the section's top.
+    /// The item's name is the share's own.
+    #[serde(default)]
+    pub dir: String,
+    pub rev: u64,
+    pub by: String,
+    /// Where the item was in this section before it was shared — a folder's
+    /// path, a document's without its extension: its history carries on
+    /// from there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -186,22 +210,27 @@ pub struct PollResponse {
     pub limits: Option<super::pace::Limits>,
 }
 
+/// `Private` a person's My files; `Folder` and `Document` something shared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SpaceKind {
-    Restricted,
     Private,
+    Folder,
+    Document,
 }
 
-/// One space as the poll and the spaces routes describe it.
+/// One space as the poll and the spaces routes describe it, to the person
+/// asking (`Space`, cloud-worker/src/wire.ts).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpaceEntry {
     pub id: String,
     pub kind: SpaceKind,
+    /// A shared folder's name, or a shared document's as its manifest last
+    /// spelled it.
     #[serde(default)]
     pub name: String,
-    /// Who made it, by member id — what tells two folders of one name apart.
+    /// Who made it, by member id.
     #[serde(default)]
     pub by: String,
     #[serde(default)]
@@ -209,9 +238,37 @@ pub struct SpaceEntry {
     /// Its manifest's etag, as the domain last noted it.
     #[serde(default)]
     pub etag: String,
-    /// Everyone in it, by member id.
+    /// The section it sits in: None for a My files — and for a share this
+    /// person cannot place, because they cannot open the section it sits in.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// Whose My files it is in, in the end: what tells two shares of one
+    /// name apart.
+    #[serde(default)]
+    pub owner: String,
+    /// The people it is shared with, by member id.
     #[serde(default)]
     pub members: Vec<String>,
+    /// Everyone else who can open it, because they can open the section it
+    /// sits in: its owner is one.
+    #[serde(default)]
+    pub above: Vec<String>,
+    /// When it was deleted, for a share that can still be restored: there is
+    /// nothing of it to sync, and only who can restore it is told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<u64>,
+}
+
+impl SpaceEntry {
+    /// Something shared, as against a person's My files.
+    pub fn is_share(&self) -> bool {
+        self.kind != SpaceKind::Private
+    }
+
+    /// Deleted, and still there to restore.
+    pub fn deleted(&self) -> bool {
+        self.deleted_at.is_some()
+    }
 }
 
 /// One device, keyed by its id in `PollResponse::presence`: here, and

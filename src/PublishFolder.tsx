@@ -24,14 +24,6 @@ const countNotes = (node: TreeNode): number =>
       ? 1
       : 0
     : node.children.reduce((n, c) => n + countNotes(c), 0);
-// What publishing Library takes: not what is under `Private` or `Restricted`
-// at its own top, which is in no section.
-const countLibraryNotes = (node: TreeNode): number =>
-  node.kind === "file"
-    ? countNotes(node)
-    : node.children
-        .filter((c) => !(c.kind === "dir" && ["private", "restricted"].includes(c.name.toLowerCase())))
-        .reduce((n, c) => n + countNotes(c), 0);
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const basename = (p: string) => p.split(/[\\/]/).pop() || p;
@@ -82,7 +74,7 @@ export default function PublishFolder({
     void backend.documents
       .tree(dir)
       .then((tree) => {
-        if (live) setCount(isLibrary ? countLibraryNotes(tree) : countNotes(tree));
+        if (live) setCount(countNotes(tree));
       })
       .catch(() => {
         if (live) setCount(null);
@@ -90,7 +82,7 @@ export default function PublishFolder({
     return () => {
       live = false;
     };
-  }, [dir, isLibrary]);
+  }, [dir]);
 
   const run = useCallback(
     async (f: () => Promise<unknown>) => {

@@ -1,14 +1,20 @@
 // The engine itself, linked into this process, against the real worker —
 // the harness worker over the seed workspace, started by
 // verify-harness/drive-ios.mjs, which also mints the device code this joins
-// with. Skipped when run without it.
+// with, and answers what only the domain's side can do (another person
+// sharing a folder with this one, something shared deleted on another
+// device). Skipped when run without it.
 //
 // One journey, because the engine is one per process and a device code
 // works once: join as a device through the models the screens use, hold the
-// whole workspace locally — its shared files in `Library/` — sync a change
-// up, make and rename the workspace's tags, and leave.
+// whole workspace locally — what everyone has in `Library/` — sync a change
+// up, make and rename the workspace's tags, share from My files, take what is
+// shared with this person, and leave.
 
 import XCTest
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import DoklinKit
 
 @MainActor
@@ -30,6 +36,30 @@ final class EngineLiveTests: XCTestCase {
             try await Task.sleep(nanoseconds: 200_000_000)
         }
         XCTFail("the workspace did not finish syncing: \(String(describing: device.status(root)))")
+    }
+
+    /// Ask the drive for something only the domain's side can do
+    /// (`serveAsks`, verify-harness/drive-ios.mjs).
+    private func ask(_ what: String) async throws {
+        let said = ProcessInfo.processInfo.environment["DOKLIN_TEST_DRIVE"].flatMap { URL(string: $0) }
+        let url = try XCTUnwrap(URL(string: what, relativeTo: try XCTUnwrap(said, "the drive did not say where it answers")))
+        let (data, response) = try await URLSession.shared.data(from: url)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, "\(what): \(String(decoding: data, as: UTF8.self))")
+    }
+
+    /// Wait until `met` says so, asking the engine for its model again
+    /// each time and syncing now and then.
+    private func eventually(_ device: Workspaces, _ root: String, _ what: String, within seconds: Double = 60, _ met: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        var asked = 0
+        while Date() < deadline {
+            await device.refresh()
+            if met() { return }
+            if asked % 10 == 0 { await device.syncNow(root) }
+            asked += 1
+            try await Task.sleep(nanoseconds: 300_000_000)
+        }
+        XCTFail("\(what) — never: \(String(describing: device.status(root)?.spaces))")
     }
 
     func testJoinAsADeviceHoldTheWorkspaceSyncAndLeave() async throws {
@@ -186,8 +216,8 @@ final class EngineLiveTests: XCTestCase {
         let another: DeviceCode = try await Engine.shared.call("cloud_device_code", ["root": .string(root)])
         XCTAssertTrue(another.blob.hasPrefix("doklin-invite "), another.blob)
 
-        // People, agents and a restricted folder, through the models their
-        // screens use: each change made, and the list read back.
+        // People, agents and sharing, through the models their screens use:
+        // each change made, and the list read back.
         let roster = PeopleModel(workspace: workspace)
         await roster.load()
         XCTAssertTrue(roster.people?.members.contains { $0.email == "sherin@example.com" && $0.isSuperadmin } ?? false, "\(String(describing: roster.people))")
@@ -211,16 +241,143 @@ final class EngineLiveTests: XCTestCase {
         await agents.remove(bot)
         XCTAssertFalse(agents.mine.contains { $0.id == bot.id })
 
-        let making = RestrictedFolderModel(workspace: workspace, source: .new)
-        let restricted = await making.create(name: "Kit", members: [])
-        let folderPath = try XCTUnwrap(restricted, making.problem ?? "")
-        XCTAssertTrue(workspace.files.exists(folderPath), folderPath)
-        await device.refresh()
-        let space = try XCTUnwrap(workspace.restrictedFolder(at: folderPath))
-        let access = SpaceAccessModel(workspace: workspace, id: space.id)
-        await access.delete()
-        XCTAssertNil(access.problem)
-        XCTAssertFalse(workspace.files.exists(folderPath))
+        // Sharing in place. A folder made in My files, with a note in it, is
+        // shared with Kit where it is: nothing moves, and it is a section of
+        // its own from then on.
+        try await eventually(device, root, "My files, once the domain has said it is this person's") { workspace.myFiles != nil }
+        let myFiles = FolderModel(workspace: workspace, dir: try XCTUnwrap(workspace.myFiles).path)
+        XCTAssertEqual(myFiles.dir, "My files")
+        XCTAssertEqual(myFiles.whoSeesNew, "Only you will see it.")
+        let shelf = try await myFiles.createFolder(named: "For Kit")
+        let draft = try await FolderModel(workspace: workspace, dir: shelf).createNote()
+        XCTAssertEqual(draft, "My files/For Kit/Untitled.md")
+        XCTAssertEqual(workspace.audience(of: draft), "Only you")
+        let shelfTarget = ShareTarget(path: shelf, isFolder: true)
+        XCTAssertTrue(workspace.shareable(shelfTarget))
+        XCTAssertFalse(workspace.shareable(ShareTarget(path: "Library/Projects", isFolder: true)), "nothing in Library is shared separately")
+        let sharing = ShareModel(workspace: workspace, target: shelfTarget)
+        await sharing.load()
+        XCTAssertNil(sharing.space)
+        let kit = try XCTUnwrap(sharing.others?.first { $0.email == "kit@example.com" }, "Kit, to share with: \(String(describing: sharing.others))")
+        await sharing.share(with: [kit.id])
+        XCTAssertNil(sharing.problem)
+        let shared = try XCTUnwrap(sharing.space, "the folder, shared")
+        XCTAssertEqual(shared.kind, .folder)
+        XCTAssertEqual(shared.path, shelf, "it stays where it is")
+        XCTAssertEqual(shared.name, "For Kit")
+        XCTAssertTrue(shared.placed, "its owner places it")
+        XCTAssertEqual(shared.members, [kit.id])
+        XCTAssertEqual(sharing.people.map(\.id), [people.me, kit.id])
+        XCTAssertEqual(sharing.people.map(\.tags), [["you", "owner"], []])
+        XCTAssertTrue(sharing.mayDelete)
+        XCTAssertFalse(sharing.mayLeave)
+        XCTAssertTrue(workspace.files.exists(draft), "nothing moved")
+        XCTAssertEqual(workspace.share(at: shelf, isFolder: true)?.id, shared.id)
+        XCTAssertEqual(workspace.audience(of: draft), "You and 1 other")
+        if case .share(let around) = workspace.place(of: draft) {
+            XCTAssertEqual(around.id, shared.id)
+        } else {
+            XCTFail("the note in the shared folder is in \(workspace.place(of: draft))")
+        }
+        // Stopped, and shared again: it stays a share with nobody on it.
+        await sharing.stop(kit.id)
+        XCTAssertNil(sharing.problem)
+        XCTAssertEqual(sharing.space?.members, [])
+        XCTAssertEqual(sharing.addable.map(\.id), [kit.id])
+        await sharing.add(kit.id)
+        XCTAssertEqual(sharing.space?.members, [kit.id])
+
+        // One document, shared on its own — then renamed and edited in one
+        // breath. The app says what it moved, so it is the same share still.
+        let memoAt = try await myFiles.createNote()
+        let memo = DocumentModel(workspace: workspace, path: memoAt)
+        memo.load()
+        try await memo.rename(to: "Memo")
+        try await memo.save("For Kit.\n", over: "")
+        let memoSharing = ShareModel(workspace: workspace, target: ShareTarget(path: memo.path, isFolder: false))
+        await memoSharing.load()
+        await memoSharing.share(with: [kit.id])
+        XCTAssertNil(memoSharing.problem)
+        let sharedMemo = try XCTUnwrap(memoSharing.space, "the document, shared")
+        XCTAssertEqual(sharedMemo.kind, .document)
+        XCTAssertEqual(sharedMemo.path, "My files/Memo", "a document without its extension")
+        XCTAssertEqual(workspace.share(at: "My files/Memo.md", isFolder: false)?.id, sharedMemo.id)
+        let beforeRename = try XCTUnwrap(device.status(root)?.lastSyncMs)
+        try await memo.rename(to: "Memo for Kit")
+        try await memo.save("For Kit, renamed and then edited.\n", over: "For Kit.\n")
+        await device.syncNow(root)
+        try await synced(device, root, after: beforeRename)
+        try await eventually(device, root, "the shared document, where it was renamed to") {
+            workspace.space(id: sharedMemo.id)?.path == "My files/Memo for Kit"
+        }
+        XCTAssertEqual(workspace.space(id: sharedMemo.id)?.members, [kit.id], "still shared with Kit")
+        XCTAssertEqual(try workspace.files.text("My files/Memo for Kit.md"), "For Kit, renamed and then edited.\n")
+        XCTAssertFalse(workspace.files.exists("My files/Memo.md"), "the old name came back")
+
+        // Deleted for everyone: gone from here, kept to be restored — and
+        // restored, with its people and its files.
+        await sharing.giveUp()
+        XCTAssertNil(sharing.problem)
+        try await eventually(device, root, "the deleted folder, gone from this device") { !workspace.files.exists(shelf) }
+        XCTAssertTrue(sharing.gone, "its sheet closes")
+        XCTAssertTrue(workspace.left?.holds(draft) ?? false, "what left is the folder: \(String(describing: workspace.left))")
+        XCTAssertTrue(device.notices.isEmpty, "a share given up here was told as news: \(device.notices.map(\.text))")
+        try await eventually(device, root, "the deleted folder, listed to restore") {
+            DeletedShare.listed(in: workspace.status).contains { $0.id == shared.id }
+        }
+        let deletedShare = try XCTUnwrap(DeletedShare.listed(in: workspace.status).first { $0.id == shared.id })
+        XCTAssertTrue(deletedShare.words().hasPrefix("shared folder · deleted ") && deletedShare.words().hasSuffix(" · kept 30 more days"), deletedShare.words())
+        try await workspace.restore(deletedShare)
+        try await eventually(device, root, "the restored folder, back with its note") {
+            workspace.space(id: shared.id)?.deletedAt == nil && workspace.files.exists(draft)
+        }
+        XCTAssertEqual(workspace.space(id: shared.id)?.members, [kit.id], "with its people")
+        XCTAssertEqual(workspace.space(id: shared.id)?.path, shelf, "where it was")
+
+        // What somebody else shares with this person shows under Shared with
+        // me: theirs to read, edit and share on, not theirs to move. They
+        // copy it into their own files, or leave it.
+        try await ask("shared?name=Budget")
+        let theirNote = "Shared with me/Budget/Numbers.md"
+        try await eventually(device, root, "the folder Cy shared, under Shared with me") { workspace.files.exists(theirNote) }
+        let budget = try XCTUnwrap(workspace.share(at: "Shared with me/Budget", isFolder: true), "\(String(describing: workspace.status?.spaces))")
+        XCTAssertFalse(budget.placed, "it sits in Cy's files")
+        XCTAssertNil(budget.parent, "where, this person is not told")
+        XCTAssertEqual(budget.members, [people.me])
+        XCTAssertEqual(workspace.audience(of: theirNote), "You and 1 other")
+        XCTAssertEqual(ShareWords.mark(budget), "Shared with you")
+        let sharedWithMe = FolderModel(workspace: workspace, dir: "Shared with me")
+        XCTAssertFalse(sharedWithMe.movable(.folder("Shared with me/Budget")))
+        XCTAssertTrue(sharedWithMe.copiesToMyFiles(.folder("Shared with me/Budget")))
+        XCTAssertFalse(sharedWithMe.canHoldNotes)
+        XCTAssertTrue(workspace.shareable(ShareTarget(path: "Shared with me/Budget", isFolder: true)), "anyone who can open it shares it on")
+        let copy = try await workspace.copyToMyFiles(.folder("Shared with me/Budget"))
+        XCTAssertEqual(copy, .folder("My files/Budget"))
+        XCTAssertTrue(try workspace.files.text("My files/Budget/Numbers.md").hasPrefix("# Numbers"))
+        XCTAssertFalse(workspace.files.exists("My files/Budget/.doklin"), "a copy is shared with nobody")
+        XCTAssertNil(workspace.share(copy), "the copy is an ordinary folder of hers")
+        let theirs = ShareModel(workspace: workspace, target: ShareTarget(path: "Shared with me/Budget", isFolder: true))
+        await theirs.load()
+        XCTAssertEqual(theirs.people.map(\.tags), [["owner"], ["you"]])
+        XCTAssertTrue(theirs.sharedHint.hasPrefix("Cy shared this folder with you. It sits in their files, so only they move it or delete it."), theirs.sharedHint)
+        XCTAssertTrue(theirs.mayLeave)
+        XCTAssertFalse(theirs.mayDelete)
+        await theirs.giveUp()
+        XCTAssertNil(theirs.problem)
+        try await eventually(device, root, "the folder she left, gone from this device") { !workspace.files.exists("Shared with me/Budget") }
+        XCTAssertTrue(theirs.gone)
+        XCTAssertNil(workspace.share(at: "Shared with me/Budget", isFolder: true))
+        XCTAssertTrue(workspace.files.exists("My files/Budget/Numbers.md"), "her copy went with what she left")
+        XCTAssertTrue(device.notices.isEmpty, "something left here was told as news: \(device.notices.map(\.text))")
+
+        // The folder she shares, deleted for everyone on another device of
+        // hers: it goes from this one too, and this time that is news.
+        try await ask("deleted?name=For%20Kit")
+        try await eventually(device, root, "the folder deleted elsewhere, gone from this device") { !workspace.files.exists(shelf) }
+        try await eventually(device, root, "why it went, said") { !device.notices.isEmpty }
+        XCTAssertEqual(device.notices.map(\.text), ["“For Kit” is no longer on this iPhone — it is no longer shared with you, or it was deleted."])
+        XCTAssertTrue(workspace.left?.holds(draft) ?? false)
+        XCTAssertTrue(DeletedShare.listed(in: workspace.status).contains { $0.id == shared.id }, "hers to restore still")
 
         // Library has a history of its own; the workspace's root, which
         // holds the sections, has none.

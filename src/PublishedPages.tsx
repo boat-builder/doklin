@@ -1,5 +1,5 @@
-// Every published page you can open — from Library, your Private and the
-// restricted folders you are in:
+// Every published page you can open — from Library, your My files and what
+// is shared with you:
 // folders above files (the engine's order), path · slug · by / when, copy /
 // open / stop, "Use as home page", and a "file missing" flag on an entry
 // whose file is gone (the page 404s until the file returns or the entry is
@@ -183,7 +183,7 @@ export default function PublishedPages({
                         </button>
                       )}
                       {/* The home page is chosen from what everyone has. */}
-                      {placeOf(cloud, page.path).kind === "shared" && (
+                      {placeOf(cloud, page.path).kind === "library" && (
                         <button
                           className="modal-btn"
                           data-testid="published-home"
@@ -224,7 +224,7 @@ export default function PublishedPages({
             <>
               <div className="cloud-section-label">From sections you are not in</div>
               <p className="cloud-hint">
-                Published from somebody’s Private or a restricted folder. You cannot open the files, but as an owner
+                Published from somebody’s My files or something shared. You cannot open the files, but as an owner
                 you can take a page down.
               </p>
               {elsewhereNote && (

@@ -6,6 +6,7 @@
 // change all three.
 
 import { COMPATIBILITY_DATE, WORKER_VERSION } from "virtual:cloud-worker-version";
+import { HTML_EXT_RE, META_SUFFIX } from "./metaFile";
 import type { TagDef } from "./tags";
 
 /** The worker version this app was built for — parsed out of the worker's
@@ -182,8 +183,8 @@ export type CloudStatus = {
   /** The documents another Mac holds. Empty when the engine cannot hear the
    *  domain: a lock nobody can confirm is no lock. */
   leases: LeaseHolder[];
-  /** This person's sections besides Library — their Private and the
-   *  restricted folders they are in — that have a folder on this Mac. */
+  /** This person's sections besides Library: their My files, and everything
+   *  shared — by them, or with them. */
   spaces: CloudSpace[];
   /** The workspace's tags, in order, as this device believes them: the
    *  shared workspace's list with the changes made here and not yet sent
@@ -191,18 +192,35 @@ export type CloudStatus = {
   tags: TagDef[];
 };
 
-/** One section of a workspace that only some people have. Mirrors
- *  `SpaceStatus` in status.rs — change both. */
+/** One section of a workspace beside Library: this person's My files, or
+ *  something shared — a folder, or one document. Mirrors `SpaceStatus` in
+ *  status.rs and `SpaceStatus` in the iPhone's Payloads.swift — change all
+ *  three. */
 export type CloudSpace = {
   id: string;
-  kind: "private" | "restricted";
+  kind: "private" | "folder" | "document";
   name: string;
-  /** Its folder on this Mac, workspace-relative: `Private`, `Restricted/Finance`. */
+  /** Where its item is on this device, workspace-relative: a folder, or a
+   *  document without its extension — `My files`, `My files/Work/Plans`,
+   *  `Shared with me/Budget`. Empty for one that is not here: a share just
+   *  heard of, and a deleted one. */
   path: string;
   /** Who made it, as a name. */
   by: string;
-  /** Everyone in it, by member id. */
+  /** Whose My files it is in, in the end, by member id. */
+  owner: string;
+  /** The section it sits in; null for My files, and for a share whose
+   *  folder this person cannot open. */
+  parent: string | null;
+  /** Whether this person places it — moves it, deletes it, restores it:
+   *  they can open the folder it sits in. */
+  placed: boolean;
+  /** The people it is shared with, by member id. */
   members: string[];
+  /** Everyone else who can open it, through the folder it sits in. */
+  above: string[];
+  /** When it was deleted (ms), for one that can still be restored. */
+  deletedAt: number | null;
 };
 
 export type CloudWorkspaceRecord = {
@@ -221,9 +239,13 @@ export type CloudProbe = {
 };
 
 /** The hidden `.doklin/cloud.json` a connected folder carries — secret-free.
- *  `layout` is `"library"` once the folder holds its sections side by side,
- *  the shared one in `Library/`; absent before it has moved. */
-export type CloudMarker = { domain: string; wsId: string; layout?: "library" };
+ *  `layout` is `LAYOUT_NOW` once the folder holds its sections side by
+ *  side, Library's files in `Library/`; absent before it has moved. */
+export type CloudMarker = { domain: string; wsId: string; layout?: string };
+
+/** `CloudMarker.layout` for a folder laid out as this build syncs it
+ *  (`MY_FILES`, engine/src/cloud/layout.rs — change both). */
+export const LAYOUT_NOW = "my-files";
 
 /** `cloudHeld`: the copy of a domain's workspace this Mac already has. One
  *  per domain, so a code or a key traded for a second would buy nothing.
@@ -397,9 +419,15 @@ export type CloudPendingAddsEvent = { root: string; count: number; folders: { pa
 /** A page asked for an address another section holds on this domain, and was
  *  not published. `path` is workspace-relative. */
 export type CloudAddressTakenEvent = { root: string; slug: string; path: string };
-/** A restricted folder left this Mac: you were taken out of it, or it was
- *  deleted. `path` is where it was, workspace-relative. */
+/** Something shared left this device: it is no longer shared with you, or
+ *  it was deleted. `path` is where it was, workspace-relative — a folder, or
+ *  a document without its extension. */
 export type CloudSpaceLeftEvent = { root: string; name: string; path: string };
+/** Something shared is somewhere else on this device now, or called
+ *  something else: sync moved it where it sits, renamed it as somebody
+ *  renamed it, or followed it where it was moved outside the app. Paths are
+ *  workspace-relative; `dir` for a folder, else one file. */
+export type CloudSpaceMovedEvent = { root: string; moves: { from: string; to: string; dir: boolean }[] };
 export type CloudProgressEvent = { root: string; kind: "upload" | "download"; done: number; total: number };
 /** An owner took this Mac's access to a workspace away, and its copy here is
  *  gone: the folder, and what Doklin kept for it. `deleted` is false when the
@@ -433,53 +461,116 @@ export function cloudForWorkspace(statuses: CloudStatus[], root: string | null):
 /** Which part of a workspace a path is in, and so who can open it. */
 export type Place =
   /** Everyone in the workspace: Library. */
-  | { kind: "shared" }
-  /** Only you, on every Mac of yours. */
-  | { kind: "private"; space: CloudSpace }
-  /** The people in that folder. */
-  | { kind: "restricted"; space: CloudSpace }
-  /** In no section, so it stays on this Mac and syncs nowhere until it is
-   *  moved: the workspace's folder itself and anything else at its top,
-   *  straight under `Restricted` or in a folder there that is not a
-   *  restricted folder yet, and a folder with a section's name at the top of
-   *  Library. */
+  | { kind: "library" }
+  /** Only you, on every device of yours: your My files, and nothing shared. */
+  | { kind: "mine"; space: CloudSpace }
+  /** Something shared — the folder or the document `space` is, or anything
+   *  inside that folder: the people it is shared with, and whoever can open
+   *  the folder it sits in. */
+  | { kind: "share"; space: CloudSpace }
+  /** In no section, so it stays on this device and syncs nowhere until it
+   *  is moved: the workspace's folder itself and anything else at its top,
+   *  and what is under `Shared with me` that nobody shared. */
   | { kind: "nowhere" };
 
-/** The shared section's folder, at the top of a connected workspace beside
- *  `Private` and `Restricted`. Said in four places: this, `LIBRARY_DIR` in
+/** Library's folder, at the top of a connected workspace beside `My files`
+ *  and `Shared with me`. Said in four places: this, `LIBRARY_DIR` in
  *  engine/src/cloud/space.rs, `LIBRARY_FOLDER` in
  *  cloud-worker/src/layout.ts, and `TreeModel.libraryFolder` in the
  *  iPhone's Tree.swift (ios/DoklinKit) — change all four. */
 export const LIBRARY_DIR = "Library";
+/** A person's own files, and what others shared with them: the other two
+ *  folders at the top (`MY_FILES_DIR` and `SHARED_DIR`,
+ *  engine/src/cloud/space.rs; `MY_FILES_FOLDER` and `SHARED_FOLDER`,
+ *  cloud-worker/src/layout.ts; the iPhone's Tree.swift — change all four). */
+export const MY_FILES_DIR = "My files";
+export const SHARED_DIR = "Shared with me";
 
 /** The three section folders at the top of a connected workspace, spelled as
- *  `doklin` spells them (`PRIVATE_FOLDER`, `RESTRICTED_FOLDER`,
- *  cloud-worker/src/agentPlace.ts). */
-const SECTION_DIRS = [LIBRARY_DIR, "Private", "Restricted"];
+ *  `doklin` spells them. Compared without case, as the disk compares them. */
+const SECTION_DIRS = [LIBRARY_DIR, MY_FILES_DIR, SHARED_DIR];
+const SECTION_TOP = new Set(SECTION_DIRS.map((s) => s.toLowerCase()));
 
-/** The names a section's folder has at the top of a connected workspace,
- *  compared without case — and so the names no folder at the top of Library
- *  has: the shared section holds nothing under them (`RESERVED_DIRS`,
- *  engine/src/cloud/space.rs). */
-const RESERVED_TOP = new Set(SECTION_DIRS.map((s) => s.toLowerCase()));
+/** A document's path without its extension: its markdown, its html and its
+ *  comments are one document, under one name (`split_name`,
+ *  engine/src/cloud/space.rs; `splitName`, cloud-worker/src/mount.ts;
+ *  `Sections.documentStem`, ios/DoklinKit — change all four). */
+export function documentStem(path: string): string {
+  const slash = path.lastIndexOf("/");
+  const name = path.slice(slash + 1);
+  if (name.toLowerCase().endsWith(META_SUFFIX) && name.length > META_SUFFIX.length) {
+    return path.slice(0, path.length - META_SUFFIX.length);
+  }
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? path.slice(0, slash + 1 + dot) : path;
+}
 
-/** Whether `name` is a section's own, whatever its case. */
-export const isSectionName = (name: string): boolean => RESERVED_TOP.has(name.toLowerCase());
+/** Whether `path` names one of a document's files: its markdown, its html
+ *  or its comments. Anything else that only begins like a document — a
+ *  picture beside it, a folder called `Plan.1` — is not that document. */
+const isDocumentFile = (path: string): boolean =>
+  MD_EXT_RE.test(path) || HTML_EXT_RE.test(path) || path.toLowerCase().endsWith(META_SUFFIX);
 
-/** The section `rel` — workspace-relative — is in. Names are compared
- *  without case, as the disk compares them. */
-export function placeOf(cloud: CloudStatus | null, rel: string): Place {
-  if (!cloud) return { kind: "shared" };
+/** The share whose own item is at `rel` (workspace-relative): a shared
+ *  folder at that folder, a shared document at any of its files. The iPhone
+ *  asks the same (`Sections.share(at:)`) — change both. */
+export function shareAt(cloud: Pick<CloudStatus, "spaces"> | null, rel: string, isDir: boolean): CloudSpace | null {
+  if (!isDir && !isDocumentFile(rel)) return null;
+  const at = (isDir ? rel : documentStem(rel)).toLowerCase();
+  const kind = isDir ? "folder" : "document";
+  return cloud?.spaces.find((s) => s.kind === kind && s.path !== "" && s.path.toLowerCase() === at) ?? null;
+}
+
+/** The section `rel` — workspace-relative — is in: the deepest one that
+ *  holds it, a shared document's before the folder it sits in. Names are
+ *  compared without case, as the disk compares them. The iPhone asks the
+ *  same (`Sections.place`) — change both. */
+export function placeOf(cloud: Pick<CloudStatus, "spaces"> | null, rel: string): Place {
+  if (!cloud) return { kind: "library" };
   const lower = rel.toLowerCase();
-  const space = cloud.spaces.find((s) => {
+  const stem = documentStem(lower);
+  let found: CloudSpace | null = null;
+  for (const s of cloud.spaces) {
+    if (s.path === "") continue;
     const at = s.path.toLowerCase();
-    return lower === at || lower.startsWith(`${at}/`);
-  });
-  if (space) return { kind: space.kind, space };
-  const [top, inLibrary] = lower.split("/", 2);
-  if (top !== LIBRARY_DIR.toLowerCase()) return { kind: "nowhere" };
-  // Library never holds anything under a section's name at its own top.
-  return inLibrary !== undefined && RESERVED_TOP.has(inLibrary) ? { kind: "nowhere" } : { kind: "shared" };
+    // A shared document holds its own files, and is itself where it is.
+    const holds =
+      s.kind === "document" ? lower === at || (stem === at && isDocumentFile(lower)) : lower === at || lower.startsWith(`${at}/`);
+    // A document is deeper than the folder it is in, whatever their lengths.
+    const deeper = !found || (s.kind === "document" && found.kind !== "document") || (found.kind !== "document" && s.path.length > found.path.length);
+    if (holds && deeper) found = s;
+  }
+  if (found) return found.kind === "private" ? { kind: "mine", space: found } : { kind: "share", space: found };
+  return lower.split("/", 1)[0] === LIBRARY_DIR.toLowerCase() ? { kind: "library" } : { kind: "nowhere" };
+}
+
+/** The id of the section `rel` is in, as a document's `section` names it
+ *  (src/docLinks.ts): null for Library, and for a path in no section. */
+export function sectionIdOf(cloud: Pick<CloudStatus, "spaces"> | null, rel: string): string | null {
+  const place = placeOf(cloud, rel);
+  return place.kind === "mine" || place.kind === "share" ? place.space.id : null;
+}
+
+/** Everyone who can open what is in `place`, by member id; null for
+ *  Library, which is everyone (`Sections.people` on the iPhone — change
+ *  both). */
+export function audienceOf(cloud: CloudStatus, place: Place): string[] | null {
+  if (place.kind === "library") return null;
+  if (place.kind === "nowhere") return [];
+  if (place.kind === "mine") return cloud.meId ? [cloud.meId] : [];
+  return [...new Set([...place.space.members, ...place.space.above])];
+}
+
+/** Who can open what is in `place`, in a few words: the line under a
+ *  document's title, and in the Share dialog. The engine says the same of a
+ *  link (`Engine::linked`), and the iPhone of a note (`Sections.audience`)
+ *  — change all three. */
+export function audienceLine(cloud: CloudStatus, place: Place): string {
+  if (place.kind === "library") return `Everyone in ${cloud.name}`;
+  if (place.kind === "nowhere") return `Only on this device`;
+  const others = (audienceOf(cloud, place) ?? []).filter((id) => id !== cloud.meId).length;
+  if (others === 0) return "Only you";
+  return `You and ${others} ${others === 1 ? "other" : "others"}`;
 }
 
 /** What *Copy path* puts on the clipboard: `rel` (workspace-relative) as
@@ -487,7 +578,7 @@ export function placeOf(cloud: CloudStatus | null, rel: string): Place {
  *  spelled the CLI's way; a folder ends in `/`; a document loses its
  *  extension, as its md and html versions are one document (`nameOf`,
  *  cloud-worker/src/documents.ts): `Library/GTM/launch-plan`,
- *  `Restricted/Finance/Q3/`. Null for a path in no section, which no agent
+ *  `My files/Finance/Q3/`. Null for a path in no section, which no agent
  *  can reach. */
 export function agentPath(cloud: CloudStatus, rel: string, isDir: boolean): string | null {
   if (placeOf(cloud, rel).kind === "nowhere") return null;
@@ -504,27 +595,40 @@ export function agentPath(cloud: CloudStatus, rel: string, isDir: boolean): stri
  *  for the paths the app keeps outside the folder. */
 export function toLibraryLayout(rel: string): string {
   const top = rel.split("/", 1)[0];
-  if (top === "" || top.startsWith(".") || RESERVED_TOP.has(top.toLowerCase())) return rel;
+  if (top === "" || top.startsWith(".") || SECTION_TOP.has(top.toLowerCase())) return rel;
   return `${LIBRARY_DIR}/${rel}`;
+}
+
+/** ONE-TIME, to be deleted with the engine's `from_library`
+ *  (engine/src/cloud/layout.rs, whose `moved_rel` this mirrors, as
+ *  `Sections.fromLibraryLayout` does on the iPhone — change all three):
+ *  where a path the app stored under the layout before sharing in
+ *  place is now. What was under `Private/` is under `My files/`, and what
+ *  was under `Restricted/` is under `Shared with me/`. */
+export function fromLibraryLayout(rel: string): string {
+  const slash = rel.indexOf("/");
+  const top = (slash < 0 ? rel : rel.slice(0, slash)).toLowerCase();
+  const now = top === "private" ? MY_FILES_DIR : top === "restricted" ? SHARED_DIR : null;
+  return now === null ? rel : slash < 0 ? now : `${now}${rel.slice(slash)}`;
 }
 
 /** Library's folder in the connected workspace at `root`: where the shared
  *  section's files and its version history are. */
 export const libraryDirOf = (root: string): string => `${root}/${LIBRARY_DIR}`;
 
-/** Who gains sight of something moved from one section to another —
- *  "Everyone in Acme", "All 3 people in “Finance”" — or null when nobody
- *  does, which is every move that keeps the audience or narrows it. The
- *  iPhone asks the same (`Sections.wider`, ios/DoklinKit) — change both. */
+/** Who gains sight of something moved from one place to another —
+ *  "Everyone in Acme", "All 3 people who can open “Finance”" — or null when
+ *  nobody does, which is every move that keeps the audience or narrows it.
+ *  The iPhone asks the same (`Sections.wider`, ios/DoklinKit) — change both. */
 export function widerAudience(cloud: CloudStatus, from: Place, to: Place): string | null {
-  if (from.kind === "shared" || to.kind === "nowhere" || to.kind === "private") return null;
-  if (to.kind === "shared") return `Everyone in ${cloud.name}`;
-  if (from.kind !== "nowhere" && from.space.id === to.space.id) return null;
-  const before = from.kind === "nowhere" ? [] : from.space.members;
-  const gained = to.space.members.filter((m) => !before.includes(m) && m !== cloud.meId);
-  if (gained.length === 0) return null;
-  const n = to.space.members.length;
-  return `${n === 2 ? "Both people" : `All ${n} people`} in “${to.space.name}”`;
+  const after = audienceOf(cloud, to);
+  const before = audienceOf(cloud, from);
+  if (before === null || to.kind === "nowhere" || to.kind === "mine") return null;
+  if (after === null) return `Everyone in ${cloud.name}`;
+  if (from.kind === "share" && to.kind === "share" && from.space.id === to.space.id) return null;
+  if (!after.some((m) => !before.includes(m) && m !== cloud.meId)) return null;
+  const name = to.kind === "share" ? to.space.name : "";
+  return `${after.length === 2 ? "Both people" : `All ${after.length} people`} who can open “${name}”`;
 }
 
 /** Whether a role may do `action`, from an answer that states what it may —

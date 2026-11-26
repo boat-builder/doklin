@@ -72,6 +72,25 @@ public final class SeenStore: @unchecked Sendable {
         write(snapshot)
     }
 
+    /// ONE-TIME, to be deleted with `Sections.fromLibraryLayout`: what was
+    /// read of a file with no id yet is kept by its path, which follows the
+    /// workspace's `Private` and `Restricted` to `My files` and `Shared with
+    /// me`.
+    func moveFromLibraryLayout(_ wsId: String) {
+        lock.lock()
+        let before = stored.workspaces[wsId] ?? [:]
+        var after: [String: String] = [:]
+        for (key, hash) in before {
+            let moved = key.hasPrefix("path:") ? "path:" + Sections.fromLibraryLayout(String(key.dropFirst(5))).lowercased() : key
+            after[moved] = hash
+        }
+        let changed = after != before
+        if changed { stored.workspaces[wsId] = after }
+        let snapshot = stored
+        lock.unlock()
+        if changed { write(snapshot) }
+    }
+
     private func write(_ snapshot: Stored) {
         if let file, let data = try? JSONEncoder().encode(snapshot) {
             try? data.write(to: file, options: .atomic)

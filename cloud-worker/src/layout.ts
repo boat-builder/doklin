@@ -9,8 +9,9 @@
 //   versions/index.json         the mirrored version store's retained set (versions.ts)
 //   versions/snapshots/<id>     one workspace state, gzip'd; immutable
 //   versions/blobs/<hash>       one file's content, gzip'd; immutable
-//   spaces/<spaceId>/…          a restricted folder or a person's Private: the same four kinds of
-//                               object again — manifest.json, blobs/, versions/ — under its own prefix
+//   spaces/<spaceId>/…          a person's My files, or something shared (a folder, or one
+//                               document): the same four kinds of object again — manifest.json,
+//                               blobs/, versions/ — under its own prefix
 //
 // Nothing public is stored here: public pages are rendered from blobs/. And
 // nobody is stored here: people, their tokens and their invites live in the
@@ -36,8 +37,11 @@ export const spacePrefix = (spaceId: string): string => `${SPACES_PREFIX}${space
 
 /** File, device and workspace ids — what the engine mints. */
 export const ID_RE = /^[a-z0-9][a-z0-9_-]{2,63}$/;
-/** A space: `s-` a restricted folder, `p-` a person's Private. */
+/** A space: `p-` a person's My files, `s-` a share — a folder, or one
+ *  document. A share's id is minted by the device that makes it. */
 export const SPACE_ID_RE = /^[sp]-[a-f0-9]{8}$/;
+/** A share's id alone. */
+export const SHARE_ID_RE = /^s-[a-f0-9]{8}$/;
 /** A person: what a manifest's `by`, a space's people, presence and leases
  *  name one by. An email never enters any of them. */
 export const MEMBER_ID_RE = /^m-[a-f0-9]{8}$/;
@@ -114,6 +118,10 @@ export const MAX_PUBLIC_ENTRIES = 5000;
 export const MAX_PATH_LEN = 1024;
 export const MAX_PATH_DEPTH = 12;
 export const MAX_NAME_LEN = 80;
+/** The longest name a shared folder or document carries: what a disk allows
+ *  a file's name to be, less its extension (`MAX_ITEM_NAME_LEN`,
+ *  engine/src/cloud/space.rs — change both). */
+export const MAX_ITEM_NAME_LEN = 200;
 /** An address is allowed to be long; RFC 5321 caps a path at 254 characters. */
 export const MAX_EMAIL_LEN = 254;
 export const MAX_TITLE_LEN = 300;
@@ -187,30 +195,21 @@ export function validName(raw: unknown, fallback: string): string {
 }
 
 
-/** The folder the shared section is at, beside `Private` and `Restricted`:
- *  on disk, in a browser, and in every path an agent types. Mirrored by the
- *  engine (`LIBRARY_DIR`, engine/src/cloud/space.rs), the app (`LIBRARY_DIR`,
- *  src/cloud.ts) and the iPhone (`TreeModel.libraryFolder`,
+/** The folders a workspace's three headings are at: on disk, in a browser,
+ *  and in every path an agent types. `Library` is everyone's; `My files` the
+ *  person's own; `Shared with me` holds what others shared with them, each
+ *  item under its own name. Mirrored by the engine (`LIBRARY_DIR`,
+ *  `MY_FILES_DIR`, `SHARED_DIR`, engine/src/cloud/space.rs), the app
+ *  (`SECTION_DIRS`, src/cloud.ts) and the iPhone (`TreeModel`,
  *  ios/DoklinKit/Sources/DoklinKit/Models/Tree.swift): change all four. */
 export const LIBRARY_FOLDER = "Library";
+export const MY_FILES_FOLDER = "My files";
+export const SHARED_FOLDER = "Shared with me";
 
-/** The names the shared section keeps out of its own top: the sections' own
- *  folders on disk. Nothing in the shared manifest lives under any of them,
- *  whatever its case (`RESERVED_DIRS`, engine/src/cloud/space.rs: change
- *  both). `Private` and `Restricted` because a device still in the layout
- *  from before Library mounts the shared section at the workspace's top;
- *  `Library` because a build from before it, run on a folder that has moved,
- *  sends every shared file as moved under `Library/` — refused here, so no
- *  other device follows. */
-export const RESERVED_FOLDERS: ReadonlySet<string> = new Set([LIBRARY_FOLDER.toLowerCase(), "private", "restricted"]);
-
-/** Whether a path in the shared section is under one of the reserved names. */
-export const reservedTop = (path: string): boolean => RESERVED_FOLDERS.has(path.split("/", 1)[0].toLowerCase());
-
-/** A name a folder on disk can carry — what a restricted folder is called:
- *  one path segment, trimmed and capped, not hidden. Null when it is not one. */
-export function validFolderName(raw: unknown): string | null {
+/** A name a shared folder or document can carry on a disk: one path segment,
+ *  trimmed and capped, not hidden. Null when it is not one. */
+export function validItemName(raw: unknown): string | null {
   const name = typeof raw === "string" ? raw.trim() : "";
-  if (name.length > MAX_NAME_LEN || name.includes("/") || name.startsWith(".")) return null;
+  if ([...name].length > MAX_ITEM_NAME_LEN || name.includes("/") || name.includes(":") || name.startsWith(".")) return null;
   return validPath(name) ? name : null;
 }

@@ -22,10 +22,10 @@ import {
   MAX_TOMBSTONES,
   MEMBER_ID_RE,
   RESERVED_SLUGS,
+  SHARE_ID_RE,
   SLUG_RE,
   SPACE_ID_RE,
   UNSYNCED_SENTENCE,
-  reservedTop,
   syncs,
   validPath,
 } from "./layout";
@@ -77,6 +77,23 @@ export type PublicEntry =
       at: number;
     };
 
+/**
+ * Where a share sits in the section it is in, keyed by the share's id. Who
+ * can open the share is never read from here (spaces.ts): this only says
+ * where. A share with no entry sits at the section's top.
+ */
+export type Mount = {
+  /** The folder of this section its item is in; "" the section's top. The
+   *  item's name is the share's own. */
+  dir: string;
+  rev: number;
+  by: string;
+  /** Where the item was in this section before it was shared — a folder's
+   *  path, a document's without its extension: its history carries on from
+   *  there. */
+  was?: string;
+};
+
 export type Manifest = {
   version: typeof MANIFEST_VERSION;
   name?: string;
@@ -85,10 +102,15 @@ export type Manifest = {
   tombstones?: Record<string, Tombstone>;
   public?: Record<string, PublicEntry>;
   /** The workspace's tags, in order: which of a note's frontmatter lines
-   *  are tags, and the values each takes (src/tags.ts). The shared
-   *  workspace's manifest alone holds any. */
+   *  are tags, and the values each takes (src/tags.ts). Library's manifest
+   *  alone holds any. */
   tags?: TagDef[];
+  mounts?: Record<string, Mount>;
 };
+
+/** Which section a manifest is: Library's holds no share, and a shared
+ *  document's holds that one document and nothing else. */
+export type ManifestOf = "library" | "private" | "folder" | "document";
 
 /** What a PUT that fails validation answers with: 400 for garbage, 426 for a schema this worker predates. */
 export type ManifestProblem = { status: 400 | 426; error: string };
@@ -106,13 +128,21 @@ const optionalText = (v: unknown, max: number): boolean =>
 /** A `by`: the id of a person or an agent. */
 const isAuthor = (v: unknown): boolean => typeof v === "string" && (MEMBER_ID_RE.test(v) || AGENT_ID_RE.test(v));
 
-/** What a shared manifest naming a file under a reserved folder is told. */
-export const RESERVED_SENTENCE = "Library, Private and Restricted are the names of a workspace's sections: no shared folder is called one";
+/** What a shared document's manifest is told when it would hold anything else. */
+export const ONE_DOCUMENT_SENTENCE = "a shared document's section holds that document and nothing else";
+
+/** A document's files share a name: `plan.md`, `plan.html`, `plan.meta.jsonl`. */
+function documentStem(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".meta.jsonl")) return lower.slice(0, -".meta.jsonl".length);
+  const dot = lower.lastIndexOf(".");
+  return dot > 0 ? lower.slice(0, dot) : lower;
+}
 
 /** What a manifest naming a file outside `syncs` is told. */
 const unsynced = (path: string): string => `${UNSYNCED_SENTENCE} — "${path}" is neither`;
 
-function validateFiles(files: unknown, space: boolean): string | null {
+function validateFiles(files: unknown, of: ManifestOf): string | null {
   if (!isObject(files)) return "files must be an object";
   const ids = Object.keys(files);
   if (ids.length > MAX_MANIFEST_FILES) return "too many files";
@@ -123,7 +153,6 @@ function validateFiles(files: unknown, space: boolean): string | null {
     if (!isObject(f)) return `invalid file entry: ${id}`;
     if (!validPath(f.path)) return `invalid path for ${id}`;
     if (!syncs(f.path)) return unsynced(f.path);
-    if (!space && reservedTop(f.path)) return RESERVED_SENTENCE;
     // Case-insensitive: the workspace lives on a case-insensitive disk.
     const pathKey = f.path.toLowerCase();
     if (seenPaths.has(pathKey)) return `duplicate path: ${f.path}`;
@@ -134,10 +163,14 @@ function validateFiles(files: unknown, space: boolean): string | null {
     if (f.mtime !== undefined && !isTime(f.mtime)) return `invalid mtime for ${id}`;
     if (!isAuthor(f.by)) return `invalid by for ${id}`;
   }
+  if (of === "document") {
+    const paths = [...seenPaths];
+    if (paths.some((p) => p.includes("/")) || new Set(paths.map(documentStem)).size > 1) return ONE_DOCUMENT_SENTENCE;
+  }
   return null;
 }
 
-function validateTombstones(tombstones: unknown, space: boolean): string | null {
+function validateTombstones(tombstones: unknown): string | null {
   if (tombstones === undefined) return null;
   if (!isObject(tombstones)) return "tombstones must be an object";
   const ids = Object.keys(tombstones);
@@ -147,7 +180,6 @@ function validateTombstones(tombstones: unknown, space: boolean): string | null 
     const t = tombstones[id];
     if (!isObject(t) || !validPath(t.path)) return `invalid tombstone for ${id}`;
     if (!syncs(t.path)) return unsynced(t.path);
-    if (!space && reservedTop(t.path)) return RESERVED_SENTENCE;
     if (!isCount(t.rev)) return `invalid tombstone rev for ${id}`;
     if (!isTime(t.ts)) return `invalid tombstone ts for ${id}`;
     if (!isAuthor(t.by)) return `invalid tombstone by for ${id}`;
@@ -166,7 +198,7 @@ function validateTombstones(tombstones: unknown, space: boolean): string | null 
  * may cover a folder that is empty now. The page at `/` is the shared
  * workspace's to name: a space's map has none.
  */
-function validatePublic(map: unknown, space: boolean): string | null {
+function validatePublic(map: unknown, of: ManifestOf): string | null {
   if (map === undefined) return null;
   if (!isObject(map)) return "public must be an object";
   const slugs = Object.keys(map);
@@ -184,6 +216,7 @@ function validatePublic(map: unknown, space: boolean): string | null {
       if (typeof e.path !== "string" || (e.path !== "" && !validPath(e.path))) {
         return `invalid path for ${slug}`;
       }
+      if (of === "document") return ONE_DOCUMENT_SENTENCE;
     } else {
       return `invalid kind for ${slug}`;
     }
@@ -194,7 +227,7 @@ function validatePublic(map: unknown, space: boolean): string | null {
     if (e.root !== undefined && typeof e.root !== "boolean") return `invalid root for ${slug}`;
     if (e.root === true) roots += 1;
   }
-  if (roots > 0 && space) return "The home page is chosen from Library.";
+  if (roots > 0 && of !== "library") return "The home page is chosen from Library.";
   if (roots > 1) return "more than one root page";
   return null;
 }
@@ -202,12 +235,12 @@ function validatePublic(map: unknown, space: boolean): string | null {
 /**
  * The tag list, held to the rules the app keeps it by (src/tags.ts) —
  * every tag's name and values, the limits, no name twice. It is the
- * workspace's, so a space's manifest has none.
+ * workspace's, so only Library's manifest has one.
  */
-function validateTags(tags: unknown, space: boolean): string | null {
+function validateTags(tags: unknown, of: ManifestOf): string | null {
   if (tags === undefined) return null;
   if (!Array.isArray(tags)) return "tags must be a list";
-  if (space && tags.length > 0) return "The tags are the workspace's, kept with Library.";
+  if (of !== "library" && tags.length > 0) return "The tags are the workspace's, kept with Library.";
   for (const t of tags) {
     if (!isObject(t) || typeof t.name !== "string") return "invalid tag";
     if (!Array.isArray(t.values) || !t.values.every((v) => typeof v === "string")) return `invalid values for tag ${t.name}`;
@@ -217,10 +250,31 @@ function validateTags(tags: unknown, space: boolean): string | null {
   return problem ? `invalid tags: ${problem}` : null;
 }
 
-/** Shape-check a manifest without trusting the client. `space` is true for
- *  the manifest of a restricted folder or a Private, false for the shared
- *  workspace's. */
-export function validateManifest(data: unknown, space: boolean): ManifestProblem | null {
+/** Where the shares in a section sit. Library holds none, and neither does a
+ *  shared document: nothing sits in a document. */
+function validateMounts(mounts: unknown, of: ManifestOf): string | null {
+  if (mounts === undefined) return null;
+  if (!isObject(mounts)) return "mounts must be an object";
+  const ids = Object.keys(mounts);
+  if (ids.length === 0) return null;
+  if (of === "library") return "Nothing in Library is shared separately: it is everyone's.";
+  if (of === "document") return ONE_DOCUMENT_SENTENCE;
+  if (ids.length > MAX_MANIFEST_FILES) return "too many mounts";
+  for (const id of ids) {
+    if (!SHARE_ID_RE.test(id)) return `invalid mount id: ${id}`;
+    const m = mounts[id];
+    if (!isObject(m)) return `invalid mount: ${id}`;
+    if (typeof m.dir !== "string" || (m.dir !== "" && !validPath(m.dir))) return `invalid mount dir for ${id}`;
+    if (!isCount(m.rev) || m.rev < 1) return `invalid mount rev for ${id}`;
+    if (!isAuthor(m.by)) return `invalid mount by for ${id}`;
+    if (m.was !== undefined && !validPath(m.was)) return `invalid mount was for ${id}`;
+  }
+  return null;
+}
+
+/** Shape-check a manifest without trusting the client. `of` is which
+ *  section's it is. */
+export function validateManifest(data: unknown, of: ManifestOf): ManifestProblem | null {
   const bad = (error: string): ManifestProblem => ({ status: 400, error });
   if (!isObject(data)) return bad("manifest must be an object");
   if (!Number.isInteger(data.version)) return bad("manifest version must be an integer");
@@ -239,10 +293,11 @@ export function validateManifest(data: unknown, space: boolean): ManifestProblem
   if (!isCount(data.seq)) return bad("seq must be a non-negative integer");
   if (!optionalText(data.name, MAX_NAME_LEN)) return bad("invalid name");
   const problem =
-    validateFiles(data.files, space) ??
-    validateTombstones(data.tombstones, space) ??
-    validatePublic(data.public, space) ??
-    validateTags(data.tags, space);
+    validateFiles(data.files, of) ??
+    validateTombstones(data.tombstones) ??
+    validatePublic(data.public, of) ??
+    validateTags(data.tags, of) ??
+    validateMounts(data.mounts, of);
   return problem ? bad(problem) : null;
 }
 

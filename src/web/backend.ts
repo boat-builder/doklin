@@ -16,7 +16,7 @@ import type {
   Backend,
   Cloud,
   CloudAccess,
-  CloudSpaces,
+  CloudShares,
   Documents,
   FileClipboard,
   FileClipboardPayload,
@@ -48,37 +48,17 @@ import type { Workspace } from "./workspace";
 const SEARCH_TRIES = 6;
 const SEARCH_AGAIN_MS = 1200;
 
-/** Every section the person is in, searched by the worker (search.ts): the
- *  first documents that match, each with its first matching lines. What
- *  this page has typed and not yet sent is not in it. */
-async function search(ws: Workspace, query: string, tags: TagFilter[]): Promise<SearchResults> {
-  // A tag token rides as `tag=name:value`, or `tag=name` for a note that has
-  // the tag at all: a name never holds a colon (src/tags.ts).
-  const tagged = tags
-    .map((t) => `&tag=${encodeURIComponent(t.value === null ? t.name : `${t.name}:${t.value}`)}`)
-    .join("");
-  const at = `/api/web/search?q=${encodeURIComponent(query)}&limit=${SEARCH_LIMIT_MAX}${tagged}`;
+/** How many requests one search makes for a workspace of more sections than
+ *  a request opens (`next`, cloud-worker/src/webDocs.ts): what is shared is a
+ *  section each. Past it, the answer says there is more. */
+const SEARCH_PAGES = 6;
+
+/** One request's worth of a search: the sections from `after` on. Asked
+ *  again while the worker's mirror catches up. */
+async function searched(at: string): Promise<SearchAnswer> {
   for (let tries = 1; ; tries += 1) {
     const res = await ask("GET", at);
-    if (res.status !== 202) {
-      const found = (await res.json()) as SearchAnswer;
-      const needle = query.toLowerCase();
-      const files = found.results.flatMap((hit) => {
-        const path = ws.pathOfFile(hit.space, hit.fid);
-        if (!path) return [];
-        return {
-          path,
-          name: path.slice(path.lastIndexOf("/") + 1),
-          named: hit.inName === true,
-          matches: hit.matches.map((m) => ({
-            line: m.line ?? null,
-            column: Math.max(0, m.text.toLowerCase().indexOf(needle)),
-            preview: m.text,
-          })),
-        };
-      });
-      return { files, more: found.total - found.results.length };
-    }
+    if (res.status !== 202) return (await res.json()) as SearchAnswer;
     const { pending } = (await res.json()) as SearchIndexing;
     if (tries === SEARCH_TRIES) {
       throw new Error(
@@ -87,6 +67,42 @@ async function search(ws: Workspace, query: string, tags: TagFilter[]): Promise<
     }
     await new Promise((done) => setTimeout(done, SEARCH_AGAIN_MS));
   }
+}
+
+/** Every section the person can open, searched by the worker (search.ts):
+ *  the first documents that match, each with its first matching lines. What
+ *  this page has typed and not yet sent is not in it. */
+async function search(ws: Workspace, query: string, tags: TagFilter[]): Promise<SearchResults> {
+  // A tag token rides as `tag=name:value`, or `tag=name` for a note that has
+  // the tag at all: a name never holds a colon (src/tags.ts).
+  const tagged = tags
+    .map((t) => `&tag=${encodeURIComponent(t.value === null ? t.name : `${t.name}:${t.value}`)}`)
+    .join("");
+  const at = `/api/web/search?q=${encodeURIComponent(query)}&limit=${SEARCH_LIMIT_MAX}${tagged}`;
+  const needle = query.toLowerCase();
+  const files: SearchResults["files"] = [];
+  let more = 0;
+  let after: number | undefined = 0;
+  for (let page = 0; after !== undefined && page < SEARCH_PAGES && files.length < SEARCH_LIMIT_MAX; page += 1) {
+    const found: SearchAnswer = await searched(after === 0 ? at : `${at}&after=${after}`);
+    for (const hit of found.results) {
+      const path = ws.pathOfFile(hit.space, hit.fid);
+      if (!path) continue;
+      files.push({
+        path,
+        name: path.slice(path.lastIndexOf("/") + 1),
+        named: hit.inName === true,
+        matches: hit.matches.map((m) => ({
+          line: m.line ?? null,
+          column: Math.max(0, m.text.toLowerCase().indexOf(needle)),
+          preview: m.text,
+        })),
+      });
+    }
+    more += found.total - found.results.length;
+    after = found.next;
+  }
+  return { files, more };
 }
 
 /** A change to the tree that fails is said under the row it was asked on,
@@ -162,6 +178,7 @@ function cloudOf(ws: Workspace, saving: Saving): Cloud {
     onApplied: (cb) => ws.onApplied(cb),
     onConflict: (cb) => ws.onConflict(cb),
     onSpaceLeft: (cb) => ws.onSpaceLeft(cb),
+    onSpaceMoved: (cb) => ws.onSpaceMoved(cb),
     async setActivity(path) {
       ws.setActivity(path);
     },
@@ -331,23 +348,29 @@ function accessOf(ws: Workspace): CloudAccess {
   };
 }
 
-/** Restricted folders: each is the route a Mac's engine calls
- *  (`create_space` and the rest, engine/src/cloud/remote.rs), and the worker
- *  answers the people in the folder and nobody else. What a Mac does on its
- *  own disk, this page asks for: a folder that becomes a restricted one is
- *  moved into it (saving.ts), and a folder left or deleted goes from the
- *  picture held here at once (workspace.ts). */
-function spacesOf(ws: Workspace, saving: Saving): CloudSpaces {
+/** Sharing: each is the route a Mac's engine calls (`create_space` and the
+ *  rest, engine/src/cloud/remote.rs), and the worker answers the people who
+ *  can open the share and nobody else. What a Mac does by syncing, this page
+ *  asks for: the files of what is shared are carried into the share
+ *  (saving.ts), and something left or deleted goes from the picture held
+ *  here at once (workspace.ts). */
+function sharesOf(ws: Workspace, saving: Saving): CloudShares {
+  // What was typed in it goes first, while there is still somewhere to send it.
+  const flushed = async (id: string) => {
+    const item = ws.itemAt(id);
+    if (item !== null) await saving.flush(item);
+  };
   return {
-    spaceCreate: (_root, name, members, from = null) => saving.restrict(name, members, from),
-    async spaceMember(_root, id, memberId, add) {
-      // Leaving: what was typed in it goes first, while there is still
-      // somewhere to send it.
-      const folder = !add && memberId === ws.me ? ws.folderOf(id) : null;
-      if (folder !== null) await saving.flush(folder);
-      await ws.spaceMember(id, memberId, add);
+    share: (_root, path, members) => saving.share(path, members),
+    async shareMember(_root, id, memberId, add) {
+      if (!add && memberId === ws.me) await flushed(id);
+      await ws.shareMember(id, memberId, add);
     },
-    spaceDelete: (_root, id) => ws.deleteSpace(id),
+    async shareDelete(_root, id) {
+      await flushed(id);
+      await ws.deleteShare(id);
+    },
+    shareRestore: (_root, id) => ws.restoreShare(id),
   };
 }
 
@@ -394,7 +417,7 @@ export function webBackend(ws: Workspace, saving: Saving): Backend {
     home: ws.root,
     htmlFrame: "/app/frame",
     access: accessOf(ws),
-    spaces: spacesOf(ws, saving),
+    shares: sharesOf(ws, saving),
     session,
     shows,
     leaving,

@@ -3,8 +3,8 @@ import SwiftUI
 import UIKit
 
 /// One document, open for reading: its title, which is its name; its tags;
-/// where it is, who made it or changed it last, and — when it changed since
-/// this person last read it here — what changed, marked. *Edit*, or a double tap
+/// where it is and who can open it, who made it or changed it last, and —
+/// when it changed since this person last read it here — what changed, marked. *Edit*, or a double tap
 /// on a paragraph, edits it right here, and a double tap on the title edits
 /// that: a new title renames the file. Its comments, its link, its page on
 /// the web and its history are in the bar along the bottom.
@@ -23,6 +23,11 @@ struct DocumentView: View {
     /// The comments sheet, and what it opens on: a thread, or words for a new one.
     @State private var commentStart: CommentStart?
     @State private var publishing = false
+    /// *Share*, while its sheet is up.
+    @State private var sharing: ShareTarget?
+    /// The path this screen was opened with: the document's own moves under
+    /// it, by a new title or by sync.
+    private let opened: String
     /// *New tag* or *Edit*, while one is up.
     @State private var tagSheet: TagSheet?
     /// The words a search found, while the find bar is up.
@@ -49,6 +54,7 @@ struct DocumentView: View {
         _find = State(initialValue: find)
         _naming = State(initialValue: naming)
         foundLine = line
+        opened = path
     }
 
     private var workspace: Workspace { model.workspace }
@@ -67,6 +73,9 @@ struct DocumentView: View {
             }
             .sheet(isPresented: $publishing) {
                 PublishView(workspace: workspace, path: model.path, kind: .file) { route.append(.publishedPages) }
+            }
+            .sheet(item: $sharing) { target in
+                ShareSheet(workspace: workspace, target: target)
             }
             .sheet(item: $tagSheet) { TagSheetView(sheet: $0, workspace: workspace, toaster: toaster) }
             .alert("Doklin", isPresented: problemShown) {
@@ -119,11 +128,16 @@ struct DocumentView: View {
                 await model.shown()
             }
             .onChange(of: model.path) {
-                // Renamed by its title: its comments are its sidecar's, under the new name.
+                // Renamed by its title, or moved by sync: its comments are
+                // its sidecar's, under the new name.
+                shell.follow(opened, to: model.path)
                 comments = CommentsModel(workspace: workspace, path: model.path)
                 comments.load()
             }
             .onChange(of: workspace.changes) {
+                // Sync moved it, or renamed it as somebody renamed it: it is
+                // read, and edited, where it is now.
+                if let moved = workspace.relocated, model.follow(moved) { session?.relocated() }
                 if let session {
                     Task {
                         if await session.heardChange() { close() }
@@ -212,6 +226,7 @@ struct DocumentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     Breadcrumb(workspace: workspace, path: model.path)
+                    AudienceLine(workspace: workspace, path: model.path, share: shareTarget.map { target in { sharing = target } })
                     title
                     MarkdownView(
                         document: document, file: model.path, workspace: workspace, actions: actions,
@@ -245,6 +260,13 @@ struct DocumentView: View {
             }
             return .handled
         })
+    }
+
+    /// What *Share* is offered on: this document, when it is somewhere a
+    /// document is shared from.
+    private var shareTarget: ShareTarget? {
+        let target = ShareTarget(path: model.path, isFolder: false)
+        return workspace.shareable(target) ? target : nil
     }
 
     /// The note's name. One nobody gave ("Untitled") shows as the editor's
@@ -662,13 +684,20 @@ struct DocumentView: View {
                 Label("Share the text", systemImage: "square.and.arrow.up")
             }
         }
-        if workspace.status != nil, model.isNote || model.kind == .html, workspace.audience(of: model.path) != .nowhere {
+        if workspace.status != nil, model.isNote || model.kind == .html, workspace.place(of: model.path) != .nowhere {
             Button {
                 copyLink()
             } label: {
                 Label("Copy link", systemImage: "link")
             }
             .accessibilityIdentifier("copy-link")
+        }
+        if let shareTarget {
+            Button {
+                sharing = shareTarget
+            } label: {
+                Label("Share…", systemImage: "person.crop.circle.badge.plus")
+            }
         }
         Button {
             shell.showInBrowse(model.path)
@@ -738,6 +767,42 @@ struct Breadcrumb: View {
         .foregroundStyle(Theme.text2)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("In " + ([workspace.name] + folders).joined(separator: ", "))
+    }
+}
+
+/// Who can open a document, in a few words — "Everyone in Acme", "Only
+/// you", "You and 2 others" — beside the way to share it.
+struct AudienceLine: View {
+    let workspace: Workspace
+    let path: String
+    /// Opens *Share*, where the document can be shared.
+    let share: (() -> Void)?
+
+    var body: some View {
+        if let words = workspace.audience(of: path) {
+            HStack(spacing: 10) {
+                Label(words, systemImage: symbol)
+                    .labelStyle(.titleAndIcon)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("audience")
+                if let share {
+                    Button("Share", action: share)
+                        .font(.footnote.weight(.semibold))
+                        .accessibilityIdentifier("share")
+                }
+            }
+            .font(.footnote)
+            .foregroundStyle(Theme.text2)
+        }
+    }
+
+    private var symbol: String {
+        switch workspace.place(of: path) {
+        case .library: return "person.3"
+        case .mine: return "person"
+        case .share: return "person.2"
+        case .nowhere: return "icloud.slash"
+        }
     }
 }
 

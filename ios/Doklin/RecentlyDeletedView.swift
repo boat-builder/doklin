@@ -4,6 +4,8 @@ import SwiftUI
 /// Every file the workspace's history holds and its folders do not — removed
 /// here, on another device, or by a restore. A note comes back with its page
 /// and its comments, where it was, or beside it when that name is taken now.
+/// Above them, what was shared and deleted for everyone, for whoever can
+/// bring it back: it returns whole, with its people and its history.
 struct RecentlyDeletedView: View {
     @Binding var route: [Route]
     @Environment(Workspaces.self) private var device
@@ -11,6 +13,7 @@ struct RecentlyDeletedView: View {
     @State private var model: RecentlyDeleted
     @State private var restoring: String?
     @State private var failure: String?
+    @State private var now = Clock.now
 
     init(workspace: Workspace, route: Binding<[Route]>) {
         _route = route
@@ -21,7 +24,19 @@ struct RecentlyDeletedView: View {
 
     var body: some View {
         let dates = HistoryDates()
+        let shares = DeletedShare.listed(in: workspace.status)
         List {
+            if !shares.isEmpty {
+                Section {
+                    ForEach(shares) { share in
+                        row(share)
+                    }
+                } header: {
+                    Text("Shared")
+                } footer: {
+                    Text(DeletedShare.restoring)
+                }
+            }
             if !model.documents.isEmpty {
                 Section {
                     ForEach(model.documents) { document in
@@ -33,9 +48,10 @@ struct RecentlyDeletedView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .overlay { emptiness }
+        .overlay { if shares.isEmpty { emptiness } }
         .navigationTitle("Recently deleted")
         .navigationBarTitleDisplayMode(.inline)
+        .ticking($now)
         .task { await load() }
         .refreshable { await load() }
         .onChange(of: workspace.changes) { Task { await load() } }
@@ -52,6 +68,43 @@ struct RecentlyDeletedView: View {
 
     private func load() async {
         await model.load(stores: device.stores(of: workspace))
+    }
+
+    /// Something shared, deleted for everyone: it comes back as it was.
+    private func row(_ share: DeletedShare) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(share.space.name)
+                    .foregroundStyle(Theme.text1)
+                    .lineLimit(2)
+                Text(share.words(now: now))
+                    .font(.footnote)
+                    .foregroundStyle(Theme.text3)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("deleted-share-\(share.space.name)")
+            if workspace.may("work") {
+                Button(restoring == share.id ? "Bringing it back…" : "Restore") { bringBack(share) }
+                    .disabled(restoring != nil)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier("restore-share-\(share.space.name)")
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func bringBack(_ share: DeletedShare) {
+        restoring = share.id
+        Task {
+            defer { restoring = nil }
+            do {
+                try await workspace.restore(share)
+                toaster.show(share.restored)
+            } catch {
+                failure = HistoryWords.failed("Couldn't bring “\(share.space.name)” back", error)
+            }
+        }
     }
 
     private func row(_ document: DeletedDocument, _ dates: HistoryDates) -> some View {

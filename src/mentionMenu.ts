@@ -14,7 +14,7 @@ import type { Ctx } from "@milkdown/kit/ctx";
 import { Plugin, PluginKey, type EditorState } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { $prose } from "@milkdown/kit/utils";
-import { documentName, documentsFor, pickNotice, sectionName, sectionOf, whoCanOpen, type WorkspaceDocument } from "./docLinks";
+import { documentName, documentsFor, pickNotice, sectionName, whoCanOpen, type WorkspaceDocument } from "./docLinks";
 import { insertDocumentLink, linkContextCtx, type LinkContext } from "./linkMark";
 
 type Open = { at: number; query: string; index: number };
@@ -127,15 +127,14 @@ class MentionList {
       const where = line.appendChild(document.createElement("span"));
       where.className = "where";
       where.textContent = folderWithin(doc.path);
-      const own = links.note && links.docs ? sectionOf(links.note.path, links.docs) : null;
-      if (links.note && doc.section !== own) {
+      if (links.note && doc.section !== links.note.section) {
         const section = line.appendChild(document.createElement("span"));
         section.className = "section";
         section.textContent = sectionName(doc.path);
         if (doc.section !== null) {
           const who = row.appendChild(document.createElement("div"));
           who.className = "who";
-          who.textContent = whoCanOpen(doc, links.workspace);
+          who.textContent = whoCanOpen(doc, links.workspace, links.shares?.get(doc.section) ?? null);
         }
       }
       row.addEventListener("mouseenter", () => {
@@ -218,11 +217,12 @@ class MentionList {
   }
 }
 
-/** A document's folder below its section's: "GTM" for
- *  `Library/GTM/launch-plan.md`. */
+/** A document's folder below the one at the top of the workspace: "GTM" for
+ *  `Library/GTM/launch-plan.md`, "Finance" for
+ *  `Shared with me/Finance/budget.md`. */
 function folderWithin(path: string): string {
   const parts = path.split("/").slice(0, -1);
-  const skip = parts[0] === "Restricted" ? 2 : parts[0] === "Library" || parts[0] === "Private" ? 1 : 0;
+  const skip = ["Library", "My files", "Shared with me"].includes(parts[0]) ? 1 : 0;
   return parts.slice(skip).join("/");
 }
 

@@ -4,8 +4,11 @@ import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { Facepile } from "./Avatar";
 import {
   LIBRARY_DIR,
+  MY_FILES_DIR,
+  SHARED_DIR,
   agentPath,
-  isSectionName,
+  documentStem,
+  fromLibraryLayout,
   pageUrl,
   placeOf,
   publishedByPath,
@@ -54,7 +57,7 @@ type PendingRename = { path: string; kind: "file" | "dir"; openable?: boolean };
 // is a right-click on the empty space of a folder that is not connected (its
 // one list); "section" is one of a connected workspace's lists — its heading
 // or empty space in or under it (`sectionAt`) — whose folder `path` names.
-// `space` marks a restricted folder's own row.
+// `space` marks the row of something shared: the folder, or the document.
 type MenuTarget = {
   path: string;
   kind: "file" | "dir" | "root" | "section";
@@ -139,13 +142,12 @@ type Props = {
   onOpenPeople?: () => void;
   onOpenDevices?: () => void;
   onOpenAgents?: () => void;
-  // Sections (a connected workspace whose status says `sections`): making a
-  // restricted folder — empty, or out of a folder that is there (`from`) —
-  // seeing and changing who is in one, and putting a private note in a new
-  // folder with somebody.
-  onNewRestricted?: (from?: string) => void;
-  onManageAccess?: (space: CloudSpace) => void;
-  onShareWith?: (path: string) => void;
+  // Sharing (a connected workspace): the Share dialog for a folder or a
+  // document — one in My files or in something shared, or something shared
+  // already — and, for what is shared with this person and is not theirs to
+  // move, a copy of their own in My files.
+  onShare?: (path: string, kind: "file" | "dir") => void;
+  onCopyToMine?: (path: string, kind: "file" | "dir") => void;
   // Asked once before a drag moves anything: false leaves everything where
   // it is. Where a move would let more people see something, this is where
   // the user is told.
@@ -218,17 +220,21 @@ const readShowAll = () => {
   }
 };
 
-// The three lists of a connected workspace, one per section. A folder that is
-// not connected is one list, `library`'s.
-type SectionId = "library" | "restricted" | "private";
-const SECTION_IDS: readonly string[] = ["library", "restricted", "private"] satisfies SectionId[];
+// The three lists of a connected workspace: what everyone has, what is this
+// person's own, and what others shared with them. A folder that is not
+// connected is one list, `library`'s.
+type SectionId = "library" | "mine" | "shared";
+const SECTION_IDS: readonly string[] = ["library", "mine", "shared"] satisfies SectionId[];
 
-// Why a row syncs nowhere, on its "not synced" mark.
-const STRAY_LINE = "In no section, so it stays on this Mac — move it into Library or Private";
-const UNFOLDERED_LINE = "In no restricted folder, so it stays on this Mac — move it into one";
-const SECTION_NAMED_LINE = "A folder in Library with a section's name stays on this Mac — rename it";
-// What making or renaming a folder to one of those names is told.
-const SECTION_NAMED = "A folder in Library can't be called Library, Private or Restricted.";
+// Why a row syncs nowhere, on its "not synced" mark (`Sections.notSyncedLine`
+// on the iPhone, ios/DoklinKit — change both).
+const STRAY_LINE = "In no section, so it stays on this Mac — move it into Library or My files";
+const UNSHARED_LINE = "Nobody shared this with you, so it stays on this Mac — move it into Library or My files";
+
+// What something shared is keyed by among the rows: a folder by its path, a
+// document by its path without an extension — its markdown and its html are
+// one row.
+const shareKey = (path: string, kind: "file" | "dir") => (kind === "dir" ? path : `${documentStem(path)}\u0000`);
 
 // How the tree was left, per workspace — a view preference kept on this Mac:
 // the folders open in it, and the sections folded away. A folder is closed
@@ -295,6 +301,26 @@ export const moveTreeViewIntoLibrary = (root: string) => {
   all[root] = { ...v, open: v.open.map(toLibraryLayout) };
   writeAllTreeViews(all);
 };
+// ONE-TIME (`fromLibraryLayout`, cloud.ts): a folder's `Private` and
+// `Restricted` became `My files` and `Shared with me`, so each folder its
+// tree had open follows.
+export const moveTreeViewFromLibrary = (root: string) => {
+  const all = readAllTreeViews();
+  const v = all[root];
+  if (!v) return;
+  all[root] = { ...v, open: v.open.map(fromLibraryLayout) };
+  writeAllTreeViews(all);
+};
+// Something in the tree moved (`from` to `to`, workspace-relative): the
+// folders open at or under it are open where it is now.
+export const moveTreeViewPath = (root: string, from: string, to: string) => {
+  const all = readAllTreeViews();
+  const v = all[root];
+  if (!v) return;
+  const moved = (rel: string) => (rel === from ? to : rel.startsWith(`${from}/`) ? `${to}${rel.slice(from.length)}` : rel);
+  all[root] = { ...v, open: v.open.map(moved) };
+  writeAllTreeViews(all);
+};
 
 // The folders from just under `root` down to `dir`, `dir` included: what has
 // to be open for a row inside `dir` to show.
@@ -350,9 +376,8 @@ export default function Sidebar({
   onOpenPeople,
   onOpenDevices,
   onOpenAgents,
-  onNewRestricted,
-  onManageAccess,
-  onShareWith,
+  onShare,
+  onCopyToMine,
   onConfirmMove,
   workspaces,
   onOpenWorkspace,
@@ -441,54 +466,63 @@ export default function Sidebar({
   /* ---------- Sections ---------- */
 
   // A connected workspace draws three lists instead of one: Library, what
-  // everyone has; the restricted folders this person is in; and their
-  // Private. On disk they are the folders `Library`, `Restricted` and
-  // `Private` at the top, found however the disk spells them; here they are
-  // headings, and those folders have no row of their own. Anything else at
-  // the top is in no section — only Finder or an agent puts it there — and is
-  // listed after them, while there is any. A folder that is not connected is
-  // one list, of everything in it: its `libraryDir` is the folder itself.
+  // everyone has; My files, this person's own — where what they share stays;
+  // and Shared with me, what others shared with them. On disk they are the
+  // folders `Library`, `My files` and `Shared with me` at the top, found
+  // however the disk spells them; here they are headings, and those folders
+  // have no row of their own. Anything else at the top is in no section —
+  // only Finder or an agent puts it there — and is listed after them, while
+  // there is any. A folder that is not connected is one list, of everything
+  // in it: its `libraryDir` is the folder itself.
   const sectioned = cloud != null;
   const layout = useMemo(() => {
     if (!tree || tree.kind !== "dir") return null;
     if (!sectioned) {
       return {
-        shared: tree.children,
-        restricted: [],
-        private: [],
+        library: tree.children,
+        mine: [],
+        shared: [],
         strays: [],
         libraryDir: root,
-        restrictedDir: `${root}/Restricted`,
-        privateDir: `${root}/Private`,
+        mineDir: `${root}/${MY_FILES_DIR}`,
+        sharedDir: `${root}/${SHARED_DIR}`,
       };
     }
     const top = (name: string) =>
       tree.children.find(
-        (c): c is Extract<TreeNode, { kind: "dir" }> => c.kind === "dir" && c.name.toLowerCase() === name,
+        (c): c is Extract<TreeNode, { kind: "dir" }> => c.kind === "dir" && c.name.toLowerCase() === name.toLowerCase(),
       ) ?? null;
-    const library = top(LIBRARY_DIR.toLowerCase());
-    const restricted = top("restricted");
-    const mine = top("private");
+    const library = top(LIBRARY_DIR);
+    const mine = top(MY_FILES_DIR);
+    const shared = top(SHARED_DIR);
     return {
-      shared: library?.children ?? [],
-      restricted: restricted?.children ?? [],
-      private: mine?.children ?? [],
-      strays: tree.children.filter((c) => c !== library && c !== restricted && c !== mine && !c.name.startsWith(".")),
+      library: library?.children ?? [],
+      mine: mine?.children ?? [],
+      shared: shared?.children ?? [],
+      strays: tree.children.filter((c) => c !== library && c !== mine && c !== shared && !c.name.startsWith(".")),
       libraryDir: library?.path ?? `${root}/${LIBRARY_DIR}`,
-      restrictedDir: restricted?.path ?? `${root}/Restricted`,
-      privateDir: mine?.path ?? `${root}/Private`,
+      mineDir: mine?.path ?? `${root}/${MY_FILES_DIR}`,
+      sharedDir: shared?.path ?? `${root}/${SHARED_DIR}`,
     };
   }, [tree, sectioned, root]);
   const libraryDir = layout?.libraryDir ?? (sectioned ? `${root}/${LIBRARY_DIR}` : root);
-  const restrictedDir = layout?.restrictedDir ?? `${root}/Restricted`;
-  const privateDir = layout?.privateDir ?? `${root}/Private`;
-  // The restricted folders, by where each is on this Mac.
-  const spacesByAbs = useMemo(() => {
+  const mineDir = layout?.mineDir ?? `${root}/${MY_FILES_DIR}`;
+  const sharedDir = layout?.sharedDir ?? `${root}/${SHARED_DIR}`;
+  // What is shared, by the row each is on this Mac (`shareKey`).
+  const shares = useMemo(() => {
     const out = new Map<string, CloudSpace>();
-    for (const sp of cloud?.spaces ?? []) if (sp.kind === "restricted") out.set(`${root}/${sp.path}`, sp);
+    for (const sp of cloud?.spaces ?? []) {
+      if (sp.kind !== "private" && sp.path !== "") {
+        out.set(shareKey(`${root}/${sp.path}`, sp.kind === "folder" ? "dir" : "file"), sp);
+      }
+    }
     return out;
   }, [cloud, root]);
-  const hasPrivate = (cloud?.spaces ?? []).some((sp) => sp.kind === "private");
+  const shareOf = useCallback(
+    (entry: { path: string; kind: "file" | "dir" }) => shares.get(shareKey(entry.path, entry.kind)) ?? null,
+    [shares],
+  );
+  const hasMine = (cloud?.spaces ?? []).some((sp) => sp.kind === "private");
 
   // Which list a path is in; null for one in no section, whose list does not
   // fold. A folder that is not connected is one list.
@@ -496,11 +530,11 @@ export default function Sidebar({
     (path: string): SectionId | null => {
       const within = (dir: string) => path === dir || path.startsWith(`${dir}/`);
       if (!sectioned || within(libraryDir)) return "library";
-      if (within(privateDir)) return "private";
-      if (within(restrictedDir)) return "restricted";
+      if (within(mineDir)) return "mine";
+      if (within(sharedDir)) return "shared";
       return null;
     },
-    [sectioned, libraryDir, privateDir, restrictedDir],
+    [sectioned, libraryDir, mineDir, sharedDir],
   );
   const toggleSection = useCallback((id: SectionId) => {
     setFolded((prev) => {
@@ -535,12 +569,12 @@ export default function Sidebar({
     // A section's own folder has no row to open.
     openFolders(
       foldersDownTo(root, kind === "dir" ? path : dirname(path)).filter(
-        (dir) => !(sectioned && [libraryDir, restrictedDir, privateDir].includes(dir)),
+        (dir) => !(sectioned && [libraryDir, mineDir, sharedDir].includes(dir)),
       ),
     );
     unfoldSectionOf(path);
     setScrollTarget(path);
-  }, [reveal, tree, root, sectioned, libraryDir, restrictedDir, privateDir, openFolders, unfoldSectionOf, onRevealTaken]);
+  }, [reveal, tree, root, sectioned, libraryDir, mineDir, sharedDir, openFolders, unfoldSectionOf, onRevealTaken]);
   useEffect(() => {
     if (!scrollTarget) return;
     const row = document.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(scrollTarget)}"]`);
@@ -562,9 +596,9 @@ export default function Sidebar({
       }
     };
     if (layout) {
-      if (!folded.has("library")) walk(layout.shared);
-      if (!folded.has("restricted")) walk(layout.restricted);
-      if (!folded.has("private")) walk(layout.private);
+      if (!folded.has("library")) walk(layout.library);
+      if (!folded.has("mine")) walk(layout.mine);
+      if (!folded.has("shared")) walk(layout.shared);
       walk(layout.strays);
     }
     return out;
@@ -671,18 +705,18 @@ export default function Sidebar({
       // there to be in none.
       if (sectioned && toDir === root) return false;
       if (entries.every((en) => dirname(en.path) === toDir)) return false;
-      // Straight under Restricted is where the restricted folders are: a
-      // folder dropped there becomes one — where one can be made at all —
-      // and a note there would be in none.
-      if (sectioned && toDir === restrictedDir && (!onNewRestricted || entries.some((en) => en.kind === "file"))) {
-        return false;
-      }
+      // Straight under Shared with me is what others shared: nothing is put
+      // there by hand, where nobody would have shared it.
+      if (sectioned && toDir === sharedDir) return false;
+      // What is shared with this person sits where its owner keeps it: it
+      // is not theirs to move (they copy it, or leave it).
+      if (entries.some((en) => shareOf(en)?.placed === false)) return false;
       return !entries.some(
         (en) =>
           en.kind === "dir" && (toDir === en.path || toDir.startsWith(en.path + "/")),
       );
     },
-    [sectioned, root, restrictedDir, onNewRestricted],
+    [sectioned, root, sharedDir, shareOf],
   );
 
   const setDropState = useCallback((dir: string | null) => {
@@ -824,7 +858,7 @@ export default function Sidebar({
       // Moved folders stay as open as they were, and the destination opens
       // (its list unfolds) so the moved rows are visible where they landed.
       // A list's own folder has no row to open.
-      const listDir = toDir === libraryDir || toDir === restrictedDir || toDir === privateDir;
+      const listDir = toDir === libraryDir || toDir === mineDir || toDir === sharedDir;
       setOpenDirs((prev) => {
         let next = prev;
         for (const [from, to] of movedDirs) next = movedOpen(next, from, to);
@@ -832,7 +866,7 @@ export default function Sidebar({
       });
       unfoldSectionOf(toDir);
     },
-    [onMovePath, onSelect, onConfirmMove, libraryDir, restrictedDir, privateDir, unfoldSectionOf],
+    [onMovePath, onSelect, onConfirmMove, libraryDir, mineDir, sharedDir, unfoldSectionOf],
   );
 
   const onRowPointerDown = useCallback(
@@ -982,21 +1016,20 @@ export default function Sidebar({
 
   // Where something new is made for `wantedDir`, opened (with the folders
   // above it, and its list) so what is made there shows. Nothing is made
-  // straight under Restricted from here: a note there would be in no folder,
-  // and a folder there is made with its people.
+  // straight under Shared with me: nobody would have shared it.
   const makeRoomIn = useCallback(
     (wantedDir: string): string => {
-      const parentDir = sectioned && wantedDir === restrictedDir ? libraryDir : wantedDir;
+      const parentDir = sectioned && wantedDir === sharedDir ? libraryDir : wantedDir;
       setCtxMenu(null);
       setMenuOpen(false);
       setPendingRename(null); // one inline input at a time
       openFolders(
-        foldersDownTo(root, parentDir).filter((d) => d !== libraryDir && d !== restrictedDir && d !== privateDir),
+        foldersDownTo(root, parentDir).filter((d) => d !== libraryDir && d !== mineDir && d !== sharedDir),
       );
       unfoldSectionOf(parentDir);
       return parentDir;
     },
-    [root, sectioned, libraryDir, restrictedDir, privateDir, openFolders, unfoldSectionOf],
+    [root, sectioned, libraryDir, mineDir, sharedDir, openFolders, unfoldSectionOf],
   );
 
   // New Folder: its name row, at the top of the folder.
@@ -1067,7 +1100,6 @@ export default function Sidebar({
       if (!name) return "A name is required.";
       if (/[/\\:]/.test(name)) return "Names can't contain /, \\ or :";
       if (name.startsWith(".")) return "Names can't start with a dot.";
-      if (sectioned && pc.parentDir === libraryDir && isSectionName(name)) return SECTION_NAMED;
       const path = `${pc.parentDir}/${name}`;
       try {
         await backend.documents.create(path, "dir");
@@ -1079,7 +1111,7 @@ export default function Sidebar({
       onSelect([{ path, kind: "dir" }]);
       return null;
     },
-    [pendingCreate, sectioned, libraryDir, refresh, onSelect],
+    [pendingCreate, refresh, onSelect],
   );
 
   const cancelCreate = useCallback(() => setPendingCreate(null), []);
@@ -1115,9 +1147,6 @@ export default function Sidebar({
         setPendingRename(null); // nothing changed
         return null;
       }
-      if (sectioned && pr.kind === "dir" && dirname(pr.path) === libraryDir && isSectionName(newName)) {
-        return SECTION_NAMED;
-      }
       const to = `${dirname(pr.path)}/${newName}`;
       const err = await onMovePath(pr.path, to, pr.kind);
       if (err) return err;
@@ -1126,7 +1155,7 @@ export default function Sidebar({
       onSelect([{ path: to, kind: pr.kind }]);
       return null;
     },
-    [pendingRename, sectioned, libraryDir, onMovePath, onSelect],
+    [pendingRename, onMovePath, onSelect],
   );
 
   const cancelRename = useCallback(() => setPendingRename(null), []);
@@ -1141,10 +1170,10 @@ export default function Sidebar({
         selectionAnchorRef.current = target.path;
         onSelect([{ path: target.path, kind: target.kind }]);
       }
-      const space = target.kind === "dir" ? spacesByAbs.get(target.path) : undefined;
+      const space = target.openable === false ? undefined : (shareOf(target) ?? undefined);
       setCtxMenu({ x: e.clientX, y: e.clientY, target: { ...target, space } });
     },
-    [selection, onSelect, spacesByAbs],
+    [selection, onSelect, shareOf],
   );
 
   const rootName = useMemo(() => basename(root), [root]);
@@ -1168,7 +1197,7 @@ export default function Sidebar({
   }, [cloud, root]);
   const showCreateInLibrary = pendingCreate?.parentDir === libraryDir;
   const libraryFolded = sectioned && folded.has("library");
-  const showCreateInPrivate = sectioned && pendingCreate?.parentDir === privateDir;
+  const showCreateInMine = sectioned && pendingCreate?.parentDir === mineDir;
 
   const ctxItems: ContextMenuItem[] = useMemo(() => {
     if (!ctxMenu) return [];
@@ -1178,25 +1207,20 @@ export default function Sidebar({
     // whole set, with only the operations that make sense for many rows at
     // once (per-document items like Rename need a single target).
     if (isRow && selection.length > 1 && selection.some((s) => s.path === target.path)) {
-      // A restricted folder is not cut or trashed like the rows beside it:
-      // it is left, or deleted for everyone, from its own dialog.
-      const movable = selection.filter((s) => !spacesByAbs.has(s.path));
+      // Something shared is not cut or trashed with the rows beside it: it
+      // is deleted for everyone, or left, on its own and asked first.
+      const movable = selection.filter((s) => !shareOf(s));
       return [
         { label: "Cut", disabled: movable.length === 0, onClick: () => onCopyEntries(movable, true) },
         { label: "Copy", onClick: () => onCopyEntries([...selection], false) },
         { label: "Delete", danger: true, disabled: movable.length === 0, onClick: () => onDelete(movable) },
       ];
     }
-    // Empty space under Restricted: the one thing made there is a folder
-    // with people in it.
-    if (target.kind === "section" && target.section === "restricted") {
-      return onNewRestricted ? [{ label: "New restricted folder…", onClick: () => onNewRestricted() }] : [];
-    }
-    // A row straight under Restricted offers no New Document / New Folder:
-    // see `makeRoomIn`.
-    const underRestricted = sectioned && createDirFor(target) === restrictedDir;
+    // A row straight under Shared with me offers no New Document, New
+    // Folder or Paste: see `makeRoomIn`.
+    const underShared = sectioned && createDirFor(target) === sharedDir;
     const items: ContextMenuItem[] = [];
-    if (!underRestricted) {
+    if (!underShared) {
       items.push(
         { label: "New Document", onClick: () => void newDocument(createDirFor(target)) },
         { label: "New Folder…", onClick: () => startNewFolder(createDirFor(target)) },
@@ -1238,18 +1262,18 @@ export default function Sidebar({
     if (target.kind === "file" && target.openable !== false && onHistory) {
       items.push({ label: "Version history…", onClick: () => onHistory(target.path) });
     }
-    // Who can open it: a restricted folder's people; a folder everyone has,
-    // or a private one, made into one; a private note put in a new folder
-    // with somebody.
-    if (sectioned && isRow && target.path.startsWith(`${root}/`)) {
-      const place = placeOf(cloud, target.path.slice(root.length + 1));
-      if (target.space && onManageAccess) {
-        const space = target.space;
-        items.push({ label: "Manage access…", onClick: () => onManageAccess(space) });
-      } else if (target.kind === "dir" && onNewRestricted && (place.kind === "shared" || place.kind === "private")) {
-        items.push({ label: "Restrict access…", onClick: () => onNewRestricted(target.path) });
-      } else if (target.kind === "file" && onShareWith && place.kind === "private" && target.openable !== false) {
-        items.push({ label: "Share with…", onClick: () => onShareWith(target.path) });
+    // Who can open it. A folder or a document in My files, or in something
+    // shared, is shared where it is; what is in Library is everyone's
+    // already. Something shared with this person, which is not theirs to
+    // move, can be copied into their own files.
+    if (sectioned && (target.kind === "file" || target.kind === "dir") && target.openable !== false) {
+      const { path, kind } = target;
+      const place = path.startsWith(`${root}/`) ? placeOf(cloud, path.slice(root.length + 1)).kind : "nowhere";
+      if (onShare && (place === "mine" || place === "share")) {
+        items.push({ label: "Share…", onClick: () => onShare(path, kind) });
+      }
+      if (onCopyToMine && target.space?.placed === false && hasMine) {
+        items.push({ label: "Copy to My files", onClick: () => onCopyToMine(path, kind) });
       }
     }
     // The first list's whole history — where "put it back to Tuesday" is
@@ -1259,13 +1283,13 @@ export default function Sidebar({
     const libraryTarget = sectioned
       ? target.kind === "section" && target.section === "library"
       : target.kind === "root";
-    const ownHistory = target.space != null || (target.kind === "section" && target.section === "private");
+    const ownHistory = target.space?.kind === "folder" || (target.kind === "section" && target.section === "mine");
     if (libraryTarget && onWorkspaceHistory) {
       items.push({ label: sectioned ? "Library history…" : "Folder history…", onClick: () => onWorkspaceHistory() });
     }
     if (ownHistory && onWorkspaceHistory) {
       items.push({
-        label: target.space ? "Folder history…" : "Private history…",
+        label: target.space ? "Folder history…" : "My files history…",
         onClick: () => onWorkspaceHistory(target.path),
       });
     }
@@ -1305,40 +1329,43 @@ export default function Sidebar({
     }
     // Cut/Copy/Paste, VS Code's explorer trio. Paste lands where New Document
     // would (`createDirFor`) — and stays visible-but-disabled while the
-    // clipboard is empty. A restricted folder is copied, never cut: it leaves
-    // by its own dialog.
+    // clipboard is empty. Something shared with this person is copied, never
+    // cut: where it sits is its owner's to say.
     if (target.kind === "file" || target.kind === "dir") {
       const entry: SidebarSelection = { path: target.path, kind: target.kind };
-      if (!target.space) items.push({ label: "Cut", onClick: () => onCopyEntries([entry], true) });
+      if (target.space?.placed !== false) items.push({ label: "Cut", onClick: () => onCopyEntries([entry], true) });
       items.push({ label: "Copy", onClick: () => onCopyEntries([entry], false) });
     }
-    items.push({
-      label: "Paste",
-      disabled: !clipboardHasFiles,
-      onClick: () => onPasteEntries(createDirFor(target)),
-    });
+    if (!underShared) {
+      items.push({
+        label: "Paste",
+        disabled: !clipboardHasFiles,
+        onClick: () => onPasteEntries(createDirFor(target)),
+      });
+    }
     if (target.kind === "file" || target.kind === "dir") {
       const kind = target.kind;
       items.push({
         label: "Rename…",
         onClick: () => startRename({ path: target.path, kind, openable: target.openable }),
       });
-      if (!target.space) {
-        items.push({
-          label: "Delete",
-          danger: true,
-          onClick: () => onDelete([{ path: target.path, kind }]),
-        });
-      }
+      // Something shared is deleted for everyone it is shared with by
+      // whoever keeps it, and left by anyone else: the app asks first.
+      items.push({
+        label: !target.space ? "Delete" : target.space.placed ? "Delete for everyone…" : "Leave…",
+        danger: true,
+        onClick: () => onDelete([{ path: target.path, kind }]),
+      });
     }
     return items;
   }, [
     ctxMenu,
     selection,
     clipboardHasFiles,
-    spacesByAbs,
+    shareOf,
+    hasMine,
     sectioned,
-    restrictedDir,
+    sharedDir,
     newDocument,
     startNewFolder,
     startRename,
@@ -1359,9 +1386,8 @@ export default function Sidebar({
     onCopyLink,
     onCopyPageLink,
     onCopyAgentPath,
-    onNewRestricted,
-    onManageAccess,
-    onShareWith,
+    onShare,
+    onCopyToMine,
   ]);
 
   // Right-edge drag handle: the app owns the width (grid CSS variable);
@@ -1398,9 +1424,9 @@ export default function Sidebar({
     />
   );
   // A top-level row of one of the lists. `loose` is why the row is in no
-  // section and so syncs nowhere — a note straight under Restricted, anything
-  // at the workspace's top — or null when it is in one.
-  const sectionDirs = [libraryDir, restrictedDir, privateDir];
+  // section and so syncs nowhere — under Shared with me and shared by
+  // nobody, anything at the workspace's top — or null when it is in one.
+  const sectionDirs = [libraryDir, mineDir, sharedDir];
   const renderItem = (child: TreeNode, parentDir: string, loose: string | null) => (
     <TreeItem
       key={child.path}
@@ -1419,7 +1445,7 @@ export default function Sidebar({
       dnd={dnd}
       presence={presenceByPath}
       published={publishedByAbs}
-      spaces={spacesByAbs}
+      shares={shares}
       loose={loose}
       synced={sectioned}
       onToggle={toggleOpen}
@@ -1474,8 +1500,8 @@ export default function Sidebar({
         onContextMenu={(e) => {
           // A right-click off the rows (theirs stopPropagation) is for the
           // list it is in (`sectionAt`) — a folder that is not connected is
-          // one list. Under Restricted the one thing made is a folder with
-          // people; in no section nothing is made, so there is no menu.
+          // one list. Under Shared with me, and in no section, nothing is
+          // made, so there is no menu.
           e.preventDefault();
           onSelect([]);
           const list = sectioned ? sectionAt(e.clientY)?.dataset.section : null;
@@ -1483,11 +1509,9 @@ export default function Sidebar({
             ? { path: root, kind: "root" }
             : list === "library"
               ? { path: libraryDir, kind: "section", section: "library" }
-              : list === "restricted" && onNewRestricted
-                ? { path: restrictedDir, kind: "section", section: "restricted" }
-                : list === "private" && hasPrivate
-                  ? { path: privateDir, kind: "section", section: "private" }
-                  : null;
+              : list === "mine" && hasMine
+                ? { path: mineDir, kind: "section", section: "mine" }
+                : null;
           setCtxMenu(target && { x: e.clientX, y: e.clientY, target });
         }}
       >
@@ -1503,7 +1527,7 @@ export default function Sidebar({
             icon={sectioned ? <LibraryIcon /> : null}
             label={sectioned ? "Library" : "Files"}
             folded={libraryFolded}
-            count={layout?.shared.length ?? 0}
+            count={layout?.library.length ?? 0}
             onToggle={sectioned ? () => toggleSection("library") : undefined}
             testid={sectioned ? "library" : "files"}
           >
@@ -1528,18 +1552,11 @@ export default function Sidebar({
           {!error && loading && !tree && <div className="sidebar-message">Loading…</div>}
           {!error && layout && !libraryFolded && (
             <>
-              {layout.shared.length === 0 && !showCreateInLibrary && <div className="sidebar-message">No files yet</div>}
-              {(layout.shared.length > 0 || showCreateInLibrary) && (
+              {layout.library.length === 0 && !showCreateInLibrary && <div className="sidebar-message">No files yet</div>}
+              {(layout.library.length > 0 || showCreateInLibrary) && (
                 <ul className="tree" role="tree">
                   {showCreateInLibrary && pendingCreate && createRow}
-                  {/* Only Finder makes a folder here with a section's name: Library holds nothing under one. */}
-                  {layout.shared.map((child) =>
-                    renderItem(
-                      child,
-                      libraryDir,
-                      sectioned && child.kind === "dir" && isSectionName(child.name) ? SECTION_NAMED_LINE : null,
-                    ),
-                  )}
+                  {layout.library.map((child) => renderItem(child, libraryDir, null))}
                 </ul>
               )}
             </>
@@ -1548,95 +1565,81 @@ export default function Sidebar({
         {!error && layout && sectioned && (
           <>
             <div
-              className={`tree-section ${dropDir === restrictedDir ? "is-drop-section" : ""}`}
-              data-section="restricted"
-              data-section-dir={restrictedDir}
-              data-testid="section-restricted"
+              className={`tree-section ${hasMine && dropDir === mineDir ? "is-drop-section" : ""}`}
+              data-section="mine"
+              data-section-dir={hasMine ? mineDir : ""}
+              data-testid="section-mine"
             >
               <SectionHead
-                icon={<RestrictedIcon />}
-                label="Restricted"
-                folded={folded.has("restricted")}
-                count={layout.restricted.length}
-                onToggle={() => toggleSection("restricted")}
-                testid="restricted"
+                icon={<MineIcon />}
+                label="My files"
+                folded={folded.has("mine")}
+                count={layout.mine.length}
+                onToggle={() => toggleSection("mine")}
+                testid="mine"
               >
-                {onNewRestricted && (
-                  <button
-                    className="sidebar-section-btn"
-                    data-testid="new-restricted"
-                    onClick={() => onNewRestricted()}
-                    title="New restricted folder"
-                    aria-label="New restricted folder"
-                  >
-                    <PlusIcon />
-                  </button>
-                )}
-              </SectionHead>
-              {!folded.has("restricted") &&
-                (layout.restricted.length === 0 ? (
-                  <div className="sidebar-message tree-section-hint">Folders only the people you choose can open.</div>
-                ) : (
-                  <ul className="tree" role="tree">
-                    {/* Straight under Restricted a note is in no folder, so nobody else has it. */}
-                    {layout.restricted.map((child) =>
-                      renderItem(child, restrictedDir, child.kind === "file" ? UNFOLDERED_LINE : null),
-                    )}
-                  </ul>
-                ))}
-            </div>
-            <div
-              className={`tree-section ${hasPrivate && dropDir === privateDir ? "is-drop-section" : ""}`}
-              data-section="private"
-              data-section-dir={hasPrivate ? privateDir : ""}
-              data-testid="section-private"
-            >
-              <SectionHead
-                icon={<PrivateIcon />}
-                label="Private"
-                folded={folded.has("private")}
-                count={layout.private.length}
-                onToggle={() => toggleSection("private")}
-                testid="private"
-              >
-                {hasPrivate && (
+                {hasMine && (
                   <>
                     <button
                       className="sidebar-section-btn"
-                      data-testid="new-private-folder"
-                      onClick={() => startNewFolder(createDirIn(privateDir))}
-                      title="New private folder"
-                      aria-label="New private folder"
+                      data-testid="new-mine-folder"
+                      onClick={() => startNewFolder(createDirIn(mineDir))}
+                      title="New folder in My files"
+                      aria-label="New folder in My files"
                     >
                       <NewFolderIcon />
                     </button>
                     <button
                       className="sidebar-section-btn"
-                      data-testid="new-private"
-                      onClick={() => void newDocument(createDirIn(privateDir))}
-                      title="New private note"
-                      aria-label="New private note"
+                      data-testid="new-mine"
+                      onClick={() => void newDocument(createDirIn(mineDir))}
+                      title="New note in My files"
+                      aria-label="New note in My files"
                     >
                       <PlusIcon />
                     </button>
                   </>
                 )}
               </SectionHead>
-              {!folded.has("private") && (
+              {!folded.has("mine") && (
                 <>
-                  {hasPrivate && layout.private.length === 0 && !showCreateInPrivate && (
-                    <div className="sidebar-message tree-section-hint">Only you can see what you put here.</div>
+                  {/* What an empty list says it is for: the iPhone's words too
+                      (`TreeSection.emptyHint`, ios/DoklinKit) — change both. */}
+                  {hasMine && layout.mine.length === 0 && !showCreateInMine && (
+                    <div className="sidebar-message tree-section-hint">Only you can open what you put here, until you share it.</div>
                   )}
-                  {(layout.private.length > 0 || showCreateInPrivate) && (
+                  {(layout.mine.length > 0 || showCreateInMine) && (
                     <ul className="tree" role="tree">
-                      {showCreateInPrivate && createRow}
-                      {layout.private.map((child) =>
-                        renderItem(child, privateDir, !hasPrivate && child.kind === "file" ? UNFOLDERED_LINE : null),
-                      )}
+                      {showCreateInMine && createRow}
+                      {/* Before the domain has said this is their My files, nothing here syncs yet. */}
+                      {layout.mine.map((child) => renderItem(child, mineDir, hasMine ? null : STRAY_LINE))}
                     </ul>
                   )}
                 </>
               )}
+            </div>
+            {/* What others shared with this person. Nothing is made or
+                dropped here; what is here and shared by nobody stays on this
+                Mac. */}
+            <div className="tree-section" data-section="shared" data-section-dir="" data-testid="section-shared">
+              <SectionHead
+                icon={<SharedIcon />}
+                label="Shared with me"
+                folded={folded.has("shared")}
+                count={layout.shared.length}
+                onToggle={() => toggleSection("shared")}
+                testid="shared"
+              />
+              {!folded.has("shared") &&
+                (layout.shared.length === 0 ? (
+                  <div className="sidebar-message tree-section-hint">What other people share with you shows here.</div>
+                ) : (
+                  <ul className="tree" role="tree">
+                    {layout.shared.map((child) =>
+                      renderItem(child, sharedDir, child.kind === "file" && child.supported === false ? null : shareOf(child) ? null : UNSHARED_LINE),
+                    )}
+                  </ul>
+                ))}
             </div>
             {/* What Finder or an agent put at the workspace's top: in no
                 section, so it stays on this Mac. Nothing is dropped here. */}
@@ -1997,7 +2000,7 @@ function TreeItem({
   dnd,
   presence,
   published,
-  spaces,
+  shares,
   loose = null,
   synced,
   onToggle,
@@ -2032,9 +2035,9 @@ function TreeItem({
   presence: Map<string, string[]>;
   // Rows with a public page of their own, by absolute path.
   published: Map<string, PublicPage>;
-  // The restricted folders, by absolute path: such a row says how many
-  // people are in it, and is not dragged away.
-  spaces: Map<string, CloudSpace>;
+  // What is shared, by its row (`shareKey`): such a row says so, and one
+  // shared with this person is not dragged away.
+  shares: Map<string, CloudSpace>;
   // Why the row at this level is in no section, so syncs nowhere; null when
   // it is in one.
   loose?: string | null;
@@ -2085,6 +2088,7 @@ function TreeItem({
     const active = node.path === currentPath;
     const editors = presence.get(node.path);
     const page = published.get(node.path);
+    const share = openable ? (shares.get(shareKey(node.path, "file")) ?? null) : null;
     return (
       <li role="treeitem" aria-selected={active || isSelected}>
         <button
@@ -2098,8 +2102,9 @@ function TreeItem({
             if (onRowClick(e, { path: node.path, kind: "file" })) return;
             onOpenFile(node.path);
           }}
-          onPointerDown={(e) =>
-            dnd.onPointerDown(e, { path: node.path, kind: "file", openable })
+          // What is shared with this person stays where its owner keeps it.
+          onPointerDown={
+            share?.placed === false ? undefined : (e) => dnd.onPointerDown(e, { path: node.path, kind: "file", openable })
           }
           onPointerMove={dnd.onPointerMove}
           onPointerUp={dnd.onPointerUp}
@@ -2118,6 +2123,7 @@ function TreeItem({
             {active && currentTitle ? currentTitle : openable ? stripDocExt(node.name) : node.name}
           </span>
           {loose && <NowhereMark line={loose} />}
+          {share && <SharedMark share={share} />}
           {page?.kind === "file" && (
             <span className="tree-published" title={`Published at /${page.slug}`} data-testid="tree-published" />
           )}
@@ -2135,7 +2141,7 @@ function TreeItem({
     );
   }
 
-  const space = spaces.get(node.path) ?? null;
+  const share = shares.get(shareKey(node.path, "dir")) ?? null;
   const isOpen = openDirs.has(node.path);
   const creatingHere = pendingCreate?.parentDir === node.path;
   const isDropTarget = dropDir === node.path;
@@ -2164,9 +2170,10 @@ function TreeItem({
             if (onRowClick(e, { path: node.path, kind: "dir" })) return;
             onToggle(node.path);
           }}
-          // A restricted folder stays where it is: it is left, or deleted
-          // for everyone, never dragged into another section.
-          onPointerDown={space ? undefined : (e) => dnd.onPointerDown(e, { path: node.path, kind: "dir" })}
+          // What is shared with this person stays where its owner keeps it.
+          onPointerDown={
+            share?.placed === false ? undefined : (e) => dnd.onPointerDown(e, { path: node.path, kind: "dir" })
+          }
           onPointerMove={dnd.onPointerMove}
           onPointerUp={dnd.onPointerUp}
           onPointerCancel={dnd.onPointerCancel}
@@ -2178,15 +2185,7 @@ function TreeItem({
           </span>
           <span className="tree-label tree-dir-label">{node.name}</span>
           {loose && <NowhereMark line={loose} />}
-          {space && space.members.length > 0 && (
-            <span
-              className="tree-space-count"
-              data-testid="space-count"
-              title={`${space.members.length} ${space.members.length === 1 ? "person" : "people"} can open this folder`}
-            >
-              · {space.members.length}
-            </span>
-          )}
+          {share && <SharedMark share={share} />}
           {published.get(node.path)?.kind === "dir" && (
             <span
               className="tree-published"
@@ -2227,7 +2226,7 @@ function TreeItem({
               dnd={dnd}
               presence={presence}
               published={published}
-              spaces={spaces}
+              shares={shares}
               synced={synced}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
@@ -2242,6 +2241,24 @@ function TreeItem({
         </ul>
       )}
     </li>
+  );
+}
+
+// The mark on the row of something shared: with how many people, or that
+// it is somebody else's, shared with this person. The iPhone says the line
+// under the row's name (`ShareWords.mark`, ios/DoklinKit) — change both.
+function SharedMark({ share }: { share: CloudSpace }) {
+  const n = share.members.length;
+  const line = !share.placed
+    ? "Shared with you"
+    : n === 0
+      ? "Shared with nobody yet"
+      : `Shared with ${n} ${n === 1 ? "person" : "people"}`;
+  return (
+    <span className="tree-shared" data-testid="tree-shared" title={line} aria-label={line}>
+      <SharedIcon />
+      {share.placed && n > 0 ? n : null}
+    </span>
   );
 }
 
@@ -2577,7 +2594,7 @@ function LibraryIcon() {
   );
 }
 
-function RestrictedIcon() {
+function SharedIcon() {
   return (
     <svg
       width="14"
@@ -2590,14 +2607,15 @@ function RestrictedIcon() {
       strokeLinejoin="round"
       aria-hidden
     >
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      <circle cx="12" cy="9.5" r="2.5" />
-      <path d="M8 16.5a4 4 0 0 1 8 0" />
+      <circle cx="9" cy="8" r="3.5" />
+      <path d="M2.5 20a6.5 6.5 0 0 1 13 0" />
+      <circle cx="17.5" cy="9" r="2.5" />
+      <path d="M17.5 14.5a4.5 4.5 0 0 1 4 5" />
     </svg>
   );
 }
 
-function PrivateIcon() {
+function MineIcon() {
   return (
     <svg
       width="14"
@@ -2610,8 +2628,8 @@ function PrivateIcon() {
       strokeLinejoin="round"
       aria-hidden
     >
-      <rect x="4" y="11" width="16" height="10" rx="2" />
-      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21a8 8 0 0 1 16 0" />
     </svg>
   );
 }

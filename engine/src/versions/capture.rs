@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use tokio::time::{Duration, Instant};
 
 use crate::cloud::scan::{read_file_checked, scan_local};
-use crate::cloud::space::shared_skip;
 
 use super::store::{digest_of, hash_full, FileEntry, Index, Reason, Snapshot, SnapshotRow, Store, STORE_VERSION};
 
@@ -121,7 +120,7 @@ pub fn capture(
     restored_from: Option<u64>,
     now_ms: u64,
 ) -> Result<Captured, CaptureError> {
-    let scanned = scan_local(&store.root, shared_skip(&store.root)).map_err(|_| CaptureError::TooLarge)?;
+    let scanned = scan_local(&store.root, &store.reach).map_err(|_| CaptureError::TooLarge)?;
     let mut out = Captured::default();
     let mut files: BTreeMap<String, FileEntry> = BTreeMap::new();
     let mut total_bytes = 0u64;

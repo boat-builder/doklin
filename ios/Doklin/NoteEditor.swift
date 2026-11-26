@@ -437,6 +437,15 @@ final class NoteEditing {
         page.editable(lease == nil && !changedElsewhere)
     }
 
+    /// Sync moved the note, or renamed it as somebody renamed it: the editor
+    /// shows its name now, its links lead from where it is, and other
+    /// devices see it edited there.
+    func relocated() {
+        guard phase == .editing else { return }
+        EditorPage.shared.named(model.title, note: model.path, title: model.title, problem: nil)
+        Task { await model.editing(true) }
+    }
+
     /// The workspace's documents changed: the editor shows the note's links
     /// where their files are now.
     func documentsChanged() {

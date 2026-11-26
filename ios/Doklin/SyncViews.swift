@@ -29,6 +29,9 @@ final class Shell {
     /// Documents on screen: they hide the tab bar, and with it the bar above
     /// the tabs, so what was just done shows in their own bar instead.
     var documents = 0
+    /// Where a document on screen is now, by the path its screen was opened
+    /// with: a new title renames it, and sync moves it, under that screen.
+    private var renamed: [String: String] = [:]
 
     /// Push `route` over whatever the showing tab has.
     func open(_ route: Route) {
@@ -51,6 +54,23 @@ final class Shell {
         browse.removeAll(where: gone)
         recent.removeAll(where: gone)
         search.removeAll(where: gone)
+    }
+
+    /// Lead each screen `moved` answers for to where it says instead.
+    func rewrite(_ moved: (Route) -> Route?) {
+        browse = browse.map { moved($0) ?? $0 }
+        recent = recent.map { moved($0) ?? $0 }
+        search = search.map { moved($0) ?? $0 }
+    }
+
+    /// The document whose screen was opened with `path` is at `now`.
+    func follow(_ path: String, to now: String) {
+        renamed[path] = now == path ? nil : now
+    }
+
+    /// Where the document whose screen was opened with `path` is now.
+    func now(_ path: String) -> String {
+        renamed[path] ?? path
     }
 }
 

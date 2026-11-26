@@ -26,7 +26,7 @@
       const params = new URLSearchParams(location.search);
       // The folders in the Library layout (the engine's move,
       // engine/src/cloud/layout.rs): their shared files are in `Library/`,
-      // beside `Private/` and `Restricted/`. /docs starts there in a
+      // beside `My files/` and `Shared with me/`. /docs starts there in a
       // workspace that is in sections (`?sections`), and moves on a connect
       // or a resume; a joined folder is in it from the start. Anything else
       // at the top of a moved folder is in no section: `__strays` (file
@@ -51,7 +51,7 @@
       const intoLibrary = (root, p) => {
         if (!p.startsWith(`${root}/`)) return p;
         const top = p.slice(root.length + 1).split("/")[0];
-        return top.startsWith(".") || ["library", "private", "restricted"].includes(top.toLowerCase())
+        return top.startsWith(".") || ["library", "my files", "shared with me"].includes(top.toLowerCase())
           ? p
           : `${root}/Library/${p.slice(root.length + 1)}`;
       };
@@ -80,37 +80,30 @@
         path: `${root}/Projects`,
         children: [{ kind: "file", name: "plan.md", path: `${root}/Projects/plan.md` }],
       });
-      // A workspace in sections (`?sections`): what is under `Private` and
-      // `Restricted` on disk. `private` is the files of this person's own
-      // section, or null when they have none; `restricted` is the folders
-      // there, by folder name, each a list of file names; `loose` is notes
-      // straight under Restricted, in no folder. `projectsGone` is set once
-      // the shared Projects folder has been made a restricted one.
+      // A workspace in sections (`?sections`): what is under `My files` and
+      // `Shared with me` on disk. `lists` is every folder there by its path,
+      // each a list of file names — a folder is one once it is a key.
+      // `mine` is false while this person has no My files yet. What is
+      // shared is not here: it is the status's `spaces`, as the engine says it.
       window.__sections = null;
       const fileNode = (dir, name) => ({ kind: "file", name, path: `${dir}/${name}` });
+      const dirnameOf = (p) => p.slice(0, p.lastIndexOf("/"));
       const sectionNodes = (root) => {
         const sec = window.__sections;
         if (!sec || root !== "/docs") return [];
-        const restricted = `${root}/Restricted`;
-        return [
-          ...(sec.private
-            ? [{ kind: "dir", name: "Private", path: `${root}/Private`, children: sec.private.map((f) => fileNode(`${root}/Private`, f)) }]
-            : []),
-          {
-            kind: "dir",
-            name: "Restricted",
-            path: restricted,
-            children: [
-              ...Object.entries(sec.restricted).map(([name, files]) => ({
-                kind: "dir",
-                name,
-                path: `${restricted}/${name}`,
-                children: files.map((f) => fileNode(`${restricted}/${name}`, f)),
-              })),
-              ...sec.loose.map((f) => fileNode(restricted, f)),
-            ],
-          },
-        ];
+        const dirNode = (dir) => ({
+          kind: "dir",
+          name: basename(dir),
+          path: dir,
+          children: [
+            ...Object.keys(sec.lists)
+              .filter((d) => dirnameOf(d) === dir)
+              .sort()
+              .map(dirNode),
+            ...sec.lists[dir].map((f) => fileNode(dir, f)),
+          ],
+        });
+        return [...(sec.mine ? [`${root}/My files`] : []), `${root}/Shared with me`].filter((d) => sec.lists[d]).map(dirNode);
       };
       // The list of file names a path under /docs is in, and its name there —
       // what creating or moving a note has to touch for the tree to show it.
@@ -124,18 +117,25 @@
         if (window.__moved.has("/docs") && parts.length === 2 && window.__strayDirs[parts[0]]) {
           return { list: window.__strayDirs[parts[0]], name: parts[1] };
         }
-        if (!sec) return null;
-        if (parts[0] === "Private" && parts.length === 2 && sec.private) return { list: sec.private, name: parts[1] };
-        if (parts[0] === "Restricted" && parts.length === 2) return { list: sec.loose, name: parts[1] };
-        if (parts[0] === "Restricted" && parts.length === 3 && sec.restricted[parts[1]]) {
-          return { list: sec.restricted[parts[1]], name: parts[2] };
-        }
-        return null;
+        const list = sec?.lists[dirnameOf(path)];
+        return list ? { list, name: basename(path) } : null;
       };
+      // What is shared at a workspace-relative path: a folder there, or a
+      // document by any of its files.
+      const stemOf = (rel) => rel.replace(/\.(md|html)$/i, "").replace(/\.meta\.jsonl$/i, "");
+      const spacesOf = (root) => window.__cloud.statuses.find((st) => st.root === root)?.spaces ?? [];
+      const shareAt = (root, rel, dir) =>
+        spacesOf(root).find((sp) => sp.kind === (dir ? "folder" : "document") && sp.path !== "" && sp.path === (dir ? rel : stemOf(rel)));
+      // The deepest section a workspace-relative path is in.
+      const sectionAt = (root, rel) =>
+        spacesOf(root)
+          .filter((sp) => sp.path !== "" && (sp.kind === "document" ? stemOf(rel) === sp.path : rel === sp.path || rel.startsWith(`${sp.path}/`)))
+          .sort((a, b) => (b.kind === "document") - (a.kind === "document") || b.path.length - a.path.length)[0] ?? null;
+      window.__sectionAt = sectionAt;
       // The shared section's files, in the folder `dir`.
       // `__finderDirs`: folders somebody made in the shared section outside the app.
       const sharedNodes = (dir, all) => [
-        ...(window.__sections?.projectsGone ? [] : [projectsNode(dir)]),
+        projectsNode(dir),
         ...(window.__finderDirs ?? []).map((name) => ({ kind: "dir", name, path: `${dir}/${name}`, children: [] })),
         ...window.__treeFiles.map((f) => ({ kind: "file", name: f, path: `${dir}/${f}` })),
         ...(all ? window.__otherFiles.map((f) => ({ kind: "file", name: f, path: `${dir}/${f}`, supported: false })) : []),
@@ -177,7 +177,7 @@
         statuses: [],
         // What cloud_probe answers: a CloudProbe, or a string to reject with.
         probe: null,
-        // What cloud_marker answers for any root — with `layout: "library"`
+        // What cloud_marker answers for any root — with `layout: "my-files"`
         // added for a folder that has moved, which also answers with one of
         // its status's when this is null.
         marker: null,
@@ -615,7 +615,7 @@
               if (!window.__moved.has(args.root)) return Promise.resolve(set);
               const s = window.__cloud.statuses.find((st) => st.root === args.root);
               const marker = set ?? (s ? { domain: s.domain, wsId: s.wsId } : null);
-              return Promise.resolve(marker && { ...marker, layout: "library" });
+              return Promise.resolve(marker && { ...marker, layout: "my-files" });
             }
             // The copy of the domain this Mac already has: a status of that
             // domain's, stopped once its sign-in is refused (the engine also
@@ -1041,45 +1041,55 @@
               window.__fs.set(args.path, "");
               return Promise.resolve(null);
             }
-            // A folder made: kept in `__madeDirs`, which the tree does not list.
+            // A folder made: kept in `__madeDirs`. The tree lists one made
+            // in My files; Library's rows are the fixed ones above.
             case "create_dir": {
               (window.__madeDirs ??= []).push(args.path);
               window.__dirs.add(args.path);
+              const lists = window.__sections?.lists;
+              if (lists && lists[args.path.slice(0, args.path.lastIndexOf("/"))]) lists[args.path] = [];
               return Promise.resolve(null);
             }
             case "move_path": {
               (window.__moves ??= []).push({ from: args.from, to: args.to });
               const sec = window.__sections;
-              const folderOf = (p) => p.match(/^\/docs\/Restricted\/([^/]+)$/)?.[1] ?? null;
-              // A restricted folder renamed in place: the engine renames it
-              // for everyone, so the status follows.
-              if (sec && folderOf(args.from) && folderOf(args.to) && sec.restricted[folderOf(args.from)]) {
-                const [was, now] = [folderOf(args.from), folderOf(args.to)];
-                sec.restricted[now] = sec.restricted[was];
-                delete sec.restricted[was];
-                const s = window.__cloud.statuses.find((st) => st.root === "/docs");
-                patchStatus("/docs", {
-                  spaces: s.spaces.map((sp) =>
-                    sp.path === `Restricted/${was}` ? { ...sp, name: now, path: `Restricted/${now}` } : sp,
-                  ),
+              const root = "/docs";
+              const [fromRel, toRel] = [args.from, args.to].map((p) => p.slice(root.length + 1));
+              const s = window.__cloud.statuses.find((st) => st.root === root);
+              // What is shared moves with its item, as the engine follows it
+              // (`moved_share`): renamed, it has that name for everyone; in
+              // Library it is everyone's, and no share.
+              const follow = (dir) => {
+                if (!s) return;
+                const library = sharedOf(root).slice(root.length + 1);
+                const from = dir ? fromRel : stemOf(fromRel);
+                const to = dir ? toRel : stemOf(toRel);
+                const spaces = s.spaces.flatMap((sp) => {
+                  const own = sp.path === from;
+                  const inside = dir && sp.path.startsWith(`${from}/`);
+                  if (!own && !inside) return [sp];
+                  const path = own ? to : `${to}${sp.path.slice(from.length)}`;
+                  if (path === library || path.startsWith(`${library}/`)) return [];
+                  return [{ ...sp, path, ...(own ? { name: basename(to) } : {}) }];
                 });
-                return Promise.resolve(null);
-              }
-              // The shared Projects folder dropped under Restricted: the
-              // engine makes it a restricted folder with only its mover.
-              if (sec && args.from === `${sharedOf("/docs")}/Projects` && folderOf(args.to)) {
-                const name = folderOf(args.to);
-                sec.projectsGone = true;
-                sec.restricted[name] = ["plan.md"];
-                window.__dirs.delete(args.from);
-                window.__dirs.add(args.to);
-                const s = window.__cloud.statuses.find((st) => st.root === "/docs");
-                patchStatus("/docs", {
-                  spaces: [
-                    ...s.spaces,
-                    { id: "s-dropped0", kind: "restricted", name, path: `Restricted/${name}`, by: window.__cloud.me, members: [window.__cloud.people.me] },
-                  ],
-                });
+                patchStatus(root, { spaces });
+              };
+              if (sec?.lists[args.from]) {
+                // A folder: every folder at or under it goes with it.
+                for (const dir of Object.keys(sec.lists).filter((d) => d === args.from || d.startsWith(`${args.from}/`))) {
+                  const now = `${args.to}${dir.slice(args.from.length)}`;
+                  if (now.startsWith(`${sharedOf(root)}/`)) (window.__finderDirs ??= []).push(basename(now));
+                  else sec.lists[now] = sec.lists[dir];
+                  delete sec.lists[dir];
+                  window.__dirs.delete(dir);
+                  window.__dirs.add(now);
+                }
+                for (const [path, c] of [...window.__fs]) {
+                  if (!path.startsWith(`${args.from}/`)) continue;
+                  window.__fs.delete(path);
+                  window.__fs.set(`${args.to}${path.slice(args.from.length)}`, c);
+                }
+                follow(true);
                 return Promise.resolve(null);
               }
               const [a, b] = [listOf(args.from), listOf(args.to)];
@@ -1092,58 +1102,131 @@
                 window.__fs.delete(args.from);
                 window.__fs.set(args.to, c);
               }
+              follow(false);
+              return Promise.resolve(null);
+            }
+            case "copy_path": {
+              (window.__copies ??= []).push({ from: args.from, to: args.to });
+              const sec = window.__sections;
+              if (sec?.lists[args.from]) {
+                sec.lists[args.to] = [...sec.lists[args.from]];
+                window.__dirs.add(args.to);
+                for (const name of sec.lists[args.from]) window.__fs.set(`${args.to}/${name}`, window.__fs.get(`${args.from}/${name}`) ?? "");
+                return Promise.resolve(null);
+              }
+              const at = listOf(args.to);
+              if (!at) return Promise.reject(`no such folder for ${args.to}`);
+              at.list.push(at.name);
+              window.__fs.set(args.to, window.__fs.get(args.from) ?? "");
               return Promise.resolve(null);
             }
 
-            /* ----- restricted folders, as the engine would keep them ----- */
-            case "cloud_space_create": {
+            /* ----- sharing, as the engine would keep it ----- */
+            // ONE-TIME: no folder of this harness was laid out by the build before.
+            case "cloud_layout_moved":
+              return Promise.resolve(window.__cloud.layoutMoved ?? []);
+            case "cloud_share": {
               const sec = window.__sections;
               const s = window.__cloud.statuses.find((st) => st.root === args.root);
               if (!sec || !s) return Promise.reject("that workspace isn't connected");
-              if (typeof window.__cloud.spaceError === "string") return Promise.reject(window.__cloud.spaceError);
-              // A second folder of a name this person already has is told
-              // apart by who made it.
-              const dir = sec.restricted[args.name] ? `${args.name} (${window.__cloud.me})` : args.name;
-              sec.restricted[dir] = [];
-              window.__dirs.add(`/docs/Restricted/${dir}`);
-              const projects = `${sharedOf("/docs")}/Projects`;
-              if (args.from === projects) {
-                // The folder itself becomes it.
-                sec.projectsGone = true;
-                sec.restricted[dir] = ["plan.md"];
-                window.__dirs.delete(projects);
-                const c = window.__fs.get(`${projects}/plan.md`);
-                window.__fs.delete(`${projects}/plan.md`);
-                window.__fs.set(`/docs/Restricted/${dir}/plan.md`, c);
+              if (typeof window.__cloud.shareError === "string") return Promise.reject(window.__cloud.shareError);
+              const rel = args.path.slice(args.root.length + 1);
+              const dir = sec.lists[args.path] !== undefined;
+              const there = shareAt(args.root, rel, dir);
+              if (there) {
+                // Shared already: those people as well.
+                const now = { ...there, members: [...new Set([...there.members, ...args.members])] };
+                patchStatus(args.root, { spaces: s.spaces.map((sp) => (sp.id === there.id ? now : sp)) });
+                return Promise.resolve(now);
               }
+              const around = sectionAt(args.root, dirnameOf(rel));
+              if (!around || around.kind === "document") {
+                return Promise.reject(
+                  "Only a folder or a document in My files, or in a folder shared with you, can be shared. Nothing in Library is shared separately: it is everyone's.",
+                );
+              }
+              const me = window.__cloud.people.me;
               window.__cloud.spaceSeq = (window.__cloud.spaceSeq ?? 0) + 1;
               const space = {
                 id: `s-${String(window.__cloud.spaceSeq).padStart(8, "0")}`,
-                kind: "restricted",
-                name: args.name,
-                path: `Restricted/${dir}`,
+                kind: dir ? "folder" : "document",
+                name: basename(dir ? rel : stemOf(rel)),
+                path: dir ? rel : stemOf(rel),
                 by: window.__cloud.me,
-                members: [window.__cloud.people.me, ...args.members],
+                owner: around.owner,
+                parent: around.id,
+                placed: true,
+                members: args.members,
+                // Whoever opens the folder it sits in opens it too.
+                above: around.kind === "private" ? [around.owner] : [...new Set([...around.members, ...around.above])],
+                deletedAt: null,
               };
-              patchStatus(args.root, { spaces: [...s.spaces, space] });
+              // What is shared from inside it sits in it from now on.
+              const spaces = s.spaces.map((sp) => (dir && sp.parent === around.id && sp.path.startsWith(`${rel}/`) ? { ...sp, parent: space.id } : sp));
+              patchStatus(args.root, { spaces: [...spaces, space] });
               return Promise.resolve(space);
             }
-            case "cloud_space_member":
-            case "cloud_space_delete": {
+            case "cloud_share_member":
+            case "cloud_share_delete":
+            case "cloud_share_restore": {
               const sec = window.__sections;
               const s = window.__cloud.statuses.find((st) => st.root === args.root);
               const space = s?.spaces.find((sp) => sp.id === args.id);
-              if (!sec || !space) return Promise.reject("That folder is not there any more, or you are no longer in it.");
+              const gone = "That is not there any more, or it is no longer shared with you.";
+              if (!sec || !space) return Promise.reject(gone);
               const me = window.__cloud.people.me;
-              const leaves = cmd === "cloud_space_delete" || (!args.add && args.memberId === me);
-              if (cmd === "cloud_space_member" && !args.add && space.members.length === 1) {
-                return Promise.reject("they are the last person in this folder — delete it, or add somebody first");
+              const kept = (window.__cloud.keptShares ??= {});
+              if (cmd === "cloud_share_restore") {
+                const was = kept[space.id];
+                if (space.deletedAt === null || !was) return Promise.reject("That can't be restored any more: its thirty days are up, or it was restored already.");
+                Object.assign(sec.lists, was.lists);
+                for (const [path, c] of was.files) window.__fs.set(path, c);
+                if (was.file) sec.lists[was.file.dir].push(was.file.name);
+                delete kept[space.id];
+                patchStatus(args.root, { spaces: s.spaces.map((sp) => (sp.id === space.id ? { ...sp, path: was.path, deletedAt: null } : sp)) });
+                window.__emit("cloud-applied", { root: args.root, paths: [was.path] });
+                return Promise.resolve(null);
               }
+              if (cmd === "cloud_share_delete" && !space.placed) {
+                return Promise.reject("This is shared with you: only the people of the folder it sits in can move or delete it. You can leave it instead.");
+              }
+              if (cmd === "cloud_share_member" && !args.add && space.above.includes(args.memberId)) {
+                return Promise.reject("They can open the folder this sits in, and nothing in a folder is kept from that folder's people.");
+              }
+              const leaves = cmd === "cloud_share_delete" || (!args.add && args.memberId === me && !space.placed);
               if (leaves) {
-                // The folder leaves this Mac with its person: the engine
-                // deletes it, drops it from the status and says so.
-                delete sec.restricted[space.path.slice("Restricted/".length)];
-                patchStatus(args.root, { spaces: s.spaces.filter((sp) => sp.id !== space.id) });
+                // It leaves this Mac: the engine takes its copy away, and
+                // says so. Deleted, the domain keeps it thirty days.
+                const abs = `${args.root}/${space.path}`;
+                const lists = {};
+                const files = [];
+                let file = null;
+                if (space.kind === "folder") {
+                  for (const dir of Object.keys(sec.lists).filter((d) => d === abs || d.startsWith(`${abs}/`))) {
+                    lists[dir] = sec.lists[dir];
+                    delete sec.lists[dir];
+                  }
+                  for (const [path, c] of [...window.__fs]) {
+                    if (!path.startsWith(`${abs}/`)) continue;
+                    files.push([path, c]);
+                    window.__fs.delete(path);
+                  }
+                } else {
+                  const list = sec.lists[dirnameOf(abs)] ?? [];
+                  const name = list.find((n) => stemOf(n) === basename(abs));
+                  if (name) {
+                    list.splice(list.indexOf(name), 1);
+                    file = { dir: dirnameOf(abs), name };
+                    files.push([`${dirnameOf(abs)}/${name}`, window.__fs.get(`${dirnameOf(abs)}/${name}`) ?? ""]);
+                  }
+                }
+                const inside = (sp) => sp.id !== space.id && space.kind === "folder" && sp.path.startsWith(`${space.path}/`);
+                const spaces =
+                  cmd === "cloud_share_delete"
+                    ? s.spaces.filter((sp) => !inside(sp)).map((sp) => (sp.id === space.id ? { ...sp, path: "", deletedAt: Date.now() } : sp))
+                    : s.spaces.filter((sp) => sp.id !== space.id && !inside(sp));
+                if (cmd === "cloud_share_delete") kept[space.id] = { path: space.path, lists, files, file };
+                patchStatus(args.root, { spaces });
                 window.__emit("cloud-space-left", { root: args.root, name: space.name, path: space.path });
                 return Promise.resolve(null);
               }
@@ -1172,17 +1255,17 @@
               const s = window.__cloud.statuses.find((st) => args.path.startsWith(`${st.root}/`));
               if (!s) return Promise.reject("that file isn't in a workspace that syncs, so it has no link");
               const rel = args.path.slice(s.root.length + 1);
-              const space = s.spaces.find((sp) => rel.toLowerCase().startsWith(`${sp.path.toLowerCase()}/`));
-              const [top, inLibrary] = rel.toLowerCase().split("/");
-              const shared = top === "library" && !["private", "restricted"].includes(inLibrary);
+              const space = sectionAt(s.root, rel);
+              const shared = rel.toLowerCase().split("/")[0] === "library";
               if (!space && !shared) {
                 return Promise.reject("that file is in no section, so it syncs nowhere and has no link");
               }
+              const alone = space && [...space.members, ...space.above].every((m) => m === window.__cloud.people.me);
               const who = !space
                 ? `Everyone in ${s.name} can open it.`
-                : space.kind === "private"
+                : space.kind === "private" || alone
                   ? "Only you can open it, on any device of yours."
-                  : `Only the people in “${space.name}” can open it.`;
+                  : `Only the people “${space.name}” is shared with can open it.`;
               const file = `f-${(rel.length * 7919).toString(16).padStart(12, "0").slice(-12)}`;
               const url = `https://doklin.cc/open#d=${s.domain}&w=${s.wsId}${space ? `&s=${space.id}` : ""}&f=${file}`;
               return Promise.resolve({ url, who });
@@ -1263,11 +1346,11 @@
         }),
       );
       // `?sections`: the app starts in a connected workspace that is in
-      // sections — this person (the superadmin) has a
-      // Private with a note in it and is in one restricted folder with Bob;
-      // Carol is in the workspace and in neither. A note sits straight under
-      // Restricted, in no folder, and somebody's Private has published a
-      // page this owner cannot open.
+      // sections — this person (the superadmin) has a My files with notes
+      // in it, a folder there shared with Bob, and a folder and a document
+      // Carol shared with them. A note sits straight under Shared with me
+      // that nobody shared, and somebody's My files has published a page
+      // this owner cannot open.
       if (new URLSearchParams(location.search).has("sections")) {
         const me = "m-sherin";
         const member = (id, name, extra = {}) => ({
@@ -1286,11 +1369,27 @@
           member("m-bob", "Bob"),
           member("m-carol", "Carol"),
         ];
-        window.__sections = { private: ["journal.md"], restricted: { Finance: ["budget.md"] }, loose: ["stray.md"], projectsGone: false };
-        window.__fs.set("/docs/Private/journal.md", "# Journal\n\nOnly mine.\n");
-        window.__fs.set("/docs/Restricted/Finance/budget.md", "# Budget\n\nNumbers.\n");
-        window.__fs.set("/docs/Restricted/stray.md", "# Stray\n");
-        for (const dir of ["/docs/Private", "/docs/Restricted", "/docs/Restricted/Finance"]) window.__dirs.add(dir);
+        // My files: a journal and a plan, a folder shared with Bob (Finance)
+        // and one shared with nobody (Work). Shared with me: a folder and a
+        // document Carol shared, and a note nobody shared.
+        window.__sections = {
+          mine: true,
+          lists: {
+            "/docs/My files": ["journal.md", "plan.md"],
+            "/docs/My files/Finance": ["budget.md"],
+            "/docs/My files/Work": ["notes.md"],
+            "/docs/Shared with me": ["Roadmap.md", "stray.md"],
+            "/docs/Shared with me/Board": ["minutes.md"],
+          },
+        };
+        window.__fs.set("/docs/My files/journal.md", "# Journal\n\nOnly mine.\n");
+        window.__fs.set("/docs/My files/plan.md", "# Plan\n\nMine, for now.\n");
+        window.__fs.set("/docs/My files/Finance/budget.md", "# Budget\n\nNumbers.\n");
+        window.__fs.set("/docs/My files/Work/notes.md", "# Notes\n\nWork.\n");
+        window.__fs.set("/docs/Shared with me/Roadmap.md", "# Roadmap\n\nCarol's.\n");
+        window.__fs.set("/docs/Shared with me/stray.md", "# Stray\n");
+        window.__fs.set("/docs/Shared with me/Board/minutes.md", "# Minutes\n");
+        for (const dir of Object.keys(window.__sections.lists)) window.__dirs.add(dir);
         // What Finder or an agent put at the workspace's top, in no section.
         window.__strays = ["todo.md"];
         window.__strayDirs = { Scratch: [] };
@@ -1298,7 +1397,7 @@
         window.__dirs.add("/docs/Scratch");
         window.__cloud.everyPages = {
           pages: [
-            { slug: "carols-notes", kind: "dir", title: "Private", by: "Carol", at: Date.now() - 2 * 86400000, shared: false },
+            { slug: "carols-notes", kind: "dir", title: "Carol's notes", by: "Carol", at: Date.now() - 2 * 86400000, shared: false },
           ],
           truncated: false,
         };
@@ -1306,8 +1405,12 @@
           {
             ...statusFor("/docs", "https://notes.example.com", "Notes", "w-1"),
             spaces: [
-              { id: "p-sherin00", kind: "private", name: "Private", path: "Private", by: "Sherin", members: [me] },
-              { id: "s-finance0", kind: "restricted", name: "Finance", path: "Restricted/Finance", by: "Sherin", members: [me, "m-bob"] },
+              { id: "p-sherin00", kind: "private", name: "My files", path: "My files", by: "Sherin", owner: me, parent: null, placed: true, members: [me], above: [], deletedAt: null },
+              // Shared by this person, where they keep it.
+              { id: "s-finance0", kind: "folder", name: "Finance", path: "My files/Finance", by: "Sherin", owner: me, parent: "p-sherin00", placed: true, members: ["m-bob"], above: [me], deletedAt: null },
+              // Shared with this person: where they sit is their owner's to say.
+              { id: "s-board000", kind: "folder", name: "Board", path: "Shared with me/Board", by: "Carol", owner: "m-carol", parent: null, placed: false, members: [me, "m-bob"], above: ["m-carol"], deletedAt: null },
+              { id: "s-roadmap0", kind: "document", name: "Roadmap", path: "Shared with me/Roadmap", by: "Carol", owner: "m-carol", parent: null, placed: false, members: [me], above: ["m-carol"], deletedAt: null },
             ],
           },
         ];

@@ -191,40 +191,46 @@ export function indexDocuments(docs: WorkspaceDocument[]): DocumentIndex {
 
 /* ---------- Sections ---------- */
 
-/** The folders a section is at the top of a workspace: `Library`,
- *  `Private`, `Restricted/<folder>`; null for a path in none of them (a
- *  folder that doesn't sync has no sections). */
-function sectionFolder(path: string): string | null {
-  const [top, next] = path.split("/");
-  if (top === "Library" || top === "Private") return top;
-  return top === "Restricted" && next ? `Restricted/${next}` : null;
-}
-
-/** The section the document at `path` is in: the one the list says, else
- *  the one of any document in the same section's folder; null for Library,
- *  and for a folder that doesn't sync. */
+/** The section the document at `path` is in: the one the list says, else —
+ *  for a note the list does not hold yet — that of the listed document
+ *  nearest above it: in its own folder, or failing that in the closest
+ *  folder around it. Something shared is a section wherever it sits, so a
+ *  path's first folder does not say. Null for Library, and for a folder
+ *  that doesn't sync. An app that knows where its sections are asks that
+ *  instead (`placeOf`, src/cloud.ts). */
 export function sectionOf(path: string, docs: DocumentIndex): string | null {
   const known = docs.byPath.get(path.toLowerCase());
   if (known) return known.section;
-  const folder = sectionFolder(path);
-  if (folder === null || folder === "Library") return null;
-  return docs.list.find((d) => sectionFolder(d.path) === folder)?.section ?? null;
+  const folder = folderOf(path).toLowerCase();
+  let nearest: WorkspaceDocument | null = null;
+  for (const doc of docs.list) {
+    const around = folderOf(doc.path).toLowerCase();
+    // At the very top of a folder that doesn't sync there is no section.
+    if (around === "" || (around !== folder && !folder.startsWith(`${around}/`))) continue;
+    if (!nearest || around.length > folderOf(nearest.path).length) nearest = doc;
+  }
+  return nearest?.section ?? null;
 }
 
-/** A section as a person calls it: "Library", "Private", or a restricted
- *  folder's name. */
+/** Where a document is, as a person calls it: "Library", "My files", or —
+ *  for what somebody shared with them — its own name. */
 export function sectionName(path: string): string {
-  const folder = sectionFolder(path);
-  return folder?.startsWith("Restricted/") ? folder.slice("Restricted/".length) : (folder ?? "");
+  const [top, next] = path.split("/");
+  return top === "Shared with me" && next ? documentName(next) : top;
 }
 
-/** Who can open a document, as a sentence. The engine says it in the same
- *  words (`linked`, engine/src/cloud/engine.rs) and so does the browser
- *  (`linkTo`, src/web/address.ts): change all three. */
-export function whoCanOpen(doc: WorkspaceDocument, workspace: string): string {
+/** A share as far as a sentence about it goes: what it is called, and
+ *  whether this person alone can open it. */
+export type ShareNamed = { name: string; alone: boolean };
+
+/** Who can open a document, as a sentence: `share` is the share it is in,
+ *  when the app knows. The engine says it in the same words (`linked`,
+ *  engine/src/cloud/engine.rs) and so does the browser (`linkTo`,
+ *  src/web/address.ts): change all three. */
+export function whoCanOpen(doc: WorkspaceDocument, workspace: string, share: ShareNamed | null): string {
   if (doc.section === null) return `Everyone in ${workspace} can open it.`;
-  if (doc.section.startsWith("p-")) return "Only you can open it, on any device of yours.";
-  return `Only the people in “${sectionName(doc.path)}” can open it.`;
+  if (doc.section.startsWith("p-") || share?.alone) return "Only you can open it, on any device of yours.";
+  return share ? `Only the people “${share.name}” is shared with can open it.` : "Only the people it is shared with can open it.";
 }
 
 /** Whether a link from a note in section `from` to `doc` opens for everyone
@@ -236,14 +242,13 @@ export const opensForReaders = (doc: WorkspaceDocument, from: string | null): bo
  *  the people who read the note are not all people who can open it: its
  *  name and its folder are in the note's text for all of them to see. */
 export function pickNotice(doc: WorkspaceDocument, from: string | null): string | null {
-  // Nobody but its owner reads a Private note.
+  // Nobody but its owner reads a note in their My files.
   if (doc.section === null || doc.section === from || from?.startsWith("p-")) return null;
   const name = documentName(doc.path);
   if (doc.section.startsWith("p-")) {
     return `Everyone who can read this note can see “${name}”, but only you can open it.`;
   }
-  const folder = sectionName(doc.path);
-  return `Everyone who can read this note can see “${name}” and its folder “${folder}”, but only the people in “${folder}” can open it.`;
+  return `Everyone who can read this note can see “${name}”, but only the people it is shared with can open it.`;
 }
 
 /* ---------- The list `@` opens ---------- */
@@ -386,14 +391,14 @@ export type SavedLinks = { links: { href: string; words: string }[]; records: Li
  *    now: its destination, and a named link's words.
  * 3. A link with no record gets one by its path, but only when that path
  *    leads into the note's own section or into Library, the same file for
- *    everyone who reads the note. Into a Private or a restricted folder from
+ *    everyone who reads the note. Into a My files or something shared from
  *    outside it may name another person's folder on another device, so no
  *    id is guessed for it.
  * 4. Writing back never reveals: a link whose document is in a section other
  *    than the note's own and other than Library is written back as it was,
- *    unless it was made in this editor just now. So a move into a restricted
- *    folder, or a rename there, never puts its new name or folder into notes
- *    that people outside it read.
+ *    unless it was made in this editor just now. So a move into something
+ *    shared, or a rename there, never puts its new name or folder into notes
+ *    that people who cannot open it read.
  */
 export function linksToSave(
   note: { path: string; section: string | null },

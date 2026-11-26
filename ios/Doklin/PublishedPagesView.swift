@@ -3,7 +3,7 @@ import SwiftUI
 import UIKit
 
 /// Every page published from what this person can open — Library, their
-/// Private, the restricted folders they are in — with each
+/// My files, what is shared with them — with each
 /// address to copy, share or open, the home page, and the way to stop one.
 /// An owner also sees what was published from sections they are not in,
 /// and can take any of it down.
@@ -148,7 +148,7 @@ struct PublishedPagesView: View {
                     }
                 }
                 // The home page is chosen from what everyone has.
-                if workspace.audience(of: page.path) == .everyone {
+                if workspace.place(of: page.path) == .library {
                     Button {
                         home(page)
                     } label: {
@@ -243,7 +243,7 @@ struct PublishedPagesView: View {
             Text("From sections you are not in")
                 .textCase(nil)
         } footer: {
-            Text("Published from somebody’s Private or a restricted folder. You cannot open the files, but as an owner you can take a page down.")
+            Text("Published from somebody’s My files or something shared. You cannot open the files, but as an owner you can take a page down.")
         }
     }
 

@@ -15,8 +15,9 @@ workspace through that domain. Nothing is copied to this machine.
 You work as one person's agent, and see what they see. Every path starts with the
 section it is in, and a path with no section is refused:
   Library/…                    everyone in the workspace sees it
-  Private/…                    only your person sees it
-  Restricted/<folder>/…        only the people in that folder
+  My files/…                   your person's own; what they share of it stays there
+  Shared with me/<name>/…      what other people shared with your person
+A name with a space goes in quotes: doklin ls "My files/Launch plans".
 
 Wherever a command takes a document, it also takes a link to one, as people copy it
 in the app (https://doklin.cc/open#…); the command then runs in that link's workspace.
@@ -63,7 +64,7 @@ More
   doklin help comments         how a comment attaches to text
   doklin help tags             tags: the list, a document's values, finding by them
   doklin help publishing       what public means
-  doklin help sections         Library, Private and Restricted: who sees what
+  doklin help sections         Library, My files and Shared with me: who sees what
   doklin help writing          how a document reads well: its name, sections, callouts
   doklin help drawings         diagrams: how to draw one that reads well
   doklin help agent            a short brief for an AI agent using this
@@ -215,39 +216,64 @@ the document is back, and then shows it again. Stop publishing with `unpublish`.
 
 This machine can publish only if its person allowed it: `doklin whoami` says what
 it may do. Publishing does not change who can open the document in the workspace:
-a page from Private/ is public, and its document is still only your person's."#;
+a page from My files/ is public, and its document is still only your person's."#;
 
 const SECTIONS: &str = r#"SECTIONS
 
 A workspace has three sections, and every path starts with the one it is in.
 
   Library/…                 Everyone in the workspace sees and edits it.
-  Private/…                 Your person's own. Nobody else in the workspace sees it.
-  Restricted/<folder>/…     A restricted folder: only the people in it. `doklin ls
-                            Restricted` lists the ones your person is in.
+  My files/…                Your person's own. Nobody else sees it, except a
+                            folder or a document of it they share with people.
+  Shared with me/<name>/…   What other people shared with your person, each under
+                            its own name. It is there once something is.
+
+A name with a space goes in quotes, as a shell needs: doklin ls "My files/Plans".
 
 A path with no section is refused. For Projects/plan, say which one you mean:
-Library/Projects/plan, Private/Projects/plan or Restricted/<folder>/Projects/plan.
+Library/Projects/plan or "My files/Projects/plan".
 
-You are one person's agent and see exactly what they see. If they are added to a
-folder you can work in it from your next command; if they are taken out, it is gone
-for you too. A folder they are not in does not exist as far as you can tell.
+You are one person's agent and see exactly what they see. When something is shared
+with them you can work in it from your next command; when they are taken off it, it
+is gone for you too. What they cannot open does not exist as far as you can tell.
 
-Put new work under Private/ unless your person says where it goes:
+Put new work under My files/ unless your person says where it goes:
 
-  doklin write Private/drafts/summary < summary.md
+  doklin write "My files/drafts/summary" < summary.md
+
+Sharing
+
+A person shares a folder or a document of their My files/ with people of the
+workspace, in the Doklin app. It stays where it is: they go on finding it in
+My files/, and the people it is shared with find it under Shared with me/.
+Whoever can open a folder can open everything in it, so what you write into a
+shared folder is its people's too.
+
+  doklin ls "Shared with me"       what is shared with your person, as it is named here
+  doklin ls "My files/Work"        a shared document there says (shared), or
+                                   "shared": true in JSON; --deep opens it
+
+Two shared things of one name are told apart by whose they are: the second is
+"Shared with me/Plan (Dave)". A shared folder is listed like any other folder, so
+put new work at the top of My files/ or in a folder you made, unless told where.
+
+In what is shared you read, write and comment as anywhere. The shared folder or
+document itself you can rename and, where it sits in your person's own My files/,
+move to another folder there. You cannot share anything, change who something is
+shared with, remove something that is itself shared, or move it to another
+section: people do that in the Doklin app, which tells them first who gains or
+loses it.
 
 Moving a thing changes who can see it, so do it only when asked:
 
-  doklin mv Private/drafts/summary Library/                now everyone sees it
-  doklin mv Library/Projects/summary Restricted/Finance/   now only that folder's people
+  doklin mv "My files/drafts/summary" Library/                    now everyone sees it
+  doklin mv Library/Projects/summary "Shared with me/Finance/"    now only Finance's people
 
 `doklin ls` lists the sections you can see, `doklin ls --deep` everything in them,
-and `doklin search` with no folder searches all of it. `doklin ls Private` or
-`doklin search "…" --in Restricted/Finance` keeps to that place.
-You cannot make a restricted folder or change who is in one — people do that in the
-Doklin app. A section itself — Library, Private, a restricted folder — is not a
-folder to move or rename."#;
+and `doklin search` with no folder searches all of it. `doklin ls "My files"` or
+`doklin search "…" --in "Shared with me/Finance"` keeps to that place.
+A section itself — Library, My files, Shared with me — is not a folder to move or
+rename."#;
 
 // The callout kinds and their meanings are src/calloutTypes.ts's (the app's
 // type picker shows the same lines): change both. The examples are the
@@ -453,11 +479,13 @@ Start here
 
 Where things go
   You see what the person who gave you this sees. Every path starts with its
-  section: Library/ is what everyone sees, Private/ only them, Restricted/<folder>/
-  that folder's people. Put anything new under Private/ unless they tell you where
-  it goes (doklin help sections).
-  · Do not move a document out of Private/ or a restricted folder unless asked:
-    that shows it to more people.
+  section: Library/ is what everyone sees, My files/ is theirs, Shared with me/
+  is what others shared with them. Put anything new under My files/ unless they
+  tell you where it goes, and put a path with a space in quotes
+  (doklin help sections).
+  · A folder or a document can be shared with people, and stays where it is. Do
+    not move a document out of My files/, or into or out of a shared folder,
+    unless asked: that changes who sees it.
 
 Read before you write
   doklin read <doc>            prints the text; its revision is on stderr
@@ -494,8 +522,8 @@ What matters here
   · A diagram is a ```svg drawing you place by hand, in the theme's colours —
     follow doklin help drawings, and it reads like the rest of the document.
   · A document's name is its title: name a new one the way a title reads
-    (Private/Launch plan), and don't open its text with a # line that says it
-    again (doklin help writing).
+    ("My files/Launch plan"), and don't open its text with a # line that says
+    it again (doklin help writing).
   · To set something apart (a note, a warning), use a callout: "> [!NOTE]" on
     its own line, the text on the "> " lines after it (doklin help writing).
   · Every command that changes something takes --dry-run.
@@ -522,7 +550,7 @@ pub fn print(topic: Option<&str>) -> Result<(), Failure> {
         "comments" => COMMENTS,
         "tags" => TAGS,
         "publishing" => PUBLISHING,
-        "sections" | "private" | "restricted" => SECTIONS,
+        "sections" | "sharing" | "shared" => SECTIONS,
         "agent" | "agents" => AGENT,
         "drawings" | "drawing" | "diagrams" | "diagram" => DRAWINGS,
         "writing" | "callouts" | "callout" => WRITING,
@@ -566,7 +594,7 @@ fn options_of(command: &str) -> &'static str {
             "  --on \"…\"       the words the thread is on (doklin help comments)\n  -m \"…\"         the comment\n  --md, --html   which version the words are in (default: the markdown, or the one the name's extension picks)"
         }
         "search" => {
-            "  --in <folder>  only under this folder\n  --limit <n>    how many documents to show (default 20, at most 30)\n  --where <tag>=<value>\n                 only documents with that tag; a tag alone is any value. Repeat it for\n                 several. With no text, every document that has them"
+            "  --in <folder>  only under this folder\n  --limit <n>    how many documents to show (default 20, at most 30). Where much is\n                 shared the search takes several requests, and shows that many of each\n  --where <tag>=<value>\n                 only documents with that tag; a tag alone is any value. Repeat it for\n                 several. With no text, every document that has them"
         }
         "links" => "  --from         only what the document links to\n  --to           only the documents that link to it",
         "publish" => {

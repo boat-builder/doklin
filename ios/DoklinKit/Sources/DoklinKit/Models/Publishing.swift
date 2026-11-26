@@ -249,14 +249,12 @@ extension Workspace {
         return Int(modified.timeIntervalSince1970 * 1000) > (status?.lastSyncMs ?? 0)
     }
 
-    /// How many notes a folder page would show: every note under the
-    /// folder that syncs — not what is under Library's own `Private` or
-    /// `Restricted`, which is in no section.
+    /// How many notes a folder page would show: every note under the folder.
     public func notes(under dir: String) -> Int {
         let entries = (try? files.list(dir)) ?? []
         return entries.reduce(0) { count, entry in
             switch entry {
-            case .folder(let path): return count + (audience(of: path) == .nowhere ? 0 : notes(under: path))
+            case .folder(let path): return count + notes(under: path)
             case .document(let row): return count + (FileKind.of(row.path) == .markdown ? 1 : 0)
             case .file: return count
             }

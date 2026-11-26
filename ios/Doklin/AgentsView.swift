@@ -47,7 +47,7 @@ struct AgentsView: View {
         List {
             Section {
             } header: {
-                Intro("Agents are bots. Each works with this workspace from another computer through the doklin command line, with no copy of the folder. An agent you add is yours: it sees what you see — Library, your Private, the restricted folders you are in — and reads, writes, comments and publishes there within what you allow.")
+                Intro("Agents are bots. Each works with this workspace from another computer through the doklin command line, with no copy of the folder. An agent you add is yours: it sees what you see — Library, your My files, what is shared with you — and reads, writes, comments and publishes there within what you allow.")
             }
 
             if let shown = model.login {

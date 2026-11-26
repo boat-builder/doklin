@@ -66,6 +66,8 @@ public struct CloudStatus: Decodable, Equatable, Sendable, Identifiable {
     public let tags: [TagDef]
     public let presence: [PresenceDevice]
     public let leases: [LeaseHolder]
+    /// This person's sections besides Library: their My files, and everything
+    /// shared — by them, or with them.
     public let spaces: [SpaceStatus]
 
     public var id: String { root }
@@ -126,21 +128,43 @@ public struct CloudUsage: Decodable, Equatable, Sendable {
 }
 
 public enum SpaceKind: String, Decodable, Sendable {
-    case restricted
+    /// This person's My files.
     case `private`
+    /// A folder shared where it is.
+    case folder
+    /// One document shared where it is: its markdown, its html and its comments.
+    case document
 }
 
-/// A section only some people have: this person's Private, or a restricted
-/// folder they are in.
+/// One section of a workspace beside Library, as this device has it: this
+/// person's My files, or something shared — with them, or by them. Mirrors
+/// `SpaceStatus` (engine/src/cloud/status.rs) and `CloudSpace`
+/// (src/cloud.ts): change all three.
 public struct SpaceStatus: Decodable, Equatable, Sendable, Identifiable {
     public let id: String
     public let kind: SpaceKind
     public let name: String
-    /// Its folder, workspace-relative: `Private`, `Restricted/Finance`.
+    /// Where its item is on this device, workspace-relative: a folder, or a
+    /// document without its extension — `My files`, `My files/Work/Plans`,
+    /// `Shared with me/Budget`. Empty for one that is not here: a share just
+    /// heard of, and a deleted one.
     public let path: String
+    /// Who made it, in words.
     public let by: String
-    /// Everyone in it, by member id.
+    /// Whose My files it is in, in the end, by member id.
+    public let owner: String
+    /// The section it sits in; null for My files, and for a share whose
+    /// folder this person cannot open.
+    public let parent: String?
+    /// Whether this person places it — moves it, deletes it, restores it:
+    /// they can open the folder it sits in.
+    public let placed: Bool
+    /// The people it is shared with, by member id.
     public let members: [String]
+    /// Everyone else who can open it, through the folder it sits in.
+    public let above: [String]
+    /// When it was deleted, for one that can still be restored.
+    public let deletedAt: Int?
 }
 
 public enum PublicKind: String, Decodable, Sendable {
@@ -484,11 +508,35 @@ public struct AddedFolder: Decodable, Equatable, Sendable {
     public let count: Int
 }
 
-/// `cloud-space-left`: a restricted folder left this device.
+/// `cloud-space-left`: something shared left this device — it is no longer
+/// shared with this person, or it was deleted. `path` is where it was,
+/// workspace-relative: a folder, or a document without its extension.
 public struct CloudSpaceLeft: Decodable, Sendable {
     public let root: String
     public let name: String
     public let path: String
+}
+
+/// `cloud-space-moved`: something shared is somewhere else on this device
+/// now, or called something else — sync moved it where it sits, or renamed
+/// it as somebody renamed it. What is open from `from` is at `to`.
+public struct CloudSpaceMoved: Decodable, Sendable {
+    public let root: String
+    public let moves: [SpaceMove]
+}
+
+public struct SpaceMove: Decodable, Equatable, Sendable {
+    /// Workspace-relative, as is `to`.
+    public let from: String
+    public let to: String
+    /// A folder; otherwise one file.
+    public let dir: Bool
+
+    public init(from: String, to: String, dir: Bool) {
+        self.from = from
+        self.to = to
+        self.dir = dir
+    }
 }
 
 /// `cloud-progress`: a join's download, file by file.
@@ -516,8 +564,11 @@ public enum VersionsPhase: String, Decodable, Sendable {
     case error
 }
 
-/// One version store: a section's — Library, Private, a restricted folder.
+/// One version store: a section's — Library, My files, something shared.
 public struct VersionsStatus: Decodable, Equatable, Sendable, Identifiable {
+    /// What the store is called to everything that names one: its section's
+    /// folder — or, for a shared document's, the document's path without its
+    /// extension. Absolute.
     public let root: String
     public let key: String
     public let phase: VersionsPhase

@@ -1,11 +1,10 @@
 import DoklinKit
 import SwiftUI
 
-/// What can be done to a row of a folder or of the tree — make, rename,
-/// move, remove, restrict, share, publish — and the questions each asks.
-/// Every change is made here first and reaches every other device through
-/// sync. A screen hosts it once (`EntryActionsHost`); its rows offer it
-/// (`EntryMenu`, `EntrySwipes`).
+/// What can be done to a row of the tree — make, rename, move, remove,
+/// share, copy, publish — and the questions each asks. Every change is made
+/// here first and reaches every other device through sync. A screen hosts it
+/// once (`EntryActionsHost`); its rows offer it (`EntryMenu`, `EntrySwipes`).
 @MainActor
 @Observable
 final class EntryActing {
@@ -18,7 +17,11 @@ final class EntryActing {
     var renaming: FolderEntry?
     var moving: FolderEntry?
     var removing: FolderEntry?
-    var restricting: RestrictedSource?
+    var sharing: ShareTarget?
+    /// Something shared with this person, being copied into their My files.
+    var copying: FolderEntry?
+    /// Something shared about to be left, or deleted for everyone.
+    var question: Question?
     var publishing: PublishTarget?
     var failure: String?
 
@@ -35,6 +38,47 @@ final class EntryActing {
         newName = entry.name
         renaming = entry
     }
+
+    /// Remove a row. Something shared is not removed like the rows beside
+    /// it: whoever can open the folder it sits in deletes it for everyone it
+    /// is shared with, and anyone else leaves it — asked first, naming who
+    /// loses it. A folder that holds something shared is not removed around
+    /// it either: each is deleted for everyone first, or the folder stays.
+    func remove(_ entry: FolderEntry, in workspace: Workspace) {
+        if let own = workspace.share(entry) {
+            giveUp(own, in: workspace) {}
+        } else if case .folder(let dir) = entry {
+            empty(entry, of: Sections.shares(inside: dir, in: workspace.status), in: workspace)
+        } else {
+            removing = entry
+        }
+    }
+
+    private func empty(_ folder: FolderEntry, of held: [SpaceStatus], in workspace: Workspace) {
+        guard let next = held.first else {
+            removing = folder
+            return
+        }
+        giveUp(next, inside: folder.name, in: workspace) {
+            // The next question, once this one has gone.
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            self.empty(folder, of: Array(held.dropFirst()), in: workspace)
+        }
+    }
+
+    private func giveUp(_ space: SpaceStatus, inside: String? = nil, in workspace: Workspace, then: @escaping () async -> Void) {
+        guard let status = workspace.status else { return }
+        let asked = Sections.deleteQuestion(space, inside: inside, in: status)
+        question = Question(asked.title, asked.body, button: asked.button) {
+            do {
+                try await workspace.giveUp(space)
+            } catch {
+                self.failure = (error as? DoklinError)?.message ?? error.localizedDescription
+                return
+            }
+            await then()
+        }
+    }
 }
 
 /// The model a row's change goes through: the folder it is in.
@@ -47,8 +91,11 @@ private func folder(of entry: FolderEntry, in workspace: Workspace) -> FolderMod
 struct EntryActionsHost: ViewModifier {
     let workspace: Workspace
     let acting: EntryActing
-    /// Somewhere to go: a note just made, a restricted folder, Published pages.
+    /// Somewhere to go: a note just made, a copy, Published pages.
     let open: (Route) -> Void
+
+    @Environment(Toaster.self) private var toaster
+    @Environment(Shell.self) private var shell
 
     func body(content: Content) -> some View {
         @Bindable var acting = acting
@@ -56,6 +103,9 @@ struct EntryActionsHost: ViewModifier {
             .environment(acting)
             .onChange(of: acting.makingNote) { _, dir in
                 if let dir { makeNote(in: dir) }
+            }
+            .onChange(of: acting.copying) { _, entry in
+                if let entry { copyToMyFiles(entry) }
             }
             .alert("New folder", isPresented: shown(\.creatingFolder)) {
                 TextField("Name", text: $acting.newName)
@@ -70,8 +120,8 @@ struct EntryActionsHost: ViewModifier {
                 Button("Cancel", role: .cancel) { acting.renaming = nil }
                 Button("Rename") { rename() }
             } message: {
-                if let renaming = acting.renaming, workspace.restrictedFolder(at: renaming.path) != nil {
-                    Text("It is renamed for everyone in it.")
+                if let renaming = acting.renaming, workspace.share(renaming) != nil {
+                    Text("It is renamed for everyone who can open it.")
                 }
             }
             .confirmationDialog(
@@ -87,9 +137,10 @@ struct EntryActionsHost: ViewModifier {
             .sheet(item: $acting.moving) { entry in
                 MoveSheet(model: folder(of: entry, in: workspace), entry: entry) { message in acting.failure = message }
             }
-            .sheet(item: $acting.restricting) { source in
-                RestrictedFolderSheet(workspace: workspace, source: source) { made in open(.folder(made)) }
+            .sheet(item: $acting.sharing) { target in
+                ShareSheet(workspace: workspace, target: target)
             }
+            .asking($acting.question)
             .sheet(item: $acting.publishing) { target in
                 PublishView(workspace: workspace, path: target.path, kind: target.kind) { open(.publishedPages) }
             }
@@ -117,6 +168,25 @@ struct EntryActionsHost: ViewModifier {
         Task {
             do {
                 open(.made(try await FolderModel(workspace: workspace, dir: dir).createNote()))
+            } catch {
+                acting.failure = (error as? DoklinError)?.message ?? error.localizedDescription
+            }
+        }
+    }
+
+    /// What was shared with this person, as a note or a folder of their own.
+    private func copyToMyFiles(_ entry: FolderEntry) {
+        acting.copying = nil
+        Task {
+            do {
+                let copy = try await workspace.copyToMyFiles(entry)
+                let action: Toaster.Action
+                if case .folder = copy {
+                    action = Toaster.Action(label: "Show") { shell.showInBrowse(copy.path) }
+                } else {
+                    action = Toaster.Action(label: "Open") { open(.document(copy.path)) }
+                }
+                toaster.show("Copied to My files as “\(copy.name)”.", action: action)
             } catch {
                 acting.failure = (error as? DoklinError)?.message ?? error.localizedDescription
             }
@@ -166,14 +236,13 @@ struct EntryActionsHost: ViewModifier {
 struct EntryMenu: View {
     let entry: FolderEntry
     let workspace: Workspace
-    let open: (Route) -> Void
 
     @Environment(EntryActing.self) private var acting
 
     var body: some View {
         let model = folder(of: entry, in: workspace)
-        let mayChange = workspace.may("work")
-        if case .folder(let dir) = entry, mayChange, FolderModel(workspace: workspace, dir: dir).canHoldNotes {
+        let mayChange = workspace.may("work") && !model.isSection(entry)
+        if case .folder(let dir) = entry, workspace.may("work"), FolderModel(workspace: workspace, dir: dir).canHoldNotes {
             Button {
                 acting.newNote(in: dir)
             } label: {
@@ -185,53 +254,64 @@ struct EntryMenu: View {
                 Label("New folder here", systemImage: "folder.badge.plus")
             }
         }
-        if mayChange, model.renamable(entry) {
+        if mayChange {
             Button {
                 acting.rename(entry)
             } label: {
                 Label("Rename", systemImage: "pencil")
             }
         }
-        if mayChange, !model.isManaged(entry) {
+        if mayChange, model.movable(entry) {
             Button {
                 acting.moving = entry
             } label: {
                 Label("Move…", systemImage: "folder")
             }
-            Button(role: .destructive) {
-                acting.removing = entry
-            } label: {
-                Label("Remove", systemImage: "trash")
-            }
         }
-        if let space = workspace.restrictedFolder(at: entry.path) {
+        if let target = ShareTarget(entry), workspace.shareable(target) {
             Button {
-                open(.access(space.id))
+                acting.sharing = target
             } label: {
-                Label("Manage access…", systemImage: "person.2")
+                Label("Share…", systemImage: "person.crop.circle.badge.plus")
             }
         }
-        if model.restrictable(entry) {
+        if model.copiesToMyFiles(entry) {
             Button {
-                acting.restricting = .folder(entry.path)
+                acting.copying = entry
             } label: {
-                Label("Restrict access…", systemImage: "lock")
+                Label("Copy to My files", systemImage: "doc.on.doc")
             }
         }
-        if model.shareable(entry) {
-            Button {
-                acting.restricting = .note(entry.path)
-            } label: {
-                Label("Share with…", systemImage: "person.crop.circle.badge.plus")
-            }
-        }
-        if case .folder(let dir) = entry, workspace.mayPublish, workspace.status != nil, workspace.audience(of: dir) != .nowhere {
+        if case .folder(let dir) = entry, workspace.mayPublish, workspace.status != nil, workspace.place(of: dir) != .nowhere {
             Button {
                 acting.publishing = PublishTarget(path: dir, kind: .dir)
             } label: {
                 let published = workspace.pages(of: dir).contains { $0.kind == .dir }
                 Label(published ? "Edit publishing…" : "Publish folder…", systemImage: "globe")
             }
+        }
+        if mayChange {
+            Button(role: .destructive) {
+                acting.remove(entry, in: workspace)
+            } label: {
+                RemoveLabel(share: workspace.share(entry), ellipsis: true)
+            }
+        }
+    }
+}
+
+/// What removing a row is called. Something shared is deleted for everyone
+/// by whoever can open the folder it sits in, and left by anyone else.
+private struct RemoveLabel: View {
+    let share: SpaceStatus?
+    /// In a menu, where a question follows: "Delete for everyone…".
+    var ellipsis = false
+
+    var body: some View {
+        switch share?.placed {
+        case nil: Label("Remove", systemImage: "trash")
+        case true?: Label(ellipsis ? "Delete for everyone…" : "Delete", systemImage: "trash")
+        case false?: Label(ellipsis ? "Leave…" : "Leave", systemImage: "rectangle.portrait.and.arrow.right")
         }
     }
 }
@@ -244,24 +324,27 @@ struct EntrySwipes: View {
     @Environment(EntryActing.self) private var acting
 
     var body: some View {
-        if workspace.may("work"), !folder(of: entry, in: workspace).isManaged(entry) {
+        let model = folder(of: entry, in: workspace)
+        if workspace.may("work"), !model.isSection(entry) {
             Button(role: .destructive) {
-                acting.removing = entry
+                acting.remove(entry, in: workspace)
             } label: {
-                Label("Remove", systemImage: "trash")
+                RemoveLabel(share: workspace.share(entry))
             }
-            Button {
-                acting.moving = entry
-            } label: {
-                Label("Move", systemImage: "folder")
+            if model.movable(entry) {
+                Button {
+                    acting.moving = entry
+                } label: {
+                    Label("Move", systemImage: "folder")
+                }
+                .tint(Theme.accent)
             }
-            .tint(Theme.accent)
         }
     }
 }
 
-/// Choosing the folder something moves into — and, when more people would
-/// see it there, saying so first.
+/// Choosing the folder something moves into — and, when that changes who
+/// can open it, saying so first.
 struct MoveSheet: View {
     let model: FolderModel
     let entry: FolderEntry
@@ -269,22 +352,25 @@ struct MoveSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var folders: [String] = []
-    @State private var widening: (folder: String, words: String)?
+    @State private var asking: (folder: String, question: ShareQuestion)?
 
     var body: some View {
         NavigationStack {
             List {
-                Button {
-                    choose(TreeModel.libraryFolder)
-                } label: {
-                    Label("Library", systemImage: "books.vertical")
+                if model.takes(entry, in: TreeModel.libraryFolder) {
+                    Button {
+                        choose(TreeModel.libraryFolder)
+                    } label: {
+                        Label("Library", systemImage: "books.vertical")
+                    }
                 }
-                ForEach(folders.filter(allowed), id: \.self) { folder in
+                ForEach(folders.filter(offered), id: \.self) { folder in
                     Button {
                         choose(folder)
                     } label: {
                         Label(folder, systemImage: "folder")
                     }
+                    .accessibilityIdentifier("move-to-\(folder)")
                 }
             }
             .navigationTitle("Move \(entry.name) to")
@@ -295,39 +381,29 @@ struct MoveSheet: View {
                 }
             }
             .onAppear { folders = model.workspace.files.everyFolder() }
-            .confirmationDialog(
-                widening.map { model.wideningTitle(entry, into: $0.folder) } ?? "",
-                isPresented: wideningShown,
-                titleVisibility: .visible
-            ) {
-                Button("Move") {
-                    if let folder = widening?.folder { move(into: folder) }
+            .confirmationDialog(asking?.question.title ?? "", isPresented: askingShown, titleVisibility: .visible) {
+                Button(asking?.question.button ?? "Move") {
+                    if let folder = asking?.folder { move(into: folder) }
                 }
-                Button("Cancel", role: .cancel) { widening = nil }
+                Button("Cancel", role: .cancel) { asking = nil }
             } message: {
-                Text(widening?.words ?? "")
+                Text(asking?.question.body ?? "")
             }
         }
     }
 
-    private var wideningShown: Binding<Bool> {
-        Binding(get: { widening != nil }, set: { if !$0 { widening = nil } })
+    private var askingShown: Binding<Bool> {
+        Binding(get: { asking != nil }, set: { if !$0 { asking = nil } })
     }
 
-    /// Not Library itself, which is the top choice; not where it already
-    /// is, not itself; not the folder that only holds other folders, and
-    /// nowhere in no section, which would take it off every other device.
-    private func allowed(_ folder: String) -> Bool {
-        if folder.lowercased() == TreeModel.libraryFolder.lowercased() { return false }
-        if folder == DocLinks.directory(of: entry.path) { return false }
-        if case .folder(let own) = entry, folder == own || folder.hasPrefix(own + "/") { return false }
-        let audience = model.workspace.audience(of: folder)
-        return audience != .folders && audience != .nowhere
+    /// Not Library itself, which is the top choice.
+    private func offered(_ folder: String) -> Bool {
+        folder.lowercased() != TreeModel.libraryFolder.lowercased() && model.takes(entry, in: folder)
     }
 
     private func choose(_ folder: String) {
-        if let words = model.widening(entry, into: folder) {
-            widening = (folder, words)
+        if let question = model.moveQuestion(entry, into: folder) {
+            asking = (folder, question)
         } else {
             move(into: folder)
         }

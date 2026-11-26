@@ -34,7 +34,7 @@ import { dirTitle, htmlFile, notePage, rawRendition, tocPage, type Linked } from
 import { PublicMap, nestedUrl, type DirPage, type Page } from "./publicMap";
 import { flowchartModulePath } from "./render";
 import { landingPage, notFoundPage } from "./static";
-import { spaceEnv } from "./spaces";
+import { spaceStore } from "./spaces";
 import { isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 
 /* ---------- The cache ----------
@@ -166,7 +166,7 @@ async function serving(env: Env, shared: Workspace, url: URL): Promise<Workspace
   }
   if (!SLUG_RE.test(slug) || RESERVED_SLUGS.has(slug) || Object.hasOwn(shared.manifest.public ?? {}, slug)) return shared;
   const space = await spaceAt(env, slug);
-  return space ? openWorkspace(spaceEnv(env, space), shared.name) : null;
+  return space ? openWorkspace(spaceStore(env, space), shared.name) : null;
 }
 
 /** The path's segments, percent-decoded; null when one is malformed or would create a segment of its own. */

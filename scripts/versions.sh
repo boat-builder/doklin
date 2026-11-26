@@ -7,6 +7,10 @@
 #   scripts/versions.sh ~/Notes        print the history once
 #   scripts/versions.sh -w ~/Notes     print it every 5 s, until ^C
 #
+# In a connected workspace each section has a history of its own: name its
+# folder (`~/Doklin/Acme/Library`, `…/My files`, a shared folder), or a
+# shared document without its extension.
+#
 # macOS-only: the app-data path and `shasum` are the Mac's.
 set -eu
 
@@ -21,9 +25,35 @@ TARGET="${1:-.}"
 # The store key the app derives: "r-" and the first 16 hex characters of the
 # sha256 of the folder's canonical path (`pwd -P` resolves the symlinks
 # `std::fs::canonicalize` does).
-ROOT=$(cd "$TARGET" && pwd -P)
+if [ -d "$TARGET" ]; then
+    ROOT=$(cd "$TARGET" && pwd -P)
+else
+    ROOT="$(cd "$(dirname "$TARGET")" && pwd -P)/$(basename "$TARGET")"
+fi
 KEY="r-$(printf '%s' "$ROOT" | shasum -a 256 | cut -c1-16)"
 DIR="$APP/versions/$KEY"
+# A section of a connected workspace keeps its store under its section's key
+# (`section_key`, engine/src/versions/store.rs), wherever its folder is: it is
+# found by the folder its index says it is at.
+if [ ! -f "$DIR/index.json" ] && [ -d "$APP/versions" ]; then
+    FOUND=$(python3 - "$APP/versions" "$ROOT" <<'PY'
+import json, os, sys
+
+stores, root = sys.argv[1], sys.argv[2]
+for key in sorted(os.listdir(stores)):
+    try:
+        at = json.load(open(os.path.join(stores, key, "index.json"))).get("root", "")
+    except (OSError, ValueError):
+        continue
+    if at and os.path.realpath(at) == os.path.realpath(root):
+        print(os.path.join(stores, key))
+        break
+PY
+)
+    if [ -n "$FOUND" ]; then
+        DIR="$FOUND"
+    fi
+fi
 
 show() {
     echo "$ROOT"

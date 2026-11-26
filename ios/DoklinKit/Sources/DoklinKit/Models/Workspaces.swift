@@ -87,8 +87,9 @@ public final class Workspaces {
     /// asking for a new line. Held in memory only.
     @ObservationIgnored private var bought: (endpoint: String, code: String, redeemed: Redeemed)?
     @ObservationIgnored private var starting = false
-    /// Restricted folders this person is giving up here, as `<root>/<path>`
-    /// lowercased: when one goes, that is no news to them.
+    /// What is shared that this person is giving up here — leaving it, or
+    /// deleting it for everyone — as `<root>/<path>` lowercased: when one
+    /// goes, that is no news to them.
     @ObservationIgnored private var givenUp: Set<String> = []
     /// Whether the app is on screen: the workspace selected then is the one
     /// the engine polls for most often.
@@ -127,6 +128,7 @@ public final class Workspaces {
         }
         Task {
             await refresh()
+            await followLayoutMoved()
             // Every connected workspace has a history of its own here.
             try? await Engine.shared.run("versions_reconcile")
             ready = true
@@ -140,7 +142,8 @@ public final class Workspaces {
         if let all: [VersionsStatus] = try? await Engine.shared.call("versions_status") { versions = all }
     }
 
-    private func take(_ all: [CloudStatus]) {
+    /// The engine's whole model, as it last said it.
+    func take(_ all: [CloudStatus]) {
         statuses = all
         defer { Task { await focus() } }
         if let selected, let status = all.first(where: { $0.root == selected }) {
@@ -155,6 +158,24 @@ public final class Workspaces {
     }
 
     private static let selectedKey = "selected-workspace"
+
+    /* ---------- ONE-TIME: from Private and Restricted ----------
+       To be deleted with the engine's `from_library`
+       (engine/src/cloud/layout.rs). A workspace laid out by the build before
+       sharing in place has its `Private/` renamed `My files/` and what was
+       under `Restricted/` moved under `Shared with me/` as the engine
+       starts. What this iPhone keeps about paths in it — the folders open in
+       its tree, what was read of a file with no id yet — follows, by the
+       same rule (`Sections.fromLibraryLayout`), before any screen reads it. */
+
+    private func followLayoutMoved() async {
+        guard let roots: [String] = try? await Engine.shared.call("cloud_layout_moved") else { return }
+        for root in roots {
+            guard let wsId = status(root)?.wsId else { continue }
+            TreeModel.moveFromLibraryLayout(wsId, in: remembered)
+            seen?.moveFromLibraryLayout(wsId)
+        }
+    }
 
     /* ---------- Looking at one ---------- */
 
@@ -177,13 +198,6 @@ public final class Workspaces {
         selected = root
         if let status = status(root) { remembered.set(status.wsId, forKey: Self.selectedKey) }
         Task { await focus() }
-    }
-
-    /// The version store a path is kept in: the deepest whose root holds it.
-    public func store(holding absolute: String) -> VersionsStatus? {
-        versions
-            .filter { absolute == $0.root || absolute.hasPrefix($0.root + "/") }
-            .max { $0.root.count < $1.root.count }
     }
 
     /* ---------- Links ---------- */
@@ -440,9 +454,11 @@ public final class Workspaces {
             if let left = event.decode(CloudSpaceLeft.self) {
                 open[left.root]?.lost(left.path)
                 if givenUp.remove("\(left.root)/\(left.path)".lowercased()) == nil {
-                    say(left.root, "“\(left.name)” is no longer on this iPhone — you were taken out of it, or it was deleted.", path: nil)
+                    say(left.root, "“\(left.name)” is no longer on this iPhone — it is no longer shared with you, or it was deleted.", path: nil)
                 }
             }
+        case "cloud-space-moved":
+            if let moved = event.decode(CloudSpaceMoved.self) { open[moved.root]?.relocate(moved.moves) }
         case "cloud-address-taken":
             if let taken = event.decode(CloudAddressTaken.self) {
                 say(taken.root, "The address “\(taken.slug)” is already taken on this domain, so \(DocLinks.name(of: taken.path)) was not published.", path: nil)
@@ -464,8 +480,8 @@ public final class Workspaces {
         notices.append(Notice(root: root, text: text, path: path))
     }
 
-    /// This person is giving up the restricted folder at `path` (or, with
-    /// `false`, is not after all).
+    /// This person is giving up what is shared at `path` (or, with `false`,
+    /// is not after all).
     func givingUp(_ root: String, _ path: String, _ giving: Bool) {
         let key = "\(root)/\(path)".lowercased()
         if giving { givenUp.insert(key) } else { givenUp.remove(key) }
@@ -506,9 +522,12 @@ public final class Workspace: Identifiable {
     public private(set) var changes = 0
     /// The workspace-relative paths of the last change.
     public private(set) var lastChanged: Set<String> = []
-    /// The last restricted folder to leave this iPhone: the screens inside
-    /// it close when it moves.
-    public private(set) var left: FolderLeft?
+    /// The last thing shared to leave this iPhone: the screens inside it
+    /// close when it moves.
+    public private(set) var left: ShareLeft?
+    /// Where sync last moved something shared on this iPhone: the screens
+    /// open from where it was follow it.
+    public private(set) var relocated: SharesMoved?
     /// What changed lately, as the engine last said (`cloud_recent`).
     public private(set) var recent: RecentFiles?
     /// Every document here, in every section, as the engine last listed
@@ -617,9 +636,16 @@ public final class Workspace: Identifiable {
         await device?.refresh()
     }
 
-    /// This person is leaving or deleting the restricted folder at `path`.
+    /// This person is leaving what is shared at `path`, or deleting it for
+    /// everyone.
     func givingUp(_ path: String, _ giving: Bool = true) {
         device?.givingUp(root, path, giving)
+    }
+
+    /// Ask the engine for its model again, so what a command just changed
+    /// is what the next screen reads.
+    func refresh() async {
+        await device?.refresh()
     }
 
     func changed(_ paths: [String]) {
@@ -629,11 +655,17 @@ public final class Workspace: Identifiable {
         Task { await loadDocuments() }
     }
 
-    /// The restricted folder at `folder` left this iPhone, its copy already
-    /// deleted by the engine.
-    func lost(_ folder: String) {
-        left = FolderLeft(path: folder, count: (left?.count ?? 0) + 1)
-        changed([folder])
+    /// What was shared at `path` — a folder, or a document without its
+    /// extension — left this iPhone, its copy already deleted by the engine.
+    func lost(_ path: String) {
+        left = ShareLeft(path: path, count: (left?.count ?? 0) + 1)
+        changed([path])
+    }
+
+    /// Sync moved something shared on this iPhone, or renamed it.
+    func relocate(_ moves: [SpaceMove]) {
+        relocated = SharesMoved(moves: moves, count: (relocated?.count ?? 0) + 1)
+        changed(moves.flatMap { [$0.from, $0.to] })
     }
 
     /// A change made from this device: the engine hears of it, and so does
@@ -646,8 +678,9 @@ public final class Workspace: Identifiable {
     }
 
     /// A rename or a move made from this device: the engine hears which file
-    /// went where, so a note renamed and typed on at once stays the same
-    /// document, and then that both ends were written.
+    /// or folder went where, so a note renamed and typed on at once stays the
+    /// same document and something shared stays that share, and then that
+    /// both ends were written.
     public func moved(_ moved: WorkspaceFiles.Moved) async {
         for (from, to) in moved {
             try? await Engine.shared.run("moved", ["from": .string(files.absolute(from)), "to": .string(files.absolute(to))])
@@ -681,11 +714,6 @@ public final class Workspace: Identifiable {
         return path
     }
 
-    /// Who can open what is at a path.
-    public func audience(of path: String) -> Audience {
-        Audience.of(path, in: status)
-    }
-
     /// The other device that holds a document, when one does.
     public func lease(of path: String) -> LeaseHolder? {
         let key = path.lowercased()
@@ -695,38 +723,6 @@ public final class Workspace: Identifiable {
     /// The public pages of a document or folder.
     public func pages(of path: String) -> [PublicPage] {
         status?.public.filter { $0.path == path } ?? []
-    }
-}
-
-/// Who can open what is at a path, read off the sections the engine lists,
-/// as the Mac's `placeOf` (src/cloud.ts) reads it.
-public enum Audience: Equatable, Sendable {
-    /// Everyone in the workspace: what is in Library.
-    case everyone
-    /// Only this person: their Private.
-    case onlyYou
-    /// The people of one restricted folder, by its name.
-    case folder(String)
-    /// The folder that holds the restricted folders, which is nobody's itself.
-    case folders
-    /// In no section — the top of the workspace and anything else there, a
-    /// folder with a section's name at the top of Library, or a folder under
-    /// `Restricted/` that is not a restricted folder: it stays on this iPhone.
-    case nowhere
-
-    public static func of(_ path: String, in status: CloudStatus?) -> Audience {
-        guard let status else { return .everyone }
-        let under = { (folder: String) in Sections.holds(folder, path) }
-        for space in status.spaces where under(space.path) {
-            return space.kind == .private ? .onlyYou : .folder(space.name)
-        }
-        if path.lowercased() == TreeModel.restrictedFolder.lowercased() { return .folders }
-        guard under(TreeModel.libraryFolder) else { return .nowhere }
-        // Library never holds anything under a section's name at its own
-        // top: the shared section skips them, as the engine's `reserved_top`
-        // does.
-        let inside = path.split(separator: "/").dropFirst().first.map(String.init)
-        return inside.map(TreeModel.isSectionName) == true ? .nowhere : .everyone
     }
 }
 

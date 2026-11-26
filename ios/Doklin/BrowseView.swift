@@ -41,9 +41,10 @@ struct BrowseTab: View {
 }
 
 /// The workspace as one tree: folders open in place, documents open over
-/// it, sections as the Mac's sidebar has them. What is open is kept. The
-/// workspace's name, top left, switches workspaces and leads to its
-/// settings; how sync stands is the quiet line under it.
+/// it, under the Mac sidebar's three headings — Library, My files, Shared
+/// with me. What is open is kept. The workspace's name, top left, switches
+/// workspaces and leads to its settings; how sync stands is the quiet line
+/// under it.
 struct BrowseView: View {
     let workspace: Workspace
     @Binding var path: [Route]
@@ -83,7 +84,7 @@ struct BrowseView: View {
                                 EntrySwipes(entry: row.entry, workspace: workspace)
                             }
                             .contextMenu {
-                                EntryMenu(entry: row.entry, workspace: workspace) { path.append($0) }
+                                EntryMenu(entry: row.entry, workspace: workspace)
                             }
                         }
                         if let words = footnote(group) {
@@ -126,13 +127,6 @@ struct BrowseView: View {
                         } label: {
                             Label("New folder", systemImage: "folder.badge.plus")
                         }
-                        if workspace.mayRestrict {
-                            Button {
-                                acting.restricting = .new
-                            } label: {
-                                Label("New restricted folder", systemImage: "folder.badge.person.crop")
-                            }
-                        }
                     } label: {
                         Label("New", systemImage: "plus")
                     }
@@ -143,6 +137,10 @@ struct BrowseView: View {
         .refreshable { await workspace.syncNow() }
         .onAppear { tree.load() }
         .onChange(of: workspace.changes) { tree.load() }
+        // Also what sync moved before the tree was on screen, as just after launch.
+        .onChange(of: workspace.relocated, initial: true) { _, moved in
+            if let moved { tree.follow(moved.moves) }
+        }
         .modifier(EntryActionsHost(workspace: workspace, acting: acting) { route in
             if case .document(let file) = route { open(file) } else { path.append(route) }
         })
@@ -167,23 +165,11 @@ struct BrowseView: View {
             case .library:
                 Image(systemName: "books.vertical")
                 Text("Library")
-            case .restricted:
-                Image(systemName: "person.2")
-                Text("Restricted")
-                if workspace.mayRestrict {
-                    Spacer()
-                    Button {
-                        acting.restricting = .new
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .accessibilityLabel("New restricted folder")
-                    .accessibilityIdentifier("new-restricted")
-                }
-            case .personal:
-                Image(systemName: "lock")
-                Text("Private")
-                if workspace.may("work") {
+            case .mine:
+                Image(systemName: "person")
+                Text("My files")
+                // Before the domain has said this is their My files, nothing made here would sync.
+                if workspace.may("work"), workspace.myFiles != nil {
                     Spacer()
                     Menu {
                         Button {
@@ -199,9 +185,13 @@ struct BrowseView: View {
                     } label: {
                         Image(systemName: "plus")
                     }
-                    .accessibilityLabel("New in Private")
-                    .accessibilityIdentifier("new-private")
+                    .accessibilityLabel("New in My files")
+                    .accessibilityIdentifier("new-mine")
                 }
+            case .shared:
+                // What others shared with this person: nothing is made here.
+                Image(systemName: "person.2")
+                Text("Shared with me")
             case .nowhere:
                 Image(systemName: "icloud.slash")
                 Text("In no section")
@@ -213,15 +203,10 @@ struct BrowseView: View {
     /// is in none stays here.
     private func footnote(_ group: TreeGroup) -> String? {
         if group.section == .nowhere {
-            return "These are in no section, so they stay on this iPhone. Move them into Library or Private to sync them."
+            return "These are in no section, so they stay on this iPhone. Move them into Library or My files to sync them."
         }
         guard group.rows.isEmpty, !tree.isFiltering else { return nil }
-        switch group.section {
-        case .library: return "No documents yet. Make one with the plus above."
-        case .restricted: return "Folders only the people you choose can open."
-        case .personal: return "Only you can see what you put here."
-        case .nowhere: return nil
-        }
+        return group.section.emptyHint
     }
 
     @ViewBuilder private var emptiness: some View {
@@ -240,7 +225,7 @@ struct BrowseView: View {
 }
 
 /// One row of the tree: indented by how deep it is, a folder with its
-/// chevron, a document with when it changed.
+/// chevron, a document with when it changed, something shared with its mark.
 struct TreeRowView: View {
     let row: TreeRow
     let workspace: Workspace
@@ -248,6 +233,8 @@ struct TreeRowView: View {
     let tap: () -> Void
 
     var body: some View {
+        let share = workspace.share(row.entry)
+        let place = workspace.place(of: row.entry.path)
         Button(action: tap) {
             HStack(spacing: 8) {
                 if row.isFolder {
@@ -259,19 +246,26 @@ struct TreeRowView: View {
                 } else {
                     Color.clear.frame(width: 14, height: 1)
                 }
-                EntryIcon(entry: row.entry, audience: workspace.audience(of: row.entry.path))
+                EntryIcon(entry: row.entry, synced: place != .nowhere)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(row.entry.name)
                         .foregroundStyle(Theme.text1)
                         .lineLimit(1)
-                    if let detail {
+                    if let detail = detail(share: share, place: place) {
                         Text(detail)
                             .font(.caption)
                             .foregroundStyle(Theme.text3)
-                            .lineLimit(1)
+                            .lineLimit(2)
                     }
                 }
                 Spacer(minLength: 0)
+                if share != nil {
+                    // The mark of something shared; the line under its name says with whom.
+                    Image(systemName: "person.2.fill")
+                        .font(.caption)
+                        .foregroundStyle(Theme.text3)
+                        .accessibilityHidden(true)
+                }
                 if !workspace.pages(of: row.entry.path).isEmpty {
                     Image(systemName: "globe")
                         .font(.footnote)
@@ -288,14 +282,52 @@ struct TreeRowView: View {
         .accessibilityValue(row.isFolder ? (row.open ? "Open" : "Closed") : "")
     }
 
-    /// Whose a restricted folder is, or when a document changed.
-    private var detail: String? {
-        if let space = workspace.restrictedFolder(at: row.entry.path) {
-            return "\(space.members.count) \(space.members.count == 1 ? "person" : "people")"
-        }
+    /// Who something shared is shared with, why a row at the top of a
+    /// section syncs nowhere — what is in no section at all says so once,
+    /// under its group — or when a document changed.
+    private func detail(share: SpaceStatus?, place: Place) -> String? {
+        if let share { return ShareWords.mark(share) }
+        if place == .nowhere, row.depth == 0, row.entry.path.contains("/") { return Sections.notSyncedLine(row.entry.path) }
         if case .document = row.entry, let changed = row.entry.modified {
             return changed.formatted(.relative(presentation: .named))
         }
         return nil
+    }
+}
+
+/// What a row is, at a glance: a folder, a note, a page, a file — and
+/// whether it syncs.
+struct EntryIcon: View {
+    let entry: FolderEntry
+    /// In a section: what is in none stays on this iPhone.
+    let synced: Bool
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.title3)
+            .foregroundStyle(tint)
+            .frame(width: 28)
+            .accessibilityHidden(true)
+    }
+
+    private var symbol: String {
+        switch entry {
+        case .folder:
+            return synced ? "folder" : "icloud.slash"
+        case .document(let row):
+            return row.isHTML ? "doc.richtext" : "doc.text"
+        case .file(let row):
+            switch FileKind.of(row.path) {
+            case .image: return "photo"
+            case .pdf: return "doc.viewfinder"
+            case .text: return "doc.plaintext"
+            default: return "doc"
+            }
+        }
+    }
+
+    private var tint: Color {
+        if case .folder = entry { return Theme.accent }
+        return Theme.text2
     }
 }

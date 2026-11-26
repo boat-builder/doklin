@@ -280,6 +280,14 @@ export function moveWithin(tx: Tx, ask: MoveAsk): Record<string, unknown> | Refu
       entry.path = rebased(entry.path, label.from, label.to);
       tx.touch();
     }
+    // And what is shared from inside it sits where its folder now is.
+    for (const mount of Object.values(tx.m.mounts ?? {})) {
+      if (!within(mount.dir, label.from)) continue;
+      mount.dir = rebased(mount.dir, label.from, label.to);
+      mount.rev += 1;
+      mount.by = tx.by;
+      tx.touch();
+    }
   }
   keepPublic(tx);
   return { kind, ...label, files: plan.length };
@@ -314,7 +322,7 @@ function firstPart(moving: readonly Entry[]): Entry[] {
 async function lift(source: Where, ask: MoveAsk, limit: (files: number) => string): Promise<Lifted | Refusal> {
   const ws = await openWorkspace(source.env);
   if (!ws) return new Refusal(404, "this domain holds no workspace yet");
-  const whole = pick(new Index(mounted(ws.manifest, source.mount).files), ask.from, ask.what);
+  const whole = pick(new Index(mounted(ws.manifest, source).files), ask.from, ask.what);
   if (whole instanceof Refusal) return whole;
   const files = whole.moving.length;
   if (files > MAX_FILES_ACROSS && !(ask.parts && whole.kind === "folder")) return new Refusal(400, limit(files));
@@ -362,7 +370,7 @@ function land(
       keepPublic(tx);
       return { label: routed.label, ids: [...ids] };
     },
-    { dryRun, mount: dest.mount },
+    { dryRun, at: dest },
   );
 }
 
@@ -401,7 +409,7 @@ export async function moveAcross(
   ask: MoveAsk,
   dryRun = false,
 ): Promise<Record<string, unknown> | Refusal> {
-  const change = <T>(at: Where, fn: (tx: Tx) => Promise<T | Refusal>) => commit(at.env, who.by, fn, { mount: at.mount });
+  const change = <T>(at: Where, fn: (tx: Tx) => Promise<T | Refusal>) => commit(at.env, who.by, fn, { at });
   const lifted = await lift(
     source,
     ask,

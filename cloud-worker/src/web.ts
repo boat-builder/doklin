@@ -18,7 +18,7 @@
 // A section is named by its id — "" the shared workspace, a space's id
 // otherwise — and a path is as that section stores it: the browser holds
 // each section's manifest and speaks in its terms. No folder name stands for
-// a section here, as `Private/` does for an agent.
+// a section here, as `My files/` does for an agent.
 //
 //   POST   /api/web/session            NO CREDENTIAL — {code, deviceId?, deviceName?} → 201
 //                                      {tokenId, member} and the cookie that is the sign-in.
@@ -43,10 +43,15 @@
 //                                      what was in it becomes what is in the section
 //   POST   /api/web/copy               the same body: the document or the folder again, at `to`,
 //                                      every file of it a new one. 16 files at most
-//   GET    /api/web/search?q=&limit=&tag=   every section the person is in (search.ts); 202
-//                                      {indexing, pending} while the mirror catches up. `tag`
-//                                      (repeatable) is name:value, or a name for any value; q may
-//                                      then be empty, and every such note is listed
+//   PUT    /api/web/mount?space=&id=   {dir, was?} → {etag, over}: where the share `id` sits in
+//                                      the section `space` it is in (the manifest's `mounts`):
+//                                      the folder its item is in, "" the top
+//   GET    /api/web/search?q=&limit=&tag=&after=   every section the person can open
+//                                      (search.ts), as many as a request opens: `next` is where
+//                                      the next request starts (`after`). 202 {indexing, pending}
+//                                      while the mirror catches up. `tag` (repeatable) is
+//                                      name:value, or a name for any value; q may then be empty,
+//                                      and every such note is listed
 //   PUT    /api/web/pages              {space, path, kind, slug?, title?, desc?} → {slug, url, …}
 //   DELETE /api/web/pages?slug=        stop a page, in whichever section of theirs holds it
 //   PUT    /api/web/home               {slug: string | null}: the page at `/`, or none
@@ -69,8 +74,7 @@
 // browser's token is refused as a bearer (auth.ts). What is left out is what
 // a browser has no use for, so a page that somehow ran script on this domain
 // could not reach it either: putting a manifest or a stored copy, the version
-// store, renaming a restricted folder, binding and erasing the domain, its
-// plan.
+// store, binding and erasing the domain, its plan.
 //
 // People, devices and agents are NOT left out: somebody with no Mac has only
 // a browser to add a device or an agent from, and an owner among them only a
@@ -80,11 +84,15 @@
 // and nothing it started: what it started is a row under Devices or Agents,
 // to be signed out there, exactly as with a code a Mac made.
 //
-// Nor are restricted folders: making one, who is in it, deleting it. Each is
-// the route a Mac calls, answered to the people in the folder and to nobody
-// else (spaces.ts). A folder that becomes a restricted one is, on a Mac, its
-// own files moved on its own disk and then synced; a browser has
-// `/api/web/move` carry them to the top of the folder it just made.
+// Nor is sharing: sharing a folder or a document, who it is shared with,
+// renaming, moving, deleting and restoring it. Each is the route a Mac
+// calls, answered to the people who can open the share and to nobody else
+// (spaces.ts). What a Mac then does by syncing — the item's files leave the
+// section it sits in for the share's own, and that section's manifest says
+// where the share sits — a browser asks for: `/api/web/mount` says where,
+// then `/api/web/move` carries the files to the top of the share it just
+// made. Stopped halfway, the files not yet carried are still where only the
+// people of that section see them.
 
 import { ownScript, sessionCookie, type Auth } from "./auth";
 import { sha256Hex } from "./crypto";
@@ -93,7 +101,7 @@ import { json, readJsonObject } from "./http";
 import { ID_RE, normalizeCode } from "./layout";
 import { redeemInvite } from "./members";
 import type { WebCall } from "./webCall";
-import { deleteDoc, deleteFolder, getSearch, postCopy, postMove, putDoc } from "./webDocs";
+import { deleteDoc, deleteFolder, getSearch, postCopy, postMove, putDoc, putMount } from "./webDocs";
 import { deletePage, putHome, putPage } from "./webPages";
 import { deleteTags, putTags } from "./webTags";
 
@@ -127,8 +135,8 @@ export async function signIn(request: Request, env: Env): Promise<Response> {
 /* ---------- What else a browser's sign-in is answered on ---------- */
 
 /** Outside /api/web: the reads a client with no copy of the workspace is
- *  built from, the beat that says where it is, its person's own Private and
- *  the restricted folders they make and are in, an owner's view of every
+ *  built from, the beat that says where it is, its person's own My files
+ *  and what is shared from it or with them, an owner's view of every
  *  public page, its own sign-out — and people, devices and agents, which
  *  each route gates by role as it does for a Mac (roles.ts). By method and
  *  by the path after `/api/`. */
@@ -142,7 +150,9 @@ const ALSO: readonly (readonly [method: string, path: RegExp])[] = [
   ["GET", /^spaces\/[^/]+\/manifest$/],
   ["GET", /^spaces\/[^/]+\/blobs\/[^/]+\/[^/]+$/],
   ["POST", /^spaces$/],
+  ["PATCH", /^spaces\/[^/]+$/],
   ["DELETE", /^spaces\/[^/]+$/],
+  ["POST", /^spaces\/[^/]+\/restore$/],
   ["PUT", /^spaces\/[^/]+\/members\/[^/]+$/],
   ["DELETE", /^spaces\/[^/]+\/members\/[^/]+$/],
   ["GET", /^pages$/],
@@ -183,6 +193,7 @@ const ROUTES: Record<string, Partial<Record<string, Handler>>> = {
   folder: { DELETE: deleteFolder },
   move: { POST: postMove },
   copy: { POST: postCopy },
+  mount: { PUT: putMount },
   search: { GET: getSearch },
   pages: { PUT: putPage, DELETE: deletePage },
   home: { PUT: putHome },

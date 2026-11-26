@@ -1,6 +1,6 @@
 // Publishing, for an agent.
 //
-//   GET    /api/agent/pages
+//   GET    /api/agent/pages[?after=]
 //   PUT    /api/agent/pages           {path, slug?, title?, desc?, dryRun?}
 //   DELETE /api/agent/pages?path= | ?slug=  [&dry=1]
 //
@@ -13,7 +13,7 @@
 // an address is stopped in whichever of those holds it.
 
 import { spaceAt, spacesWithPages } from "./addresses";
-import { change, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
+import { PAGE, change, cursorOf, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
 import type { Section } from "./agentPlace";
 import { Refusal, type Committed, type Tx } from "./commit";
 import { Index, nameOf, pathProblem } from "./documents";
@@ -23,7 +23,6 @@ import type { Manifest } from "./manifest";
 import { listDirectory } from "./members";
 import { cleanText, documentTarget, folderTarget, publish, sameTarget, slugProblem, type Found } from "./publishing";
 import { mirrorAfter } from "./search";
-import { MAX_SECTIONS_READ } from "./spaces";
 
 /**
  * What a path means to publishing. A trailing slash says "the folder";
@@ -52,13 +51,10 @@ export async function getPages(c: Call): Promise<Response> {
   // Library's map, and that of each section the registry says holds an
   // address: a section that publishes nothing is not opened.
   const publishing = all.filter((s) => s.space === "" || holding.has(s.space));
+  const after = cursorOf(url);
+  const page = publishing.slice(after, after + PAGE);
   const pages: Record<string, unknown>[] = [];
-  const notListed: string[] = [];
-  for (const [i, section] of publishing.entries()) {
-    if (i > MAX_SECTIONS_READ) {
-      notListed.push(section.mount);
-      continue;
-    }
+  for (const section of page) {
     const tree = await openTree(inSection(c, section));
     if (!tree) {
       if (section.space === "") return notBound();
@@ -67,7 +63,8 @@ export async function getPages(c: Call): Promise<Response> {
     pages.push(...pagesOf(tree.manifest, url.origin, names));
   }
   pages.sort((a, b) => String(a.slug).localeCompare(String(b.slug)));
-  return json({ pages, ...(notListed.length > 0 ? { notListed } : {}) });
+  // More sections than one request opens: the rest are the next request's.
+  return json({ pages, ...(after + page.length < publishing.length ? { next: after + page.length } : {}) });
 }
 
 function pagesOf(m: Manifest, origin: string, names: ReadonlyMap<string, string>): Record<string, unknown>[] {

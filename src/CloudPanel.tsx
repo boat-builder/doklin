@@ -236,7 +236,7 @@ export default function CloudPanel({
       <>
         <p className="cloud-intro">
           A workspace is a folder of notes shared with the people you invite: its Library is
-          everyone’s, its Private only yours, and each restricted folder only its people’s. Each
+          everyone’s, and My files is only yours until you share a folder or a note from it. Each
           person works on a copy on their own Mac, and the copies stay in step. It lives at a
           domain of your own — one Cloudflare Worker, one bucket and one database on your account,
           set up by an agent from a prompt this app writes — and publishing a note from it is one

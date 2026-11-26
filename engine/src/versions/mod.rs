@@ -47,7 +47,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-use crate::cloud::scan::rel_for_touch;
+use crate::cloud::space::Reach;
 use crate::cloud::status::Events;
 use crate::cloud::versions::VersionsEntry;
 use crate::Core;
@@ -60,7 +60,7 @@ use status::{
     emit_statuses, Phase, RestoreOutcome, SnapshotMeta, StatusTable, StoreBytes, VersionsStatus, EV_APPLIED,
     EV_PROGRESS,
 };
-use store::{store_key, versions_dir, FileEntry, Index, Reason, SnapshotRow, Store};
+use store::{section_key, store_key, versions_dir, FileEntry, Index, Reason, SnapshotRow, Store};
 use stores::{ExportReport, StoreInfo};
 use workspace::{DeletedFile, RestoreReport, SnapshotDiff};
 
@@ -285,11 +285,11 @@ impl Versioner {
     /// what the bucket holds — empty for a folder that isn't connected, and
     /// walked exactly like this Mac's own snapshots when it isn't.
     fn history(&mut self, rel: &str, cloud: &[VersionsEntry]) -> FileHistory {
-        let current_hash = history::hash_on_disk(&self.store.root.join(rel));
+        let current_hash = history::hash_on_disk(&self.store.abs(rel));
         let retained = history::retained_set(&self.index, cloud);
         let versions =
             history::file_versions(&self.store, &retained, &mut self.cache, rel, current_hash.as_deref());
-        FileHistory { root: self.store.root.to_string_lossy().to_string(), current_hash, versions }
+        FileHistory { root: self.store.display(), current_hash, versions }
     }
 
     /// What restoring one retained snapshot would do to the folder as it
@@ -310,10 +310,16 @@ impl Versioner {
         Ok(workspace::deleted(&self.store, &self.index, &on_disk))
     }
 
+    /// A retained snapshot, as much of it as is this store's section still:
+    /// what was shared since from inside it is another section's now, and a
+    /// restore here neither brings it back nor counts it missing.
     fn snapshot_at(&self, ts: u64) -> Result<store::Snapshot, String> {
-        self.store
+        let mut snap = self
+            .store
             .read_snapshot(ts)
-            .ok_or_else(|| "that version of this folder is no longer in its history".to_string())
+            .ok_or_else(|| "that version of this folder is no longer in its history".to_string())?;
+        snap.files.retain(|path, _| self.store.reach.holds(path));
+        Ok(snap)
     }
 
     /// The file restore, one size up: the state the workspace is about to
@@ -365,7 +371,7 @@ impl Versioner {
         for rel in &to_write {
             let Some(entry) = then.files.get(rel) else { continue };
             let Some(bytes) = self.store.read_blob(&entry.h) else { continue };
-            let abs = self.store.root.join(rel);
+            let abs = self.store.abs(rel);
             // A folder that was deleted along with everything in it comes
             // back with the files that were in it.
             if let Some(parent) = abs.parent() {
@@ -376,7 +382,7 @@ impl Versioner {
             touched.push(abs.to_string_lossy().to_string());
         }
         for rel in &to_trash {
-            let abs = self.store.root.join(rel);
+            let abs = self.store.abs(rel);
             if trash(&abs) {
                 report.trashed += 1;
                 touched.push(abs.to_string_lossy().to_string());
@@ -392,7 +398,7 @@ impl Versioner {
         self.events.emit_json(
             EV_APPLIED,
             serde_json::json!({
-                "root": self.store.root.to_string_lossy(),
+                "root": self.store.display(),
                 "paths": touched,
             }),
         );
@@ -418,7 +424,9 @@ impl Versioner {
         if !self.enabled {
             return Err("versions are turned off on this Mac — turn them back on to restore".to_string());
         }
-        let rel = rel_for_touch(&self.store.root, path)
+        let rel = self
+            .store
+            .rel_of(path)
             .ok_or_else(|| "that file isn't in a folder with version history".to_string())?;
         // A revision only the cloud still holds arrives as text; everything
         // else is a blob in this store.
@@ -471,7 +479,7 @@ impl Versioner {
         self.events.emit_json(
             EV_APPLIED,
             serde_json::json!({
-                "root": self.store.root.to_string_lossy(),
+                "root": self.store.display(),
                 "paths": paths,
             }),
         );
@@ -524,7 +532,7 @@ impl Versioner {
 
     fn status(&self) -> VersionsStatus {
         VersionsStatus {
-            root: self.store.root.to_string_lossy().to_string(),
+            root: self.store.display(),
             key: self.store.key.clone(),
             phase: self.phase,
             error: self.error.clone(),
@@ -609,7 +617,7 @@ enum VersionerCmd {
     },
     /// Stop without the closing capture, and answer once nothing more will be
     /// written: the folder is being taken off this Mac, and its history goes
-    /// with it (`forget_root`).
+    /// with it (`forget_store`).
     Abandon {
         reply: oneshot::Sender<()>,
     },
@@ -770,8 +778,18 @@ async fn run(state: Shared, mut cmds: mpsc::UnboundedReceiver<VersionerCmd>, mut
 /* ---------- The routing table ---------- */
 
 struct Route {
-    root: PathBuf,
+    /// What it versions: a folder, or a section's part of one.
+    store: Store,
     tx: mpsc::UnboundedSender<VersionerCmd>,
+}
+
+/// Of the stores that version `path`, the one it is: a shared document's
+/// before the folder it sits in, a deeper folder before the one around it.
+fn store_of<'a, T>(stores: impl Iterator<Item = (&'a Store, T)>, path: &Path) -> Option<(String, T)> {
+    stores
+        .filter_map(|(store, with)| store.rel_of(path).map(|rel| (store, rel, with)))
+        .max_by_key(|(store, _, _)| (store.reach.only.is_some(), store.root.as_os_str().len()))
+        .map(|(_, rel, with)| (rel, with))
 }
 
 /// One row per running versioner, beside the manager — so a write reaches
@@ -783,32 +801,25 @@ pub struct VersionBus {
 }
 
 impl VersionBus {
-    fn register(&self, root: PathBuf, tx: mpsc::UnboundedSender<VersionerCmd>) {
+    fn register(&self, store: Store, tx: mpsc::UnboundedSender<VersionerCmd>) {
         if let Ok(mut routes) = self.routes.write() {
-            routes.retain(|r| r.root != root);
-            routes.push(Route { root, tx });
+            routes.retain(|r| r.store.key != store.key);
+            routes.push(Route { store, tx });
         }
     }
 
-    fn unregister(&self, root: &Path) {
+    fn unregister(&self, key: &str) {
         if let Ok(mut routes) = self.routes.write() {
-            routes.retain(|r| r.root != root);
+            routes.retain(|r| r.store.key != key);
         }
     }
 
-    /// Route a touched absolute path to the versioner whose root contains it
-    /// (the deepest, should roots ever nest). Returns whether one did.
+    /// Route a touched absolute path to the versioner that versions it.
+    /// Returns whether one did.
     pub fn touch(&self, path: &Path) -> bool {
         let Ok(routes) = self.routes.read() else { return false };
-        let Some(route) = routes
-            .iter()
-            .filter(|r| path.starts_with(&r.root))
-            .max_by_key(|r| r.root.as_os_str().len())
-        else {
-            return false;
-        };
-        let Some(rel) = rel_for_touch(&route.root, path) else { return false };
-        route.tx.send(VersionerCmd::Touched(rel)).is_ok()
+        let Some((rel, tx)) = store_of(routes.iter().map(|r| (&r.store, &r.tx)), path) else { return false };
+        tx.send(VersionerCmd::Touched(rel)).is_ok()
     }
 }
 
@@ -816,9 +827,8 @@ impl VersionBus {
 
 struct VersionerHandle {
     tx: mpsc::UnboundedSender<VersionerCmd>,
-    root: PathBuf,
     /// The store this versioner owns; no two may share one.
-    key: String,
+    store: Store,
     // Held so the folder watcher lives exactly as long as the versioner.
     _watcher: Option<crate::cloud::Watcher>,
 }
@@ -828,7 +838,8 @@ pub(crate) struct ManagerInner {
     /// The name a snapshot is attributed to.
     by: String,
     settings: Settings,
-    /// Keyed by the display root.
+    /// Keyed by what each store is called (`Store::display`): its folder —
+    /// or, for a shared document's, the document.
     versioners: HashMap<String, VersionerHandle>,
     statuses: StatusTable,
 }
@@ -854,46 +865,64 @@ pub fn init(core: &Arc<Core>) {
     reconcile(core);
 }
 
-/// Which folders are open, as the app says (`Host::open_folders`). Asked
-/// whenever what is open may have changed (`reconcile`), so nothing else is
-/// needed to start or stop a versioner. An untitled note is in no folder, so
-/// it has no history: it is unsaved, and gone when its tab closes.
-fn open_roots(core: &Core) -> BTreeSet<String> {
-    let open = core.host.open_folders();
-    // A connected workspace's sections — Library, Private, its restricted
-    // folders — each keep their history in a store of their own, which only
-    // their own people's devices have; the workspace's root keeps none
-    // (`keeps_own_versions`).
-    let sections: Vec<String> = open
-        .iter()
-        .flat_map(|root| crate::cloud::section_roots(Path::new(root)))
-        .map(|dir| dir.to_string_lossy().to_string())
-        .collect();
-    let mut roots: BTreeSet<String> =
-        open.into_iter().filter(|root| crate::cloud::keeps_own_versions(Path::new(root))).collect();
-    roots.extend(sections);
-    roots
+/// The stores to version now, by what each is called: every folder the app
+/// says is open (`Host::open_folders`) — and of one that is a connected
+/// workspace, each section's own instead: Library, My files and everything
+/// shared keep their history in a store apiece, which only their own
+/// people's devices have, and the workspace's root keeps none
+/// (`keeps_own_versions`). Where each section is, and what of its folder is
+/// its own, is the engine's to say (`cloud::sections_of`). Asked whenever
+/// what is open may have changed (`reconcile`), so nothing else is needed to
+/// start or stop a versioner. An untitled note is in no folder, so it has no
+/// history: it is unsaved, and gone when its tab closes.
+fn open_stores(core: &Core, data_dir: &Path) -> BTreeMap<String, Store> {
+    let mut stores = BTreeMap::new();
+    for root in core.host.open_folders() {
+        let path = PathBuf::from(&root);
+        if crate::cloud::keeps_own_versions(&path) {
+            let store = Store::open(data_dir, &store_key(&path), &path);
+            stores.insert(store.display(), store);
+            continue;
+        }
+        for section in crate::cloud::sections_of(core, &root) {
+            let key = section_key(&section.ws_id, &section.id);
+            let store = Store::open_section(data_dir, &key, &section.root, &section.reach);
+            stores.insert(store.display(), store);
+        }
+    }
+    stores
 }
 
-/// Bring the running versioners in line with what is open.
+/// Bring the running versioners in line with what is open: one that is not
+/// open any more stops, and so does one whose section is somewhere else
+/// now, or is another part of its folder — its store carries on under the
+/// versioner started for it as it is.
 pub fn reconcile(core: &Arc<Core>) {
-    let open = open_roots(core);
     let _ = with_inner(core, |inner| {
-        let stale: Vec<String> = inner.versioners.keys().filter(|root| !open.contains(*root)).cloned().collect();
-        for root in stale {
-            stop_versioner(core, inner, &root);
+        let open = open_stores(core, &inner.data_dir);
+        let same = |handle: &VersionerHandle, store: &Store| {
+            handle.store.key == store.key && handle.store.root == store.root && handle.store.reach == store.reach
+        };
+        let stale: Vec<String> = inner
+            .versioners
+            .iter()
+            .filter(|(name, handle)| !open.get(*name).is_some_and(|store| same(handle, store)))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in stale {
+            stop_versioner(core, inner, &name);
         }
-        for root in &open {
-            if !inner.versioners.contains_key(root) {
-                start_versioner(core, inner, root);
+        for (name, store) in open {
+            if !inner.versioners.contains_key(&name) {
+                start_versioner(core, inner, store);
             }
         }
         Ok(())
     });
 }
 
-fn start_versioner(core: &Arc<Core>, inner: &mut ManagerInner, display_root: &str) {
-    let root = PathBuf::from(display_root);
+fn start_versioner(core: &Arc<Core>, inner: &mut ManagerInner, store: Store) {
+    let root = store.root.clone();
     if !root.is_dir() {
         return;
     }
@@ -903,11 +932,10 @@ fn start_versioner(core: &Arc<Core>, inner: &mut ManagerInner, display_root: &st
     if root.starts_with(&stores) || stores.starts_with(&root) {
         return;
     }
-    let key = store_key(&root);
     // One store, one versioner. Two windows on the same folder are one root
     // and never get here; two spellings of one path (a symlink, a `..`)
     // would, and two tasks writing one index would lose rows to each other.
-    if inner.versioners.values().any(|h| h.key == key) {
+    if inner.versioners.values().any(|h| h.store.key == store.key) {
         return;
     }
 
@@ -917,7 +945,7 @@ fn start_versioner(core: &Arc<Core>, inner: &mut ManagerInner, display_root: &st
     let (watcher, fs_rx) = crate::cloud::watch_folder(core, &root, "versions");
 
     let versioner = Versioner::new(
-        Store::open(&inner.data_dir, &key, &root),
+        store.clone(),
         inner.by.clone(),
         &inner.settings,
         inner.statuses.clone(),
@@ -926,10 +954,8 @@ fn start_versioner(core: &Arc<Core>, inner: &mut ManagerInner, display_root: &st
     );
     core.runtime.spawn(run(Arc::new(Mutex::new(versioner)), cmd_rx, fs_rx));
 
-    core.version_bus.register(root.clone(), cmd_tx.clone());
-    inner
-        .versioners
-        .insert(display_root.to_string(), VersionerHandle { tx: cmd_tx, root, key, _watcher: watcher });
+    core.version_bus.register(store.clone(), cmd_tx.clone());
+    inner.versioners.insert(store.display(), VersionerHandle { tx: cmd_tx, store, _watcher: watcher });
 }
 
 /// Stop the versioner for `root` — it captures the session's last state on
@@ -937,7 +963,7 @@ fn start_versioner(core: &Arc<Core>, inner: &mut ManagerInner, display_root: &st
 fn stop_versioner(core: &Core, inner: &mut ManagerInner, root: &str) {
     let Some(handle) = inner.versioners.remove(root) else { return };
     let _ = handle.tx.send(VersionerCmd::Shutdown);
-    core.version_bus.unregister(&handle.root);
+    core.version_bus.unregister(&handle.store.key);
     if let Ok(mut table) = inner.statuses.lock() {
         table.remove(root);
     }
@@ -960,32 +986,32 @@ fn sender_for(core: &Arc<Core>, root: &str) -> Result<mpsc::UnboundedSender<Vers
     })
 }
 
-/// The versioner whose root holds `path` — the deepest, should roots ever
-/// nest — with its display root and the path inside it.
+/// The versioner that versions `path`, with what its store is called and
+/// the path as the store names it.
 fn route(core: &Arc<Core>, path: &str) -> Result<(mpsc::UnboundedSender<VersionerCmd>, String, String), String> {
     let abs = PathBuf::from(path);
     with_inner(core, move |inner| {
-        let (display, handle) = inner
-            .versioners
-            .iter()
-            .filter(|(_, handle)| abs.starts_with(&handle.root))
-            .max_by_key(|(_, handle)| handle.root.as_os_str().len())
-            .ok_or_else(|| "that file isn't in a folder with version history".to_string())?;
-        let rel = rel_for_touch(&handle.root, &abs)
-            .ok_or_else(|| "this folder doesn't keep versions of that file".to_string())?;
-        Ok((handle.tx.clone(), display.clone(), rel))
+        let handles = inner.versioners.iter().map(|(name, handle)| (&handle.store, (name, handle)));
+        // Told apart: a file in no folder that keeps versions, and a file
+        // such a folder does not version.
+        if !inner.versioners.values().any(|handle| abs.starts_with(&handle.store.root)) {
+            return Err("that file isn't in a folder with version history".to_string());
+        }
+        let (rel, (name, handle)) =
+            store_of(handles, &abs).ok_or_else(|| "this folder doesn't keep versions of that file".to_string())?;
+        Ok((handle.tx.clone(), name.clone(), rel))
     })
 }
 
-/// Stop the versioner for `root` and wait until it has: it captures what is
-/// pending first, then writes nothing more. For a folder about to move into
-/// the Library layout (`cloud::layout`), whose store is about to become
-/// Library's; by then `open_roots` no longer names the root, so nothing
+/// Stop the versioner called `root` and wait until it has: it captures what
+/// is pending first, then writes nothing more. For a folder about to move
+/// into the Library layout (`cloud::layout`), whose store is about to become
+/// Library's; by then `open_stores` no longer names the root, so nothing
 /// starts it again.
 pub(crate) async fn release_root(core: &Core, root: &str) {
     let stopping = with_inner(core, |inner| {
         let Some(handle) = inner.versioners.remove(root) else { return Ok(None) };
-        core.version_bus.unregister(&handle.root);
+        core.version_bus.unregister(&handle.store.key);
         if let Ok(mut table) = inner.statuses.lock() {
             table.remove(root);
         }
@@ -1003,31 +1029,40 @@ pub(crate) async fn release_root(core: &Core, root: &str) {
     }
 }
 
-/// The version store for a folder, opened straight from its path — no
-/// manager, no running versioner. What the cloud engine mirrors from: it
-/// reads, and never writes.
+/// The version store for a folder that is no workspace, opened straight
+/// from its path — no manager, no running versioner.
 pub(crate) fn store_for_root(data_dir: &Path, root: &Path) -> Store {
     Store::open(data_dir, &store_key(root), root)
 }
 
-/// How long `forget_root` waits for a versioner to say it has stopped.
+/// The version store of one section of a connected workspace, opened with
+/// no manager and no running versioner. What the cloud engine mirrors from:
+/// it reads, and never writes.
+pub(crate) fn store_for_section(data_dir: &Path, ws_id: &str, section: &str, root: &Path, reach: &Reach) -> Store {
+    Store::open_section(data_dir, &section_key(ws_id, section), root, reach)
+}
+
+/// How long `forget_store` waits for a versioner to say it has stopped.
 const ABANDON_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Delete this Mac's whole version history of the folder at `root`, stopping
-/// its versioner first — with no closing capture, which would only write the
-/// store back. For a workspace this Mac has lost access to (`access_removed`,
-/// cloud/mod.rs): the history holds every file's content, so it leaves
-/// with the folder.
-///
-/// `store_dir` is the store as it was found while the folder still existed —
-/// a store's key comes from the folder's canonical path, which cannot be
-/// asked for once the folder is gone.
-pub(crate) async fn forget_root(core: &Core, root: &str, store_dir: PathBuf) {
+/// Delete this Mac's whole version history kept under `key`, stopping its
+/// versioner first — with no closing capture, which would only write the
+/// store back. For a workspace this Mac has lost access to
+/// (`access_removed`, cloud/mod.rs), and for a section this person can no
+/// longer open: the history holds every file's content, so it leaves with
+/// the files.
+pub(crate) async fn forget_store(core: &Core, key: &str) {
+    if !stores::valid_key(key) {
+        return;
+    }
     let stopping = with_inner(core, |inner| {
-        let Some(handle) = inner.versioners.remove(root) else { return Ok(None) };
-        core.version_bus.unregister(&handle.root);
+        let Some(name) = inner.versioners.iter().find(|(_, handle)| handle.store.key == key).map(|(name, _)| name.clone()) else {
+            return Ok(None);
+        };
+        let Some(handle) = inner.versioners.remove(&name) else { return Ok(None) };
+        core.version_bus.unregister(&handle.store.key);
         if let Ok(mut table) = inner.statuses.lock() {
-            table.remove(root);
+            table.remove(&name);
         }
         emit_statuses(core.events().as_ref(), &inner.statuses);
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1040,11 +1075,8 @@ pub(crate) async fn forget_root(core: &Core, root: &str, store_dir: PathBuf) {
     if let Some(stopped) = stopping {
         let _ = tokio::time::timeout(ABANDON_TIMEOUT, stopped).await;
     }
-    // Inside the stores' own directory and nowhere else, whatever was passed.
-    let stores = with_inner(core, |inner| Ok(versions_dir(&inner.data_dir))).ok();
-    if stores.is_some_and(|stores| store_dir.parent() == Some(stores.as_path())) {
-        let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&store_dir)).await;
-    }
+    let Some(dir) = with_inner(core, |inner| Ok(versions_dir(&inner.data_dir).join(key))).ok() else { return };
+    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&dir)).await;
 }
 
 /// A store to read from without going through its versioner: reads are pure
@@ -1055,7 +1087,7 @@ fn store_for(core: &Arc<Core>, root: &str) -> Result<Store, String> {
             .versioners
             .get(root)
             .ok_or_else(|| "that folder has no version store yet".to_string())?;
-        Ok(Store::open(&inner.data_dir, &handle.key, &handle.root))
+        Ok(handle.store.clone())
     })
 }
 
@@ -1197,27 +1229,84 @@ async fn mirrored_set(core: &Arc<Core>, path: &str, root: &str) -> Vec<VersionsE
 /// Every version of one document, newest first — the rail's whole model.
 /// This Mac's snapshots and the ones other devices mirrored are one walk,
 /// and that walk is the whole answer.
+///
+/// A document in something shared has its history from before it was shared
+/// in the section it was shared from. Somebody who can open that section —
+/// this device has its store then — reads on into it: the same document,
+/// one list. For anyone else it starts at the share.
 pub async fn versions_history(core: &Arc<Core>, path: String) -> Result<FileHistory, String> {
     let (tx, root, rel) = route(core, &path)?;
     let cloud = mirrored_set(core, &path, &root).await;
-    ask(tx, move |reply| VersionerCmd::History { rel, cloud, reply }).await
+    let before = earlier(core, &root, Some(&rel));
+    let mut history: FileHistory = ask(tx, move |reply| VersionerCmd::History { rel, cloud, reply }).await?;
+    if let Some((from, Some(rel))) = before {
+        if let Ok(tx) = sender_for(core, &from) {
+            let cloud = mirrored_set(core, &from, &from).await;
+            if let Ok(older) = ask(tx, move |reply| VersionerCmd::History { rel, cloud, reply }).await {
+                history::carry_on(&mut history, older);
+            }
+        }
+    }
+    Ok(history)
+}
+
+/// Where the history of the store called `root` carries on from: the store
+/// of the section its item was shared from, when this device versions that
+/// one too — and the file `rel` as that store names it.
+fn earlier(core: &Arc<Core>, root: &str, rel: Option<&str>) -> Option<(String, Option<String>)> {
+    with_inner(core, |inner| {
+        let Some(store) = inner.versioners.get(root).map(|handle| &handle.store) else { return Ok(None) };
+        let sections = core.sections.lock().map(|table| table.values().flatten().cloned().collect::<Vec<_>>()).unwrap_or_default();
+        let Some((ws_id, (parent, was))) = sections
+            .into_iter()
+            .find(|section| section_key(&section.ws_id, &section.id) == store.key)
+            .and_then(|section| Some((section.ws_id, section.from?)))
+        else {
+            return Ok(None);
+        };
+        let key = section_key(&ws_id, &parent);
+        let Some(from) = inner.versioners.values().find(|handle| handle.store.key == key).map(|handle| handle.store.display()) else {
+            return Ok(None);
+        };
+        // A shared document's files were `<was>.<ext>`; a shared folder's, under `<was>/`.
+        let there = rel.map(|rel| match &store.reach.only {
+            Some(_) => format!("{}{}", was, crate::cloud::space::split_name(rel).1),
+            None => format!("{}/{}", was, rel),
+        });
+        Ok(Some((from, there)))
+    })
+    .ok()
+    .flatten()
 }
 
 /// One version's text: this Mac's blob, or — for a version only another
 /// device ever held — the mirrored one, fetched through the engine.
+///
+/// A version from before its document was shared is in the store of the
+/// section it was shared from (`versions_history`): looked for there next.
 async fn version_text(core: &Arc<Core>, root: &str, hash: &str) -> Result<String, String> {
-    let store = store_for(core, root)?;
-    let owned = hash.to_string();
-    let local = tokio::task::spawn_blocking(move || history::read_version(&store, &owned))
-        .await
-        .map_err(|_| "that version couldn't be read".to_string())?;
-    match local {
-        Ok(text) => Ok(text),
-        Err(missing) => match crate::cloud::version_blob(core, root, hash).await {
-            Ok(bytes) => history::text_of(bytes),
-            Err(_) => Err(missing),
-        },
+    let mut at = root.to_string();
+    let mut refusal: Option<String> = None;
+    // A share inside a share inside My files is three stores deep.
+    for _ in 0..4 {
+        let store = store_for(core, &at)?;
+        let owned = hash.to_string();
+        let local = tokio::task::spawn_blocking(move || history::read_version(&store, &owned))
+            .await
+            .map_err(|_| "that version couldn't be read".to_string())?;
+        match local {
+            Ok(text) => return Ok(text),
+            Err(missing) => match crate::cloud::version_blob(core, &at, hash).await {
+                Ok(bytes) => return history::text_of(bytes),
+                Err(_) => refusal = refusal.or(Some(missing)),
+            },
+        }
+        match earlier(core, &at, None) {
+            Some((from, _)) => at = from,
+            None => break,
+        }
     }
+    Err(refusal.unwrap_or_else(|| "that version's content is no longer in this folder's history".to_string()))
 }
 
 /// One version's text, for the preview.
@@ -1309,7 +1398,7 @@ pub async fn versions_stores(core: &Arc<Core>) -> Result<Vec<StoreInfo>, String>
 /// user asked to forget the history, not to restart it.
 pub async fn versions_forget(core: &Arc<Core>, key: String) -> Result<(), String> {
     let (data_dir, open) = with_inner(core, |inner| {
-        let open: BTreeSet<String> = inner.versioners.values().map(|handle| handle.key.clone()).collect();
+        let open: BTreeSet<String> = inner.versioners.values().map(|handle| handle.store.key.clone()).collect();
         Ok((inner.data_dir.clone(), open))
     })?;
     tokio::task::spawn_blocking(move || stores::forget(&data_dir, &key, &open))
@@ -1348,6 +1437,12 @@ pub async fn versions_restore_file(
     text: Option<String>,
 ) -> Result<RestoreOutcome, String> {
     let tx = sender_for(core, &root)?;
+    // A version this store does not hold the bytes of — one from before the
+    // document was shared — is restored as the text it was.
+    let text = match (&text, &hash) {
+        (None, Some(hash)) if !store_for(core, &root)?.has_blob(hash) => Some(version_text(core, &root, hash).await?),
+        _ => text,
+    };
     let core = core.clone();
     ask(tx, move |reply| VersionerCmd::RestoreFile {
         core,

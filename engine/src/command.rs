@@ -111,13 +111,13 @@ pub async fn call(core: &Arc<Core>, name: &str, args: Value) -> Result<Value, St
         "cloud_set_root" => json(cloud::cloud_set_root(core, a.get("root")?, a.get("slug")?).await?),
         "cloud_set_tag" => json(cloud::cloud_set_tag(core, a.get("root")?, a.get("at")?, a.get("def")?).await?),
         "cloud_remove_tag" => json(cloud::cloud_remove_tag(core, a.get("root")?, a.get("name")?).await?),
-        "cloud_space_create" => json(
-            cloud::cloud_space_create(core, a.get("root")?, a.get("name")?, a.get("members")?, a.get("from")?).await?,
+        "cloud_layout_moved" => json(cloud::cloud_layout_moved(core)?),
+        "cloud_share" => json(cloud::cloud_share(core, a.get("root")?, a.get("path")?, a.get("members")?).await?),
+        "cloud_share_member" => json(
+            cloud::cloud_share_member(core, a.get("root")?, a.get("id")?, a.get("memberId")?, a.get("add")?).await?,
         ),
-        "cloud_space_member" => json(
-            cloud::cloud_space_member(core, a.get("root")?, a.get("id")?, a.get("memberId")?, a.get("add")?).await?,
-        ),
-        "cloud_space_delete" => json(cloud::cloud_space_delete(core, a.get("root")?, a.get("id")?).await?),
+        "cloud_share_delete" => json(cloud::cloud_share_delete(core, a.get("root")?, a.get("id")?).await?),
+        "cloud_share_restore" => json(cloud::cloud_share_restore(core, a.get("root")?, a.get("id")?).await?),
         "cloud_link" => json(cloud::cloud_link(core, a.get("path")?).await?),
         "cloud_follow_link" => json(cloud::cloud_follow_link(core, a.get("url")?).await?),
         "cloud_link_target" => json(cloud::cloud_link_target(core, a.get("url")?)?),

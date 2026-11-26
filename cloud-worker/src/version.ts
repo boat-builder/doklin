@@ -11,7 +11,7 @@
 // with, and a worker that is behind becomes an "update the worker" state
 // rather than an error. The counter starts at 1: nothing older speaks this
 // API, so no version below 1 can ever show up.
-export const WORKER_VERSION = 36;
+export const WORKER_VERSION = 37;
 
 // The manifest schema this worker understands.
 // A PUT carrying any other version is a 426 in both directions, with a
@@ -19,7 +19,7 @@ export const WORKER_VERSION = 36;
 // in `worker-outdated` until the worker is updated, and an app older than it
 // is told to update itself (refuse politely, never
 // corrupt).
-export const MANIFEST_VERSION = 5;
+export const MANIFEST_VERSION = 6;
 
 // The oldest clients this worker answers (clients.ts): an older one is
 // refused on every request, with a sentence telling it to update. Only a

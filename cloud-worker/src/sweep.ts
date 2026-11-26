@@ -16,20 +16,35 @@
 // copy it still counts on is never one this takes. Change both.
 //
 // A run is bounded: Workers Free allows 50 calls to the bucket in one
-// invocation, and this makes at most SWEEP_CALLS. Each day starts at another
-// section, so one that a run did not reach is reached on a later one. The
-// version store (versions/) is not this: it has its own grace and its own
-// collector (engine/src/cloud/versions.rs).
+// invocation, and this makes at most SWEEP_CALLS. Each day starts further
+// round the sections (SWEEP_STRIDE of them), so one that a run did not reach
+// is reached on a later one: every shared document is a section, and a
+// bucket soon holds more than a run goes through. The version store
+// (versions/) is not this: it has its own grace and its own collector
+// (engine/src/cloud/versions.rs).
+//
+// The same run ends what is over (`sweepShares`), first: a share deleted
+// thirty days ago is erased — what it stored, then its rows — and so is a
+// shared document that never got its document, a day after it was made: the
+// device that was sharing it never finished, and nobody can see it.
 
 import type { Env } from "./env";
 import { BLOBS_PREFIX, MANIFEST_KEY, SPACES_PREFIX, SPACE_ID_RE } from "./layout";
 import { withoutUnsynced } from "./manifest";
-import { spaceEnv } from "./spaces";
+import { withDb } from "./schema";
+import { dropMount } from "./mounts";
+import { eraseSpace, parentIdOf, spaceStore } from "./spaces";
 
 /** How long a copy no manifest names is left alone. */
 export const SWEEP_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 /** Calls to the bucket one run may make — under Workers Free's 50. */
 export const SWEEP_CALLS = 40;
+/** How far round the sections each day's run starts from the last one's. */
+export const SWEEP_STRIDE = 10;
+/** How long a deleted share can be restored (`deleted_at`, schema.ts). */
+export const DELETED_KEPT_MS = 30 * 24 * 60 * 60 * 1000;
+/** Calls to the bucket a run spends on erasing what is over, at most. */
+const ERASE_CALLS = 12;
 /** R2 deletes at most this many keys in one call. */
 const DELETE_BATCH = 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -43,6 +58,8 @@ export type SweepReport = {
   deleted: number;
   /** Sections passed over because their manifest could not be read. */
   unreadable: number;
+  /** Shares erased: deleted thirty days ago, or never given a document. */
+  erased: number;
 };
 
 /** The calls one run has left: every bucket call takes one. */
@@ -58,11 +75,13 @@ class Budget {
   }
 }
 
-type Outcome = "swept" | "cut" | "unreadable";
+/** "empty": swept, and it holds no copy of anything at all. */
+type Outcome = "swept" | "empty" | "cut" | "unreadable";
 
 export async function sweep(env: Env, now: number): Promise<SweepReport> {
   const budget = new Budget(SWEEP_CALLS);
-  const report: SweepReport = { sections: 0, swept: 0, deleted: 0, unreadable: 0 };
+  const report: SweepReport = { sections: 0, swept: 0, deleted: 0, unreadable: 0, erased: 0 };
+  await sweepShares(env, now, budget, report);
 
   // The shared workspace, then every space the bucket holds a prefix for.
   const sections: string[] = [""];
@@ -79,15 +98,81 @@ export async function sweep(env: Env, now: number): Promise<SweepReport> {
   sections.sort();
   report.sections = sections.length;
 
-  const start = Math.floor(now / DAY_MS) % sections.length;
+  const start = (Math.floor(now / DAY_MS) * SWEEP_STRIDE) % sections.length;
   for (let i = 0; i < sections.length; i++) {
     const id = sections[(start + i) % sections.length];
-    const outcome = await sweepSection(id === "" ? env : spaceEnv(env, id), now, budget, report);
+    const outcome = await sweepSection(id === "" ? env : spaceStore(env, id), now, budget, report);
     if (outcome === "unreadable") report.unreadable += 1;
-    if (outcome === "swept") report.swept += 1;
+    if (outcome === "swept" || outcome === "empty") report.swept += 1;
+    if (outcome === "empty" && id !== "") await eraseUnfilled(env, id, now, budget, report);
     if (outcome === "cut" || budget.remaining === 0) break;
   }
   return report;
+}
+
+/**
+ * Erase the shares deleted thirty days ago — the top one of each tree that
+ * was deleted together; what was beneath it goes with it. One that takes
+ * more calls than a run has for this is finished by the next day's: its rows
+ * go last, so it is found again.
+ */
+async function sweepShares(env: Env, now: number, budget: Budget, report: SweepReport): Promise<void> {
+  const over = await withDb(env, async (db) => {
+    const { results } = await db
+      .prepare(
+        `SELECT s.id FROM spaces s
+          WHERE s.deleted_at IS NOT NULL AND s.deleted_at < ?1
+            AND NOT EXISTS (SELECT 1 FROM spaces p WHERE p.id = s.parent AND p.deleted_at IS NOT NULL)
+          ORDER BY s.deleted_at LIMIT 20`,
+      )
+      .bind(now - DELETED_KEPT_MS)
+      .all<{ id: string }>();
+    return results;
+  });
+  let left = ERASE_CALLS;
+  for (const share of over ?? []) {
+    if (left < 4) return;
+    const parent = await parentIdOf(env, share.id);
+    const erased = await eraseSpace(env, share.id, left - 2);
+    if (!erased) return;
+    for (let i = 0; i < erased.spent; i += 1) budget.take();
+    left -= erased.spent;
+    if (erased.remaining) continue;
+    report.erased += 1;
+    // The section it sat in stops saying where: a read of its manifest, and a write.
+    if (parent) await dropMount(env, parent, share.id);
+    budget.take();
+    budget.take();
+    left -= 2;
+  }
+}
+
+/**
+ * A space the run found nothing stored for, not one copy: when it is a
+ * shared document made more than a day ago whose manifest names no file, it
+ * never got its document — the device that was sharing it did not finish —
+ * and it is erased.
+ */
+async function eraseUnfilled(env: Env, id: string, now: number, budget: Budget, report: SweepReport): Promise<void> {
+  const unfilled = await withDb(env, (db) =>
+    db
+      .prepare("SELECT 1 AS there FROM spaces WHERE id = ?1 AND kind = 'document' AND deleted_at IS NULL AND created_at < ?2")
+      .bind(id, now - SWEEP_MIN_AGE_MS)
+      .first(),
+  );
+  if (!unfilled || budget.remaining < 6 || !budget.take()) return;
+  const manifest = await spaceStore(env, id).DATA.get(MANIFEST_KEY);
+  try {
+    if (manifest && Object.keys(((await manifest.json()) as { files?: object }).files ?? {}).length > 0) return;
+  } catch {
+    return; // unreadable: left alone
+  }
+  const parent = await parentIdOf(env, id);
+  const erased = await eraseSpace(env, id, 2);
+  for (let i = 0; i < (erased?.spent ?? 0); i += 1) budget.take();
+  if (!erased || erased.remaining) return;
+  report.erased += 1;
+  if (parent && budget.take() && budget.take()) await dropMount(env, parent, id);
 }
 
 /**
@@ -102,6 +187,7 @@ async function sweepSection(env: Env, now: number, budget: Budget, report: Sweep
   const old: string[] = [];
   let cursor: string | undefined;
   let cut = false;
+  let copies = 0;
   do {
     if (budget.remaining <= 2) {
       cut = true;
@@ -109,12 +195,13 @@ async function sweepSection(env: Env, now: number, budget: Budget, report: Sweep
     }
     budget.take();
     const page = await env.DATA.list({ prefix: BLOBS_PREFIX, cursor });
+    copies += page.objects.length;
     for (const obj of page.objects) {
       if (now - obj.uploaded.getTime() > SWEEP_MIN_AGE_MS) old.push(obj.key);
     }
     cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
-  if (old.length === 0) return cut ? "cut" : "swept";
+  if (old.length === 0) return cut ? "cut" : copies === 0 ? "empty" : "swept";
 
   if (!budget.take()) return "cut";
   const named = await namedCopies(env);

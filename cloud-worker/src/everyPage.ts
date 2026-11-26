@@ -17,7 +17,7 @@ import { MANIFEST_KEY } from "./layout";
 import type { Manifest, PublicEntry } from "./manifest";
 import { listDirectory } from "./members";
 import { withDb } from "./schema";
-import { sharedEnv, spaceEnv } from "./spaces";
+import { sharedEnv, spaceStore } from "./spaces";
 import { basename } from "./workspace";
 
 export type EveryPage = {
@@ -62,7 +62,10 @@ export async function listEveryPage(env: Env): Promise<{ pages: EveryPage[]; tru
   const shared = sharedEnv(env);
   const rows = await withDb(shared, async (db) => {
     const { results } = await db
-      .prepare("SELECT slug, space_id FROM addresses WHERE space_id <> '' ORDER BY space_id, slug")
+      .prepare(
+        `SELECT a.slug, a.space_id FROM addresses a JOIN spaces s ON s.id = a.space_id
+          WHERE s.deleted_at IS NULL ORDER BY a.space_id, a.slug`,
+      )
       .all<{ slug: string; space_id: string }>();
     return results;
   });
@@ -87,7 +90,7 @@ export async function listEveryPage(env: Env): Promise<{ pages: EveryPage[]; tru
   for (const row of rows) bySpace.set(row.space_id, [...(bySpace.get(row.space_id) ?? []), row.slug]);
   const spaces = [...bySpace.keys()];
   for (const id of spaces.slice(0, MAX_SPACES_READ)) {
-    const theirs = await readPublic(spaceEnv(shared, id));
+    const theirs = await readPublic(spaceStore(shared, id));
     for (const slug of bySpace.get(id) ?? []) {
       const entry = theirs?.map[slug];
       if (entry) pages.push(page(slug, entry, theirs.name, false));
@@ -104,7 +107,7 @@ export async function listEveryPage(env: Env): Promise<{ pages: EveryPage[]; tru
 export async function takeDownPage(env: Env, by: string, slug: string): Promise<true | Refusal> {
   const shared = sharedEnv(env);
   const holder = await spaceAt(shared, slug);
-  const target = holder ? spaceEnv(shared, holder) : shared;
+  const target = holder ? spaceStore(shared, holder) : shared;
   const done = await commit(target, by, async (tx) => {
     const map = tx.m.public ?? {};
     if (!map[slug]) return new Refusal(404, `nothing is published at "${slug}"`);

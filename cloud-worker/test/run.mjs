@@ -26,7 +26,7 @@ import path from "node:path";
 import { build } from "vite";
 import { withAssets } from "./assets.mjs";
 import { FakeCache, FakeR2 } from "./fake-r2.mjs";
-import { FakeD1, brokenD1 } from "./fake-d1.mjs";
+import { FakeD1, brokenD1, reads } from "./fake-d1.mjs";
 import { PIXEL_PNG, SEED_FILES, SEED_PUBLIC, WIDE_TABLE, fidOf, seedThroughApi } from "./seed.mjs";
 
 /* ---------- The worker under test: compiled from src/, or a bundle ---------- */
@@ -93,7 +93,8 @@ const MANIFEST_VERSION = Number(
 );
 
 /** What a fully migrated database reports, and the tables it then holds. */
-const D1_SCHEMA = 12;
+const D1_SCHEMA = 13;
+/** The manifest schema the worker takes (cloud-worker/src/version.ts). */
 const D1_TABLES = [
   "addresses",
   "agent_codes",
@@ -241,6 +242,15 @@ const putManifest = async (body, etag, token = OWNER) =>
     body,
   });
 
+/** A share's id, as a device mints one. */
+let shares = 0;
+const shareId = () => `s-${(0x5a000000 + (shares += 1)).toString(16)}`;
+/** The caller's own My files, made on first asking. */
+const myFiles = async (token) => (await call("/api/spaces/private", { method: "PUT", token })).json.space;
+/** Share a folder (or a document) — in the caller's My files unless `parent` says where. */
+const share = async (token, { name, kind = "folder", members = [], parent, id = shareId() }) =>
+  call("/api/spaces", { method: "POST", token, body: { id, kind, name, members, parent: parent ?? (await myFiles(token)).id } });
+
 /* ---------- Tests ---------- */
 
 let ws; // the binding, once made
@@ -281,7 +291,7 @@ await test("d1: a fresh database migrates itself, once per isolate", async () =>
   assert.deepEqual(db.queries, [], "a migrated isolate's probe asks the database nothing");
 });
 
-await test("d1: a database at schema 9 takes steps 10, 11 and 12 — settings, usage, links and tags made, presence made again with until, everything else kept", async () => {
+await test("d1: a database at schema 9 takes steps 10 to 13 — settings, usage, links and tags made, presence made again with until, spaces given where each sits and when it was deleted, everything else kept", async () => {
   const at9 = new FakeD1();
   const probe = (isolate) =>
     isolate.fetch(new Request("https://nine.example.com/api/meta", { headers: { authorization: `Bearer ${KEY}` } }), {
@@ -299,6 +309,10 @@ await test("d1: a database at schema 9 takes steps 10, 11 and 12 — settings, u
   at9.run(
     "CREATE TABLE presence (device_id TEXT PRIMARY KEY, member_id TEXT, device_name TEXT NOT NULL, space_id TEXT NOT NULL DEFAULT '', path TEXT, ts INTEGER NOT NULL)",
   );
+  at9.run("DROP INDEX spaces_by_parent");
+  at9.run("ALTER TABLE spaces DROP COLUMN parent");
+  at9.run("ALTER TABLE spaces DROP COLUMN deleted_at");
+  at9.run("INSERT INTO spaces (id, kind, name, created_by, created_at, etag) VALUES ('s-00000009', 'folder', 'Kept', 'm-00000009', 1, 'e')");
   at9.run("UPDATE meta SET schema_version = 9 WHERE key = 'schema'");
   at9.run("INSERT INTO members (id, email, name, role, created_at) VALUES ('m-00000009', 'nine@example.com', 'Nine', 'owner', 1)");
   at9.run("INSERT INTO presence (device_id, member_id, device_name, ts) VALUES ('d-nine', 'm-00000009', 'Nine', ?)", Date.now());
@@ -310,6 +324,13 @@ await test("d1: a database at schema 9 takes steps 10, 11 and 12 — settings, u
   assert.equal(at9.value("SELECT COUNT(*) FROM presence"), 0, "what the last beats wrote is the one thing dropped");
   assert.equal(at9.value("SELECT name FROM members WHERE id = 'm-00000009'"), "Nine", "everything else is as it was");
   assert.equal(at9.value("SELECT schema_version FROM meta WHERE key = 'schema'"), D1_SCHEMA);
+  // A table that holds something gains its columns: its rows are kept, with nothing said in the new ones.
+  assert.deepEqual(at9.rows("SELECT name, parent, deleted_at FROM spaces"), [{ name: "Kept", parent: null, deleted_at: null }]);
+
+  // A database whose columns were added by hand, its number left behind: the step looks first, and adds nothing twice.
+  at9.run("UPDATE meta SET schema_version = 12 WHERE key = 'schema'");
+  assert.equal((await (await probe(await anotherIsolate("nine-c"))).json()).d1, D1_SCHEMA);
+  assert.equal(at9.rows("PRAGMA table_info(spaces)").filter((c) => c.name === "parent" || c.name === "deleted_at").length, 2);
 });
 
 await test("key: the domain's key is no sign-in — it trades, once, for the superadmin's own device", async () => {
@@ -1266,8 +1287,6 @@ await test("manifest: validation rejects traversal, duplicate paths, bad revs an
     [manifest(3, {}, { tombstones: { "f-old": { path: "a/../b.md" } } }), /tombstone/],
     [manifest(3, {}, { tombstones: [] }), /tombstones/],
     [manifest(3, {}, { tombstones: { "f-old": { path: "a.md", rev: 2, ts: 1700000000000, by: "m-1a2b3c4d", to: "the finance folder" } } }), /tombstone to/],
-    [manifest(3, { "f-a": fileEntry("Private/diary.md", 1, "a") }), /names of a workspace's sections/],
-    [manifest(3, { "f-a": fileEntry("restricted/Finance/q3.md", 1, "a") }), /names of a workspace's sections/],
     [manifest(-1, {}), /seq/],
     [manifest(3, {}, { name: "n".repeat(81) }), /name/],
     [{ ...manifest(3, {}), files: [] }, /files/],
@@ -1303,7 +1322,7 @@ await test("manifest: only documents sync — a file, a tombstone or a page of a
     }
   }
   // …in a space as in the shared workspace.
-  const space = (await call("/api/spaces", { method: "POST", token: OWNER, body: { name: "Only documents" } })).json.space;
+  const space = (await share(OWNER, { name: "Only documents" })).json.space;
   const spaceManifest = await call(`/api/spaces/${space.id}/manifest`, { token: OWNER });
   const inSpace = await call(`/api/spaces/${space.id}/manifest`, {
     method: "PUT",
@@ -1343,31 +1362,75 @@ await test("manifest: either side of a schema skew is 426, and the sentence says
   assert.equal((await putManifest(manifest(3, {}, { version: String(MANIFEST_VERSION) }))).status, 400, "a version that is not a number is garbage");
 });
 
-await test("manifest: the shared workspace holds nothing under Library, Private or Restricted, a space holds what it likes, and a tombstone may say where its file went", async () => {
+await test("manifest: Library names its folders what it likes and holds no share; a tombstone may say where its file went; a section says where its shares sit, and a shared document's holds that document alone", async () => {
   const etag = await currentEtag();
-  // What a build from before the Library layout sends when it is run on a
-  // folder that has moved: every shared file, moved under `Library/`. It is
-  // refused, so no other device follows.
-  for (const path of ["Library/notes.md", "library/Projects/plan.md"]) {
-    const refused = await putManifest(manifest(3, { "f-res000": fileEntry(path, 1, "r") }));
-    assert.equal(refused.status, 400, path);
-    assert.match(refused.json.error, /Library, Private and Restricted are the names of a workspace's sections/);
-  }
-  assert.equal(await currentEtag(), etag, "and nothing was stored");
-  // A folder that only looks like one of them is an ordinary folder.
+  // No name is kept from Library's top: a folder called what a section is called is an ordinary folder.
   const near = await putManifest(
-    manifest(3, { "f-near01": fileEntry("Private (shared)/diary.md", 1, "n"), "f-near02": fileEntry("Docs/Private/x.md", 1, "m"), "f-near03": fileEntry("Library.md", 1, "l"), "f-near04": fileEntry("Docs/Library/x.md", 1, "k") }),
+    manifest(3, { "f-near01": fileEntry("My files/diary.md", 1, "n"), "f-near02": fileEntry("Shared with me/x.md", 1, "m"), "f-near03": fileEntry("Library/notes.md", 1, "l"), "f-near04": fileEntry("Private/x.md", 1, "k") }),
   );
   assert.equal(near.status, 200, JSON.stringify(near.json));
   // A file that moved to a section is a tombstone that says so: a space's id, or "" for the shared workspace.
   const moved = await putManifest(
-    manifest(4, {}, { tombstones: { "f-near01": { path: "Private (shared)/diary.md", rev: 2, ts: 1700000000000, by: "m-1a2b3c4d", to: "p-0a1b2c3d" }, "f-near02": { path: "Docs/Private/x.md", rev: 2, ts: 1700000000000, by: "m-1a2b3c4d", to: "" } } }),
+    manifest(4, {}, { tombstones: { "f-near01": { path: "My files/diary.md", rev: 2, ts: 1700000000000, by: "m-1a2b3c4d", to: "p-0a1b2c3d" }, "f-near02": { path: "Shared with me/x.md", rev: 2, ts: 1700000000000, by: "m-1a2b3c4d", to: "" } } }),
   );
   assert.equal(moved.status, 200, JSON.stringify(moved.json));
-  // A tombstone is a path the shared workspace held, so never one under a reserved name.
-  const reserved = await putManifest(manifest(5, {}, { tombstones: { "f-res001": { path: "Private/gone.md", rev: 3, ts: 1700000000000, by: "m-1a2b3c4d" } } }));
-  assert.equal(reserved.status, 400);
-  assert.match(reserved.json.error, /Library, Private and Restricted/);
+  const bad = await putManifest(manifest(5, {}, { tombstones: { "f-near01": { path: "a.md", rev: 2, ts: 1700000000000, by: "m-1a2b3c4d", to: "nowhere" } } }));
+  assert.equal(bad.status, 400);
+  assert.match(bad.json.error, /tombstone to/);
+
+  // Nothing in Library is shared separately: its manifest says where no share sits.
+  const mount = { dir: "Work", rev: 1, by: "m-1a2b3c4d" };
+  const inLibrary = await putManifest(manifest(5, {}, { mounts: { "s-0a1b2c3d": mount } }));
+  assert.equal(inLibrary.status, 400);
+  assert.match(inLibrary.json.error, /Nothing in Library is shared separately/);
+  assert.equal((await putManifest(manifest(5, {}, { mounts: {} }))).status, 200, "an empty map says nothing");
+
+  // A My files and a shared folder do: the folder a share's item is in, "" the top, and where it was before.
+  const mine = await myFiles(OWNER);
+  const put = async (id, body) => {
+    const at = (await call(`/api/spaces/${id}/manifest`, { token: OWNER })).headers.get("x-manifest-etag");
+    return call(`/api/spaces/${id}/manifest`, { method: "PUT", token: OWNER, headers: { "x-base-etag": at }, body });
+  };
+  const placed = await put(mine.id, manifest(1, {}, { name: "My files", mounts: { "s-0a1b2c3d": { ...mount, was: "Work/Plans" }, "s-0a1b2c3e": { dir: "", rev: 3, by: "m-1a2b3c4d" } } }));
+  assert.equal(placed.status, 200, placed.text);
+  for (const [entry, why] of [
+    [{ ...mount, dir: "../up" }, /mount dir/],
+    [{ ...mount, dir: 4 }, /mount dir/],
+    [{ ...mount, rev: 0 }, /mount rev/],
+    [{ ...mount, by: "Sherin's Mac" }, /mount by/],
+    [{ ...mount, was: "" }, /mount was/],
+    ["Work", /invalid mount/],
+  ]) {
+    const res = await put(mine.id, manifest(2, {}, { name: "My files", mounts: { "s-0a1b2c3d": entry } }));
+    assert.equal(res.status, 400, JSON.stringify(entry));
+    assert.match(res.json.error, why);
+  }
+  const notAShare = await put(mine.id, manifest(2, {}, { name: "My files", mounts: { "p-0a1b2c3d": mount } }));
+  assert.equal(notAShare.status, 400, "only a share sits anywhere");
+  assert.match(notAShare.json.error, /mount id/);
+  assert.equal((await put(mine.id, manifest(2, {}, { name: "My files" }))).status, 200);
+
+  // A shared document's section is that document: its files at the top, one name, and nothing else.
+  const doc = (await share(OWNER, { name: "Plan", kind: "document" })).json.space;
+  const one = { "f-pl0001": fileEntry("Plan.md", 1, "p"), "f-pl0002": fileEntry("Plan.html", 1, "h"), "f-pl0003": fileEntry("plan.meta.jsonl", 1, "c") };
+  assert.equal((await put(doc.id, manifest(1, one, { name: "Plan" }))).status, 200);
+  for (const [body, what] of [
+    [manifest(2, { ...one, "f-ot0001": fileEntry("Other.md", 1, "o") }), "a second document"],
+    [manifest(2, { "f-pl0001": fileEntry("Work/Plan.md", 1, "p") }), "a folder"],
+    [manifest(2, one, { mounts: { "s-0a1b2c3d": mount } }), "a share inside it"],
+    [manifest(2, one, { public: { plans: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1757000000000 } } }), "a published folder"],
+  ]) {
+    const res = await put(doc.id, body);
+    assert.equal(res.status, 400, what);
+    assert.equal(res.json.error, "a shared document's section holds that document and nothing else", what);
+  }
+  // Renamed, it is still one document — and the database follows its file's name.
+  const renamed = await put(doc.id, manifest(2, { "f-pl0001": fileEntry("Budget.md", 2, "p"), "f-pl0003": fileEntry("Budget.meta.jsonl", 2, "c") }, { name: "Plan" }));
+  assert.equal(renamed.status, 200, renamed.text);
+  const listed = (await call("/api/spaces", { token: OWNER })).json.spaces.find((x) => x.id === doc.id);
+  assert.equal(listed.name, "Budget", "a shared document is called what its file is called");
+  assert.equal(listed.etag, renamed.json.etag);
+  assert.equal((await call(`/api/spaces/${doc.id}`, { method: "DELETE", token: OWNER })).json.kept, true, "it holds a document: kept, to be restored");
   await putManifest(manifest(6, {}));
   assert.notEqual(await currentEtag(), etag);
 });
@@ -1658,7 +1721,7 @@ const presenceRows = () => db.rows("SELECT * FROM presence ORDER BY device_id");
 /** The leases, as the database holds them. */
 const leaseRows = () => db.rows("SELECT * FROM leases ORDER BY path");
 const holder = (answer, path) => answer.json.leases.find((l) => l.path === path)?.deviceId ?? null;
-const writes = () => db.queries.filter((sql) => !/^\s*SELECT/i.test(sql));
+const writes = () => db.queries.filter((sql) => !reads(sql));
 
 await test("poll: a GET only reads; a POST is the same poll carrying this device's beat", async () => {
   const ownerId = (await call("/api/meta", { token: OWNER })).json.you.memberId;
@@ -1953,50 +2016,94 @@ async function joinAs(email, name, body, deviceId) {
   return joined.json;
 }
 
-await test("spaces: anyone makes a restricted folder — it answers the people in it, and to everyone else, the superadmin included, it does not exist", async () => {
+await test("spaces: anyone shares a folder from their My files — it answers the people it is shared with and its owner, and to everyone else, the superadmin included, it does not exist", async () => {
   JO = await joinAs("jo@example.com", "Jo", "JJJJJJJJJJJJJJJJJJJJ", "d-jo");
   KIM = await joinAs("kim@example.com", "Kim", "KKKKKKKKKKKKKKKKKKKK", "d-kim");
+  const alices = await myFiles(MEMBER);
+  await myFiles(JO.token);
+  const before = db.value("SELECT COUNT(*) FROM spaces");
 
-  const made = await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "  Finance ", members: [JO.member.id] } });
+  const id = shareId();
+  const made = await share(MEMBER, { id, name: "  Finance ", members: [JO.member.id] });
   assert.equal(made.status, 201, made.text);
   FINANCE = made.json.space;
-  assert.ok(/^s-[a-f0-9]{8}$/.test(FINANCE.id));
-  assert.equal(FINANCE.kind, "restricted");
+  assert.equal(FINANCE.id, id, "the id is the one her device minted");
+  assert.equal(FINANCE.kind, "folder");
   assert.equal(FINANCE.name, "Finance");
-  assert.equal(FINANCE.by, ALICE.id, "who made it — what tells two folders of one name apart");
-  assert.deepEqual(FINANCE.members, [ALICE.id, JO.member.id].sort(), "a member made it: herself, and whoever she named");
+  assert.equal(FINANCE.by, ALICE.id);
+  assert.equal(FINANCE.parent, alices.id, "it sits in her My files — and she is told so, because she can open that");
+  assert.equal(FINANCE.owner, ALICE.id, "whose My files it is in: what tells two shares of one name apart");
+  assert.deepEqual(FINANCE.members, [JO.member.id], "it is shared with whoever she named — not with her: hers it is already");
+  assert.deepEqual(FINANCE.above, [ALICE.id], "she opens it because she opens the folder it sits in");
 
-  // A name is a folder's name on every Mac it reaches.
-  for (const name of ["", "   ", "a/b", ".hidden", "..", "x".repeat(81), 7]) {
-    assert.equal((await call("/api/spaces", { method: "POST", token: MEMBER, body: { name } })).status, 400, JSON.stringify(name));
+  // The same id from her again is the same share: a device that never heard the answer asks again.
+  const again = await share(MEMBER, { id, name: "Finance", members: [KIM.member.id] });
+  assert.equal(again.status, 201);
+  assert.deepEqual(again.json.space.members, [JO.member.id, KIM.member.id].sort(), "with those people added");
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id = ?", id), 1);
+  assert.equal((await call(`/api/spaces/${id}/members/${KIM.member.id}`, { method: "DELETE", token: MEMBER })).status, 204);
+  // Anybody else's is taken, and so is hers for another thing.
+  const taken = await share(JO.token, { id, name: "Finance" });
+  assert.equal(taken.status, 409);
+  assert.equal(taken.json.code, "id_taken");
+  assert.equal((await share(MEMBER, { id, name: "Finance", kind: "document" })).status, 409);
+
+  // A name is a folder's or a file's name on every device it reaches.
+  for (const name of ["", "   ", "a/b", "a:b", ".hidden", "..", "x".repeat(201), 7]) {
+    assert.equal((await share(MEMBER, { name })).status, 400, JSON.stringify(name));
   }
-  // Only people here can be put in one.
-  const stranger = await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "X", members: ["m-00000000"] } });
+  const long = await share(MEMBER, { name: "A sentence of a title that is longer than eighty characters, as a document's name may well be" });
+  assert.equal(long.status, 201);
+  assert.equal((await call(`/api/spaces/${long.json.space.id}`, { method: "DELETE", token: MEMBER })).json.kept, false);
+  for (const bad of ["nope", "p-0a1b2c3d", "s-123", "s-0123ABCD", 7]) {
+    assert.equal((await share(MEMBER, { name: "X", id: bad })).status, 400, `id ${bad}`);
+  }
+  assert.equal((await share(MEMBER, { name: "X", kind: "restricted" })).status, 400);
+  // Only people here can be shared with.
+  const stranger = await share(MEMBER, { name: "X", members: ["m-00000000"] });
   assert.equal(stranger.status, 400);
   assert.deepEqual(stranger.json.unknown, ["m-00000000"]);
   const erin = db.value("SELECT id FROM members WHERE email = 'erin@example.com'");
-  const removed = await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "X", members: [erin] } });
-  assert.deepEqual(removed.json.unknown, [erin], "a removed person is not here");
+  assert.deepEqual((await share(MEMBER, { name: "X", members: [erin] })).json.unknown, [erin], "a removed person is not here");
   for (const members of ["jo", ["jo"], [7], { id: JO.member.id }]) {
-    assert.equal((await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "X", members } })).status, 400);
+    assert.equal((await share(MEMBER, { name: "X", members })).status, 400);
   }
-  assert.equal(db.value("SELECT COUNT(*) FROM spaces"), 1, "a refused request made nothing");
-  assert.deepEqual([...fake.store.keys()].filter((k) => k.startsWith("spaces/")), [`spaces/${FINANCE.id}/manifest.json`]);
+  // A share sits in a section its maker can open, that holds folders — never Library.
+  const library = await share(MEMBER, { name: "X", parent: "" });
+  assert.equal(library.status, 400);
+  assert.match(library.json.error, /Nothing in Library is shared separately/);
+  assert.equal((await share(MEMBER, { name: "X", parent: (await myFiles(OWNER)).id })).status, 404, "somebody else's My files is no place she knows");
+  assert.equal((await share(MEMBER, { name: "X", parent: "s-00000000" })).status, 404);
+  assert.equal((await share(MEMBER, { name: "X", parent: "nope" })).status, 400);
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces"), before + 1, "a refused request made nothing");
 
-  // Names need not be unique: Jo's own Finance is another folder.
-  const twin = (await call("/api/spaces", { method: "POST", token: JO.token, device: "d-jo", body: { name: "Finance" } })).json.space;
+  // The same item shared from two of her devices at once is one share: the second asks under an id of its
+  // own, for what sits where the first one's item was and is, and is answered the first — with its people as well.
+  const twice = await call("/api/spaces", { method: "POST", token: MEMBER, body: { id: shareId(), kind: "folder", name: "Twice", parent: alices.id, dir: "Work", was: "Work/Twice", members: [JO.member.id] } });
+  const again2 = await call("/api/spaces", { method: "POST", token: MEMBER, body: { id: shareId(), kind: "folder", name: "Twice", parent: alices.id, dir: "Work", was: "Work/Twice", members: [KIM.member.id] } });
+  assert.deepEqual([again2.status, again2.json.space.id, again2.json.space.members], [201, twice.json.space.id, [JO.member.id, KIM.member.id].sort()]);
+  const another = await call("/api/spaces", { method: "POST", token: MEMBER, body: { id: shareId(), kind: "folder", name: "Twice", parent: alices.id, dir: "Home", was: "Home/Twice" } });
+  assert.notEqual(another.json.space.id, twice.json.space.id, "a folder of the same name somewhere else is another thing");
+  for (const made of [twice, another]) assert.equal((await call(`/api/spaces/${made.json.space.id}`, { method: "DELETE", token: MEMBER })).json.kept, false);
+
+  // Names need not be unique: Jo's own Finance is another share.
+  const twin = (await share(JO.token, { name: "Finance" })).json.space;
   assert.notEqual(twin.id, FINANCE.id);
-  assert.equal(twin.by, JO.member.id);
-  assert.deepEqual(twin.members, [JO.member.id]);
+  assert.equal(twin.owner, JO.member.id);
+  assert.deepEqual([twin.members, twin.above], [[], [JO.member.id]], "shared with nobody yet, it is a section of its own all the same");
 
-  // Each person is told about the spaces they are in, and no others.
-  const ids = async (token, device) => (await mySpaces(token, device)).map((s) => s.id).sort();
-  assert.deepEqual(await ids(MEMBER), [FINANCE.id]);
-  assert.deepEqual(await ids(JO.token, "d-jo"), [FINANCE.id, twin.id].sort());
-  assert.deepEqual(await ids(KIM.token, "d-kim"), []);
-  assert.deepEqual(await ids(OWNER), [], "an owner is told nothing: no name, no lock, no count");
+  // Each person is told about what they can open, and nothing else.
+  const told = async (token, device) => (await mySpaces(token, device)).filter((x) => x.kind !== "private").map((x) => x.id).sort();
+  assert.ok((await told(MEMBER)).includes(FINANCE.id));
+  assert.deepEqual(await told(JO.token, "d-jo"), [FINANCE.id, twin.id].sort());
+  assert.deepEqual(await told(KIM.token, "d-kim"), []);
+  assert.deepEqual(await told(OWNER), (await told(OWNER)).filter((x) => x !== FINANCE.id), "an owner is told nothing: no name, no lock, no count");
+  // Somebody it is shared with is not told where it sits: not the section, so not its name or its path.
+  const jos = (await mySpaces(JO.token, "d-jo")).find((x) => x.id === FINANCE.id);
+  assert.equal(jos.parent, null);
+  assert.deepEqual([jos.owner, jos.members, jos.above], [ALICE.id, [JO.member.id], [ALICE.id]], "who can open it, they are told");
 
-  // To anyone not in it, every route is the 404 an id nobody minted gets.
+  // To anyone who cannot open it, every route is the 404 an id nobody minted gets.
   const unknown = await call("/api/spaces/s-00000000/manifest", { token: OWNER });
   assert.equal(unknown.status, 404);
   const routes = [
@@ -2007,8 +2114,9 @@ await test("spaces: anyone makes a restricted folder — it answers the people i
     ["GET", "/versions/index"],
     ["PATCH", ""],
     ["DELETE", ""],
+    ["POST", "/restore"],
     ["PUT", `/members/${KIM.member.id}`],
-    ["DELETE", `/members/${ALICE.id}`],
+    ["DELETE", `/members/${JO.member.id}`],
   ];
   for (const [who, token, device] of [["the superadmin", OWNER, DEVICE], ["a member outside it", KIM.token, "d-kim"]]) {
     for (const [method, path] of routes) {
@@ -2018,7 +2126,8 @@ await test("spaces: anyone makes a restricted folder — it answers the people i
       assert.deepEqual(res.json, unknown.json, "the same answer, to the letter");
     }
   }
-  assert.equal((await call(`/api/spaces/${FINANCE.id}/manifest`, { token: MEMBER })).status, 200, "the people in it get in");
+  assert.equal((await call(`/api/spaces/${FINANCE.id}/manifest`, { token: MEMBER })).status, 200, "its owner gets in");
+  assert.equal((await call(`/api/spaces/${FINANCE.id}/manifest`, { token: JO.token, device: "d-jo" })).status, 200, "and the people it is shared with");
   for (const bad of ["nope", "s-123", "m-0123abcd", "s-0123ABCD"]) {
     assert.equal((await call(`/api/spaces/${bad}/manifest`, { token: OWNER })).status, 400, bad);
   }
@@ -2026,8 +2135,10 @@ await test("spaces: anyone makes a restricted folder — it answers the people i
   assert.equal((await call(`/api/spaces/${FINANCE.id}/nothing`, { token: MEMBER })).status, 404);
   assert.equal((await call("/api/spaces", { method: "DELETE", token: MEMBER })).status, 405);
 
+  // One that holds nothing has nothing to restore: deleting it erases it.
   const gone = await call(`/api/spaces/${twin.id}`, { method: "DELETE", token: JO.token, device: "d-jo" });
-  assert.deepEqual(gone.json, { deleted: true, purged: 1, remaining: false });
+  assert.deepEqual(gone.json, { deleted: true, kept: false, purged: 1, remaining: false });
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id = ?", twin.id), 0);
 });
 
 await test("spaces: a space syncs like the workspace does — its own manifest, blobs and versions under its own prefix — and the poll says where each one is", async () => {
@@ -2059,17 +2170,17 @@ await test("spaces: a space syncs like the workspace does — its own manifest, 
   assert.equal(await currentEtag(), sharedBefore, "the shared manifest did not move");
   assert.ok(!(await call("/api/manifest", { token: OWNER })).text.includes("Budget"), "…and names nothing in the folder");
 
-  // One poll says which spaces the caller is in and where each manifest is.
+  // One poll says which spaces the caller can open and where each manifest is.
   db.queries.length = 0;
-  const polled = await call("/api/poll", { token: MEMBER });
+  const polled = await call("/api/poll", { token: JO.token, device: "d-jo" });
   assert.deepEqual(writes(), [], "still a poll that only reads");
   assert.deepEqual(
-    polled.json.spaces.map((s) => [s.id, s.kind, s.name, s.etag]),
-    [[FINANCE.id, "restricted", "Finance", etag1]],
+    polled.json.spaces.filter((x) => x.kind !== "private").map((x) => [x.id, x.kind, x.name, x.etag]),
+    [[FINANCE.id, "folder", "Finance", etag1]],
   );
-  assert.deepEqual(polled.json.spaces[0].members, FINANCE.members);
-  assert.deepEqual(await polledSpaces(KIM.token, "d-kim"), [], "somebody outside it is told nothing");
-  assert.deepEqual(await polledSpaces(OWNER), []);
+  assert.deepEqual(polled.json.spaces.find((x) => x.id === FINANCE.id).members, FINANCE.members);
+  assert.deepEqual((await polledSpaces(KIM.token, "d-kim")).filter((x) => x.kind !== "private"), [], "somebody outside it is told nothing");
+  assert.ok(!(await polledSpaces(OWNER)).some((x) => x.id === FINANCE.id));
 
   // Where the poll thinks a manifest is gets put right by the next read, when a write's note never landed.
   db.run("UPDATE spaces SET etag = 'lost' WHERE id = ?", FINANCE.id);
@@ -2095,17 +2206,17 @@ await test("spaces: a space syncs like the workspace does — its own manifest, 
   assert.ok(/home page/.test(home.json.error));
 });
 
-await test("spaces: everyone has a Private of their own — made the first time they ask, never anybody else's, and not a folder to rename, share or delete", async () => {
+await test("spaces: everyone has a My files of their own — made the first time they ask, never anybody else's, and not a thing to rename, share, move or delete", async () => {
   const jo = { token: JO.token, device: "d-jo" };
   const first = await call("/api/spaces/private", { method: "PUT", ...jo });
   assert.equal(first.status, 200, first.text);
   const mine = first.json.space;
   assert.equal(mine.id, `p-${JO.member.id.slice(2)}`, "the person's own id, so asking twice cannot make two");
   assert.equal(mine.kind, "private");
-  assert.equal(mine.name, "Private");
-  assert.deepEqual(mine.members, [JO.member.id]);
+  assert.equal(mine.name, "My files");
+  assert.deepEqual([mine.parent, mine.owner, mine.members, mine.above], [null, JO.member.id, [JO.member.id], []]);
   assert.deepEqual((await call("/api/spaces/private", { method: "PUT", ...jo })).json.space, mine, "asking again changes nothing");
-  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE kind = 'private'"), 1);
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id = ?", mine.id), 1);
   assert.ok((await polledSpaces(JO.token, "d-jo")).some((s) => s.id === mine.id), "and their poll lists it");
   assert.equal((await call("/api/spaces/private", jo)).status, 405);
 
@@ -2118,7 +2229,10 @@ await test("spaces: everyone has a Private of their own — made the first time 
   assert.equal((await priv(`/members/${ALICE.id}`, { method: "PUT", ...jo })).status, 409, "one person, never another");
   assert.equal((await priv(`/members/${JO.member.id}`, { method: "DELETE", ...jo })).status, 409);
   assert.equal((await priv("", { method: "PATCH", ...jo, body: { name: "Mine" } })).status, 409);
-  assert.equal((await priv("", { method: "DELETE", ...jo })).status, 409);
+  assert.equal((await priv("", { method: "PATCH", ...jo, body: { parent: FINANCE.id } })).status, 409);
+  const stays = await priv("", { method: "DELETE", ...jo });
+  assert.equal(stays.status, 409);
+  assert.match(stays.json.error, /Share a folder or a document in it instead/);
 
   // The superadmin has one like anybody: they are a person from their first device on.
   const me = (await call("/api/meta", { token: OWNER })).json.you.memberId;
@@ -2131,14 +2245,14 @@ await test("spaces: everyone has a Private of their own — made the first time 
   }
 });
 
-await test("spaces: everyone in a folder is equal — any of them adds, removes and renames; the last one cannot leave; a person removed from the workspace leaves their folders and keeps their Private", async () => {
+await test("spaces: everyone on a share adds and takes off people and renames it, and may leave; its owner is never taken off, and it stays a section with nobody on it; a person removed from the workspace leaves what was shared with them and keeps their My files", async () => {
   const finance = spaceCall(FINANCE.id);
   const jo = { token: JO.token, device: "d-jo" };
   const kim = { token: KIM.token, device: "d-kim" };
 
   const added = await finance(`/members/${KIM.member.id}`, { method: "PUT", ...jo });
-  assert.equal(added.status, 200, "Jo did not make the folder, and adds to it all the same");
-  assert.deepEqual(added.json.space.members, [ALICE.id, JO.member.id, KIM.member.id].sort());
+  assert.equal(added.status, 200, "Jo did not share the folder, and shares it on all the same");
+  assert.deepEqual(added.json.space.members, [JO.member.id, KIM.member.id].sort());
   const twice = await finance(`/members/${KIM.member.id}`, { method: "PUT", ...jo });
   assert.deepEqual(twice.json.space.members, added.json.space.members, "adding twice is adding once");
   assert.equal((await finance("/manifest", kim)).status, 200, "and Kim is in, on her next request");
@@ -2149,33 +2263,99 @@ await test("spaces: everyone in a folder is equal — any of them adds, removes 
   const renamed = await finance("", { method: "PATCH", ...kim, body: { name: "Finance 2026" } });
   assert.equal(renamed.json.space.name, "Finance 2026");
   assert.equal((await finance("", { method: "PATCH", ...kim, body: { name: "a/b" } })).status, 400);
-  assert.equal((await polledSpaces(MEMBER)).find((s) => s.id === FINANCE.id).name, "Finance 2026", "everyone in it hears the new name on their next poll");
+  assert.equal((await polledSpaces(MEMBER)).find((s) => s.id === FINANCE.id).name, "Finance 2026", "everyone who can open it hears the new name on their next poll");
 
-  // Kim takes out Alice, who made it.
-  assert.equal((await finance(`/members/${ALICE.id}`, { method: "DELETE", ...kim })).status, 204);
-  assert.equal((await finance("/manifest", { token: MEMBER })).status, 404, "to Alice it no longer exists");
-  assert.deepEqual((await polledSpaces(MEMBER)).filter((s) => s.id === FINANCE.id), [], "which is how her Mac learns to delete its copy");
-  assert.equal((await finance(`/members/${ALICE.id}`, { method: "DELETE", ...kim })).status, 404, "she is not in it to take out");
-  // Jo leaves; Kim, the last one, cannot.
-  assert.equal((await finance(`/members/${JO.member.id}`, { method: "DELETE", ...jo })).status, 204);
-  const last = await finance(`/members/${KIM.member.id}`, { method: "DELETE", ...kim });
-  assert.equal(last.status, 409);
-  assert.ok(/last person/.test(last.json.error));
-  assert.equal((await finance("/manifest", kim)).status, 200, "still hers");
+  // Where it sits, and whether it is at all, are its folder's people's to say: Alice's alone.
+  for (const [what, ask] of [["move it", { method: "PATCH", body: { parent: (await myFiles(KIM.token)).id } }], ["delete it", { method: "DELETE" }]]) {
+    const refused = await finance("", { ...kim, ...ask });
+    assert.equal(refused.status, 403, `somebody it is shared with does not ${what}`);
+    assert.match(refused.json.error, /You can leave it instead/);
+  }
+  // Alice cannot be taken off: she opens it through the folder it sits in.
+  const owner = await finance(`/members/${ALICE.id}`, { method: "DELETE", ...kim });
+  assert.equal(owner.status, 409);
+  assert.match(owner.json.error, /nothing in a folder is kept from that folder's people/);
+  assert.equal((await finance("/manifest", { token: MEMBER })).status, 200);
+  assert.equal((await finance(`/members/${ALICE.id}`, { method: "PUT", ...kim })).status, 200, "shared with her by name as well, she is on it twice over");
+  assert.equal((await finance(`/members/${ALICE.id}`, { method: "DELETE", ...kim })).status, 204, "and that is taken back");
 
-  // Removed from the workspace, Kim leaves the folder and keeps her Private.
-  const kimPrivate = (await call("/api/spaces/private", { method: "PUT", ...kim })).json.space.id;
+  // Kim takes Jo off; then leaves herself, the last one on it.
+  assert.equal((await finance(`/members/${JO.member.id}`, { method: "DELETE", ...kim })).status, 204);
+  assert.equal((await finance("/manifest", jo)).status, 404, "to Jo it no longer exists");
+  assert.deepEqual((await polledSpaces(JO.token, "d-jo")).filter((s) => s.id === FINANCE.id), [], "which is how his Mac learns to delete its copy");
+  assert.equal((await finance(`/members/${JO.member.id}`, { method: "DELETE", ...kim })).status, 404, "it is not shared with him to take back");
+  assert.equal((await finance(`/members/${KIM.member.id}`, { method: "DELETE", ...kim })).status, 204, "the last one leaves like any other");
+  const alone = (await mySpaces(MEMBER)).find((s) => s.id === FINANCE.id);
+  assert.deepEqual([alone.members, alone.above, alone.parent !== null], [[], [ALICE.id], true], "shared with nobody, it is Alice's still — and shared again at once");
+  assert.equal((await finance(`/members/${KIM.member.id}`, { method: "PUT", token: MEMBER })).status, 200);
+  assert.equal((await finance(`/members/${JO.member.id}`, { method: "PUT", token: MEMBER })).status, 200);
+
+  // Removed from the workspace, Kim leaves what was shared with her and keeps her My files — and what she shared from it stays its people's.
+  const kims = await myFiles(KIM.token);
+  const hers = (await share(KIM.token, { name: "Kim's notes", members: [JO.member.id] })).json.space;
   assert.equal((await call(`/api/auth/members/${KIM.member.id}`, { method: "DELETE", token: OWNER })).status, 204);
-  assert.deepEqual(db.rows("SELECT space_id FROM space_members WHERE member_id = ?", KIM.member.id), [{ space_id: kimPrivate }]);
-  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id = ?", FINANCE.id), 1, "the folder stays in the cloud, with nobody in it");
-  assert.ok(fake.store.has(`spaces/${FINANCE.id}/manifest.json`));
-  // Invited again she is the same person: her Private is there, the folder is not.
+  assert.deepEqual(db.rows("SELECT space_id FROM space_members WHERE member_id = ?", KIM.member.id), [{ space_id: kims.id }]);
+  assert.ok(!(await mySpaces(MEMBER)).find((s) => s.id === FINANCE.id).members.includes(KIM.member.id));
+  assert.equal((await call(`/api/spaces/${hers.id}/manifest`, jo)).status, 200, "what she shared is still open to the people on it");
+  // Invited again she is the same person: her My files and what she shared are there, what was shared with her is not.
   KIM = await joinAs("kim@example.com", "Kim", "KKKKKKKKKKKKKKKKKKK2", "d-kim");
-  assert.deepEqual((await mySpaces(KIM.token, "d-kim")).map((s) => s.id), [kimPrivate]);
+  assert.deepEqual((await mySpaces(KIM.token, "d-kim")).map((s) => s.id).sort(), [kims.id, hers.id].sort());
+  assert.deepEqual((await call(`/api/spaces/${hers.id}`, { method: "DELETE", token: KIM.token, device: "d-kim" })).json, { deleted: true, kept: false, purged: 1, remaining: false });
 });
 
-await test("spaces: presence and leases are by space — what somebody has open in a folder is told to the people in it, and to nobody else", async () => {
-  PLANS = (await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "Plans", members: [JO.member.id] } })).json.space;
+await test("spaces: sections are a tree — whoever can open a folder can open what is shared from inside it, a share moves under another folder by a change of its parent, and never inside itself", async () => {
+  const jo = { token: JO.token, device: "d-jo" };
+  const kim = { token: KIM.token, device: "d-kim" };
+  const alices = await myFiles(MEMBER);
+  // Alice shares a folder inside Finance with Kim alone, and a document of it with nobody.
+  const inner = (await share(MEMBER, { name: "Q3", parent: FINANCE.id, members: [KIM.member.id] })).json.space;
+  const doc = (await share(MEMBER, { name: "Forecast", kind: "document", parent: inner.id })).json.space;
+  assert.deepEqual([inner.parent, inner.owner, inner.members], [FINANCE.id, ALICE.id, [KIM.member.id]]);
+  assert.deepEqual(inner.above, [ALICE.id, JO.member.id].sort(), "Finance's people, and its owner: nothing in a folder is kept from them");
+  assert.deepEqual([doc.parent, doc.members, doc.above], [inner.id, [], [ALICE.id, JO.member.id, KIM.member.id].sort()]);
+  assert.equal((await share(MEMBER, { name: "Inside a document", parent: doc.id })).status, 400, "nothing sits inside a shared document");
+
+  // Jo is on Finance: he opens both, and is told where each sits. Kim is on Q3 alone: she opens Q3 and
+  // what is in it, and is told nothing of Finance — not that Q3 sits in it.
+  const seen = async (who) => new Map((await mySpaces(who.token, who.device)).map((x) => [x.id, x.parent]));
+  assert.deepEqual([...(await seen(jo))].filter(([x]) => [FINANCE.id, inner.id, doc.id].includes(x)).sort(), [[FINANCE.id, null], [inner.id, FINANCE.id], [doc.id, inner.id]].sort());
+  assert.deepEqual([...(await seen(kim))].filter(([x]) => [FINANCE.id, inner.id, doc.id].includes(x)).sort(), [[inner.id, null], [doc.id, inner.id]].sort());
+  assert.equal((await call(`/api/spaces/${doc.id}/manifest`, kim)).status, 200);
+  assert.equal((await call(`/api/spaces/${FINANCE.id}/manifest`, kim)).status, 404);
+  // Jo shares from inside Finance too, and then anyone who can open Finance places what he made.
+  const jos = (await share(JO.token, { name: "Jo's corner", parent: FINANCE.id })).json.space;
+  assert.deepEqual([jos.by, jos.owner, jos.above], [JO.member.id, ALICE.id, [ALICE.id, JO.member.id].sort()]);
+  assert.equal((await call(`/api/spaces/${jos.id}`, { method: "DELETE", token: MEMBER })).json.kept, false, "Alice can open Finance, so she deletes it");
+
+  // Taken off Finance, Jo loses everything beneath it that is not shared with him by name.
+  assert.equal((await call(`/api/spaces/${FINANCE.id}/members/${JO.member.id}`, { method: "DELETE", token: MEMBER })).status, 204);
+  assert.equal((await call(`/api/spaces/${doc.id}/manifest`, jo)).status, 404);
+  assert.equal((await call(`/api/spaces/${inner.id}/members/${JO.member.id}`, { method: "PUT", token: MEMBER })).status, 200);
+  assert.equal((await call(`/api/spaces/${doc.id}/manifest`, jo)).status, 200, "on Q3, he opens the document in it again");
+  assert.equal((await seen(jo)).get(inner.id), null, "and Q3 is no longer in a folder he can open");
+
+  // A share moves by a change of its parent: Alice takes Q3 out of Finance, to the top of her My files.
+  const place = (id, parent, who = { token: MEMBER }) => call(`/api/spaces/${id}`, { method: "PATCH", ...who, body: { parent } });
+  for (const [to, status, why] of [[inner.id, 400, "itself"], [doc.id, 400, "a document"], ["", 400, "Library"], ["s-00000000", 404, "nowhere"], [7, 400, "not an id"]]) {
+    assert.equal((await place(inner.id, to)).status, status, why);
+  }
+  assert.equal((await place(FINANCE.id, inner.id)).status, 400, "a folder does not go inside what is inside it");
+  assert.equal((await place(inner.id, alices.id, kim)).status, 403, "Kim cannot open the folder it sits in, so it is not hers to move");
+  const mountsOf = async (id) => (await call(`/api/spaces/${id}/manifest`, { token: MEMBER })).json.mounts ?? {};
+  assert.deepEqual((await mountsOf(FINANCE.id))[inner.id], { dir: "", rev: 1, by: ALICE.id }, "Finance's manifest says where Q3 sits in it");
+  assert.equal((await mountsOf(inner.id))[FINANCE.id], undefined, "a move that was refused wrote nothing");
+  const moved = await call(`/api/spaces/${inner.id}`, { method: "PATCH", token: MEMBER, body: { parent: alices.id, dir: "Work/2026" } });
+  assert.equal(moved.status, 200, moved.text);
+  assert.deepEqual([moved.json.space.parent, moved.json.space.above], [alices.id, [ALICE.id]]);
+  assert.deepEqual((await mountsOf(alices.id))[inner.id], { dir: "Work/2026", rev: 1, by: ALICE.id }, "the section it went to says where it sits now");
+  assert.equal((await mountsOf(FINANCE.id))[inner.id], undefined, "and the one it left says nothing of it");
+  assert.deepEqual((await place(inner.id, alices.id)).json.space.parent, alices.id, "where it is already is no change");
+  assert.equal((await place(inner.id, FINANCE.id)).status, 200, "and back");
+  assert.equal(db.value("SELECT parent FROM spaces WHERE id = ?", doc.id), inner.id, "what sits in it went with it, untouched");
+  PLANS = inner;
+});
+
+await test("spaces: presence and leases are by space — what somebody has open in a share is told to the people who can open it, and to nobody else", async () => {
   const jo = { token: JO.token, device: "d-jo" };
   const held = (answer, space) =>
     answer.json.leases.filter((l) => l.path === "q3.md" && (l.space ?? "") === space).map((l) => l.deviceId);
@@ -2186,17 +2366,17 @@ await test("spaces: presence and leases are by space — what somebody has open 
   assert.equal(beat.json.presence["d-jo"].space, PLANS.id);
   assert.deepEqual(held(beat, PLANS.id), ["d-jo"], "a beat claims the document in its space");
 
-  // Alice is in the folder: she is told what Jo has open, and that it is held.
+  // Alice opens it through the folder it sits in: she is told what Jo has open, and that it is held.
   const alice = await call("/api/poll", { token: MEMBER });
   assert.equal(alice.json.presence["d-jo"].path, "Q3.md");
   assert.equal(alice.json.presence["d-jo"].space, PLANS.id);
   assert.deepEqual(held(alice, PLANS.id), ["d-jo"]);
-  // The superadmin is not: Jo is here, and that is all.
+  // The superadmin cannot: Jo is here, and that is all.
   const owner = await call("/api/poll", { token: OWNER });
   assert.equal(owner.json.presence["d-jo"].name, "Jo's Air");
   assert.equal(owner.json.presence["d-jo"].path, undefined, "not the path");
   assert.equal(owner.json.presence["d-jo"].space, undefined, "not even which space");
-  assert.deepEqual(owner.json.leases.filter((l) => l.space), [], "and no lease in a space they are not in");
+  assert.deepEqual(owner.json.leases.filter((l) => l.space), [], "and no lease in a space they cannot open");
 
   // The same path in the shared workspace is another document.
   const shared = await call("/api/poll", { method: "POST", token: OWNER, body: { name: "Sherin's MacBook Pro", path: "Q3.md" } });
@@ -2204,7 +2384,7 @@ await test("spaces: presence and leases are by space — what somebody has open 
   const both = await call("/api/poll", { token: MEMBER });
   assert.deepEqual([held(both, ""), held(both, PLANS.id)], [[DEVICE], ["d-jo"]], "two leases, one a space apart");
 
-  // A beat that names a space the caller is not in is a beat with no document.
+  // A beat that names a space the caller cannot open is a beat with no document.
   const sneaky = await call("/api/poll", {
     method: "POST",
     token: OWNER,
@@ -2215,40 +2395,104 @@ await test("spaces: presence and leases are by space — what somebody has open 
   assert.equal(db.value("SELECT device_id FROM leases WHERE space_id = ? AND path = 'q3.md'", PLANS.id), "d-jo", "Jo still holds it, take or no take");
   assert.equal(db.value("SELECT COUNT(*) FROM leases WHERE device_id = ?", DEVICE), 0, "and the Mac that asked holds nothing");
 
-  // Taken out of the folder, what Jo had open there stops being his.
+  // Taken off it, what Jo had open there stops being his.
   assert.equal((await call(`/api/spaces/${PLANS.id}/members/${JO.member.id}`, { method: "DELETE", token: MEMBER })).status, 204);
   assert.equal(db.value("SELECT COUNT(*) FROM leases WHERE space_id = ?", PLANS.id), 0);
   assert.deepEqual(db.rows("SELECT space_id, path FROM presence WHERE device_id = 'd-jo'"), [{ space_id: "", path: null }]);
   for (const who of [jo, { token: OWNER }]) await call("/api/poll", { method: "POST", ...who, body: { leave: true } });
 });
 
-await test("spaces: deleting a folder takes everything it stored — its rows last — and leaves the rest of the bucket as it was", async () => {
+await test("spaces: a deleted share is kept — nobody opens it or what sat in it, its pages stop answering, and whoever can open the folder it sat in restores it whole for thirty days; then the sweep erases it", async () => {
+  const kim = { token: KIM.token, device: "d-kim" };
   const plans = spaceCall(PLANS.id);
+  const doc = db.value("SELECT id FROM spaces WHERE parent = ?", PLANS.id);
   const body = "# Plan\n";
   const hash = blobHash(body);
   await plans(`/blobs/f-plan0001/${hash}`, { method: "PUT", token: MEMBER, body });
+  // Sharing a document from inside it wrote where that sits: its manifest says so, and has moved on.
+  const held0 = await plans("/manifest", { token: MEMBER });
+  assert.deepEqual(held0.json.mounts, { [doc]: { dir: "", rev: 1, by: ALICE.id } });
   const put = await plans("/manifest", {
     method: "PUT",
     token: MEMBER,
-    headers: { "x-base-etag": PLANS.etag },
-    body: manifest(1, { "f-plan0001": fileEntry("Plan.md", 1, body) }, { name: "Plans" }),
+    headers: { "x-base-etag": held0.headers.get("x-manifest-etag") },
+    body: manifest(1, { "f-plan0001": fileEntry("Plan.md", 1, body) }, { name: "Q3", mounts: held0.json.mounts, public: { "q3-plan": { kind: "file", file: "f-plan0001", path: "Plan.md", by: ALICE.id, at: 1757000000000 } } }),
   });
   assert.equal(put.status, 200, put.text);
+  assert.equal((await call("/q3-plan", { device: null })).status, 200, "its page answers");
   const others = () => [...fake.store.keys()].filter((k) => !k.startsWith(`spaces/${PLANS.id}/`)).sort();
   const before = others();
+  const stored = () => [...fake.store.keys()].filter((k) => k.startsWith(`spaces/${PLANS.id}/`)).sort();
+  const held = stored();
   const sharedBefore = await currentEtag();
 
-  assert.equal((await plans("", { method: "DELETE", token: OWNER })).status, 404, "not an owner's to delete: to them there is no such folder");
+  assert.equal((await plans("", { method: "DELETE", token: OWNER })).status, 404, "not an owner's to delete: to them there is no such thing");
+  assert.equal((await plans("", { method: "DELETE", ...kim })).status, 403, "nor somebody's it is shared with");
   const gone = await plans("", { method: "DELETE", token: MEMBER });
-  assert.equal(gone.status, 200);
-  assert.deepEqual(gone.json, { deleted: true, purged: 2, remaining: false });
-  assert.deepEqual([...fake.store.keys()].filter((k) => k.startsWith(`spaces/${PLANS.id}/`)), []);
-  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id = ?", PLANS.id), 0);
-  assert.equal(db.value("SELECT COUNT(*) FROM space_members WHERE space_id = ?", PLANS.id), 0);
-  assert.equal((await plans("/manifest", { token: MEMBER })).status, 404);
-  assert.deepEqual((await polledSpaces(MEMBER)).filter((s) => s.id === PLANS.id), []);
+  assert.deepEqual(gone.json, { deleted: true, kept: true });
+  assert.deepEqual(stored(), held, "everything it stored is still stored");
+  assert.equal(db.value("SELECT COUNT(*) FROM space_members WHERE space_id = ?", PLANS.id), 1, "and so are its people");
+  // Nobody opens it, or what sat in it; to the people it was shared with it is simply gone.
+  for (const who of [{ token: MEMBER }, kim]) {
+    for (const id of [PLANS.id, doc]) assert.equal((await call(`/api/spaces/${id}/manifest`, who)).status, 404);
+  }
+  assert.deepEqual((await polledSpaces(KIM.token, "d-kim")).filter((x) => [PLANS.id, doc].includes(x.id)), []);
+  assert.equal((await call("/q3-plan", { device: null })).status, 404, "its page stops answering");
+  assert.ok(!(await call("/api/pages", { token: OWNER })).json.pages.some((p) => p.slug === "q3-plan"), "and is on no list of pages");
+  assert.equal((await share(MEMBER, { name: "Into the deleted", parent: PLANS.id })).status, 404);
+  // Whoever can open the folder it sat in is told it can be restored: it, not what sat in it.
+  const told = (await polledSpaces(MEMBER)).filter((x) => x.deletedAt !== undefined);
+  assert.deepEqual(told.map((x) => [x.id, x.name, x.parent]), [[PLANS.id, "Q3", FINANCE.id]]);
+  assert.ok(Math.abs(told[0].deletedAt - Date.now()) < 5000);
+
+  // Restored, it is as it was: its files, its people, what sat in it, its page.
+  assert.equal((await plans("/restore", { method: "POST", ...kim })).status, 404, "not hers to restore");
+  assert.equal((await call(`/api/spaces/${doc}/restore`, { method: "POST", token: MEMBER })).status, 409, "what sat in it comes back with it, not before it");
+  assert.equal((await plans("/restore", { method: "GET", token: MEMBER })).status, 405);
+  const back = await plans("/restore", { method: "POST", token: MEMBER });
+  assert.equal(back.status, 200, back.text);
+  assert.deepEqual([back.json.space.members, back.json.space.parent, back.json.space.deletedAt], [[KIM.member.id], FINANCE.id, undefined]);
+  assert.equal((await plans("/restore", { method: "POST", token: MEMBER })).status, 404, "it is not deleted to restore");
+  for (const id of [PLANS.id, doc]) assert.equal((await call(`/api/spaces/${id}/manifest`, kim)).status, 200);
+  assert.equal((await call("/q3-plan", { device: null })).status, 200);
   assert.deepEqual(others(), before, "nothing else in the bucket was touched");
   assert.equal(await currentEtag(), sharedBefore);
+
+  // A share deleted while the folder it sits in is deleted stays so when the folder comes back.
+  assert.equal((await call(`/api/spaces/${doc}`, { method: "DELETE", token: MEMBER })).json.kept, false, "the document's section holds nothing: erased at once");
+  const early = (await share(MEMBER, { name: "Early", parent: PLANS.id })).json.space;
+  const earlyManifest = await call(`/api/spaces/${early.id}/manifest`, { method: "PUT", token: MEMBER, headers: { "x-base-etag": early.etag }, body: manifest(1, { "f-early001": fileEntry("e.md", 1, "e") }, { name: "Early" }) });
+  assert.equal(earlyManifest.status, 200);
+  assert.equal((await call(`/api/spaces/${early.id}`, { method: "DELETE", token: MEMBER })).json.kept, true);
+  db.run("UPDATE spaces SET deleted_at = deleted_at - 1000 WHERE id = ?", early.id);
+  assert.equal((await plans("", { method: "DELETE", token: MEMBER })).json.kept, true);
+  assert.equal((await plans("/restore", { method: "POST", token: MEMBER })).status, 200);
+  assert.equal((await call(`/api/spaces/${early.id}/manifest`, { token: MEMBER })).status, 404, "deleted on its own, it is restored on its own");
+  assert.equal((await call(`/api/spaces/${early.id}/restore`, { method: "POST", token: MEMBER })).status, 200);
+
+  // Thirty days on the sweep erases it: what it stored, what sat in it, then its rows.
+  assert.equal((await plans("", { method: "DELETE", token: MEMBER })).json.kept, true);
+  const sweep = async () => {
+    const log = console.log;
+    console.log = () => {};
+    try {
+      await worker.scheduled({ cron: "17 3 * * *", scheduledTime: Date.now() }, env, { waitUntil() {} });
+    } finally {
+      console.log = log;
+    }
+  };
+  db.run("UPDATE spaces SET deleted_at = deleted_at - ? WHERE deleted_at IS NOT NULL", 29 * DAY);
+  await sweep();
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id IN (?, ?)", PLANS.id, early.id), 2, "a day short, it is all still there");
+  db.run("UPDATE spaces SET deleted_at = deleted_at - ? WHERE deleted_at IS NOT NULL", 2 * DAY);
+  await sweep();
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id IN (?, ?)", PLANS.id, early.id), 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM space_members WHERE space_id = ?", PLANS.id), 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE space_id = ?", PLANS.id), 0);
+  assert.deepEqual([...fake.store.keys()].filter((k) => k.startsWith(`spaces/${PLANS.id}/`) || k.startsWith(`spaces/${early.id}/`)), []);
+  assert.deepEqual((await polledSpaces(MEMBER)).filter((x) => x.deletedAt !== undefined), []);
+  assert.ok(fake.store.has(`spaces/${FINANCE.id}/manifest.json`), "the folder it sat in is as it was");
+  assert.equal((await call(`/api/spaces/${FINANCE.id}`, { method: "DELETE", token: MEMBER })).json.kept, true);
 });
 
 await test("poll: a database that fails past the sign-in costs presence, leases and spaces, never the etag", async () => {
@@ -3047,7 +3291,7 @@ await test("agents: the owner adds one with its first code; the code is redeemed
     // its person has, Library first.
     person: { id: maker.id, name: maker.name },
     scopes: ["read", "edit"],
-    sections: ["Library", "Private"],
+    sections: ["Library", "My files"],
     workspace: { id: here.id, name: here.name },
     version: workerVersion,
   });
@@ -3738,19 +3982,26 @@ await test("documents: what a Mac would never see is refused — and so is anyth
     }
   }
   assert.equal(etagNow(), etag, "none of it reached the manifest");
-  // The two folders that are a person's own on a Mac are never Library's,
-  // in any case: a path under one is in that section, or nowhere.
-  for (const p of ["restricted/Nobodys/q3", "Restricted/q3", "RESTRICTED"]) {
+  // What is shared with a person is never Library's, in any case: a path
+  // under `Shared with me` is something shared with them, or nowhere. And the
+  // folders an older Doklin had are refused with what they are called now.
+  for (const p of ["shared with me/Nobodys/q3", "Shared with me/q3"]) {
     const kept = await api(docUrl(p, "", "&force=1"), { method: "PUT", body: "# x\n" });
-    assert.ok(kept.status === 404 || kept.status === 400, `writing ${p}: ${kept.text}`);
-    assert.ok(/restricted folder/.test(kept.json.error), kept.json.error);
+    assert.equal(kept.status, 404, `writing ${p}: ${kept.text}`);
+    assert.match(kept.json.error, /is shared with this agent's person/);
   }
-  for (const p of ["Library/Private/q3", "library/RESTRICTED/Finance/q3", "Library/Library/q3"]) {
+  for (const [p, said] of [["Private/q3", /Private is called "My files" now/], ["restricted/Finance/q3", /There is no Restricted any more/], ["RESTRICTED", /There is no Restricted any more/]]) {
     const kept = await api(docUrl(p, "", "&force=1"), { method: "PUT", body: "# x\n" });
-    assert.equal(kept.status, 409, `writing ${p}: ${kept.text}`);
-    assert.ok(/Library, Private and Restricted are the names of a workspace's sections/.test(kept.json.error), kept.json.error);
+    assert.equal(kept.status, 400, `writing ${p}: ${kept.text}`);
+    assert.match(kept.json.error, said);
   }
   assert.equal(etagNow(), etag, "nor did those");
+  // Inside Library a folder is called what its people like — a section's name included.
+  for (const p of ["Library/My files/q3", "library/Shared with me/Finance/q3", "Library/Library/q3"]) {
+    const kept = await api(docUrl(p, "", "&force=1"), { method: "PUT", body: "# x\n" });
+    assert.equal(kept.status, 201, `writing ${p}: ${kept.text}`);
+    assert.equal((await api(docUrl(p), { method: "DELETE" })).status, 200);
+  }
   assert.ok(/does not sync names that begin with a dot/.test((await api(docUrl("Library/.secret/plan"))).json.error));
   assert.ok(/a folder Doklin does not sync/.test((await api(docUrl("Library/node_modules/pkg/readme"))).json.error));
   assert.ok(/comments commands/.test((await api(docUrl("Library/Case/Report.meta.jsonl"))).json.error), "the sidecar's refusal says where comments are");
@@ -3758,10 +4009,10 @@ await test("documents: what a Mac would never see is refused — and so is anyth
   // A listing is folders and documents — never a sidecar.
   const root = (await api("/api/agent/tree")).json;
   // (The top is the sections the agent's person has: Library, and their Private.)
-  assert.deepEqual(root, { dir: "", folders: ["Library", "Private"], documents: [] });
+  assert.deepEqual(root, { dir: "", folders: ["Library", "My files"], documents: [] });
   const deep = (await api("/api/agent/tree?deep=1")).json;
   assert.deepEqual(Object.keys(deep), ["dir", "folders", "documents"]);
-  assert.deepEqual(deep.folders, ["Library", "Library/Case", "Library/Case/Sub", "Private"]);
+  assert.deepEqual(deep.folders, ["Library", "Library/Case", "Library/Case/Sub", "My files"]);
   assert.deepEqual(deep.documents.map((d) => d.path), ["Library/Case/Report", "Library/Case/Sub/inner"]);
   assert.ok(!JSON.stringify(deep).includes("meta.jsonl"));
   const folder = (await api("/api/agent/tree?dir=/Library/Case/")).json;
@@ -3814,7 +4065,7 @@ await test("documents: what a Mac would never see is refused — and so is anyth
   }
   assert.deepEqual(
     (await api("/api/agent/tree?deep=1")).json.folders,
-    ["Library", "Library/Case", "Library/Case/Brand New", "Library/Case/Brand New/sub", "Library/Case/Sub", "Library/Elsewhere", "Private"],
+    ["Library", "Library/Case", "Library/Case/Brand New", "Library/Case/Brand New/sub", "Library/Case/Sub", "Library/Elsewhere", "My files"],
     "one folder, one spelling",
   );
   const intoTyped = await api("/api/agent/move", { method: "POST", body: { from: "Library/Elsewhere/As Typed", to: "library/CASE/sub/" } });
@@ -5476,7 +5727,7 @@ await test("addresses: an address is one space's for the whole domain — the se
   );
 
   // Alice publishes a note from a folder only she is in.
-  const books = (await call("/api/spaces", { method: "POST", token: MEMBER, body: { name: "Books" } })).json.space;
+  const books = (await share(MEMBER, { name: "Books" })).json.space;
   const sp = spaceCall(books.id);
   const text = "# The budget\n\nNumbers nobody else can open.\n";
   const hash = blobHash(text);
@@ -5529,7 +5780,7 @@ await test("addresses: an address is one space's for the whole domain — the se
     method: "PUT",
     ...jo,
     headers: { "x-base-etag": joPrivate.etag },
-    body: { version: MANIFEST_VERSION, name: "Private", seq: 1, files: {}, tombstones: {}, public: { budget: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1757000000000 } } },
+    body: { version: MANIFEST_VERSION, name: "My files", seq: 1, files: {}, tombstones: {}, public: { budget: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1757000000000 } } },
   });
   assert.equal(second.status, 409, "the second claim is told it is taken");
   assert.deepEqual(second.json.taken, ["budget"]);
@@ -5559,7 +5810,7 @@ await test("addresses: an address is one space's for the whole domain — the se
     headers: { "x-base-etag": joPrivate.etag },
     body: {
       version: MANIFEST_VERSION,
-      name: "Private",
+      name: "My files",
       seq: 1,
       files: {},
       tombstones: {},
@@ -5575,7 +5826,7 @@ await test("addresses: an address is one space's for the whole domain — the se
     every.pages.map((p) => [p.slug, p.kind, p.title, p.by, p.shared]),
     [
       ["budget", "file", "Budget", ALICE.name, false],
-      ["jo-notes", "dir", "Private", JO.member.name, false],
+      ["jo-notes", "dir", "My files", JO.member.name, false],
       ["open", "file", "note", ALICE.name, true],
     ],
     "the shared workspace's own pages come from its map, which is the truth even where the registry is not",
@@ -5618,12 +5869,12 @@ await test("addresses: an address is one space's for the whole domain — the se
     "with the one the database had not heard of claimed at last",
   );
 
-  // A folder that is deleted lets go of its addresses.
+  // A share that is deleted stops answering at its addresses, and keeps them for the day it is restored.
   const put3 = await store(put2.json.etag, withPages(3, { ledger: page }));
   assert.equal(put3.status, 200);
   assert.equal((await pub("/ledger")).status, 200);
-  assert.equal((await sp("", { method: "DELETE", token: MEMBER })).json.remaining, false);
-  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'ledger'"), 0);
+  assert.equal((await sp("", { method: "DELETE", token: MEMBER })).json.kept, true);
+  assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'ledger'"), 1);
   assert.equal((await pub("/ledger")).status, 404);
 
   // When the registry cannot answer the shared workspace still syncs: its addresses go unclaimed, and are served all the same.
@@ -5670,9 +5921,49 @@ const spaceText = (id, p) => {
   return hit ? fake.store.get(`spaces/${id}/blobs/${hit[0]}/${hit[1].hash}`)?.bytes.toString("utf8") : undefined;
 };
 const privateOf = (person) => `p-${person.member.id.slice(2)}`;
+/**
+ * Share what is at `path` in a person's My files, the way a Mac does: the
+ * share is made where its item is, and the item's files leave the section
+ * it sits in for the share's own, keeping their ids. A document is named
+ * without its extension.
+ */
+async function shareFromMine(person, device, { path: at, kind = "folder", members = [] }) {
+  const who = { token: person.token, device };
+  const mine = privateOf(person);
+  const name = at.slice(at.lastIndexOf("/") + 1);
+  const dir = at.includes("/") ? at.slice(0, at.lastIndexOf("/")) : "";
+  const made = await call("/api/spaces", { method: "POST", ...who, body: { id: shareId(), kind, name, members, parent: mine, dir, was: at } });
+  assert.equal(made.status, 201, made.text);
+  const space = made.json.space;
+  const got = await call(`/api/spaces/${mine}/manifest`, who);
+  const parent = got.json;
+  assert.deepEqual(parent.mounts[space.id], { dir, rev: 1, by: person.member.id, was: at }, "where it sits is in its section's manifest from the moment it is shared");
+  const prefix = kind === "folder" ? `${at}/` : `${at}.`;
+  const files = {};
+  parent.tombstones ??= {};
+  for (const [fid, f] of Object.entries(parent.files)) {
+    if (!f.path.toLowerCase().startsWith(prefix.toLowerCase())) continue;
+    const bytes = fake.store.get(`spaces/${mine}/blobs/${fid}/${f.hash}`).bytes;
+    assert.equal((await call(`/api/spaces/${space.id}/blobs/${fid}/${f.hash}`, { method: "PUT", ...who, body: bytes })).status, 200);
+    files[fid] = { ...f, path: kind === "folder" ? f.path.slice(prefix.length) : f.path.slice(dir === "" ? 0 : dir.length + 1) };
+    delete parent.files[fid];
+    parent.tombstones[fid] = { path: f.path, rev: f.rev + 1, ts: Date.now(), by: person.member.id, to: space.id };
+  }
+  const filled = await call(`/api/spaces/${space.id}/manifest`, {
+    method: "PUT",
+    ...who,
+    headers: { "x-base-etag": space.etag },
+    body: { version: MANIFEST_VERSION, name, seq: 1, files, tombstones: {}, public: {} },
+  });
+  assert.equal(filled.status, 200, filled.text);
+  parent.seq += 1;
+  const placed = await call(`/api/spaces/${mine}/manifest`, { method: "PUT", ...who, headers: { "x-base-etag": got.headers.get("x-manifest-etag") }, body: parent });
+  assert.equal(placed.status, 200, placed.text);
+  return space;
+}
 const put = (api, p, text, more = "") => api(docUrl(p, "", more), { method: "PUT", body: text });
 
-await test("sections: an agent sees what its person sees — a path under Library/, Private/ or Restricted/<folder>/ is that section's, by the names on their disk", async () => {
+await test("sections: an agent sees what its person sees — a path under Library/, My files/ or Shared with me/ is in the section that holds it, by the names on their disk", async () => {
   await freshWorkspace({ "Shared/plan.md": "# Plan\n\nThe harbour plan.\n" });
   PAT = await joinAs("pat@example.com", "Pat", "PPPPPPPPPPPPPPPPPPPP", "d-pat");
   QUINN = await joinAs("quinn@example.com", "Quinn", "QQQQQQQQQQQQQQQQQQQQ", "d-quinn");
@@ -5681,114 +5972,126 @@ await test("sections: an agent sees what its person sees — a path under Librar
   ALICE_BOT = await addAgentFor(MEMBER, "Alice's helper", ["comment", "edit", "publish"]);
   const [pat, quinn, alice] = [as(PAT_BOT), as(QUINN_BOT), as(ALICE_BOT)];
 
-  // Two folders of one name: Pat's, with Quinn in it, and Quinn's, with Pat.
-  DEALS = (await call("/api/spaces", { method: "POST", token: PAT.token, device: "d-pat", body: { name: "Deals", members: [QUINN.member.id] } })).json.space;
-  DEALS_QUINN = (await call("/api/spaces", { method: "POST", token: QUINN.token, device: "d-quinn", body: { name: "Deals", members: [PAT.member.id] } })).json.space;
-  // Made a moment later: the first of a name has it plain.
-  db.run("UPDATE spaces SET created_at = created_at + 1000 WHERE id = ?", DEALS_QUINN.id);
-
-  // Who it is, and where it can work: the second Deals is told apart by who
-  // made it, as it is on a Mac.
+  // Who it is, and where it can work: nothing is shared with Pat yet.
   const me = (await pat("/api/agent/me")).json;
   assert.deepEqual(me.person, { id: PAT.member.id, name: "Pat" });
-  assert.deepEqual(me.sections, ["Library", "Private", "Restricted/Deals", "Restricted/Deals (Quinn)"]);
-  assert.ok(fake.store.has(`spaces/${privateOf(PAT)}/manifest.json`), "asking made Pat's Private: everyone has one");
+  assert.deepEqual(me.sections, ["Library", "My files"]);
+  assert.ok(fake.store.has(`spaces/${privateOf(PAT)}/manifest.json`), "asking made Pat's My files: everyone has one");
 
-  // A path is literal. Under Private/ it is Pat's Private and nowhere else.
+  // Two folders of one name: Pat's, shared with Quinn, and Quinn's, shared with Pat.
+  DEALS = (await share(PAT.token, { name: "Deals", members: [QUINN.member.id] })).json.space;
+  DEALS_QUINN = (await share(QUINN.token, { name: "Deals", members: [PAT.member.id] })).json.space;
+  assert.deepEqual((await pat("/api/agent/me")).json.sections, ["Library", "My files", "Shared with me"]);
+
+  // A path is literal. Under My files/ it is Pat's own and nowhere else.
   const sharedEtag = etagNow();
-  const wrote = await put(pat, "Private/notes/idea", "# Idea\n\nA quiet cove nobody knows.\n");
+  const wrote = await put(pat, "My files/notes/idea", "# Idea\n\nA quiet cove nobody knows.\n");
   assert.equal(wrote.status, 201, wrote.text);
-  assert.equal(wrote.json.path, "Private/notes/idea", "said back the way it was typed");
+  assert.equal(wrote.json.path, "My files/notes/idea", "said back the way it was typed");
   assert.deepEqual(pathsOf(spaceManifest(privateOf(PAT))), ["notes/idea.md"], "stored relative to its own section");
   assert.equal(entryAt(spaceManifest(privateOf(PAT)), "notes/idea.md")[1].by, PAT_BOT.id, "signed with the agent's own name");
   assert.equal(etagNow(), sharedEtag, "Library heard nothing of it");
   assert.equal(db.value("SELECT etag FROM spaces WHERE id = ?", privateOf(PAT)), fake.store.get(`spaces/${privateOf(PAT)}/manifest.json`).etag, "and Pat's Macs are told by their next poll");
-  const read = await pat(docUrl("private/NOTES/idea"));
+  const read = await pat(docUrl("my files/NOTES/idea"));
   assert.equal(read.status, 200);
   assert.equal(read.text, "# Idea\n\nA quiet cove nobody knows.\n");
-  assert.equal(decodeURIComponent(read.headers.get("x-doklin-path")), "Private/notes/idea", "whatever case it was asked in");
-  assert.equal((await pat(docUrl("Private/notes/idea", "", "&info=1"))).json.path, "Private/notes/idea");
+  assert.equal(decodeURIComponent(read.headers.get("x-doklin-path")), "My files/notes/idea", "whatever case it was asked in");
+  assert.equal((await pat(docUrl("My files/notes/idea", "", "&info=1"))).json.path, "My files/notes/idea");
 
-  // A restricted folder by its name — each of the two Deals its own.
-  assert.equal((await put(pat, "Restricted/Deals/q3", "# Q3\n\nThe first deal.\n")).status, 201);
-  assert.equal((await put(pat, "Restricted/Deals (Quinn)/q4", "# Q4\n\nQuinn's deal.\n")).status, 201);
-  assert.deepEqual(pathsOf(spaceManifest(DEALS.id)), ["q3.md"]);
+  // What Pat shared is where it was, in his My files; what is shared with him is under Shared with me.
+  assert.equal((await put(pat, "My files/Deals/q3", "# Q3\n\nThe first deal.\n")).status, 201);
+  assert.equal((await put(pat, "Shared with me/Deals/q4", "# Q4\n\nQuinn's deal.\n")).status, 201);
+  assert.deepEqual(pathsOf(spaceManifest(DEALS.id)), ["q3.md"], "in the share's own section");
   assert.deepEqual(pathsOf(spaceManifest(DEALS_QUINN.id)), ["q4.md"]);
+  assert.deepEqual(pathsOf(spaceManifest(privateOf(PAT))), ["notes/idea.md"], "not in the My files it sits in");
   assert.deepEqual(pathsOf(storedManifest()), ["Shared/plan.md"], "and neither in Library");
+  // For Quinn the same two folders, from where she stands.
+  assert.equal((await quinn(docUrl("Shared with me/Deals/q3"))).text, "# Q3\n\nThe first deal.\n");
+  assert.equal((await quinn(docUrl("My files/Deals/q4"))).text, "# Q4\n\nQuinn's deal.\n");
 
-  // Listing: the workspace itself is the sections this person has, and
-  // nothing else; each is listed like any other folder; --deep is everything
-  // this person can see, Library included.
+  // Listing: the workspace itself is the three folders, and nothing else;
+  // each is listed like any other folder; --deep is everything this person
+  // can see, Library included.
   const ls = async (api, dir = "", deep = false) => (await api(`/api/agent/tree?dir=${encodeURIComponent(dir)}${deep ? "&deep=1" : ""}`));
-  assert.deepEqual((await ls(pat)).json, { dir: "", folders: ["Library", "Private", "Restricted"], documents: [] });
+  assert.deepEqual((await ls(pat)).json, { dir: "", folders: ["Library", "My files", "Shared with me"], documents: [] });
   assert.deepEqual((await ls(pat, "Library")).json, { dir: "Library", folders: ["Library/Shared"], documents: [] });
-  assert.deepEqual((await ls(pat, "Restricted")).json.folders, ["Restricted/Deals", "Restricted/Deals (Quinn)"]);
-  assert.deepEqual((await ls(pat, "Private")).json.folders, ["Private/notes"]);
-  assert.deepEqual((await ls(pat, "Private/notes")).json.documents.map((d) => d.path), ["Private/notes/idea"]);
-  assert.deepEqual((await ls(pat, "restricted/deals")).json.documents.map((d) => d.path), ["Restricted/Deals/q3"]);
+  assert.deepEqual((await ls(pat, "Shared with me")).json, { dir: "Shared with me", folders: ["Shared with me/Deals"], documents: [] });
+  assert.deepEqual((await ls(pat, "My files")).json.folders, ["My files/Deals", "My files/notes"], "a shared folder is a folder where it sits");
+  assert.deepEqual((await ls(pat, "My files/notes")).json.documents.map((d) => d.path), ["My files/notes/idea"]);
+  assert.deepEqual((await ls(pat, "my files/deals")).json.documents.map((d) => d.path), ["My files/Deals/q3"]);
+  assert.deepEqual((await ls(pat, "shared with me/DEALS")).json.documents.map((d) => d.path), ["Shared with me/Deals/q4"]);
   const everything = (await ls(pat, "", true)).json;
-  assert.deepEqual(everything.documents.map((d) => d.path), ["Library/Shared/plan", "Private/notes/idea", "Restricted/Deals (Quinn)/q4", "Restricted/Deals/q3"]);
-  assert.deepEqual(everything.folders, ["Library", "Library/Shared", "Private", "Private/notes", "Restricted", "Restricted/Deals", "Restricted/Deals (Quinn)"]);
-  assert.deepEqual((await ls(pat, "Restricted", true)).json.documents.map((d) => d.path), ["Restricted/Deals (Quinn)/q4", "Restricted/Deals/q3"]);
+  assert.deepEqual(everything.documents.map((d) => d.path), ["Library/Shared/plan", "My files/Deals/q3", "My files/notes/idea", "Shared with me/Deals/q4"]);
+  assert.deepEqual(everything.folders, ["Library", "Library/Shared", "My files", "My files/Deals", "My files/notes", "Shared with me", "Shared with me/Deals"]);
+  assert.deepEqual((await ls(pat, "Shared with me", true)).json.documents.map((d) => d.path), ["Shared with me/Deals/q4"]);
+  assert.deepEqual((await ls(pat, "My files", true)).json.documents.map((d) => d.path), ["My files/Deals/q3", "My files/notes/idea"], "a folder, deep, is what is shared from inside it too");
   // A section is there with nothing in it; a folder nobody made is not.
-  const empty = await ls(quinn, "Private");
+  const empty = await ls(alice, "My files");
   assert.equal(empty.status, 200);
-  assert.deepEqual(empty.json, { dir: "Private", folders: [], documents: [] });
-  assert.equal((await ls(pat, "Private/nothing")).status, 404);
-  assert.deepEqual((await ls(alice)).json.folders, ["Library", "Private"], "Alice is in no restricted folder, so she is shown none");
-  assert.deepEqual((await ls(alice, "Restricted")).json.folders, []);
+  assert.deepEqual(empty.json, { dir: "My files", folders: [], documents: [] });
+  assert.equal((await ls(pat, "My files/nothing")).status, 404);
+  assert.deepEqual((await ls(alice)).json.folders, ["Library", "My files"], "nothing is shared with Alice, so she is shown no folder of it");
+  assert.deepEqual((await ls(alice, "Shared with me")).json, { dir: "Shared with me", folders: [], documents: [] });
 
-  // To an agent whose person is not in it, a folder is one nobody made — and
-  // a Private is only ever its own person's.
+  // To an agent whose person cannot open it, a share is nothing — and a My
+  // files is only ever its own person's.
   for (const api of [alice, as(await addAgent("The owner's bot", ["edit"]))]) {
-    const gone = await api(docUrl("Restricted/Deals/q3"));
+    const gone = await api(docUrl("Shared with me/Deals/q3"));
     assert.equal(gone.status, 404);
-    assert.ok(/no restricted folder "Deals"/.test(gone.json.error), gone.json.error);
-    assert.equal((await api(docUrl("Private/notes/idea"))).status, 404, "its own Private holds no such note");
-    assert.equal((await put(api, "Restricted/Deals/intruder", "# No\n")).status, 404);
+    assert.match(gone.json.error, /nothing called "Deals" is shared with this agent's person/);
+    assert.equal((await api(docUrl("My files/notes/idea"))).status, 404, "its own My files holds no such note");
+    assert.equal((await api(docUrl("My files/Deals/q3"))).status, 404, "nor Pat's folder");
+    assert.equal((await put(api, "Shared with me/Deals/intruder", "# No\n")).status, 404);
   }
   assert.deepEqual(pathsOf(spaceManifest(DEALS.id)), ["q3.md"]);
-  // For Quinn the same two folders, named from where she stands.
-  assert.deepEqual((await quinn("/api/agent/me")).json.sections, ["Library", "Private", "Restricted/Deals", "Restricted/Deals (Quinn)"]);
-  assert.equal((await quinn(docUrl("Restricted/Deals/q3"))).text, "# Q3\n\nThe first deal.\n");
 
-  // Taken out of a folder, added to one: the agent follows on its next call.
+  // Taken off a share, put on one: the agent follows on its next call.
   const membership = (method) =>
     call(`/api/spaces/${DEALS.id}/members/${QUINN.member.id}`, { method, token: PAT.token, device: "d-pat" });
   assert.equal((await membership("DELETE")).status, 204);
-  assert.deepEqual((await quinn("/api/agent/me")).json.sections, ["Library", "Private", "Restricted/Deals"], "her own Deals is the only one now, and has the plain name");
-  assert.equal((await quinn(docUrl("Restricted/Deals/q3"))).status, 404, "what was Pat's folder is not there for her");
-  assert.equal((await quinn(docUrl("Restricted/Deals/q4"))).status, 200);
+  assert.deepEqual((await quinn("/api/agent/me")).json.sections, ["Library", "My files"], "nothing is shared with her now");
+  assert.equal((await quinn(docUrl("Shared with me/Deals/q3"))).status, 404, "what was Pat's folder is not there for her");
+  assert.equal((await quinn(docUrl("My files/Deals/q4"))).status, 200);
   assert.equal((await membership("PUT")).status, 200);
-  assert.equal((await quinn(docUrl("Restricted/Deals/q3"))).status, 200, "and back");
+  assert.equal((await quinn(docUrl("Shared with me/Deals/q3"))).status, 200, "and back");
 
-  // The names of the sections themselves are not documents, and Restricted
-  // holds folders and nothing else.
-  for (const section of ["Library", "Private"]) {
+  // Two folders of one name shared with one person: the second is told apart by whose it is, as on a Mac.
+  const third = (await share(MEMBER, { name: "Deals", members: [PAT.member.id] })).json.space;
+  db.run("UPDATE spaces SET created_at = created_at + 1000 WHERE id = ?", third.id);
+  assert.equal((await put(alice, "My files/Deals/q5", "# Q5\n\nAlice's deal.\n")).status, 201);
+  assert.deepEqual((await ls(pat, "Shared with me")).json.folders, ["Shared with me/Deals", `Shared with me/Deals (${ALICE.name})`]);
+  assert.equal((await pat(docUrl(`Shared with me/Deals (${ALICE.name})/q5`))).text, "# Q5\n\nAlice's deal.\n");
+  assert.equal((await pat(docUrl("Shared with me/Deals/q4"))).status, 200, "the first of a name has it plain");
+  assert.equal((await call(`/api/spaces/${third.id}`, { method: "DELETE", token: MEMBER })).json.kept, true);
+  assert.deepEqual((await ls(pat, "Shared with me")).json.folders, ["Shared with me/Deals"], "deleted, it is gone for the people it was shared with");
+
+  // The names of the folders themselves are not documents, and Shared with
+  // me holds what is shared and nothing else.
+  for (const section of ["Library", "My files"]) {
     const atRoot = await put(pat, section, "# x\n");
     assert.equal(atRoot.status, 400);
     assert.ok(new RegExp(`inside ${section}/`).test(atRoot.json.error), atRoot.json.error);
   }
-  const loose = await put(pat, "Restricted", "# x\n");
+  const loose = await put(pat, "Shared with me", "# x\n");
   assert.equal(loose.status, 400);
-  assert.ok(/holds restricted folders and nothing else/.test(loose.json.error), loose.json.error);
-  assert.equal((await put(pat, "Restricted/Brand New/x", "# x\n")).status, 404, "an agent does not make a restricted folder: its person does");
-  assert.equal((await put(pat, "Library/Private.md", "# A shared note that is only called Private\n")).status, 201, "a name is reserved as a folder, not as a word");
-  assert.ok(pathsOf(storedManifest()).includes("Private.md"));
-  assert.equal((await pat(docUrl("Library/Private.md"), { method: "DELETE" })).status, 200);
+  assert.match(loose.json.error, /holds what others shared and nothing else/);
+  assert.equal((await put(pat, "Shared with me/Brand New/x", "# x\n")).status, 404, "an agent does not share anything: its person does");
+  assert.equal((await put(pat, "Library/My files.md", "# A Library note that is only called My files\n")).status, 201, "a name is a folder's where a path starts, not a word");
+  assert.ok(pathsOf(storedManifest()).includes("My files.md"));
+  assert.equal((await pat(docUrl("Library/My files.md"), { method: "DELETE" })).status, 200);
 
   // Permissions limit what it may do there, never where: a reader reads all
   // of it and writes none.
   const reader = as(await addAgentFor(PAT.token, "Pat's reader", []));
-  assert.equal((await reader(docUrl("Private/notes/idea"))).status, 200);
-  assert.equal((await put(reader, "Private/notes/idea", "# Mine\n", "&force=1")).status, 403);
+  assert.equal((await reader(docUrl("My files/notes/idea"))).status, 200);
+  assert.equal((await put(reader, "My files/notes/idea", "# Mine\n", "&force=1")).status, 403);
 });
 
-await test("sections: every path starts with its section — one that does not is refused on every route, with a sentence that says which to use, and nothing is written", async () => {
+await test("sections: every path starts with Library, My files or Shared with me — one that does not is refused on every route, with a sentence that says which to use, and nothing is written", async () => {
   const pat = as(PAT_BOT);
   const etag = etagNow();
   const privateEtag = fake.store.get(`spaces/${privateOf(PAT)}/manifest.json`).etag;
-  const sentence = (p) => `${p} is in no section. Say which: Library/${p} (everyone), Private/${p} (only your person) or Restricted/<folder>/${p}.`;
+  const sentence = (p) => `${p} is in no section. Say which: Library/${p} (everyone), "My files/${p}" (only your person) or "Shared with me/<name>/…" (something shared with them).`;
   for (const [method, url, body, typed] of [
     ["GET", docUrl("Shared/plan"), undefined, "Shared/plan"],
     ["GET", docUrl("Shared/plan", "", "&info=1"), undefined, "Shared/plan"],
@@ -5798,7 +6101,7 @@ await test("sections: every path starts with its section — one that does not i
     ["POST", "/api/agent/comments", { path: "Shared/plan", on: "harbour plan", body: "Which harbour?" }, "Shared/plan"],
     ["DELETE", commentsUrl("Shared/plan", "&thread=abc123"), undefined, "Shared/plan"],
     ["POST", "/api/agent/move", { from: "Shared/plan", to: "Library/Moved/plan" }, "Shared/plan"],
-    ["POST", "/api/agent/move", { from: "Private/notes/idea", to: "Projects/idea" }, "Projects/idea"],
+    ["POST", "/api/agent/move", { from: "My files/notes/idea", to: "Projects/idea" }, "Projects/idea"],
     ["PUT", "/api/agent/pages", { path: "Shared/plan" }, "Shared/plan"],
     ["DELETE", "/api/agent/pages?path=Shared/plan", undefined, "Shared/plan"],
     ["GET", "/api/agent/tree?dir=Shared", undefined, "Shared"],
@@ -5812,9 +6115,9 @@ await test("sections: every path starts with its section — one that does not i
   // The workspace itself holds the sections, not documents.
   const nothing = await pat(docUrl(""));
   assert.equal(nothing.status, 400);
-  assert.equal(nothing.json.error, "name a document or a folder, starting with its section: Library/… (everyone), Private/… (only your person) or Restricted/<folder>/…");
+  assert.equal(nothing.json.error, 'name a document or a folder, starting with where it is: Library/… (everyone), "My files/…" (only your person) or "Shared with me/<name>/…" (what others shared with them)');
   assert.equal(etagNow(), etag, "Library heard nothing of any of it");
-  assert.equal(fake.store.get(`spaces/${privateOf(PAT)}/manifest.json`).etag, privateEtag, "nor did Private");
+  assert.equal(fake.store.get(`spaces/${privateOf(PAT)}/manifest.json`).etag, privateEtag, "nor did My files");
   // With its section, the same path is the document.
   assert.equal((await pat(docUrl("Library/Shared/plan"))).text, "# Plan\n\nThe harbour plan.\n");
 });
@@ -5825,20 +6128,20 @@ await test("sections: comments and pages work in every section the person can se
 
   // A comment: the marker in the text and the thread in the sidecar, both in
   // Pat's Private.
-  const said = await pat("/api/agent/comments", { method: "POST", body: { path: "Private/notes/idea", on: "quiet cove", body: "Which one?" } });
+  const said = await pat("/api/agent/comments", { method: "POST", body: { path: "My files/notes/idea", on: "quiet cove", body: "Which one?" } });
   assert.equal(said.status, 201, said.text);
-  assert.equal(said.json.path, "Private/notes/idea");
+  assert.equal(said.json.path, "My files/notes/idea");
   assert.ok(spaceText(mine, "notes/idea.md").includes("{==quiet cove==}"));
   assert.deepEqual(pathsOf(spaceManifest(mine)), ["notes/idea.md", "notes/idea.meta.jsonl"]);
-  const threads = (await pat(commentsUrl("Private/notes/idea"))).json.threads;
+  const threads = (await pat(commentsUrl("My files/notes/idea"))).json.threads;
   assert.equal(threads.length, 1);
   assert.equal(threads[0].comments[0].author, "Pat's bot");
 
   // Publishing: an entry in the map of the section the document is in, and
   // an address that is that section's for the whole domain.
-  const page = await pat("/api/agent/pages", { method: "PUT", body: { path: "Private/notes/idea", slug: "pats-idea" } });
+  const page = await pat("/api/agent/pages", { method: "PUT", body: { path: "My files/notes/idea", slug: "pats-idea" } });
   assert.equal(page.status, 201, page.text);
-  assert.equal(page.json.path, "Private/notes/idea");
+  assert.equal(page.json.path, "My files/notes/idea");
   assert.deepEqual(Object.keys(spaceManifest(mine).public), ["pats-idea"]);
   assert.equal(spaceManifest(mine).public["pats-idea"].path, "notes/idea.md");
   assert.equal(db.value("SELECT space_id FROM addresses WHERE slug = 'pats-idea'"), mine);
@@ -5853,9 +6156,9 @@ await test("sections: comments and pages work in every section the person can se
 
   // The list is every section its person can see, and no other.
   const listed = async (api) => (await api("/api/agent/pages")).json.pages.map((x) => [x.slug, x.path]);
-  assert.deepEqual(await listed(pat), [["pats-idea", "Private/notes/idea"], ["the-plan", "Library/Shared/plan"]]);
+  assert.deepEqual(await listed(pat), [["pats-idea", "My files/notes/idea"], ["the-plan", "Library/Shared/plan"]]);
   assert.deepEqual(await listed(alice), [["the-plan", "Library/Shared/plan"]]);
-  assert.equal((await pat(docUrl("Private/notes/idea", "", "&info=1"))).json.public[0], `${ORIGIN}/pats-idea`);
+  assert.equal((await pat(docUrl("My files/notes/idea", "", "&info=1"))).json.public[0], `${ORIGIN}/pats-idea`);
 
   // Stopping: by its document, or by its address — whichever section holds
   // it — and never one in a section the agent's person is not in.
@@ -5874,13 +6177,13 @@ await test("sections: comments and pages work in every section the person can se
   assert.equal(bySlug.status, 200, bySlug.text);
   assert.equal((await pub("/pats-idea")).status, 404);
   assert.equal(db.value("SELECT COUNT(*) FROM addresses WHERE slug = 'pats-idea'"), 0, "and the address is free again");
-  assert.equal((await pat("/api/agent/pages", { method: "PUT", body: { path: "Private/notes/idea", slug: "pats-idea" } })).status, 201);
-  assert.equal((await stopBy(pat, `path=${encodeURIComponent("Private/notes/idea")}`)).status, 200, "by its document");
+  assert.equal((await pat("/api/agent/pages", { method: "PUT", body: { path: "My files/notes/idea", slug: "pats-idea" } })).status, 201);
+  assert.equal((await stopBy(pat, `path=${encodeURIComponent("My files/notes/idea")}`)).status, 200, "by its document");
   // A whole section is a folder like another.
-  const whole = await pat("/api/agent/pages", { method: "PUT", body: { path: "Private/", dryRun: true } });
+  const whole = await pat("/api/agent/pages", { method: "PUT", body: { path: "My files/", dryRun: true } });
   assert.equal(whole.status, 200);
-  assert.equal(whole.json.path, "Private");
-  assert.deepEqual(whole.json.documents, ["Private/notes/idea"]);
+  assert.equal(whole.json.path, "My files");
+  assert.deepEqual(whole.json.documents, ["My files/notes/idea"]);
 });
 
 await test("sections: search keeps a mirror per section — the workspace itself is every section its person can see, a folder only its own, and nobody's text is found by an agent that cannot read it", async () => {
@@ -5899,7 +6202,7 @@ await test("sections: search keeps a mirror per section — the workspace itself
 
   const everywhere = await search(pat, "cove");
   assert.equal(everywhere.status, 200, everywhere.text);
-  assert.deepEqual(paths(everywhere), ["Library/Shared/harbour", "Private/notes/idea"], "Library and Pat's Private");
+  assert.deepEqual(paths(everywhere), ["Library/Shared/harbour", "My files/notes/idea"], "Library and Pat's My files");
   assert.deepEqual(everywhere.json.results[1].matches.map((m) => m.text), ["A quiet cove nobody knows."], "the line, without its comment marker");
   // One mirror a section: the rows of each are its own.
   const rowsIn = (space) => db.value("SELECT COUNT(*) FROM search_text WHERE space_id = ?", space);
@@ -5909,7 +6212,7 @@ await test("sections: search keeps a mirror per section — the workspace itself
   assert.equal(mirrorEtag(privateOf(PAT)), fake.store.get(`spaces/${privateOf(PAT)}/manifest.json`).etag);
   assert.equal(rowsIn(privateOf(QUINN)), 0, "nobody has searched Quinn's");
 
-  // Alice's agent scans the shared mirror and her own Private's — Pat's
+  // Alice's agent scans the shared mirror and her own My files' — Pat's
   // words are not in what it reads.
   db.queries.length = 0;
   const hers = await search(alice, "cove");
@@ -5918,21 +6221,25 @@ await test("sections: search keeps a mirror per section — the workspace itself
   assert.ok(/space_id IN \(\?,\?\)/.test(scan), `two sections, by id: ${scan}`);
   assert.deepEqual(paths(await search(alice, "first deal")), []);
 
-  // A folder narrows it to the section it is in.
-  assert.deepEqual(paths(await search(pat, "cove", "&dir=Private")), ["Private/notes/idea"]);
+  // A folder narrows it to the section it is in, and to what is shared beneath it.
+  const inDir = (dir) => `&dir=${encodeURIComponent(dir)}`;
+  assert.deepEqual(paths(await search(pat, "cove", inDir("My files"))), ["My files/notes/idea"]);
   assert.deepEqual(paths(await search(pat, "cove", "&dir=Library/Shared")), ["Library/Shared/harbour"]);
   assert.deepEqual(paths(await search(pat, "cove", "&dir=library")), ["Library/Shared/harbour"], "Library is a section like the others");
-  assert.deepEqual(paths(await search(pat, "deal", "&dir=Restricted")), ["Restricted/Deals (Quinn)/q4", "Restricted/Deals/q3"]);
-  assert.deepEqual(paths(await search(pat, "deal", `&dir=${encodeURIComponent("restricted/deals")}`)), ["Restricted/Deals/q3"]);
-  assert.deepEqual(paths(await search(quinn, "deal")), ["Restricted/Deals (Quinn)/q4", "Restricted/Deals/q3"]);
-  assert.equal((await pat(searchUrl("deal", "&dir=Restricted/Nobodys"))).status, 404);
+  assert.deepEqual(paths(await search(pat, "deal", inDir("My files"))), ["My files/Deals/q3"], "what Pat shared from his My files is in it");
+  assert.deepEqual(paths(await search(pat, "deal", inDir("my files/notes"))), [], "and in no other folder of it");
+  assert.deepEqual(paths(await search(pat, "deal", inDir("Shared with me"))), ["Shared with me/Deals/q4"]);
+  assert.deepEqual(paths(await search(pat, "deal", inDir("shared with me/deals"))), ["Shared with me/Deals/q4"]);
+  assert.deepEqual(paths(await search(pat, "deal")), ["My files/Deals/q3", "Shared with me/Deals/q4"]);
+  assert.deepEqual(paths(await search(quinn, "deal")), ["My files/Deals/q4", "Shared with me/Deals/q3"], "the same two, from where Quinn stands");
+  assert.equal((await pat(searchUrl("deal", inDir("Shared with me/Nobodys")))).status, 404);
 
   // What an agent writes is mirrored in the request that wrote it — in the
   // mirror of the section it wrote to.
-  assert.equal((await put(pat, "Private/notes/tide", "# Tide\n\nHigh water at noon.\n")).status, 201);
+  assert.equal((await put(pat, "My files/notes/tide", "# Tide\n\nHigh water at noon.\n")).status, 201);
   assert.equal(mirrorEtag(privateOf(PAT)), fake.store.get(`spaces/${privateOf(PAT)}/manifest.json`).etag);
   db.queries.length = 0;
-  assert.deepEqual(paths(await pat(searchUrl("high water"))), ["Private/notes/tide"]);
+  assert.deepEqual(paths(await pat(searchUrl("high water"))), ["My files/notes/tide"]);
   assert.ok(!db.queries.some((sql) => /INTO search_text/.test(sql)), "the search had nothing to catch up");
 });
 
@@ -5942,22 +6249,22 @@ await test("sections: a move between sections writes where it goes first and lea
   const move = (api, body) => api("/api/agent/move", { method: "POST", body });
 
   // Inside one section a move is the move it always was.
-  const within = await move(pat, { from: "Private/notes/tide", to: "Private/tides/noon" });
+  const within = await move(pat, { from: "My files/notes/tide", to: "My files/tides/noon" });
   assert.equal(within.status, 200, within.text);
-  assert.deepEqual(within.json, { kind: "document", from: "Private/notes/tide", to: "Private/tides/noon", files: 1 });
+  assert.deepEqual(within.json, { kind: "document", from: "My files/notes/tide", to: "My files/tides/noon", files: 1 });
   assert.ok(pathsOf(spaceManifest(mine)).includes("tides/noon.md"));
 
-  // Private → shared. Published first, so the address has something to keep.
-  assert.equal((await pat("/api/agent/pages", { method: "PUT", body: { path: "Private/notes/idea", slug: "the-cove" } })).status, 201);
+  // My files → Library. Published first, so the address has something to keep.
+  assert.equal((await pat("/api/agent/pages", { method: "PUT", body: { path: "My files/notes/idea", slug: "the-cove" } })).status, 201);
   const [oldFid] = entryAt(spaceManifest(mine), "notes/idea.md");
-  const dry = await move(pat, { from: "Private/notes/idea", to: "Library/Shared/", dryRun: true });
+  const dry = await move(pat, { from: "My files/notes/idea", to: "Library/Shared/", dryRun: true });
   assert.equal(dry.status, 200, dry.text);
-  assert.deepEqual(dry.json, { kind: "document", from: "Private/notes/idea", to: "Library/Shared/idea", files: 2, moved: false });
+  assert.deepEqual(dry.json, { kind: "document", from: "My files/notes/idea", to: "Library/Shared/idea", files: 2, moved: false });
   assert.ok(pathsOf(spaceManifest(mine)).includes("notes/idea.md") && !pathsOf(storedManifest()).includes("Shared/idea.md"), "a dry run moved nothing");
 
-  const out = await move(pat, { from: "Private/notes/idea", to: "Library/Shared/" });
+  const out = await move(pat, { from: "My files/notes/idea", to: "Library/Shared/" });
   assert.equal(out.status, 200, out.text);
-  assert.deepEqual(out.json, { kind: "document", from: "Private/notes/idea", to: "Library/Shared/idea", files: 2 });
+  assert.deepEqual(out.json, { kind: "document", from: "My files/notes/idea", to: "Library/Shared/idea", files: 2 });
   const shared = storedManifest();
   assert.ok(pathsOf(shared).includes("Shared/idea.md") && pathsOf(shared).includes("Shared/idea.meta.jsonl"), "the note and its comments");
   const [newFid, landed] = entryAt(shared, "Shared/idea.md");
@@ -5970,7 +6277,7 @@ await test("sections: a move between sections writes where it goes first and lea
   assert.ok(!pathsOf(left).includes("notes/idea.md") && !pathsOf(left).includes("notes/idea.meta.jsonl"));
   assert.equal(left.tombstones[oldFid].to, "", "the tombstone says it went to Library, the shared section — a Mac in both moves its copy");
   assert.equal(left.tombstones[oldFid].path, "notes/idea.md");
-  // The page: out of Private's map, into the shared one, at the same address.
+  // The page: out of My files' map, into Library's, at the same address.
   assert.deepEqual(Object.keys(left.public), []);
   assert.deepEqual(shared.public["the-cove"], { ...shared.public["the-cove"], kind: "file", file: newFid, path: "Shared/idea.md" });
   assert.equal(db.value("SELECT space_id FROM addresses WHERE slug = 'the-cove'"), "");
@@ -5978,42 +6285,42 @@ await test("sections: a move between sections writes where it goes first and lea
   assert.equal(page.status, 200, "and it answers from where the note is now");
   assert.ok(page.text.includes("A quiet"));
 
-  // Shared → a restricted folder: `to` is that folder's id, and the people
-  // in it find the note there.
+  // Library → a shared folder: `to` is that share's id, and the people it
+  // is shared with find the note there.
   const [planFid] = entryAt(storedManifest(), "Shared/plan.md");
-  const into = await move(pat, { from: "Library/Shared/plan", to: "Restricted/Deals" });
+  const into = await move(pat, { from: "Library/Shared/plan", to: "My files/Deals" });
   assert.equal(into.status, 200, into.text);
-  assert.equal(into.json.to, "Restricted/Deals/plan", "a section's own folder means into it, slash or not");
+  assert.equal(into.json.to, "My files/Deals/plan", "a section's own folder means into it, slash or not");
   assert.equal(storedManifest().tombstones[planFid].to, DEALS.id);
   assert.deepEqual(pathsOf(spaceManifest(DEALS.id)), ["plan.md", "q3.md"]);
-  assert.equal((await quinn(docUrl("Restricted/Deals/plan"))).text, "# Plan\n\nThe harbour plan.\n");
+  assert.equal((await quinn(docUrl("Shared with me/Deals/plan"))).text, "# Plan\n\nThe harbour plan.\n");
   // The page Alice's agent gave it went along, into a section she cannot see.
   assert.equal(db.value("SELECT space_id FROM addresses WHERE slug = 'the-plan'"), DEALS.id);
   assert.equal((await pub("/the-plan")).status, 200);
 
-  // One restricted folder to another, renamed on the way.
-  const across = await move(pat, { from: "Restricted/Deals/q3", to: "Restricted/Deals (Quinn)/archive/third" });
+  // One shared folder to another, renamed on the way.
+  const across = await move(pat, { from: "My files/Deals/q3", to: "Shared with me/Deals/archive/third" });
   assert.equal(across.status, 200, across.text);
   assert.deepEqual(pathsOf(spaceManifest(DEALS_QUINN.id)), ["archive/third.md", "q4.md"]);
   assert.equal(Object.values(spaceManifest(DEALS.id).tombstones).find((t) => t.path === "q3.md").to, DEALS_QUINN.id);
 
   // A folder moves whole, each file under the same name.
-  await put(pat, "Private/trip/a", "# A\n");
-  await put(pat, "Private/trip/b", "# B\n");
-  const folder = await move(pat, { from: "Private/trip", to: "Library/Shared/Trips/2026" });
+  await put(pat, "My files/trip/a", "# A\n");
+  await put(pat, "My files/trip/b", "# B\n");
+  const folder = await move(pat, { from: "My files/trip", to: "Library/Shared/Trips/2026" });
   assert.equal(folder.status, 200, folder.text);
-  assert.deepEqual(folder.json, { kind: "folder", from: "Private/trip", to: "Library/Shared/Trips/2026", files: 2 });
+  assert.deepEqual(folder.json, { kind: "folder", from: "My files/trip", to: "Library/Shared/Trips/2026", files: 2 });
   assert.ok(["Shared/Trips/2026/a.md", "Shared/Trips/2026/b.md"].every((x) => pathsOf(storedManifest()).includes(x)));
 
   // Library is a section like the others: its own folder means into it, at
   // the top of what the shared manifest stores, and out of it a path says where.
-  const toLibrary = await move(pat, { from: "Private/tides/noon", to: "Library/" });
+  const toLibrary = await move(pat, { from: "My files/tides/noon", to: "Library/" });
   assert.equal(toLibrary.status, 200, toLibrary.text);
-  assert.deepEqual(toLibrary.json, { kind: "document", from: "Private/tides/noon", to: "Library/noon", files: 1 });
+  assert.deepEqual(toLibrary.json, { kind: "document", from: "My files/tides/noon", to: "Library/noon", files: 1 });
   const [noonFid] = entryAt(storedManifest(), "noon.md");
   assert.ok(noonFid, "stored as the shared manifest has its paths");
-  const fromLibrary = await move(pat, { from: "library/NOON", to: "Private/tides/" });
-  assert.deepEqual(fromLibrary.json, { kind: "document", from: "Library/noon", to: "Private/tides/noon", files: 1 });
+  const fromLibrary = await move(pat, { from: "library/NOON", to: "My files/tides/" });
+  assert.deepEqual(fromLibrary.json, { kind: "document", from: "Library/noon", to: "My files/tides/noon", files: 1 });
   assert.equal(storedManifest().tombstones[noonFid].to, mine, "the tombstone says where it went");
   const back = spaceManifest(mine);
   assert.equal(back.files[noonFid]?.path, "tides/noon.md", "back where it was, under the id it always had");
@@ -6025,21 +6332,190 @@ await test("sections: a move between sections writes where it goes first and lea
     assert.equal(res.status, status, `${JSON.stringify(body)}: ${res.text}`);
     assert.ok(pattern.test(res.json.error), res.json.error);
   };
-  await refused({ from: "Private", to: "Library/Shared/everything" }, 400, /a section of this workspace, not a folder to move/);
-  await refused({ from: "Library/", to: "Private/Library" }, 400, /^Library is a section of this workspace, not a folder to move/);
-  await refused({ from: "Shared/idea", to: "Private/idea" }, 400, /^Shared\/idea is in no section\. Say which: Library\/Shared\/idea \(everyone\)/);
-  await refused({ from: "Private/tides/noon", to: "Elsewhere/noon" }, 400, /^Elsewhere\/noon is in no section/);
-  await refused({ from: "Restricted/Deals/", to: "Library/Shared/Deals" }, 400, /a section of this workspace/);
-  await refused({ from: "Library/Shared/idea", to: "Restricted/" }, 400, /holds restricted folders and nothing else/);
-  await refused({ from: "Library/Shared/idea", to: "Restricted/Nobodys/idea" }, 404, /no restricted folder/);
-  await refused({ from: "Private/nothing", to: "Library/Shared/x" }, 404, /there is nothing at/);
-  await refused({ from: "Library/Shared/idea", to: "Restricted/Deals/plan" }, 409, /"Restricted\/Deals\/plan.md" is already there/);
-  for (let i = 0; i < 17; i += 1) await put(pat, `Private/many/n${String(i).padStart(2, "0")}`, `# ${i}\n`);
-  await refused({ from: "Private/many", to: "Library/Shared/many" }, 400, /17 files, and 16 move between sections at a time/);
+  await refused({ from: "My files", to: "Library/Shared/everything" }, 400, /a section of this workspace, not a folder to move/);
+  await refused({ from: "Library/", to: "My files/Library" }, 400, /^Library is a section of this workspace, not a folder to move/);
+  await refused({ from: "Shared/idea", to: "My files/idea" }, 400, /^Shared\/idea is in no section\. Say which: Library\/Shared\/idea \(everyone\)/);
+  await refused({ from: "My files/tides/noon", to: "Elsewhere/noon" }, 400, /^Elsewhere\/noon is in no section/);
+  await refused({ from: "Library/Shared/idea", to: "Shared with me/" }, 400, /holds what others shared and nothing else/);
+  await refused({ from: "Library/Shared/idea", to: "Shared with me/Nobodys/idea" }, 404, /nothing called "Nobodys" is shared/);
+  await refused({ from: "My files/nothing", to: "Library/Shared/x" }, 404, /there is nothing at/);
+  await refused({ from: "Library/Shared/idea", to: "My files/Deals/plan" }, 409, /"My files\/Deals\/plan.md" is already there/);
+  for (let i = 0; i < 17; i += 1) await put(pat, `My files/many/n${String(i).padStart(2, "0")}`, `# ${i}\n`);
+  await refused({ from: "My files/many", to: "Library/Shared/many" }, 400, /17 files, and 16 move between sections at a time/);
   assert.ok(!pathsOf(storedManifest()).some((x) => x.startsWith("Shared/many/")), "and nothing of it was written");
   // A reader's agent moves nothing anywhere.
   const reader = as(await addAgentFor(PAT.token, "Pat's second reader", []));
-  assert.equal((await move(reader, { from: "Library/Shared/idea", to: "Private/idea" })).status, 403);
+  assert.equal((await move(reader, { from: "Library/Shared/idea", to: "My files/idea" })).status, 403);
+});
+
+await test("sections: something shared is where it sits — a shared document is reached where its owner keeps it, and under Shared with me by the people it is shared with; an agent renames it and moves it inside its section, and does not delete it or move it anywhere else; many sections are read a page at a time", async () => {
+  const [pat, quinn] = [as(PAT_BOT), as(QUINN_BOT)];
+  const mine = privateOf(PAT);
+  const move = (api, body) => api("/api/agent/move", { method: "POST", body });
+  const ls = async (api, dir = "", more = "") => (await api(`/api/agent/tree?dir=${encodeURIComponent(dir)}${more}`)).json;
+  const search = async (api, q, more = "") => {
+    for (let round = 0; round < 8; round += 1) {
+      const res = await api(searchUrl(q, more));
+      if (res.status !== 202) return res;
+    }
+    throw new Error("the search never finished indexing");
+  };
+  const forecast = "# Forecast\n\nRain on the regatta.\n";
+  assert.equal((await put(pat, "My files/plans/Forecast", forecast)).status, 201);
+  assert.equal((await put(pat, "My files/plans/budget", "# Budget\n")).status, 201);
+  const [fid] = entryAt(spaceManifest(mine), "plans/Forecast.md");
+
+  // Pat shares the one document with Quinn, from his Mac: it leaves My files' manifest for a section of its own.
+  const doc = await shareFromMine(PAT, "d-pat", { path: "plans/Forecast", kind: "document", members: [QUINN.member.id] });
+  assert.deepEqual(pathsOf(spaceManifest(doc.id)), ["Forecast.md"]);
+  assert.deepEqual(pathsOf(spaceManifest(mine)).filter((x) => x.startsWith("plans/")), ["plans/budget.md"]);
+
+  // For Pat it is where it was: the path reaches it in the section it is now in.
+  const read = await pat(docUrl("My files/plans/Forecast"));
+  assert.equal(read.text, forecast);
+  assert.equal(decodeURIComponent(read.headers.get("x-doklin-path")), "My files/plans/Forecast");
+  assert.equal((await pat(docUrl("my files/PLANS/forecast.md", "", "&info=1"))).json.linkTo.space, doc.id);
+  // For Quinn it is under Shared with me, by its own name — and nowhere in a folder of Pat's.
+  assert.equal((await quinn(docUrl("Shared with me/Forecast"))).text, forecast);
+  assert.equal((await quinn(docUrl("Shared with me/Forecast.md", "", "&info=1"))).json.path, "Shared with me/Forecast");
+  assert.equal((await quinn(docUrl("My files/plans/Forecast"))).status, 404);
+  // A link from before it was shared still finds it: the section it left says where it went.
+  const ws = JSON.parse(fake.store.get("workspace.json").bytes.toString("utf8")).id;
+  assert.deepEqual((await pat(`/api/agent/find?workspace=${ws}&space=${mine}&file=${fid}`)).json, { path: "My files/plans/Forecast" });
+  assert.deepEqual((await quinn(`/api/agent/find?workspace=${ws}&space=${mine}&file=${fid}`)).json, { path: "Shared with me/Forecast" });
+
+  // A listing says it is there, and shared, without opening its section; --deep opens it.
+  assert.deepEqual(
+    (await ls(pat, "My files/plans")).documents.map((d) => [d.path, d.shared === true, d.md !== undefined]),
+    [["My files/plans/budget", false, true], ["My files/plans/Forecast", true, false]],
+  );
+  assert.deepEqual(
+    (await ls(pat, "My files/plans", "&deep=1")).documents.map((d) => [d.path, d.md?.file]),
+    [["My files/plans/budget", "budget.md"], ["My files/plans/Forecast", "Forecast.md"]],
+  );
+  const hers = await ls(quinn, "Shared with me");
+  assert.deepEqual([hers.folders, hers.documents], [["Shared with me/Deals"], [{ path: "Shared with me/Forecast", shared: true }]]);
+
+  // Whoever is on it changes it, and what is made beside it later is part of it: an html version, its comments.
+  assert.equal((await put(quinn, "Shared with me/Forecast.html", "<p>Rain on the regatta.</p>")).status, 201);
+  const said = await quinn("/api/agent/comments", { method: "POST", body: { path: "Shared with me/Forecast", on: "regatta", body: "Which day?" } });
+  assert.equal(said.status, 201, said.text);
+  assert.deepEqual(pathsOf(spaceManifest(doc.id)), ["Forecast.html", "Forecast.md", "Forecast.meta.jsonl"]);
+  assert.equal((await pat(commentsUrl("My files/plans/Forecast"))).json.threads.length, 1, "Pat reads Quinn's thread where he keeps the note");
+  // A search finds it for each by the path they know it by.
+  assert.deepEqual((await search(pat, "regatta")).json.results.map((r) => r.path), ["My files/plans/Forecast"]);
+  assert.deepEqual((await search(quinn, "regatta")).json.results.map((r) => r.path), ["Shared with me/Forecast"]);
+  assert.deepEqual((await search(pat, "regatta", `&dir=${encodeURIComponent("My files/plans")}`)).json.results.map((r) => r.path), ["My files/plans/Forecast"]);
+
+  // Renamed by the person it is shared with: the same share, called what its file is called.
+  const renamed = await move(quinn, { from: "Shared with me/Forecast", to: "Shared with me/Outlook" });
+  assert.equal(renamed.status, 200, renamed.text);
+  assert.deepEqual(renamed.json, { kind: "document", from: "Shared with me/Forecast", to: "Shared with me/Outlook", shared: true });
+  assert.deepEqual(pathsOf(spaceManifest(doc.id)), ["Outlook.html", "Outlook.md", "Outlook.meta.jsonl"]);
+  assert.equal(db.value("SELECT name FROM spaces WHERE id = ?", doc.id), "Outlook");
+  assert.equal((await pat(docUrl("My files/plans/Outlook"))).status, 200, "for Pat too, where it sits");
+  assert.equal((await move(quinn, { from: "Shared with me/Outlook", to: "Shared with me/Outlook", dryRun: true })).json.moved, false);
+
+  // Moved by its owner inside My files: where it sits is My files' own to say, and nothing of the share changes.
+  const shareEtag = fake.store.get(`spaces/${doc.id}/manifest.json`).etag;
+  const moved = await move(pat, { from: "My files/plans/Outlook", to: "My files/archive/" });
+  assert.equal(moved.status, 200, moved.text);
+  assert.deepEqual(moved.json, { kind: "document", from: "My files/plans/Outlook", to: "My files/archive/Outlook", shared: true });
+  assert.deepEqual(spaceManifest(mine).mounts[doc.id], { dir: "archive", rev: 2, by: PAT_BOT.id, was: "plans/Forecast" });
+  assert.equal(fake.store.get(`spaces/${doc.id}/manifest.json`).etag, shareEtag);
+  assert.equal((await pat(docUrl("My files/archive/Outlook"))).status, 200);
+  assert.equal((await pat(docUrl("My files/plans/Outlook"))).status, 404);
+  assert.equal((await quinn(docUrl("Shared with me/Outlook"))).status, 200, "the people it is shared with see no move");
+  assert.ok((await ls(pat, "My files")).folders.includes("My files/archive"), "a folder that holds only what is shared is a folder");
+  // A folder that holds it moves with it.
+  assert.equal((await put(pat, "My files/archive/old", "# Old\n")).status, 201);
+  const folder = await move(pat, { from: "My files/archive", to: "My files/attic" });
+  assert.equal(folder.status, 200, folder.text);
+  assert.deepEqual([spaceManifest(mine).mounts[doc.id].dir, spaceManifest(mine).mounts[doc.id].rev], ["attic", 3]);
+  assert.equal((await pat(docUrl("My files/attic/Outlook"))).status, 200);
+
+  // What an agent does not do: delete something shared, or move it — or a folder that holds it — to where other people open it.
+  const refused = async (res, said) => {
+    assert.equal(res.status, 409, res.text);
+    assert.equal(res.json.code, "shared");
+    assert.match(res.json.error, said);
+  };
+  await refused(await pat(docUrl("My files/attic/Outlook"), { method: "DELETE" }), /does not delete something shared/);
+  await refused(await quinn(docUrl("Shared with me/Outlook"), { method: "DELETE" }), /Its person deletes it, or leaves it, in Doklin/);
+  await refused(await move(pat, { from: "My files/attic/Outlook", to: "Library/Shared/" }), /changes who can open it/);
+  await refused(await move(pat, { from: "My files/attic/Outlook", to: "My files/Deals/" }), /changes who can open it/);
+  await refused(await move(quinn, { from: "Shared with me/Outlook", to: "My files/Outlook" }), /changes who can open it/);
+  await refused(await move(pat, { from: "My files/attic", to: "Library/Shared/attic" }), /holds something shared/);
+  await refused(await move(pat, { from: "My files/Deals", to: "Library/Shared/Deals" }), /changes who can open it/);
+  assert.deepEqual(pathsOf(spaceManifest(doc.id)), ["Outlook.html", "Outlook.md", "Outlook.meta.jsonl"], "none of it was done");
+  // One of its two versions is not the document.
+  assert.equal((await quinn(docUrl("Shared with me/Outlook", "html"), { method: "DELETE" })).status, 200);
+
+  // A shared folder is renamed and moved the same way: its name is the share's own.
+  const called = await move(pat, { from: "My files/Deals", to: "My files/attic/Deals 2026" });
+  assert.equal(called.status, 200, called.text);
+  assert.deepEqual(called.json, { kind: "folder", from: "My files/Deals", to: "My files/attic/Deals 2026", shared: true });
+  assert.equal(db.value("SELECT name FROM spaces WHERE id = ?", DEALS.id), "Deals 2026");
+  assert.equal(spaceManifest(mine).mounts[DEALS.id].dir, "attic");
+  assert.equal((await pat(docUrl("My files/attic/Deals 2026/plan"))).status, 200);
+  assert.equal((await quinn(docUrl("Shared with me/Deals 2026/plan"))).status, 200);
+  // Somebody it is shared with renames it, and does not move it: there is nowhere of theirs it sits.
+  await refused(await move(quinn, { from: "Shared with me/Deals 2026", to: "My files/Deals 2026" }), /changes who can open it/);
+  assert.equal((await move(quinn, { from: "Shared with me/Deals 2026", to: "Shared with me/Deals" })).status, 200);
+  assert.equal((await move(pat, { from: "My files/attic/Deals", to: "My files/" })).status, 200, "and back to the top of My files, for the tests below");
+  assert.equal((await pat(docUrl("My files/Deals/plan"))).status, 200);
+
+  // Two documents of one name shared with one person: the second is told apart by whose it is.
+  const alice = as(ALICE_BOT);
+  assert.equal((await put(alice, "My files/Outlook", "# Alice's outlook\n")).status, 201);
+  const twin = await shareFromMine({ token: MEMBER, member: { id: ALICE.id } }, DEVICE, { path: "Outlook", kind: "document", members: [QUINN.member.id] });
+  db.run("UPDATE spaces SET created_at = created_at + 1000 WHERE id = ?", twin.id);
+  assert.deepEqual((await ls(quinn, "Shared with me")).documents.map((d) => d.path), ["Shared with me/Outlook", `Shared with me/Outlook (${ALICE.name})`]);
+  assert.equal((await quinn(docUrl(`Shared with me/Outlook (${ALICE.name})`))).text, "# Alice's outlook\n");
+  assert.equal((await put(quinn, `Shared with me/Outlook (${ALICE.name})`, "# Alice's outlook, by Quinn\n", "&force=1")).status, 200);
+  assert.deepEqual(pathsOf(spaceManifest(twin.id)), ["Outlook.md"], "written under the name it is stored by");
+  assert.equal((await call(`/api/spaces/${twin.id}`, { method: "DELETE", token: MEMBER })).json.kept, true);
+
+  // More sections than one request opens: a deep listing and a search say `next`, and are asked again from there.
+  const many = [];
+  for (let i = 0; i < 12; i += 1) many.push(await shareFromMine(PAT, "d-pat", { path: `many/n${String(i).padStart(2, "0")}`, kind: "document" }));
+  const first = await ls(pat, "My files/many", "&deep=1");
+  assert.equal(first.next, 9, "nine sections a request: My files, and eight of what is shared from it");
+  const rest = await ls(pat, "My files/many", "&deep=1&after=9");
+  assert.equal(rest.next, undefined);
+  assert.deepEqual(
+    [...first.documents, ...rest.documents].map((d) => d.path).sort(),
+    Array.from({ length: 17 }, (_, i) => `My files/many/n${String(i).padStart(2, "0")}`),
+    "between them, every note of the folder — shared or not",
+  );
+  assert.equal((await ls(pat, "My files/many")).documents.filter((d) => d.shared).length, 12, "not deep, it opens none of them");
+  const found = [];
+  for (let after = 0; after !== undefined; ) {
+    const page = (await search(pat, "#", `&dir=${encodeURIComponent("My files/many")}&limit=30${after ? `&after=${after}` : ""}`)).json;
+    found.push(...page.results.map((r) => r.path));
+    after = page.next;
+  }
+  assert.equal(new Set(found).size, 17, "a search pages through them the same way");
+  for (const one of many) assert.equal((await call(`/api/spaces/${one.id}`, { method: "DELETE", token: PAT.token, device: "d-pat" })).json.kept, true);
+
+  // A shared document that never got its document — the Mac sharing it never finished — is erased a day on.
+  const stub = (await share(PAT.token, { name: "Never filled", kind: "document" })).json.space;
+  const sweep = async () => {
+    const log = console.log;
+    console.log = () => {};
+    try {
+      await worker.scheduled({ cron: "17 3 * * *", scheduledTime: Date.now() }, env, { waitUntil() {} });
+    } finally {
+      console.log = log;
+    }
+  };
+  await sweep();
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id = ?", stub.id), 1, "made today, it may yet be filled");
+  db.run("UPDATE spaces SET created_at = created_at - ? WHERE id IN (?, ?)", 2 * DAY, stub.id, doc.id);
+  await sweep();
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id = ?", stub.id), 0);
+  assert.ok(!fake.store.has(`spaces/${stub.id}/manifest.json`));
+  assert.equal(db.value("SELECT COUNT(*) FROM spaces WHERE id = ?", doc.id), 1, "one that holds its document is left alone, however old");
 });
 
 await test("find: a link's ids lead an agent to the path its person names — and every page it cannot open is one answer", async () => {
@@ -6048,8 +6524,8 @@ await test("find: a link's ids lead an agent to the path its person names — an
   const find = (api, file, space = "", workspace = ws) =>
     api(`/api/agent/find?workspace=${workspace}&space=${space}&file=${file}`);
   assert.equal((await put(pat, "Library/Linked/shared", "# Shared\n")).status, 201);
-  assert.equal((await put(pat, "Restricted/Deals/linked", "# Deal\n")).status, 201);
-  assert.equal((await put(pat, "Private/linked", "# Mine\n")).status, 201);
+  assert.equal((await put(pat, "My files/Deals/linked", "# Deal\n")).status, 201);
+  assert.equal((await put(pat, "My files/linked", "# Mine\n")).status, 201);
   const [shared] = entryAt(storedManifest(), "Linked/shared.md");
   const [deal] = entryAt(spaceManifest(DEALS.id), "linked.md");
   const [mine] = entryAt(spaceManifest(privateOf(PAT)), "linked.md");
@@ -6057,9 +6533,9 @@ await test("find: a link's ids lead an agent to the path its person names — an
   // What a link names is in a document's info, and leads back to it.
   const linkTo = async (api, path) => (await api(docUrl(path, "", "&info=1"))).json.linkTo;
   assert.deepEqual(await linkTo(alice, "Library/Linked/shared"), { workspace: ws, space: "", file: shared });
-  assert.deepEqual(await linkTo(quinn, "Restricted/Deals/linked"), { workspace: ws, space: DEALS.id, file: deal });
-  assert.deepEqual(await linkTo(pat, "Private/linked"), { workspace: ws, space: privateOf(PAT), file: mine });
-  for (const [api, path] of [[alice, "Library/Linked/shared"], [quinn, "Restricted/Deals/linked"], [pat, "Private/linked"]]) {
+  assert.deepEqual(await linkTo(quinn, "Shared with me/Deals/linked"), { workspace: ws, space: DEALS.id, file: deal });
+  assert.deepEqual(await linkTo(pat, "My files/linked"), { workspace: ws, space: privateOf(PAT), file: mine });
+  for (const [api, path] of [[alice, "Library/Linked/shared"], [quinn, "Shared with me/Deals/linked"], [pat, "My files/Deals/linked"], [pat, "My files/linked"]]) {
     const { space, file } = await linkTo(api, path);
     assert.deepEqual((await find(api, file, space)).json, { path }, `${path} round-trips`);
   }
@@ -6071,16 +6547,17 @@ await test("find: a link's ids lead an agent to the path its person names — an
 
   // A document as the tree names it, in the section the link says.
   assert.deepEqual((await find(alice, shared)).json, { path: "Library/Linked/shared" });
-  assert.deepEqual((await find(quinn, deal, DEALS.id)).json, { path: "Restricted/Deals/linked" });
-  assert.deepEqual((await find(pat, mine, privateOf(PAT))).json, { path: "Private/linked" });
+  assert.deepEqual((await find(quinn, deal, DEALS.id)).json, { path: "Shared with me/Deals/linked" }, "as the person asking names it");
+  assert.deepEqual((await find(pat, deal, DEALS.id)).json, { path: "My files/Deals/linked" });
+  assert.deepEqual((await find(pat, mine, privateOf(PAT))).json, { path: "My files/linked" });
   // A rename keeps the link.
   const moved = await pat("/api/agent/move", { method: "POST", body: { from: "Library/Linked/shared", to: "Library/Linked/renamed" } });
   assert.equal(moved.status, 200, moved.text);
   assert.equal((await find(alice, shared)).json.path, "Library/Linked/renamed");
 
-  // An id is looked for in every section its person is in, the one the link
-  // names first: a link that names the wrong one still finds its file.
-  assert.deepEqual((await find(pat, deal)).json, { path: "Restricted/Deals/linked" });
+  // An id is looked for in every section its person can open, the one the
+  // link names first: a link that names the wrong one still finds its file.
+  assert.deepEqual((await find(pat, deal)).json, { path: "My files/Deals/linked" });
 
   // Somebody else's section, a page gone, a page never made and another
   // workspace: one answer, which names none of them.
@@ -6097,11 +6574,11 @@ await test("find: a link's ids lead an agent to the path its person names — an
 
   // A move to another section keeps the id, so the link from before it
   // finds the file where it went — for whoever can open it there.
-  const across = await pat("/api/agent/move", { method: "POST", body: { from: "Library/Linked/renamed", to: "Restricted/Deals/" } });
+  const across = await pat("/api/agent/move", { method: "POST", body: { from: "Library/Linked/renamed", to: "My files/Deals/" } });
   assert.equal(across.status, 200, across.text);
-  assert.deepEqual((await find(quinn, shared)).json, { path: "Restricted/Deals/renamed" });
-  assert.equal((await find(alice, shared)).status, 404, "Alice isn't in Deals");
-  assert.equal((await pat(docUrl("Restricted/Deals/renamed"), { method: "DELETE" })).status, 200);
+  assert.deepEqual((await find(quinn, shared)).json, { path: "Shared with me/Deals/renamed" });
+  assert.equal((await find(alice, shared)).status, 404, "Deals is not shared with Alice");
+  assert.equal((await pat(docUrl("My files/Deals/renamed"), { method: "DELETE" })).status, 200);
   assert.equal((await find(quinn, shared)).status, 404, "deleted, it is found nowhere");
 
   // What is not an id is a usage mistake, not a missing page.
@@ -6124,8 +6601,8 @@ await test("links: an agent's write gives each link to a document its record —
   const [pat, alice] = [as(PAT_BOT), as(ALICE_BOT)];
   for (const [p, text] of [
     ["Library/Links/goal", "# Goal\n"],
-    ["Restricted/Deals/deal", "# Deal\n"],
-    ["Private/mine", "# Mine\n"],
+    ["My files/Deals/deal", "# Deal\n"],
+    ["My files/mine", "# Mine\n"],
   ]) {
     const made = await put(pat, p, text);
     assert.equal(made.status, 201, `${p}: ${made.text}`);
@@ -6135,7 +6612,7 @@ await test("links: an agent's write gives each link to a document its record —
   const [mine] = entryAt(spaceManifest(privateOf(PAT)), "mine.md");
 
   const hub =
-    "# Hub\n\nSee [goal](goal.md), [the deal](../../Restricted/Deals/deal.md), [mine](../../Private/mine.md),\n" +
+    "# Hub\n\nSee [goal](goal.md), [the deal](<../../My files/Deals/deal.md>), [mine](<../../My files/mine.md>),\n" +
     "[nowhere](gone.md), [the web](https://example.com/) and [this](#hub).\n";
   const wrote = await put(pat, "Library/Links/hub", hub);
   assert.equal(wrote.status, 201, wrote.text);
@@ -6143,8 +6620,8 @@ await test("links: an agent's write gives each link to a document its record —
   assert.deepEqual(
     linkRecordsOf(textAt("Links/hub.meta.jsonl")),
     [
-      { id: "../../Private/mine.md", file: mine },
-      { id: "../../Restricted/Deals/deal.md", file: deal },
+      { id: "../../My files/Deals/deal.md", file: deal },
+      { id: "../../My files/mine.md", file: mine },
       { id: "goal.md", file: target },
     ],
     "a record for each link to a document Pat can open, whatever its section; none for one that opens nothing, the web or a heading",
@@ -6153,7 +6630,7 @@ await test("links: an agent's write gives each link to a document its record —
   // Renamed and moved: a read says where each is now, for whoever can open it.
   for (const [from, to] of [
     ["Library/Links/goal", "Library/Other/renamed"],
-    ["Restricted/Deals/deal", "Restricted/Deals/deal-2"],
+    ["My files/Deals/deal", "My files/Deals/deal-2"],
   ]) {
     assert.equal((await pat("/api/agent/move", { method: "POST", body: { from, to } })).status, 200);
   }
@@ -6161,7 +6638,7 @@ await test("links: an agent's write gives each link to a document its record —
   assert.equal(asPat.status, 200);
   assert.equal(
     asPat.text,
-    "# Hub\n\nSee [renamed](../Other/renamed.md), [the deal](../../Restricted/Deals/deal-2.md), [mine](../../Private/mine.md),\n" +
+    "# Hub\n\nSee [renamed](../Other/renamed.md), [the deal](<../../My files/Deals/deal-2.md>), [mine](<../../My files/mine.md>),\n" +
       "[nowhere](gone.md), [the web](https://example.com/) and [this](#hub).\n",
     "a named link says its document's name now; words of the author's own stay",
   );
@@ -6169,7 +6646,7 @@ await test("links: an agent's write gives each link to a document its record —
   const asAlice = await alice(docUrl("Library/Links/hub"));
   assert.equal(
     asAlice.text,
-    "# Hub\n\nSee [renamed](../Other/renamed.md), [the deal](../../Restricted/Deals/deal.md), [mine](../../Private/mine.md),\n" +
+    "# Hub\n\nSee [renamed](../Other/renamed.md), [the deal](<../../My files/Deals/deal.md>), [mine](<../../My files/mine.md>),\n" +
       "[nowhere](gone.md), [the web](https://example.com/) and [this](#hub).\n",
     "what Alice cannot open is as stored: neither its new name nor where it went",
   );
@@ -6186,21 +6663,21 @@ await test("links: an agent's write gives each link to a document its record —
   assert.equal(again.status, 200, again.text);
   assert.equal(
     textAt("Links/hub.md"),
-    "# Hub\n\nSee [renamed](../Other/renamed.md), [the deal](../../Restricted/Deals/deal.md), [mine](../../Private/mine.md),\n" +
+    "# Hub\n\nSee [renamed](../Other/renamed.md), [the deal](<../../My files/Deals/deal.md>), [mine](<../../My files/mine.md>),\n" +
       "[nowhere](gone.md), [the web](https://example.com/) and [this](#hub).\n\nA new line.\n",
   );
   assert.deepEqual(linkRecordsOf(textAt("Links/hub.meta.jsonl")), [
-    { id: "../../Private/mine.md", file: mine },
-    { id: "../../Restricted/Deals/deal.md", file: deal },
+    { id: "../../My files/Deals/deal.md", file: deal },
+    { id: "../../My files/mine.md", file: mine },
     { id: "../Other/renamed.md", file: target },
   ]);
   assert.equal((await pat(docUrl("Library/Links/hub"))).text, back, "and Pat reads what Pat wrote");
 
   // Words the agent changed are its own, wherever the link leads.
-  const reworded = back.replace("[the deal](../../Restricted/Deals/deal-2.md)", "[our deal](../../Restricted/Deals/deal-2.md)");
+  const reworded = back.replace("[the deal](<../../My files/Deals/deal-2.md>)", "[our deal](<../../My files/Deals/deal-2.md>)");
   const rev2 = Number((await pat(docUrl("Library/Links/hub"))).headers.get("x-doklin-rev"));
   assert.equal((await pat(docUrl("Library/Links/hub"), { method: "PUT", body: reworded, headers: { "if-rev": String(rev2) } })).status, 200);
-  assert.ok(textAt("Links/hub.md").includes("[our deal](../../Restricted/Deals/deal.md)"), "its words, written back where it was");
+  assert.ok(textAt("Links/hub.md").includes("[our deal](<../../My files/Deals/deal.md>)"), "its words, written back where it was");
 
   // A dry run says what would happen and writes nothing.
   const before = etagNow();
@@ -6215,7 +6692,7 @@ await test("links: a link written before records gets one by its path only into 
   const [target] = entryAt(storedManifest(), "Other/renamed.md");
   const [mine] = entryAt(spaceManifest(privateOf(PAT)), "mine.md");
   await macWrite((m, putFile) => {
-    putFile("Links/old.md", "# Old\n\nBack to [hub](hub.md), and [mine](../../Private/mine.md).\n");
+    putFile("Links/old.md", "# Old\n\nBack to [hub](hub.md), and [mine](<../../My files/mine.md>).\n");
     putFile("Links/marked.md", "# Marked\n\n{==See [renamed](../Other/goal.md)==}{>>#c1abcd<<} first.\n");
     putFile(
       "Links/marked.meta.jsonl",
@@ -6233,7 +6710,7 @@ await test("links: a link written before records gets one by its path only into 
     [{ id: "hub.md", file: hub }],
     "into Library, by its path; into a Private from Library, by its path no longer: on another device it is another person's",
   );
-  assert.ok(textAt("Links/old.md").includes("[mine](../../Private/mine.md)"));
+  assert.ok(textAt("Links/old.md").includes("[mine](<../../My files/mine.md>)"));
   assert.ok(!linkRecordsOf(textAt("Links/old.meta.jsonl")).some((r) => r.file === mine));
 
   // The thread's words hold a link the read shows where it goes now; written
@@ -6254,7 +6731,7 @@ await test("links: a link written before records gets one by its path only into 
 
 await test("links: what a document links to and what links to it — as its agent's person can open them; one they can't is said to be closed, and one they can't read is not counted", async () => {
   const [pat, alice] = [as(PAT_BOT), as(ALICE_BOT)];
-  assert.equal((await put(pat, "Private/notes/ref", "# Ref\n\nAbout [renamed](../../Library/Other/renamed.md).\n")).status, 201);
+  assert.equal((await put(pat, "My files/notes/ref", "# Ref\n\nAbout [renamed](../../Library/Other/renamed.md).\n")).status, 201);
 
   const fromPat = await pat(linksUrl("Library/Links/hub", "&from=1"));
   assert.equal(fromPat.status, 200, fromPat.text);
@@ -6262,8 +6739,8 @@ await test("links: what a document links to and what links to it — as its agen
     path: "Library/Links/hub",
     from: [
       { words: "renamed", path: "Library/Other/renamed" },
-      { words: "our deal", path: "Restricted/Deals/deal-2" },
-      { words: "mine", path: "Private/mine" },
+      { words: "our deal", path: "My files/Deals/deal-2" },
+      { words: "mine", path: "My files/mine" },
       { words: "nowhere", closed: true },
     ],
   });
@@ -6279,23 +6756,23 @@ await test("links: what a document links to and what links to it — as its agen
   assert.equal(toPat.status, 200, toPat.text);
   assert.deepEqual(toPat.json, {
     path: "Library/Other/renamed",
-    to: [{ path: "Library/Links/hub" }, { path: "Library/Links/marked" }, { path: "Private/notes/ref" }],
+    to: [{ path: "Library/Links/hub" }, { path: "Library/Links/marked" }, { path: "My files/notes/ref" }],
   });
   assert.deepEqual((await alice(linksUrl("Library/Other/renamed", "&to=1"))).json.to, [{ path: "Library/Links/hub" }, { path: "Library/Links/marked" }], "Pat's Private is neither listed nor counted");
   assert.deepEqual((await pat(linksUrl("Library/Links/hub", "&to=1"))).json.to, [{ path: "Library/Links/old" }], "a link without a record, by its path into Library");
-  assert.deepEqual((await pat(linksUrl("Private/mine", "&to=1"))).json.to, [{ path: "Library/Links/hub" }]);
+  assert.deepEqual((await pat(linksUrl("My files/mine", "&to=1"))).json.to, [{ path: "Library/Links/hub" }]);
 
   // With neither flag, both.
-  const both = (await pat(linksUrl("Restricted/Deals/deal-2"))).json;
-  assert.deepEqual(both, { path: "Restricted/Deals/deal-2", to: [{ path: "Library/Links/hub" }], from: [] });
+  const both = (await pat(linksUrl("My files/Deals/deal-2"))).json;
+  assert.deepEqual(both, { path: "My files/Deals/deal-2", to: [{ path: "Library/Links/hub" }], from: [] });
 
   // A document its person cannot open is one that does not exist.
-  assert.equal((await alice(linksUrl("Restricted/Deals/deal-2"))).status, 404);
+  assert.equal((await alice(linksUrl("My files/Deals/deal-2"))).status, 404);
   assert.equal((await pat(linksUrl("Library/Links/nothing"))).status, 404);
   assert.equal((await pat(linksUrl("Links/hub"))).status, 400, "a path names its section");
 
   // The index follows what the documents say.
-  assert.equal((await pat(docUrl("Private/notes/ref"), { method: "DELETE" })).status, 200);
+  assert.equal((await pat(docUrl("My files/notes/ref"), { method: "DELETE" })).status, 200);
   assert.deepEqual((await pat(linksUrl("Library/Other/renamed", "&to=1"))).json.to, [{ path: "Library/Links/hub" }, { path: "Library/Links/marked" }]);
   assert.ok(db.value("SELECT COUNT(*) FROM links WHERE target = ?", entryAt(storedManifest(), "Other/renamed.md")[0]) >= 2);
 });
@@ -6310,11 +6787,11 @@ await test("links: a public page follows a link with a record to its document's 
   await macWrite((m, putFile) => {
     putFile(
       "Links/page.md",
-      `# Page\n\n[goal](../Other/goal.md#top), [the deal](../../Restricted/Deals/deal.md), [hub](hub.md), [copied](${copied}) and [another](${elsewhere}).\n`,
+      `# Page\n\n[goal](../Other/goal.md#top), [the deal](<../../My files/Deals/deal.md>), [hub](hub.md), [copied](${copied}) and [another](${elsewhere}).\n`,
     );
     putFile(
       "Links/page.meta.jsonl",
-      sidecar({ t: "link", id: "../../Restricted/Deals/deal.md", file: deal }, { t: "link", id: "../Other/goal.md", file: target }),
+      sidecar({ t: "link", id: "../../My files/Deals/deal.md", file: deal }, { t: "link", id: "../Other/goal.md", file: target }),
     );
   });
   for (const [p, slug] of [["Library/Links/page", "linkpage"], ["Library/Other/renamed", "renamedpage"]]) {
@@ -6331,8 +6808,8 @@ await test("links: a public page follows a link with a record to its document's 
 
   // A page in a restricted folder leads into Library too: its page is
   // drawn from both trees, and cached under both manifests.
-  assert.equal((await put(pat, "Restricted/Deals/brief", "# Brief\n\nRead [renamed](../../Library/Other/renamed.md) first.\n")).status, 201);
-  assert.equal((await pat("/api/agent/pages", { method: "PUT", body: { path: "Restricted/Deals/brief", slug: "dealbrief" } })).status, 201);
+  assert.equal((await put(pat, "My files/Deals/brief", "# Brief\n\nRead [renamed](../../Library/Other/renamed.md) first.\n")).status, 201);
+  assert.equal((await pat("/api/agent/pages", { method: "PUT", body: { path: "My files/Deals/brief", slug: "dealbrief" } })).status, 201);
   assert.ok((await pub("/dealbrief")).text.includes('<a href="/renamedpage">renamed</a>'));
   assert.equal((await pat("/api/agent/move", { method: "POST", body: { from: "Library/Other/renamed", to: "Library/Other/final" } })).status, 200);
   assert.ok((await pub("/dealbrief")).text.includes('<a href="/renamedpage">final</a>'), "a rename in Library is on the page at once");
@@ -6351,13 +6828,15 @@ await test("sections: an agent goes with its person — removed from the workspa
   assert.equal((await as(PAT_BOT)("/api/agent/me")).status, 200);
   assert.ok(!(await call("/api/auth/agents", { token: OWNER })).json.agents.some((a) => a.id === QUINN_BOT.id));
 
-  // Invited again she is the same person, with her Private — and no agents:
+  // Invited again she is the same person, with her My files — and no agents:
   // one is connected again by its person.
   const back = await joinAs("quinn@example.com", "Quinn", "QQQQQQQQQQQQQQQQQQQ2", "d-quinn");
   assert.equal(back.member.id, QUINN.member.id);
   assert.deepEqual((await call("/api/auth/agents", { token: back.token, device: "d-quinn" })).json.agents, []);
-  // Pat is in Quinn's Deals still; Quinn is in neither until somebody adds her.
-  assert.deepEqual((await as(PAT_BOT)("/api/agent/me")).json.sections, ["Library", "Private", "Restricted/Deals", "Restricted/Deals (Quinn)"]);
+  // What Quinn shared with Pat is his still, and what she shared is hers again; what Pat shared with her is not, until he shares it again.
+  assert.deepEqual((await as(PAT_BOT)("/api/agent/me")).json.sections, ["Library", "My files", "Shared with me"]);
+  const hers = (await call("/api/spaces", { token: back.token, device: "d-quinn" })).json.spaces.map((x) => x.id).sort();
+  assert.deepEqual(hers, [privateOf(QUINN), DEALS_QUINN.id].sort());
 });
 
 /* ---------- What the account may spend ---------- */
@@ -6786,7 +7265,7 @@ await test("web: a browser's sign-in is answered on /api/web and the reads a bro
   const m = await sharedManifest();
   const [fid, file] = Object.entries(m.files)[0];
   const mine = await browser("/api/spaces/private", { method: "PUT", cookie: WEB });
-  assert.equal(mine.status, 200, "its person's own Private, made on first asking");
+  assert.equal(mine.status, 200, "its person's own My files, made on first asking");
   const space = mine.json.space.id;
 
   for (const [path, method, body] of [
@@ -6822,7 +7301,6 @@ await test("web: a browser's sign-in is answered on /api/web and the reads a bro
     ["/api/auth/recover", "POST", { email: "mallory@example.com" }],
     ["/api/auth/join", "GET"],
     ["/api/spaces", "GET"],
-    [`/api/spaces/${space}`, "PATCH", { name: "Mine" }],
     [`/api/spaces/${space}/versions/index`, "GET"],
     ["/api/pages/notes", "PUT", {}],
     ["/api/admin/wipe", "POST", { confirm: "wipe" }],
@@ -6978,109 +7456,165 @@ await test("web: people, devices and agents are a browser's too, by its person's
   assert.equal(db.value("SELECT COUNT(*) FROM agents WHERE member_id = ?", them), 0, "and their agents");
 });
 
-await test("web: restricted folders are a browser's too — one is made, people are put in and taken out, a folder of the workspace becomes one in parts, and it is deleted", async () => {
-  const save = (path, body) => browser(`/api/web/doc?path=${encodeURIComponent(path)}`, { method: "PUT", cookie: WEB, body });
+await test("web: sharing is a browser's too — a folder of My files is shared where it is, its files carried to the share in parts; a document on its own; people put on and taken off; renamed, deleted and restored", async () => {
+  const mine = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  const save = (path, body, space = mine) => browser(`/api/web/doc?space=${space}&path=${encodeURIComponent(path)}`, { method: "PUT", cookie: WEB, body });
   const move = (body) => browser("/api/web/move", { method: "POST", cookie: WEB, body });
+  const mount = (id, body, space = mine) => browser(`/api/web/mount?space=${space}&id=${id}`, { method: "PUT", cookie: WEB, body });
+  const manifestOf = async (space) => (await browser(`/api/spaces/${space}/manifest`, { cookie: WEB })).json;
   const me = (await browser("/api/meta", { cookie: WEB })).json.you.memberId;
   const other = (await call("/api/meta", { token: MEMBER })).json.you.memberId;
 
-  // Made from a browser, by the route a Mac calls: its maker is in it.
-  const made = await browser("/api/spaces", { method: "POST", cookie: WEB, body: { name: "Board" } });
-  assert.equal(made.status, 201, made.text);
-  const board = made.json.space;
-  assert.deepEqual([board.kind, board.name, board.members], ["restricted", "Board", [me]]);
-  const at = `/api/spaces/${board.id}`;
-  assert.ok((await browser("/api/poll", { cookie: WEB })).json.spaces.some((s) => s.id === board.id), "the poll lists it from then on");
-  assert.equal((await call(`${at}/manifest`, { token: MEMBER })).status, 404, "and to everybody else it does not exist");
-
-  // Who is in it: anyone in a folder adds and takes out, from a browser as from a Mac.
-  const added = await browser(`${at}/members/${other}`, { method: "PUT", cookie: WEB });
-  assert.deepEqual([added.status, added.json.space.members], [200, [me, other].sort()]);
-  assert.equal((await call(`${at}/manifest`, { token: MEMBER })).status, 200);
-  assert.equal((await browser(`${at}/members/m-00000000`, { method: "PUT", cookie: WEB })).status, 404, "only people here");
-  assert.equal((await browser(`${at}/members/${other}`, { method: "DELETE", cookie: WEB })).status, 204);
-  assert.equal((await call(`${at}/manifest`, { token: MEMBER })).status, 404);
-  const last = await browser(`${at}/members/${me}`, { method: "DELETE", cookie: WEB });
-  assert.equal(last.status, 409, "never left with nobody in it");
-  assert.ok(/delete it, or add somebody first/.test(last.json.error), last.json.error);
-  const mine = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
-  assert.equal((await browser(`/api/spaces/${mine}`, { method: "DELETE", cookie: WEB })).status, 409, "a Private is not deleted, from a browser either");
-
-  // A folder of the workspace becomes it. Twenty notes with their comments
-  // and two more beneath: 42 files, where one request carries 16.
+  // A folder of My files. Twenty notes with their comments and two more
+  // beneath: 42 files, where one request carries 16.
   for (let i = 0; i < 20; i += 1) {
-    const name = `board/n${String(i).padStart(2, "0")}.md`;
+    const name = `Work/board/n${String(i).padStart(2, "0")}.md`;
     assert.equal((await save(name, { md: { text: `# ${i}\n`, ifRev: null }, meta: { text: SIDECAR("m1", name), ifRev: null } })).status, 200);
   }
-  for (const name of ["board/Sub/Deep.md", "board/Sub/Deeper/Last.md"]) {
+  for (const name of ["Work/board/Sub/Deep.md", "Work/board/Sub/Deeper/Last.md", "Work/other.md"]) {
     assert.equal((await save(name, { md: { text: `# ${name}\n`, ifRev: null } })).status, 200);
   }
-  const page = await browser("/api/web/pages", { method: "PUT", cookie: WEB, body: { path: "board/n19.md", kind: "document", slug: "board-minutes" } });
+  const page = await browser("/api/web/pages", { method: "PUT", cookie: WEB, body: { space: mine, path: "Work/board/n19.md", kind: "document", slug: "board-minutes" } });
   assert.equal(page.status, 201, page.text);
-  const site = await browser("/api/web/pages", { method: "PUT", cookie: WEB, body: { path: "board/Sub", kind: "folder", slug: "board-papers" } });
-  assert.equal(site.status, 201, site.text);
-  const before = await sharedManifest();
-  const fids = Object.keys(before.files).filter((fid) => before.files[fid].path.startsWith("board/"));
+  const before = await manifestOf(mine);
+  const fids = Object.keys(before.files).filter((fid) => before.files[fid].path.startsWith("Work/board/"));
   assert.equal(fids.length, 42);
 
-  const ask = { from: { path: "board" }, to: { space: board.id, path: "" }, kind: "folder" };
+  // Shared from a browser, by the route a Mac calls: it sits in My files, shared with whoever was named.
+  const id = shareId();
+  const made = await browser("/api/spaces", { method: "POST", cookie: WEB, body: { id, kind: "folder", name: "board", parent: mine, dir: "Work", was: "Work/board", members: [other] } });
+  assert.equal(made.status, 201, made.text);
+  const board = made.json.space;
+  assert.deepEqual([board.kind, board.name, board.parent, board.owner, board.members, board.above], ["folder", "board", mine, me, [other], [me]]);
+  const at = `/api/spaces/${board.id}`;
+  assert.ok((await browser("/api/poll", { cookie: WEB })).json.spaces.some((x) => x.id === board.id), "the poll lists it from then on");
+  assert.equal((await call(`${at}/manifest`, { token: MEMBER })).status, 200, "the person it is shared with opens it");
+  assert.equal((await call(`${at}/manifest`, { token: KIM.token, device: "d-kim" })).status, 404, "and to everybody else it does not exist");
+
+  // Where it sits is My files' manifest's to say, from the moment it is shared: the folder its item is
+  // in, and where the item was. A browser says it again when the item moves inside My files.
+  assert.deepEqual((await manifestOf(mine)).mounts, { [board.id]: { dir: "Work", rev: 1, by: me, was: "Work/board" } });
+  const at0 = (await browser(`/api/spaces/${mine}/manifest`, { cookie: WEB })).headers.get("x-manifest-etag");
+  const same = await mount(board.id, { dir: "Work" });
+  assert.deepEqual([same.status, same.json.etag], [200, at0], "said again, nothing is written");
+  const elsewhere = await mount(board.id, { dir: "Elsewhere" });
+  assert.deepEqual([(await manifestOf(mine)).mounts[board.id].dir, (await manifestOf(mine)).mounts[board.id].rev, elsewhere.json.over], ["Elsewhere", 2, at0]);
+  assert.equal((await mount(board.id, { dir: "Work" })).status, 200);
+  for (const [bad, why] of [[{ dir: "../up" }, "not a folder"], [{ dir: 7 }, "not a path"], [{ was: "" }, "nowhere it was"]]) {
+    const refused = await browser("/api/spaces", { method: "POST", cookie: WEB, body: { id: shareId(), kind: "folder", name: "x", parent: mine, ...bad } });
+    assert.equal(refused.status, 400, why);
+  }
+  for (const [share, body, status, why] of [
+    [board.id, { dir: "../up" }, 400, "not a folder of the section"],
+    [board.id, {}, 400, "no folder said"],
+    ["s-00000000", { dir: "" }, 404, "no such share"],
+    [mine, { dir: "" }, 400, "My files is no share"],
+  ]) {
+    assert.equal((await mount(share, body)).status, status, why);
+  }
+  assert.equal((await mount(board.id, { dir: "" }, board.id)).status, 404, "it sits in My files, not in itself");
+  assert.equal((await browser(`/api/web/mount?id=${board.id}`, { method: "PUT", cookie: WEB, body: { dir: "" } })).status, 404, "nor in Library");
+
+  // Its files are carried to it — from the section it sits in to its own top.
+  const ask = { from: { space: mine, path: "Work/board" }, to: { space: board.id, path: "" }, kind: "folder" };
   const parts = [];
   for (let left = 42; left > 0; ) {
     const part = await move(ask);
     assert.equal(part.status, 200, part.text);
-    assert.deepEqual([part.json.kind, part.json.from, part.json.to], ["folder", "board", ""]);
+    assert.deepEqual([part.json.kind, part.json.from, part.json.to], ["folder", "Work/board", ""]);
     parts.push(part.json.files);
     left -= part.json.files;
     assert.equal(part.json.remaining ?? 0, left, "each answer says how many files are still where they were");
-    // Whole documents: no note is ever in one section and its comments in the other.
-    const here = Object.values((await sharedManifest()).files).map((f) => f.path).filter((x) => x.startsWith("board/"));
+    // Whole documents: no note is ever in one section and its comments in the other. And stopped
+    // here, what is not yet carried is where only its owner reads it.
+    const here = Object.values((await manifestOf(mine)).files).map((f) => f.path).filter((x) => x.startsWith("Work/board/"));
     for (const x of here.filter((x) => x.endsWith(".meta.jsonl"))) assert.ok(here.includes(x.replace(/\.meta\.jsonl$/, ".md")), x);
     assert.equal(here.length, left);
   }
   assert.deepEqual(parts, [16, 16, 10], "sixteen files a request, by path");
-  let shared = await sharedManifest();
-  assert.equal(Object.values(shared.files).filter((f) => f.path.startsWith("board/")).length, 0);
-  for (const fid of fids) assert.equal(shared.tombstones[fid].to, board.id, "each with the tombstone that says where it went");
-  let there = (await browser(`${at}/manifest`, { cookie: WEB })).json;
+  let own = await manifestOf(mine);
+  assert.deepEqual(Object.values(own.files).map((f) => f.path), ["Work/other.md"], "what was not in the folder stays My files' own");
+  for (const fid of fids) assert.equal(own.tombstones[fid].to, board.id, "each with the tombstone that says where it went");
+  let there = await manifestOf(board.id);
   assert.deepEqual(
     Object.values(there.files).map((f) => f.path).filter((x) => !x.endsWith(".meta.jsonl")).sort(),
     [...Array.from({ length: 20 }, (_, i) => `n${String(i).padStart(2, "0")}.md`), "Sub/Deep.md", "Sub/Deeper/Last.md"].sort(),
-    "what was in the folder is what is in the section, at its top",
+    "what was in the folder is what is in the share, at its top",
   );
   assert.equal(Object.values(there.files).filter((f) => f.path.endsWith(".meta.jsonl")).length, 20);
-  // Its pages keep their addresses, in the section they now belong to.
-  assert.ok(!shared.public?.["board-minutes"] && !shared.public?.["board-papers"]);
+  for (const fid of fids) assert.ok(there.files[fid], "every file under the id it had");
+  // Its page keeps its address, in the section it now belongs to.
+  assert.ok(!own.public?.["board-minutes"]);
   assert.equal(there.public["board-minutes"].path, "n19.md");
-  assert.equal(there.files[there.public["board-minutes"].file].path, "n19.md");
-  assert.deepEqual([there.public["board-papers"].kind, there.public["board-papers"].path], ["dir", "Sub"]);
   assert.equal((await move(ask)).status, 404, "and nothing is left to ask for");
 
-  // The top of a section is for a folder that comes from another one.
-  for (const [body, route] of [
-    [{ from: { space: board.id, path: "Sub" }, to: { space: board.id, path: "" }, kind: "folder" }, "move"],
-    [{ from: { path: "notes.md" }, to: { space: board.id, path: "" }, kind: "document" }, "move"],
-    [{ from: { space: board.id, path: "Sub" }, to: { path: "" }, kind: "folder" }, "copy"],
-    [{ from: { path: "" }, to: { space: board.id, path: "x" }, kind: "folder" }, "move"],
-  ]) {
-    const res = await browser(`/api/web/${route}`, { method: "POST", cookie: WEB, body });
-    assert.equal(res.status, 400, `${route} ${JSON.stringify(body)}: ${res.text}`);
-  }
-  // A folder moved back out, to a name: in parts as well, and nothing is lost.
-  const back = { from: { space: board.id, path: "Sub" }, to: { path: "papers" }, kind: "folder" };
+  // A folder that holds something shared moves, in its section, with it: the share sits where its folder now is.
+  const renamedFolder = await move({ from: { space: mine, path: "Work" }, to: { space: mine, path: "Office" }, kind: "folder" });
+  assert.equal(renamedFolder.status, 200, renamedFolder.text);
+  own = await manifestOf(mine);
+  assert.deepEqual([own.mounts[board.id].dir, own.mounts[board.id].rev, own.mounts[board.id].was], ["Office", 4, "Work/board"]);
+
+  // A document on its own: its section holds it and nothing else.
+  assert.equal((await save("Solo.md", { md: { text: "# Solo\n", ifRev: null }, meta: { text: SIDECAR("m1", "Solo.md"), ifRev: null } })).status, 200);
+  const solo = (await browser("/api/spaces", { method: "POST", cookie: WEB, body: { id: shareId(), kind: "document", name: "Solo", parent: mine, was: "Solo", members: [other] } })).json.space;
+  assert.deepEqual((await manifestOf(mine)).mounts[solo.id], { dir: "", rev: 1, by: me, was: "Solo" });
+  const carried = await move({ from: { space: mine, path: "Solo.md" }, to: { space: solo.id, path: "Solo.md" }, kind: "document" });
+  assert.equal(carried.status, 200, carried.text);
+  assert.deepEqual(Object.values((await manifestOf(solo.id)).files).map((f) => f.path).sort(), ["Solo.md", "Solo.meta.jsonl"]);
+  const second = await save("Second.md", { md: { text: "# Second\n", ifRev: null } }, solo.id);
+  assert.equal(second.status, 409, "nothing else goes in a shared document's section");
+  assert.match(second.json.error, /holds that document and nothing else/);
+  // The person it is shared with edits it, and renames it: the share is called what its file is.
+  const theirs = await call(`/api/spaces/${solo.id}/manifest`, { token: MEMBER });
+  const edited = JSON.parse(theirs.text);
+  for (const f of Object.values(edited.files)) f.path = f.path.replace(/^Solo/, "Duet");
+  edited.seq += 1;
+  const put = (body) => call(`/api/spaces/${solo.id}/manifest`, { method: "PUT", token: MEMBER, headers: { "x-base-etag": theirs.headers.get("x-manifest-etag") }, body });
+  // …and cannot take it out of its section: only the people of the folder it sits in move or delete it.
+  const emptied = await put({ ...edited, files: {} });
+  assert.equal(emptied.status, 409);
+  assert.match(emptied.json.error, /You can leave it instead/);
+  assert.equal((await put(edited)).status, 200);
+  assert.equal((await browser("/api/poll", { cookie: WEB })).json.spaces.find((x) => x.id === solo.id).name, "Duet");
+  assert.equal((await browser(`/api/spaces/${solo.id}`, { method: "PATCH", cookie: WEB, body: { name: "Trio" } })).status, 409, "a shared document is renamed by renaming its file");
+
+  // Who it is shared with: anyone on it adds and takes off, from a browser as from a Mac.
+  assert.equal((await browser(`${at}/members/m-00000000`, { method: "PUT", cookie: WEB })).status, 404, "only people here");
+  assert.equal((await browser(`${at}/members/${other}`, { method: "DELETE", cookie: WEB })).status, 204);
+  assert.equal((await call(`${at}/manifest`, { token: MEMBER })).status, 404);
+  assert.equal((await browser(`${at}/members/${me}`, { method: "DELETE", cookie: WEB })).status, 409, "its owner is not taken off");
+  const added = await browser(`${at}/members/${other}`, { method: "PUT", cookie: WEB });
+  assert.deepEqual([added.status, added.json.space.members], [200, [other]]);
+  // Renamed, a shared folder: its name is the share's own.
+  const renamed = await browser(at, { method: "PATCH", cookie: WEB, body: { name: "Board papers" } });
+  assert.deepEqual([renamed.status, renamed.json.space.name], [200, "Board papers"]);
+  assert.equal((await browser(`/api/spaces/${mine}`, { method: "DELETE", cookie: WEB })).status, 409, "My files is not deleted, from a browser either");
+
+  // A folder moved back out, to a name: nothing is lost.
+  const back = { from: { space: board.id, path: "Sub" }, to: { space: mine, path: "papers" }, kind: "folder" };
   const out = await move(back);
   assert.deepEqual([out.status, out.json.files, out.json.remaining], [200, 2, undefined], "a folder one request carries says nothing of parts");
-  shared = await sharedManifest();
-  assert.ok(fileAt(shared, "papers/Deep.md")[0] && fileAt(shared, "papers/Deeper/Last.md")[0]);
-  assert.deepEqual([shared.public["board-papers"].kind, shared.public["board-papers"].path], ["dir", "papers"], "its page with it");
+  own = await manifestOf(mine);
+  assert.ok(fileAt(own, "papers/Deep.md")[0] && fileAt(own, "papers/Deeper/Last.md")[0]);
 
-  // Deleted for everyone in it, from a browser.
+  // Deleted for everyone on it, from a browser: kept, and restored from one.
   const gone = await browser(at, { method: "DELETE", cookie: WEB });
-  assert.deepEqual([gone.status, gone.json.deleted, gone.json.remaining], [200, true, false]);
-  assert.deepEqual([...fake.store.keys()].filter((k) => k.startsWith(`spaces/${board.id}/`)), []);
+  assert.deepEqual([gone.status, gone.json], [200, { deleted: true, kept: true }]);
   assert.equal((await browser(`${at}/manifest`, { cookie: WEB })).status, 404);
-  assert.ok(!(await browser("/api/poll", { cookie: WEB })).json.spaces.some((s) => s.id === board.id));
-  assert.equal((await browser("/api/web/folder?path=papers", { method: "DELETE", cookie: WEB })).status, 200);
-  assert.equal((await browser("/api/web/pages?slug=board-papers", { method: "DELETE", cookie: WEB })).status, 200);
+  assert.equal((await pub("/board-minutes")).status, 404);
+  const listed = (await browser("/api/poll", { cookie: WEB })).json.spaces.find((x) => x.id === board.id);
+  assert.ok(listed.deletedAt > 0, "the poll says it can be restored");
+  const restored = await browser(`${at}/restore`, { method: "POST", cookie: WEB });
+  assert.deepEqual([restored.status, restored.json.space.members], [200, [other]]);
+  assert.equal((await pub("/board-minutes")).status, 200);
+  // One that holds nothing is erased: the document, once it is moved back out.
+  const outAgain = await move({ from: { space: solo.id, path: "Duet.md" }, to: { space: mine, path: "Duet.md" }, kind: "document" });
+  assert.equal(outAgain.status, 200, outAgain.text);
+  const erased = await browser(`/api/spaces/${solo.id}`, { method: "DELETE", cookie: WEB });
+  assert.deepEqual([erased.json.kept, erased.json.remaining], [false, false]);
+  assert.deepEqual([...fake.store.keys()].filter((k) => k.startsWith(`spaces/${solo.id}/`)), []);
+  assert.equal((await browser(at, { method: "DELETE", cookie: WEB })).json.kept, true);
+  assert.equal((await browser("/api/web/pages?slug=board-minutes", { method: "DELETE", cookie: WEB })).status, 404, "a deleted share's page is nobody's to stop: it answers nowhere");
 });
 
 await test("web: a note and its comments are saved in one manifest write, each over the revision that was read — and when either has moved on, neither is written", async () => {
@@ -7153,7 +7687,6 @@ await test("web: a note and its comments are saved in one manifest write, each o
   assert.equal((await save("browser/Page.html", { md: { text: "x", ifRev: null } })).status, 400, "an html page is not written here");
   assert.equal((await save("browser/First.meta.jsonl", { md: { text: "x", ifRev: null } })).status, 400, "the sidecar is saved as the document's comments");
   assert.equal((await save("browser/chart.png", { md: { text: "x", ifRev: null } })).status, 400, "only documents sync");
-  assert.equal((await save("Private/x.md", { md: { text: "x", ifRev: null } })).status, 409, "the shared workspace holds nothing under Private");
   assert.equal(await currentEtag(), empty.json.etag);
 
   // A section is named by its id, and its paths are its own.
@@ -7161,7 +7694,7 @@ await test("web: a note and its comments are saved in one manifest write, each o
   const priv = await save("Diary.md", { md: { text: "# Diary\n", ifRev: null } }, `&space=${space}`);
   assert.equal(priv.status, 200);
   const inSpace = (await call(`/api/spaces/${space}/manifest`, { token: OWNER })).json;
-  assert.equal(inSpace.files[priv.json.md.fid].path, "Diary.md", "as the space stores it: no Private/ in front");
+  assert.equal(inSpace.files[priv.json.md.fid].path, "Diary.md", "as the space stores it: no My files/ in front");
   assert.equal(fileAt(await sharedManifest(), "Diary.md")[0], null, "…and not in the shared workspace");
   assert.equal(db.value("SELECT etag FROM spaces WHERE id = ?", space), priv.json.etag, "the poll is told where the space's manifest is");
   assert.equal((await save("x.md", { md: { text: "x", ifRev: null } }, "&space=s-00000000")).status, 404, "a folder they are not in is no folder");

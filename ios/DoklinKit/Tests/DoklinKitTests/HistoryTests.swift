@@ -139,19 +139,20 @@ final class HistoryTests: XCTestCase {
 
         // Where it was, when that is free.
         let comments = rows[1]
-        XCTAssertEqual(comments.targets { _ in false }.map(\.path), ["/ws/Comments.md", "/ws/Comments.meta.jsonl"])
+        let inStore = { (path: String) in "/ws/\(path)" }
+        XCTAssertEqual(comments.targets(at: inStore) { _ in false }.map(\.path), ["/ws/Comments.md", "/ws/Comments.meta.jsonl"])
         // Beside it, one name for all its files, when something lives there now.
         var taken: Set<String> = ["/ws/Comments.md"]
         XCTAssertEqual(
-            comments.targets { taken.contains($0) }.map(\.path),
+            comments.targets(at: inStore) { taken.contains($0) }.map(\.path),
             ["/ws/Comments (restored).md", "/ws/Comments (restored).meta.jsonl"]
         )
         taken.insert("/ws/Comments (restored).meta.jsonl")
         XCTAssertEqual(
-            comments.targets { taken.contains($0) }.map(\.path),
+            comments.targets(at: inStore) { taken.contains($0) }.map(\.path),
             ["/ws/Comments (restored 2).md", "/ws/Comments (restored 2).meta.jsonl"]
         )
-        XCTAssertEqual(rows[2].targets { $0 == "/ws/pic.png" }.map(\.path), ["/ws/pic (restored).png"])
+        XCTAssertEqual(rows[2].targets(at: inStore) { $0 == "/ws/pic.png" }.map(\.path), ["/ws/pic (restored).png"])
     }
 
     @MainActor
@@ -162,21 +163,63 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(workspace.libraryStore, "/phone/Documents/Team/Library")
         XCTAssertEqual(device.stores(of: workspace), ["/phone/Documents/Team/Library"], "Library's, before the engine has listed any")
         XCTAssertEqual(workspace.storeName("/phone/Documents/Team/Library"), "Library")
-        XCTAssertEqual(workspace.storeName("/phone/Documents/Team/Private"), "Private")
+        XCTAssertEqual(workspace.storeName("/phone/Documents/Team/My files"), "My files")
         XCTAssertEqual(workspace.path("Ideas.md", in: "/phone/Documents/Team/Library"), "Library/Ideas.md")
-        XCTAssertEqual(workspace.path("Mine/plan.md", in: "/phone/Documents/Team/Private"), "Private/Mine/plan.md")
+        XCTAssertEqual(workspace.path("Mine/plan.md", in: "/phone/Documents/Team/My files"), "My files/Mine/plan.md")
 
         let deleted = RecentlyDeleted(workspace: workspace)
-        let row = DeletedDocument.group([DeletedFile(path: "Mine/plan.md", lastSeenMs: 5, hash: "p", size: 3)], store: "/phone/Documents/Team/Private")[0]
-        XCTAssertEqual(deleted.place(of: row), "Private/Mine")
+        let row = DeletedDocument.group([DeletedFile(path: "Mine/plan.md", lastSeenMs: 5, hash: "p", size: 3)], store: "/phone/Documents/Team/My files")[0]
+        XCTAssertEqual(deleted.place(of: row), "My files/Mine")
         let opened = deleted.open(row)
-        XCTAssertEqual(opened.path, "Private/Mine/plan.md")
-        XCTAssertEqual(opened.store, "/phone/Documents/Team/Private")
+        XCTAssertEqual(opened.path, "My files/Mine/plan.md")
+        XCTAssertEqual(opened.store, "/phone/Documents/Team/My files")
         XCTAssertEqual(opened.version.hash, "p")
         XCTAssertNil(opened.newer)
 
         let top = DeletedDocument.group([DeletedFile(path: "Ideas.md", lastSeenMs: 5, hash: "i", size: 3)], store: workspace.libraryStore)[0]
         XCTAssertEqual(deleted.place(of: top), "Library")
         XCTAssertEqual(deleted.open(top).path, "Library/Ideas.md", "it comes back into Library")
+    }
+
+    /// A shared folder's store is called by its folder, wherever that is; a
+    /// shared document's by the document, and holds its files alone.
+    @MainActor
+    func testWhatIsSharedKeepsAHistoryOfItsOwn() throws {
+        func space(_ id: String, _ kind: String, _ name: String, _ path: String) -> String {
+            """
+            {"id":"\(id)","kind":"\(kind)","name":"\(name)","path":"\(path)","by":"Ada","owner":"m-1","parent":"p-1","placed":true,
+             "members":[],"above":["m-1"],"deletedAt":null}
+            """
+        }
+        let json = """
+        {"root":"/phone/Team","domain":"d","endpoint":"https://d","wsId":"w-1","name":"Team","phase":"idle",
+         "lastSyncMs":1,"error":null,"pendingDeletes":0,"pendingAdds":0,
+         "usage":{"mode":"normal","cause":null,"today":0,"fleetToday":null,"cap":null,"plan":null,"resumesAt":null,"waiting":0,"liftable":false,"lifted":false},
+         "me":"Ada","meId":"m-1","can":[],"workerVersion":35,"public":[],"tags":[],"presence":[],"leases":[],
+         "spaces":[\(space("s-fin", "folder", "Finance", "My files/Work/Finance")),\(space("s-plan", "document", "Plan", "My files/Work/Plan (Dee)"))]}
+        """
+        let device = Workspaces(remembered: UserDefaults(suiteName: "doklin-history-\(UUID().uuidString)")!)
+        device.take([try JSONDecoder().decode(CloudStatus.self, from: Data(json.utf8))])
+        let workspace = device.workspace("/phone/Team")
+        let finance = "/phone/Team/My files/Work/Finance", plan = "/phone/Team/My files/Work/Plan (Dee)"
+        XCTAssertEqual(workspace.storeName(finance), "Finance")
+        XCTAssertEqual(workspace.storeName(plan), "Plan")
+        XCTAssertEqual(workspace.storeName("/phone/Team/My files"), "My files")
+        XCTAssertEqual(workspace.path("Q1/q.md", in: finance), "My files/Work/Finance/Q1/q.md")
+        // The document's store names its files as its section does; here they wear the name it has on this iPhone.
+        XCTAssertEqual(workspace.path("Plan.md", in: plan), "My files/Work/Plan (Dee).md")
+        XCTAssertEqual(workspace.path("Plan.meta.jsonl", in: plan), "My files/Work/Plan (Dee).meta.jsonl")
+        XCTAssertNotNil(workspace.documentShare(keptIn: plan))
+        XCTAssertNil(workspace.documentShare(keptIn: finance))
+
+        let page = DeletedDocument.group([DeletedFile(path: "Plan.html", lastSeenMs: 5, hash: "h", size: 3)], store: plan)[0]
+        let deleted = RecentlyDeleted(workspace: workspace)
+        XCTAssertEqual(deleted.place(of: page), "My files/Work")
+        XCTAssertEqual(deleted.open(page).path, "My files/Work/Plan (Dee).html")
+        XCTAssertEqual(
+            page.targets(at: { workspace.files.absolute(workspace.path($0, in: plan)) }) { _ in false }.map(\.path),
+            ["/phone/Team/My files/Work/Plan (Dee).html"],
+            "its page comes back beside it"
+        )
     }
 }

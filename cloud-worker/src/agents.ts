@@ -14,7 +14,7 @@
 //           Stored only as sha256(token), so revoking one is deleting one row.
 //
 // An agent belongs to the person who connected it, and sees what they see:
-// the shared workspace, their Private, the restricted folders they are in —
+// Library, their My files, what is shared with them —
 // asked of the same rows a person's own token is asked of, on every request.
 // Its permissions limit what it may do there; they never widen where.
 //

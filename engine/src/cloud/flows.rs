@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use super::space::RESERVED_DIRS;
+use super::space::Reach;
 use super::unit::{FileState, WorkspaceState};
 use super::manifest::{Manifest, ManifestFile};
 use super::remote::{Bound, Remote, RemoteError, WorkspaceRecord};
@@ -88,9 +88,9 @@ pub async fn seed_upload<R: Remote>(
     events: &Arc<dyn Events>,
     progress_root: &str,
 ) -> Result<WorkspaceState, FlowError> {
-    // `root` is the folder's Library, and what is under a reserved name at
-    // its top is in no section (`space::RESERVED_DIRS`).
-    let scan = scan_local(root, &RESERVED_DIRS).map_err(FlowError::Other)?;
+    // `root` is the folder's Library: all of it is Library's, and nothing in
+    // it is shared separately.
+    let scan = scan_local(root, &Reach::default()).map_err(FlowError::Other)?;
     let total = scan.len();
     let _ = std::fs::create_dir_all(state_dir.join("base"));
 

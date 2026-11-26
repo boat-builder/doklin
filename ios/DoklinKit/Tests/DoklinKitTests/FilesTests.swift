@@ -149,25 +149,56 @@ final class FilesTests: XCTestCase {
 
         try put("Archive/Old/b.md")
         XCTAssertThrowsError(try files.move(.folder("Archive"), into: "Archive/Old"))
-        let (path, _) = try files.move(.folder("Archive/Old"), into: "")
+        let (path, moved) = try files.move(.folder("Archive/Old"), into: "")
         XCTAssertEqual(path, "Old")
+        XCTAssertEqual(moved.map { "\($0.from) → \($0.to)" }, ["Archive/Old → Old"], "a folder is one move")
         XCTAssertTrue(files.exists("Old/b.md"))
     }
 
-    func testNoFolderAtTheTopOfLibraryHasASectionsName() throws {
+    func testAFolderInLibraryMayHaveAnyName() throws {
         try put("Library/Notes/a.md")
-        try put("Archive/Private/b.md")
-        for name in ["Library", "private", "Restricted"] {
-            XCTAssertThrowsError(try files.createFolder(in: "Library", named: name)) { error in
-                XCTAssertEqual(error.localizedDescription, "A folder in Library can't be called Library, Private or Restricted.")
-            }
-            XCTAssertThrowsError(try files.rename(.folder("Library/Notes"), to: name))
+        try put("Archive/My files/b.md")
+        for name in ["Library", "my files", "Shared with me", "Private"] {
+            XCTAssertEqual(try files.createFolder(in: "Library", named: name), "Library/\(name)")
         }
-        XCTAssertThrowsError(try files.move(.folder("Archive/Private"), into: "Library"))
-        XCTAssertFalse(files.exists("Library/Private"))
-        // Deeper, or in another section, the names mean nothing.
-        XCTAssertEqual(try files.createFolder(in: "Library/Notes", named: "Private"), "Library/Notes/Private")
-        XCTAssertEqual(try files.createFolder(in: "Private", named: "Library"), "Private/Library")
+        XCTAssertEqual(try files.rename(.folder("Library/Notes"), to: "Restricted").path, "Library/Restricted")
+        XCTAssertEqual(try files.move(.folder("Archive/My files"), into: "Library/Restricted").path, "Library/Restricted/My files")
+    }
+
+    func testACopyIsAThingOfItsOwnUnderTheFirstFreeName() throws {
+        try put("Shared with me/Budget/q1.md", "Q1\n")
+        try put("Shared with me/Budget/Deep/q2.md", "Q2\n")
+        try put("Shared with me/Budget/.doklin/space.json", "{}")
+        try put("Shared with me/Budget/Deep/.doklin/space.json", "{}")
+        try put("Shared with me/Memo.md", "Memo\n")
+        try put("Shared with me/Memo.html", "<p>Memo</p>")
+        try put("Shared with me/Memo.meta.jsonl", "{}\n")
+        try put("My files/Budget/mine.md")
+        try put("My files/memo.html")
+
+        // A folder, with all it holds but what says it is shared.
+        let (folder, written) = try files.copy(.folder("Shared with me/Budget"), into: "My files")
+        XCTAssertEqual(folder, "My files/Budget 2", "the name is taken")
+        XCTAssertEqual(written, ["My files/Budget 2"])
+        XCTAssertEqual(try files.text("My files/Budget 2/q1.md"), "Q1\n")
+        XCTAssertEqual(try files.text("My files/Budget 2/Deep/q2.md"), "Q2\n")
+        XCTAssertFalse(files.exists("My files/Budget 2/.doklin"), "a copy is shared with nobody")
+        XCTAssertFalse(files.exists("My files/Budget 2/Deep/.doklin"))
+        XCTAssertTrue(files.exists("Shared with me/Budget/q1.md"), "what was copied stays")
+
+        // A document, with its page and its comments, under one name: a page of that name is in the way.
+        let memo = try XCTUnwrap(try files.list("Shared with me").first { $0.path == "Shared with me/Memo.md" })
+        let (note, files3) = try files.copy(memo, into: "My files")
+        XCTAssertEqual(note, "My files/Memo 2.md")
+        XCTAssertEqual(files3, ["My files/Memo 2.md", "My files/Memo 2.html", "My files/Memo 2.meta.jsonl"])
+        XCTAssertEqual(try files.text("My files/Memo 2.html"), "<p>Memo</p>")
+        XCTAssertEqual(try files.copy(memo, into: "My files").path, "My files/Memo 3.md")
+
+        // Any other file keeps its extension.
+        try put("Shared with me/Budget/pic.png")
+        let picture = try XCTUnwrap(try files.list("Shared with me/Budget").first { $0.path.hasSuffix("pic.png") })
+        XCTAssertEqual(try files.copy(picture, into: "My files").path, "My files/pic.png")
+        XCTAssertEqual(try files.copy(picture, into: "My files").path, "My files/pic 2.png")
     }
 
     func testRemovingADocumentTakesWhatIsItsAlong() throws {
@@ -184,12 +215,12 @@ final class FilesTests: XCTestCase {
         try put("Library/a.md", "# A\n\nThe boat is blue.\r\nAnother line.\n")
         try put("Library/b.html", "<p>the boat</p>")
         try put("Library/Deep/c.md", "nothing here\nBOATS galore\n")
-        try put("Private/d.md", "My boat.\n")
+        try put("My files/d.md", "My boat.\n")
         try put("stray.md", "A boat in no section.\n")
         try put("Loose/e.md", "Another boat in no section.\n")
-        XCTAssertEqual(files.sectionFolders(), ["Library", "Private"])
+        XCTAssertEqual(files.sectionFolders(), ["Library", "My files"])
         let found = files.search("boat", in: files.sectionFolders())
-        XCTAssertEqual(found.map(\.path), ["Library/a.md", "Library/Deep/c.md", "Private/d.md"])
+        XCTAssertEqual(found.map(\.path), ["Library/a.md", "Library/Deep/c.md", "My files/d.md"])
         XCTAssertEqual(found[0].hits, [SearchHit(line: 2, preview: "The boat is blue.")])
         XCTAssertEqual(found[1].hits.map(\.line), [1])
         XCTAssertTrue(files.search("   ", in: files.sectionFolders()).isEmpty)
@@ -220,47 +251,18 @@ final class FilesTests: XCTestCase {
     }
 }
 
-/// Who sees what, read off the sections the engine lists.
-final class AudienceTests: XCTestCase {
-    /// A status as the engine writes one, with these sections.
-    private func status(spaces: String) throws -> CloudStatus {
+/// What the engine says a device may do.
+final class RoleTests: XCTestCase {
+    func testAStatusFromBeforeTheDomainAnsweredMayEverything() throws {
         let json = """
         {"root":"/w","domain":"d","endpoint":"https://d","wsId":"w-1","name":"Notes","phase":"idle",
          "lastSyncMs":1,"error":null,"pendingDeletes":0,"pendingAdds":0,
          "usage":{"mode":"normal","cause":null,"today":0,"fleetToday":null,"cap":null,"plan":null,"resumesAt":null,"waiting":0,"liftable":false,"lifted":false},
-         "me":"Ada","meId":"m-1","can":[],"workerVersion":17,
-         "public":[],"tags":[],"presence":[],"leases":[],"spaces":\(spaces)}
+         "me":"Ada","meId":"m-1","can":[],"workerVersion":35,
+         "public":[],"tags":[],"presence":[],"leases":[],"spaces":[]}
         """
-        return try JSONDecoder().decode(CloudStatus.self, from: Data(json.utf8))
-    }
-
-    func testSectionsSayWhoCanOpenAPath() throws {
-        let spaces = """
-        [{"id":"s-p","kind":"private","name":"Private","path":"Private","by":"Ada","members":["m-1"]},
-         {"id":"s-f","kind":"restricted","name":"Finance","path":"Restricted/Finance","by":"Ada","members":["m-1","m-2"]}]
-        """
-        let s = try status(spaces: spaces)
-        XCTAssertEqual(Audience.of("Library/Projects/plan.md", in: s), .everyone)
-        XCTAssertEqual(Audience.of("library", in: s), .everyone)
-        XCTAssertEqual(Audience.of("private/diary.md", in: s), .onlyYou)
-        XCTAssertEqual(Audience.of("Restricted/Finance/q3.md", in: s), .folder("Finance"))
-        XCTAssertEqual(Audience.of("Restricted", in: s), .folders)
-        XCTAssertEqual(Audience.of("Restricted/Loose", in: s), .nowhere)
-        // In no section: the top of the workspace, anything else there, and
-        // what Library never holds at its own top.
-        XCTAssertEqual(Audience.of("", in: s), .nowhere)
-        XCTAssertEqual(Audience.of("Projects/plan.md", in: s), .nowhere)
-        XCTAssertEqual(Audience.of("Library/Private/x.md", in: s), .nowhere)
-        XCTAssertEqual(Audience.of("Library/restricted", in: s), .nowhere)
-        XCTAssertEqual(Audience.of("Library/Library/x.md", in: s), .nowhere)
-        XCTAssertEqual(Audience.of("Library/Library.md", in: s), .everyone)
-        XCTAssertEqual(Audience.of("Library/Privateer/x.md", in: s), .everyone)
-        XCTAssertEqual(Audience.of("anything", in: nil), .everyone)
-    }
-
-    func testAStatusFromBeforeTheDomainAnsweredMayEverything() throws {
-        let s = try status(spaces: "[]")
-        XCTAssertTrue(s.may("people.invite"))
+        let status = try JSONDecoder().decode(CloudStatus.self, from: Data(json.utf8))
+        XCTAssertTrue(status.may("people.invite"))
     }
 }
 

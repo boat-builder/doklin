@@ -110,7 +110,9 @@ final class LinksTests: XCTestCase {
         guard case .list(let list)? = shown.blocks.last?.block, case .paragraph(let item)? = list.items.first?.blocks.first?.block else {
             return XCTFail("a list")
         }
-        XCTAssertEqual(item, [.link(destination: "../../Restricted/Board/board-plan.md", children: [.text("board-plan")])])
+        // In another section, wherever the fixture has it: two folders up from the note.
+        let board = Self.fixture.documents.first { $0.fileId == "f-board" }?.path ?? ""
+        XCTAssertEqual(item, [.link(destination: "../../\(board)", children: [.text("board-plan")])])
         guard case .callout(_, let inside)? = shown.blocks.dropFirst().first?.block, case .paragraph(let said)? = inside.first?.block else {
             return XCTFail("a callout")
         }

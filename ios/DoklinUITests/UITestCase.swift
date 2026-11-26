@@ -24,9 +24,11 @@ class UITestCase: XCTestCase {
         line = try ask("line")
     }
 
-    /// Ask the drive for something only the domain's side can do: `line`, or
+    /// Ask the drive for something only the domain's side can do: `line`;
     /// `editing?path=<path in Library, without its name>` — another device
-    /// editing it now.
+    /// editing it now; `shared?name=<name>` — somebody else sharing a folder
+    /// with this person; `deleted?name=<name>` — a folder this person shares
+    /// deleted on another device of theirs.
     /// What the drive could not do fails the journey there, in its words,
     /// rather than later as something else.
     @discardableResult
@@ -221,12 +223,13 @@ class UITestCase: XCTestCase {
         return editor
     }
 
-    /// Make a note with New, which opens it in the editor as Untitled with
-    /// the caret in its title, and name it: the file takes the name, and
-    /// Return goes into the note, whose text view this answers.
+    /// Make a note with New — Browse's own, which makes it in Library, or the
+    /// plus on another heading (`new-mine`) — which opens it in the editor as
+    /// Untitled with the caret in its title, and name it: the file takes the
+    /// name, and Return goes into the note, whose text view this answers.
     @discardableResult
-    func newNote(named name: String) -> XCUIElement {
-        marked("new").tap()
+    func newNote(named name: String, from menu: String = "new") -> XCUIElement {
+        marked(menu).tap()
         expect(app.buttons["New note"], "New note in the menu").tap()
         expect(text(containing: "other devices see it view-only"), "the new note, open to edit")
         let title = expect(app.webViews.textViews["Title"], "the new note's title")

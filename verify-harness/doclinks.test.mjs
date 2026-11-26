@@ -167,17 +167,17 @@ const NOTE = "/Users/me/notes/projects/plan.md";
 /* ---------- paths between notes ---------- */
 {
   const q1 = "Library/Roadmap/q1.md";
-  assert.equal(keyTarget("../../Restricted/Board/board-plan.md", q1), "Restricted/Board/board-plan.md");
+  assert.equal(keyTarget("../../Shared with me/Board/board-plan.md", q1), "Shared with me/Board/board-plan.md");
   assert.equal(keyTarget("plan.md", q1), "Library/Roadmap/plan.md");
   assert.equal(keyTarget("../../../out.md", q1), null, "out of the workspace");
-  assert.equal(relativePath(q1, "Restricted/Board/board-plan.md"), "../../Restricted/Board/board-plan.md");
+  assert.equal(relativePath(q1, "Shared with me/Board/board-plan.md"), "../../Shared with me/Board/board-plan.md");
   assert.equal(relativePath(q1, "Library/Roadmap/plan.md"), "plan.md");
   assert.equal(relativePath(q1, "Library/Roadmap/old/plan.md"), "old/plan.md");
   assert.equal(relativePath(q1, "Library/GTM/launch-plan.md"), "../GTM/launch-plan.md");
   assert.equal(relativePath("Library/q1.md", "Library/Roadmap/x.md"), "Roadmap/x.md");
   for (const [from, to] of [
-    [q1, "Private/todo.md"],
-    ["Private/a/b/c.md", "Library/x.md"],
+    [q1, "My files/todo.md"],
+    ["My files/a/b/c.md", "Library/x.md"],
     ["Library/Roadmap/q1.md", "Library/Roadmap/q1.md"],
   ]) {
     assert.equal(keyTarget(relativePath(from, to), from), to, `there and back: ${from} → ${to}`);
@@ -195,10 +195,10 @@ const docs = indexDocuments([
   { path: "Library/GTM/launch-plan-v2.md", fileId: "f-launch", section: null },
   { path: "Library/Roadmap/plan.md", fileId: "f-plan", section: null },
   { path: "Library/Roadmap/new.md", fileId: null, section: null },
-  { path: "Private/todo.md", fileId: "f-todo", section: "p-me" },
-  { path: "Restricted/Board/board-plan.md", fileId: "f-board", section: "s-board" },
+  { path: "My files/todo.md", fileId: "f-todo", section: "p-me" },
+  { path: "Shared with me/Board/board-plan.md", fileId: "f-board", section: "s-board" },
   // Half moved: one id in two sections. The shared section's is the one.
-  { path: "Restricted/Board/moving.md", fileId: "f-moving", section: "s-board" },
+  { path: "Shared with me/Board/moving.md", fileId: "f-moving", section: "s-board" },
   { path: "Library/moving.md", fileId: "f-moving", section: null },
 ]);
 const NOTE_IN = "Library/Roadmap/q1.md";
@@ -230,9 +230,9 @@ const NOTE_IN = "Library/Roadmap/q1.md";
 
   // 1. Made in this editor: a record from the id, written from where it is.
   {
-    const r = save(library, [{ href: "Restricted/Board/board-plan.md", words: "board-plan", made: "f-board" }]);
-    assert.deepEqual(r.links, [{ href: "../../Restricted/Board/board-plan.md", words: "board-plan" }]);
-    assert.deepEqual(r.records, [{ id: "../../Restricted/Board/board-plan.md", file: "f-board" }]);
+    const r = save(library, [{ href: "Shared with me/Board/board-plan.md", words: "board-plan", made: "f-board" }]);
+    assert.deepEqual(r.links, [{ href: "../../Shared with me/Board/board-plan.md", words: "board-plan" }]);
+    assert.deepEqual(r.records, [{ id: "../../Shared with me/Board/board-plan.md", file: "f-board" }]);
     const pasted = save(library, [{ href: "../x/launch-plan.md#friday", words: "see this", made: "f-launch" }]);
     assert.deepEqual(pasted.links, [{ href: "../GTM/launch-plan-v2.md#friday", words: "see this" }], "a pasted link, made from this note, its fragment kept");
   }
@@ -251,25 +251,25 @@ const NOTE_IN = "Library/Roadmap/q1.md";
     const r = save(library, [
       { href: "plan.md", words: "plan" },
       { href: "new.md", words: "new" },
-      { href: "../../Private/todo.md", words: "todo" },
-      { href: "../../Restricted/Board/board-plan.md", words: "board" },
+      { href: "../../My files/todo.md", words: "todo" },
+      { href: "../../Shared with me/Board/board-plan.md", words: "board" },
       { href: "https://example.com", words: "web" },
     ]);
     assert.deepEqual(r.records, [{ id: "plan.md", file: "f-plan" }], "Library only; none for a file with no id yet");
-    assert.deepEqual(r.links.map((l) => l.href), ["plan.md", "new.md", "../../Private/todo.md", "../../Restricted/Board/board-plan.md", "https://example.com"]);
-    const inBoard = save({ path: "Restricted/Board/notes.md", section: "s-board" }, [
+    assert.deepEqual(r.links.map((l) => l.href), ["plan.md", "new.md", "../../My files/todo.md", "../../Shared with me/Board/board-plan.md", "https://example.com"]);
+    const inBoard = save({ path: "Shared with me/Board/notes.md", section: "s-board" }, [
       { href: "board-plan.md", words: "board-plan" },
       { href: "../../Library/Roadmap/plan.md", words: "plan" },
-      { href: "../../Private/todo.md", words: "todo" },
+      { href: "../../My files/todo.md", words: "todo" },
     ]);
     assert.deepEqual(inBoard.records, [{ id: "board-plan.md", file: "f-board" }, { id: "../../Library/Roadmap/plan.md", file: "f-plan" }], "its own section, and Library");
   }
   // 4. Writing back never reveals: a target in another section stays as written.
   {
     const r = save(library, [{ href: "../Old/board-plan.md", words: "board-plan" }], [{ id: "../Old/board-plan.md", file: "f-board" }]);
-    assert.deepEqual(r.links, [{ href: "../Old/board-plan.md", words: "board-plan" }], "moved into a restricted folder: not written back");
+    assert.deepEqual(r.links, [{ href: "../Old/board-plan.md", words: "board-plan" }], "moved into something shared: not written back");
     assert.deepEqual(r.records, [{ id: "../Old/board-plan.md", file: "f-board" }]);
-    const own = save({ path: "Restricted/Board/notes.md", section: "s-board" }, [{ href: "old.md", words: "old" }], [{ id: "old.md", file: "f-board" }]);
+    const own = save({ path: "Shared with me/Board/notes.md", section: "s-board" }, [{ href: "old.md", words: "old" }], [{ id: "old.md", file: "f-board" }]);
     assert.deepEqual(own.links, [{ href: "board-plan.md", words: "board-plan" }], "its own section: written from where it is");
   }
   // One record per destination; a record no link uses is gone.
@@ -312,32 +312,41 @@ const NOTE_IN = "Library/Roadmap/q1.md";
 
 /* ---------- Sections ---------- */
 {
+  // Something shared is a section wherever it sits: Board, a folder shared
+  // with this person; Finance, a folder they shared from inside My files.
   const docs = indexDocuments([
     { path: "Library/plan.md", fileId: "f-plan", section: null },
-    { path: "Restricted/Board/board-plan.md", fileId: "f-board", section: "s-board" },
-    { path: "Private/todo.md", fileId: "f-todo", section: "p-me" },
+    { path: "Shared with me/Board/board-plan.md", fileId: "f-board", section: "s-board" },
+    { path: "My files/todo.md", fileId: "f-todo", section: "p-me" },
+    { path: "My files/Work/Finance/q1.md", fileId: "f-q1", section: "s-finance" },
   ]);
-  assert.equal(sectionOf("Restricted/Board/board-plan.md", docs), "s-board");
-  assert.equal(sectionOf("Restricted/Board/new.md", docs), "s-board", "a note not listed yet: its folder's section");
-  assert.equal(sectionOf("Private/new.md", docs), "p-me");
+  assert.equal(sectionOf("Shared with me/Board/board-plan.md", docs), "s-board");
+  assert.equal(sectionOf("Shared with me/Board/new.md", docs), "s-board", "a note not listed yet: its folder's section");
+  assert.equal(sectionOf("My files/new.md", docs), "p-me");
+  assert.equal(sectionOf("My files/Work/new.md", docs), "p-me", "the nearest listed document above it, not below");
+  assert.equal(sectionOf("My files/Work/Finance/2026/new.md", docs), "s-finance", "inside what is shared, however deep");
   assert.equal(sectionOf("Library/new.md", docs), null);
   assert.equal(sectionOf("notes/x.md", docs), null, "a folder that doesn't sync");
-  assert.equal(sectionName("Restricted/Board/x/y.md"), "Board");
-  assert.equal(sectionName("Private/y.md"), "Private");
+  assert.equal(sectionName("Shared with me/Board/x/y.md"), "Board");
+  assert.equal(sectionName("Shared with me/Plan.md"), "Plan", "a document shared on its own");
+  assert.equal(sectionName("My files/Work/Finance/q1.md"), "My files");
+  assert.equal(sectionName("Library/y.md"), "Library");
   const board = docs.byId.get("f-board");
   const todo = docs.byId.get("f-todo");
   const plan = docs.byId.get("f-plan");
-  assert.equal(whoCanOpen(board, "Acme"), "Only the people in “Board” can open it.");
-  assert.equal(whoCanOpen(todo, "Acme"), "Only you can open it, on any device of yours.");
-  assert.equal(whoCanOpen(plan, "Acme"), "Everyone in Acme can open it.");
+  assert.equal(whoCanOpen(board, "Acme", { name: "Board", alone: false }), "Only the people “Board” is shared with can open it.");
+  assert.equal(whoCanOpen(board, "Acme", { name: "Board", alone: true }), "Only you can open it, on any device of yours.", "shared with nobody yet");
+  assert.equal(whoCanOpen(board, "Acme", null), "Only the people it is shared with can open it.", "an app that cannot name it");
+  assert.equal(whoCanOpen(todo, "Acme", null), "Only you can open it, on any device of yours.");
+  assert.equal(whoCanOpen(plan, "Acme", null), "Everyone in Acme can open it.");
   assert.equal(
     pickNotice(board, null),
-    "Everyone who can read this note can see “board-plan” and its folder “Board”, but only the people in “Board” can open it.",
+    "Everyone who can read this note can see “board-plan”, but only the people it is shared with can open it.",
   );
   assert.equal(pickNotice(todo, null), "Everyone who can read this note can see “todo”, but only you can open it.");
   assert.equal(pickNotice(plan, "s-board"), null, "Library opens for everyone");
   assert.equal(pickNotice(board, "s-board"), null, "its own section");
-  assert.equal(pickNotice(board, "p-me"), null, "nobody else reads a Private note");
+  assert.equal(pickNotice(board, "p-me"), null, "nobody else reads a note in My files");
 }
 
 /* ---------- The list `@` opens ---------- */

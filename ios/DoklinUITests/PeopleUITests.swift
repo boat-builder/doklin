@@ -2,9 +2,11 @@
 // against the harness worker: the people, an invite made, made again from
 // further down and withdrawn, a role given and taken back, this iPhone among
 // Sherin's devices and a line for another, an agent added and removed, who else
-// is here, and restricted folders: one made with somebody in it, listed,
-// renamed, looked into and deleted here; another deleted on another device
-// while a note in it is open here.
+// is here, and sharing in place: a folder of My files shared with somebody,
+// renamed, stopped, deleted for everyone and restored; a document shared on
+// its own; a folder somebody else shares, found under Shared with me, copied
+// and left; and a shared folder deleted on another device while a note in it
+// is open here.
 
 import XCTest
 
@@ -58,7 +60,83 @@ final class PeopleUITests: UITestCase {
         }
     }
 
-    func testPeopleDevicesAgentsAndARestrictedFolder() throws {
+    /// Long-press a row until its menu offers `item`, and choose it. What a
+    /// row offers follows the domain — a folder just renamed is shared again
+    /// once the engine has caught up — so a menu without it is shut, by a tap
+    /// above it, and asked for again.
+    private func choose(_ item: String, on row: XCUIElement, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
+        let offered = app.buttons[item]
+        for _ in 0..<8 where !offered.exists {
+            row.press(forDuration: 1.0)
+            if offered.waitForExistence(timeout: 3) { break }
+            for _ in 0..<4 where !row.isHittable {
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
+                Thread.sleep(forTimeInterval: 1)
+            }
+            Thread.sleep(forTimeInterval: 3)
+        }
+        expect(offered, what, file: file, line: line).tap()
+    }
+
+    /// The plus on the My files heading, in reach: the tree is taken back to
+    /// its top first, where the heading is, when it has scrolled away.
+    private func newInMyFiles() -> XCUIElement {
+        let plus = marked("new-mine")
+        for _ in 0..<3 where !(plus.exists && plus.isHittable) {
+            app.collectionViews.firstMatch.swipeDown()
+        }
+        return reveal(plus, "New in My files, once the domain has said it is hers")
+    }
+
+    /// Make a folder in My files, from the plus on its heading.
+    private func newFolderInMyFiles(_ name: String) -> XCUIElement {
+        newInMyFiles().tap()
+        expect(app.buttons["New folder"], "New folder in the menu").tap()
+        type(name, into: expect(marked("new-name"), "the folder's name field"))
+        answerAlert("New folder", with: "Create")
+        return reveal(marked("entry-\(name)"), "the new folder, under My files")
+    }
+
+    /// Share what the open Share sheet is about with Bea, and close it.
+    private func shareWithBea(_ what: String) {
+        expect(text(containing: "It stays where it is. The people you pick find it under Shared with me"), "what sharing \(what) does")
+        tick(expect(marked("share-pick-bea@example.com"), "Bea, to pick"))
+        record("\(what), being shared")
+        marked("share-submit").tap()
+        expect(words("2 people can open it"), "Sherin and Bea can open \(what)")
+        expect(marked("share-member-Bea"), "Bea, whom \(what) is shared with")
+        record("who can open \(what)")
+        marked("share-close").tap()
+    }
+
+    /// Wait for a row, or the line that says who can open a note, to say
+    /// `words`: one element, whose label is everything it shows.
+    private func says(_ element: XCUIElement, _ words: String, _ what: String, timeout: TimeInterval = 60, file: StaticString = #filePath, line: UInt = #line) {
+        until(what, timeout: timeout, { element.exists && (element.label.localizedCaseInsensitiveContains(words) || anything(saying: words)) }, file: file, line: line)
+    }
+
+    /// Whether anything on screen says `words`.
+    private func anything(saying words: String) -> Bool {
+        app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", words)).count > 0
+    }
+
+    /// How many elements carry a row's mark.
+    private func count(_ identifier: String) -> Int {
+        app.descendants(matching: .any).matching(identifier: identifier).count
+    }
+
+    /// Wait for a count to be what is wanted.
+    private func until(_ what: String, timeout: TimeInterval = 60, _ met: () -> Bool, file: StaticString = #filePath, line: UInt = #line) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if met() { return }
+            Thread.sleep(forTimeInterval: 1)
+        }
+        record("never — \(what)")
+        XCTFail("\(what) never happened", file: file, line: line)
+    }
+
+    func testPeopleDevicesAgentsAndSharing() throws {
         launchAndJoin()
 
         // People: Sherin is the workspace's superadmin, and this iPhone is hers.
@@ -168,76 +246,124 @@ final class PeopleUITests: UITestCase {
         expect(app.staticTexts["The plan"], "the plan, read")
         XCTAssertFalse(text(containing: "view only").exists, "the plan is still view-only")
 
-        // A restricted folder, with Bea in it, listed under Restricted.
+        // The three headings, as the Mac's sidebar has them.
         browse()
-        marked("new").tap()
-        expect(app.buttons["New restricted folder"], "New restricted folder in the menu").tap()
-        type("Finance", into: expect(marked("restricted-name"), "the folder's name field"))
-        tick(expect(marked("restricted-pick-bea@example.com"), "Bea, to pick"))
-        record("a restricted folder, being made")
-        marked("restricted-create").tap()
-        expect(app.navigationBars["Finance"], "the new folder, open")
-        back()
-        reveal(marked("entry-Finance"), "the new folder, listed under Restricted")
-        record("restricted, with the new folder")
+        expect(app.staticTexts["My files"], "the My files heading")
+        expect(app.staticTexts["Shared with me"], "the Shared with me heading")
 
-        // Renamed here, for everyone in it.
-        marked("entry-Finance").press(forDuration: 1.0)
-        expect(app.buttons["Rename"], "Rename on the restricted folder").tap()
+        // A folder made in My files, shared with Bea where it is: it stays
+        // under My files, and its row says it is shared.
+        let finance = newFolderInMyFiles("Finance")
+        choose("Share…", on: finance, "Share on a folder of My files")
+        shareWithBea("the folder")
+        says(finance, "Shared with 1 person", "the shared folder's row says it is shared")
+        record("my files, with the shared folder")
+
+        // Renamed here, for everyone who can open it: the same share still.
+        choose("Rename", on: finance, "Rename on the shared folder")
+        expect(text(containing: "It is renamed for everyone who can open it."), "what renaming something shared does")
         let name = expect(app.alerts.textFields.firstMatch, "the new name's field")
         type(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 12) + "Money", into: name)
         answerAlert("Rename", with: "Rename")
-        // Its access is the domain's: offered once the domain has the new name.
-        let money = expect(marked("entry-Money"), "the folder, renamed")
-        let manage = app.buttons["Manage access…"]
-        // A tap above the menu shuts it; one that misses leaves the row covered.
-        let shutMenu = {
-            for _ in 0..<4 where !money.isHittable {
-                self.app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
-                Thread.sleep(forTimeInterval: 1)
-            }
-        }
-        for _ in 0..<9 where !manage.exists {
-            shutMenu()
-            money.press(forDuration: 1.0)
-            if manage.waitForExistence(timeout: 3) { break }
-            shutMenu()
-            Thread.sleep(forTimeInterval: 4)
-        }
-        expect(manage, "Manage access on the renamed folder, once the domain has the new name").tap()
-        expect(app.navigationBars["Who can open “Money”"], "the folder's people, once the domain has the new name", timeout: 45)
-        expect(words("2 people"), "Sherin and Bea in it")
-        expect(marked("space-member-Bea"), "Bea in it")
-        record("who can open the folder")
+        let money = reveal(marked("entry-Money"), "the folder, renamed")
+        says(money, "Shared with 1 person", "the folder is still shared, under its new name")
 
-        // Bea taken out; then the folder deleted here, and everything open in
-        // it closes, back to Restricted, which no longer lists it.
-        app.buttons["Remove"].tap()
-        confirm("Remove")
-        expect(words("1 person"), "only Sherin in it")
-        reveal(marked("space-delete"), "Delete it for everyone").tap()
+        // One document, shared on its own, from the line that says who can
+        // open it.
+        _ = newInMyFiles()
+        let note = newNote(named: "Pay rise", from: "new-mine")
+        note.typeText("Ask in March.")
+        marked("done").tap()
+        says(expect(marked("audience"), "who can open the note"), "Only you", "a note in My files is hers alone")
+        marked("share").tap()
+        shareWithBea("the note")
+        says(marked("audience"), "You and 1 other", "who can open the note now, above its title")
+        record("a shared note")
+        browse()
+        reveal(marked("entry-Pay rise"), "the shared note, still under My files")
+
+        // Stopped with Bea, then deleted for everyone: it goes from here with
+        // no word of news, and waits in Recently deleted.
+        choose("Share…", on: money, "Share on the shared folder")
+        expect(words("2 people can open it"), "Sherin and Bea, before it stops")
+        app.buttons["Stop sharing"].firstMatch.tap()
+        confirm("Stop sharing")
+        expect(words("1 person can open it"), "only Sherin can open it")
+        reveal(marked("share-delete"), "Delete it for everyone").tap()
         confirm("Delete the folder")
-        expect(app.navigationBars["Browse"], "the tree, once the folder is gone")
-        gone(marked("entry-Money"), "the deleted folder, from the list")
-        expect(text(containing: "Folders only the people you choose can open."), "Restricted, empty")
-        XCTAssertFalse(text(containing: "is no longer on this iPhone").exists, "a folder given up here was told as news")
-        record("restricted, after the delete")
+        gone(marked("entry-Money"), "the deleted folder, from the tree")
+        XCTAssertFalse(text(containing: "is no longer on this iPhone").exists, "something given up here was told as news")
+        record("my files, after the delete")
 
-        // Another folder, with a note in it open for editing — deleted on
-        // another device. The editor closes with what was typed, nothing
-        // puts the folder back, and the iPhone says why it went.
-        marked("new-restricted").tap()
-        type("Plans", into: expect(marked("restricted-name"), "the second folder's name field"))
-        marked("restricted-create").tap()
-        expect(app.navigationBars["Plans"], "the second folder, open")
-        let editor = newNote(named: "Draft")
-        editor.typeText("Numbers nobody else may see.")
+        // …from where it comes back as it was: a share, with nobody on it now.
+        open("Recently deleted")
+        expect(marked("deleted-share-Money"), "the deleted folder, to restore", timeout: 60)
+        record("recently deleted, with the shared folder")
+        marked("restore-share-Money").tap()
+        gone(marked("deleted-share-Money"), "the restored folder, from Recently deleted")
+        browse()
+        says(expect(marked("entry-Money"), "the folder, restored", timeout: 60), "Shared with nobody yet", "the folder is restored as the share it was")
+        record("my files, with the folder restored")
+
+        // What somebody else shares with her shows under Shared with me:
+        // hers to read and edit, not hers to move.
+        try ask("shared?name=Budget")
+        let budget = marked("entry-Budget")
+        // It is here once a poll has listed it: pulling the tree down asks now.
+        for _ in 0..<6 where !budget.waitForExistence(timeout: 10) {
+            app.collectionViews.firstMatch.swipeDown()
+        }
+        says(reveal(budget, "the folder Cy shared, under Shared with me"), "Shared with you", "its row says it is shared with her")
+        record("shared with me")
+        budget.tap()
+        reveal(marked("entry-Numbers"), "the note in the folder, opened in place").tap()
+        expect(text(containing: "Shared by Cy, in Budget."), "the shared note, read", timeout: 60)
+        says(expect(marked("audience"), "who can open the shared note"), "You and 1 other", "Cy and she can open the shared note")
+        browse()
+
+        // She copies it into her own files…
+        let before = count("entry-Budget")
+        budget.press(forDuration: 1.0)
+        expect(app.buttons["Copy to My files"], "Copy to My files on what is shared with her")
+        XCTAssertFalse(app.buttons["Move…"].exists, "something shared with her was offered to move")
+        XCTAssertTrue(app.buttons["Leave…"].exists, "something shared with her is left, never deleted")
+        app.buttons["Copy to My files"].tap()
+        expect(text(containing: "Copied to My files as “Budget”."), "the copy, said")
+        until("the copy, a row under My files") { count("entry-Budget") > before }
+        let rows = count("entry-Budget")
+        record("a copy in My files")
+        app.buttons["Dismiss"].tap()
+
+        // …and leaves it: the row under Shared with me, the last of the two,
+        // goes; the copy stays, and nothing is told as news.
+        let shared = app.descendants(matching: .any).matching(identifier: "entry-Budget").element(boundBy: rows - 1)
+        choose("Leave…", on: shared, "Leave on what is shared with her")
+        confirm("Leave")
+        until("the folder she left, gone from Shared with me") { count("entry-Budget") < rows }
+        XCTAssertFalse(anything(saying: "Shared with you"), "what she left is still marked as shared with her")
+        XCTAssertTrue(marked("entry-Budget").exists, "her copy went with what she left")
+        XCTAssertFalse(text(containing: "is no longer on this iPhone").exists, "something left here was told as news")
+        record("shared with me, after leaving")
+
+        // Another folder she shares, with a note in it open for editing —
+        // deleted for everyone on another device of hers. The editor closes
+        // with what was typed, nothing puts the folder back, and the iPhone
+        // says why it went.
+        let plans = newFolderInMyFiles("Plans")
+        choose("Share…", on: plans, "Share on the second folder")
+        shareWithBea("the second folder")
+        choose("New note here", on: plans, "New note here on the shared folder")
+        expect(text(containing: "other devices see it view-only"), "the new note, open to edit")
+        let title = expect(app.webViews.textViews["Title"], "the new note's title")
+        title.tap()
+        title.typeText("Draft\n")
+        expect(app.webViews.textViews["Note"], "the new note's text").typeText("Numbers nobody else may see.")
         record("a note in Plans, being edited")
         try ask("deleted?name=Plans")
         expect(text(containing: "“Plans” is no longer on this iPhone"), "why the folder went", timeout: 60)
         gone(app.webViews.textViews["Note"], "the editor, in a folder that is gone")
         expect(app.navigationBars["Browse"], "the tree, once the folder is gone")
-        record("a folder deleted elsewhere")
+        record("a shared folder deleted elsewhere")
         // Long enough for a save the editor had waiting.
         Thread.sleep(forTimeInterval: 2)
         XCTAssertFalse(marked("entry-Plans").exists, "the folder came back on this iPhone")

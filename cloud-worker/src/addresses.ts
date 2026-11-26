@@ -92,10 +92,18 @@ export const takenError = (taken: readonly string[]): { error: string; taken: re
   taken,
 });
 
-/** The space — never the shared workspace — whose page answers at `slug`. */
+/** The space — never the shared workspace — whose page answers at `slug`.
+ *  A deleted share keeps its addresses, for the day it is restored, and
+ *  answers at none of them. */
 export async function spaceAt(env: Env, slug: string): Promise<string | null> {
   const id = await withDb(env, (db) =>
-    db.prepare("SELECT space_id FROM addresses WHERE slug = ? AND space_id <> ''").bind(slug).first<string>("space_id"),
+    db
+      .prepare(
+        `SELECT a.space_id FROM addresses a JOIN spaces s ON s.id = a.space_id
+          WHERE a.slug = ? AND s.deleted_at IS NULL`,
+      )
+      .bind(slug)
+      .first<string>("space_id"),
   );
   return id ?? null;
 }

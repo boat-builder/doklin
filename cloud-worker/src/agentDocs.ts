@@ -2,9 +2,9 @@
 // folder holds, a document's content and what is known about it, and the
 // three ways an agent changes the tree — write, remove, move.
 //
-//   GET    /api/agent/tree?dir=&deep=1[&where=]
+//   GET    /api/agent/tree?dir=&deep=1[&where=][&after=]
 //   GET    /api/agent/doc?path=&v=md|html[&clean=1][&info=1]
-//   GET    /api/agent/search?q=&dir=&limit=[&where=]
+//   GET    /api/agent/search?q=&dir=&limit=[&where=][&after=]
 //   PUT    /api/agent/doc?path=&v=[&force=1][&dry=1]      if-rev: <n> | *
 //   DELETE /api/agent/doc?path=&v=[&dry=1]
 //   POST   /api/agent/move                                 {from, to, dryRun?}
@@ -21,10 +21,17 @@
 //
 // A call is answered in the section its path is in (agentPlace.ts), with
 // every path under the folder that section is at. Three routes look at more
-// than one: a listing or a search of the workspace itself, or of
-// `Restricted`, and a move from one section to another. A note's links are
-// read and written as they are now, wherever their documents are
-// (agentLinks.ts).
+// than one: a listing or a search of a folder that holds something shared —
+// the workspace itself and `Shared with me` are two — and a move from one
+// section to another. A note's links are read and written as they are now,
+// wherever their documents are (agentLinks.ts).
+//
+// Something shared is its people's, and an agent does not change who can
+// open anything. So it renames a shared folder or document, and moves one
+// inside the section it sits in; deleting one, moving one anywhere else, and
+// moving a folder that holds one to another section are refused with a
+// sentence: its person does those in Doklin, which says who gains or loses
+// what first.
 //
 // A listing's notes carry their tags, and `where=name:value` (repeatable, or
 // a name alone for any value) narrows a listing or a search to the notes
@@ -32,8 +39,8 @@
 // write of a note is held to the tag list where it changes a tag's line
 // (tagList.ts).
 
-import { change, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
-import type { Section } from "./agentPlace";
+import { PAGE, change, cursorOf, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
+import { itemPath, takenIn, type Section, type Shared } from "./agentPlace";
 import { readWorkspace } from "./bucket";
 import { keepPublic, moveAcross, moveWithin, removeDocument, removeVersion, repointPages, versionPath } from "./changes";
 import { Refusal, newFileId, type Tx } from "./commit";
@@ -62,14 +69,24 @@ import type { Env } from "./env";
 import { PersonDocs, linksWritten, sectionOfCall, shownNote } from "./agentLinks";
 import { placeOf, readPage } from "./htmlText";
 import { json, readJsonObject } from "./http";
-import { ID_RE, MAX_FILE_BYTES, SPACE_ID_RE, blobKey, contentTypeOf } from "./layout";
+import {
+  ID_RE,
+  LIBRARY_FOLDER,
+  MAX_FILE_BYTES,
+  MY_FILES_FOLDER,
+  SHARED_FOLDER,
+  SPACE_ID_RE,
+  blobKey,
+  contentTypeOf,
+  validItemName,
+} from "./layout";
 import type { Manifest } from "./manifest";
 import { listDirectory } from "./members";
-import { mounted } from "./mount";
+import { mounted, shownPath, storedPath } from "./mount";
 import { askOf, catchUpOpen, mirrorAfter, pairsIn, searchIn, type OpenSection } from "./search";
-import { MAX_SECTIONS_READ, sharedEnv, spaceOf } from "./spaces";
+import { renameSpace, sharedEnv, spaceOf } from "./spaces";
 import { filtersOf, listedFilters, readTagList, tagsKept } from "./tagList";
-import { isHtmlPath, isMarkdownPath, openWorkspace } from "./workspace";
+import { isHtmlPath, isMarkdownPath } from "./workspace";
 import { CRITIC_BLOCK_RE, parseSpans, stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, emptyMeta, metaFileOf, metaIsEmpty, parseEntityMeta, serializeEntityMeta, type LinkRecord } from "../../src/metaFile";
 import { keyedLines, noteTags, type NoteTag, type TagDef, type TagFilter } from "../../src/tags";
@@ -91,60 +108,91 @@ function utf8(bytes: Uint8Array): string | null {
 const sameName = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 const byName = (a: string, b: string): number => a.localeCompare(b, undefined, { sensitivity: "base" });
 
+const under = (path: string, dir: string): boolean => dir === "" || path.toLowerCase().startsWith(`${dir.toLowerCase()}/`);
+const noDatabase = (): Response => json({ error: "this domain's database is not answering — try again in a moment" }, 503);
+
+/** The sections whose files are at or under a folder: the one the folder is
+ *  in, then whatever is shared beneath it, in the order of their paths. */
+function sectionsUnder(all: readonly Section[], at: Section | "workspace" | "shared", dir: string): Section[] {
+  if (at === "workspace") return [...all];
+  if (at === "shared") return all.filter((s) => s.share && under(itemPath(s.share), SHARED_FOLDER));
+  return [at, ...all.filter((s) => s.share && s.space !== at.space && under(itemPath(s.share), dir))];
+}
+
+/**
+ * What something shared puts in a listing of `dir` without being opened:
+ * the folders between `dir` and it, itself when it is a folder, and — when
+ * the listing is not deep and it is a document right there — a row that
+ * says only that it is there, and shared.
+ */
+function impliedBy(share: Shared, kind: Section["kind"], dir: string, deep: boolean, listing: Listing & { documents: Row[] }): void {
+  const item = itemPath(share);
+  if (!under(item, dir)) return;
+  const segs = item.slice(dir === "" ? 0 : dir.length + 1).split("/");
+  const upTo = (n: number): string => item.slice(0, item.length - segs.slice(n).join("/").length - (n < segs.length ? 1 : 0));
+  const last = kind === "folder" ? segs.length : segs.length - 1;
+  for (let i = 1; i <= last && (deep || i === 1); i += 1) {
+    const folder = upTo(i);
+    if (!listing.folders.some((f) => sameName(f, folder))) listing.folders.push(folder);
+  }
+  if (!deep && kind === "document" && segs.length === 1) listing.documents.push({ path: item, shared: true });
+}
+
+/** A listing's row: a document with its versions, or one shared right there
+ *  that a listing which is not deep does not open. */
+type Row = DocRow & { shared?: true; tags?: NoteTag[] };
+
 export async function getTree(c: Call): Promise<Response> {
   const { url, places } = c;
   const dir = (url.searchParams.get("dir") ?? "").replace(/^\/+|\/+$/g, "");
   const deep = url.searchParams.get("deep") === "1";
+  const after = cursorOf(url);
   const asked = filtersOf(url.searchParams, "where");
   if (asked instanceof Refusal) return refuse(asked);
-  const at = await places.at(dir);
+  const at = await places.at(dir, true);
   if (at instanceof Refusal) return refuse(at);
+  if (at === "workspace" && !(await readWorkspace(c.env))) return notBound();
 
-  // A folder of one section, the section's own included.
-  if (at !== "workspace" && at !== "restricted") {
-    const ws = await openWorkspace(at.env);
-    if (!ws) return notBound();
-    const listing = listTree(mounted(ws.manifest, at.mount), dir, deep);
-    const nothing = listing.folders.length + listing.documents.length === 0;
-    // A section is there with nothing in it; any other folder is its files.
-    if (nothing && !sameName(dir, at.mount)) return json({ error: `there is no folder "${dir}"` }, 404);
-    return withTags(c, listing, [{ section: at, ws }], asked, {});
+  const listing: Listing & { documents: Row[] } = { dir, folders: [], documents: [] };
+  // What is shared changes a listing only where there is some: a section
+  // nothing is shared from is read alone, as it always was.
+  const all = await places.all();
+  if (all === null) return noDatabase();
+  const within = sectionsUnder(all, at, dir);
+  if (at === "workspace") {
+    listing.folders.push(LIBRARY_FOLDER, MY_FILES_FOLDER);
+    if (all.some((s) => s.share && under(itemPath(s.share), SHARED_FOLDER))) listing.folders.push(SHARED_FOLDER);
+  }
+  if (after === 0) {
+    for (const s of within) if (s.share && (at === "workspace" ? deep : true)) impliedBy(s.share, s.kind, dir, deep, listing);
   }
 
-  // The workspace itself, or `Restricted`: what is in more than one section.
-  // At the top that is the sections this person has, and nothing else.
-  if (at === "workspace" && !(await readWorkspace(c.env))) return notBound();
-  const all = await places.all();
-  if (all === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
-  const sections = all.filter((s) => at === "workspace" || s.kind === "restricted");
-  const listing: Listing = { dir, folders: [], documents: [] };
-  const notListed: string[] = [];
+  // The folder's own section, and with `deep` everything shared beneath it —
+  // as many as a request opens, the rest on the next.
+  const reading = typeof at === "string" ? (deep ? within : []) : deep ? within : [at];
+  const page = reading.slice(after, after + PAGE);
   const opened: OpenSection[] = [];
-  let count = 0;
-  for (const s of sections) {
-    const top = s.mount.split("/")[0];
-    if (at === "workspace" && !listing.folders.includes(top)) listing.folders.push(top);
-    if ((at === "restricted" || deep) && !listing.folders.includes(s.mount)) listing.folders.push(s.mount);
-    if (!deep) continue;
-    // Library is one read like the others; the rest are what a request opens.
-    if (s.kind !== "shared" && (count += 1) > MAX_SECTIONS_READ) {
-      notListed.push(s.mount);
-      continue;
-    }
-    const ws = await openWorkspace(s.env);
+  for (const s of page) {
+    const ws = await places.open(s);
     if (!ws) {
       if (s.kind === "shared") return notBound();
       continue;
     }
     opened.push({ section: s, ws });
-    const inside = listTree(mounted(ws.manifest, s.mount), s.mount, true);
-    listing.folders.push(...inside.folders);
+    const own = typeof at !== "string" && s.space === at.space;
+    const inside = listTree(mounted(ws.manifest, s), own ? dir : s.mount, own ? deep : s.kind !== "document");
+    for (const folder of inside.folders) if (!listing.folders.some((f) => sameName(f, folder))) listing.folders.push(folder);
     listing.documents.push(...inside.documents);
+  }
+  // A section is there with nothing in it; any other folder is what is in it.
+  const nothing = listing.folders.length + listing.documents.length === 0;
+  if (nothing && after === 0 && typeof at !== "string" && !sameName(dir, at.mount)) {
+    return json({ error: `there is no folder "${dir}"` }, 404);
   }
   listing.folders.sort(byName);
   listing.documents.sort((a, b) => byName(a.path, b.path));
-  // Said, never left out silently: list one of these on its own.
-  return withTags(c, listing, opened, asked, notListed.length > 0 ? { notListed } : {});
+  const next = after + page.length < reading.length ? { next: after + page.length } : {};
+  return withTags(c, listing, opened, asked, next);
 }
 
 /** A note's tags from what the index holds for it, as `noteTags` reads them
@@ -170,7 +218,13 @@ const holds = (tags: readonly NoteTag[], where: readonly TagFilter[]): boolean =
  * `202` while it reads, as a search's). Without `where` the index is not
  * waited for: `tagsBehind` says it has not read the latest changes yet.
  */
-async function withTags(c: Call, listing: Listing, opened: readonly OpenSection[], asked: readonly TagFilter[], extra: Record<string, unknown>): Promise<Response> {
+async function withTags(
+  c: Call,
+  listing: Listing & { documents: Row[] },
+  opened: readonly OpenSection[],
+  asked: readonly TagFilter[],
+  extra: Record<string, unknown>,
+): Promise<Response> {
   if (listing.documents.length === 0 && asked.length === 0) return json({ ...listing, ...extra });
   const list = await readTagList(c.env);
   const where = listedFilters(asked, list);
@@ -191,13 +245,13 @@ async function withTags(c: Call, listing: Listing, opened: readonly OpenSection[
   for (const { section, ws } of opened) {
     for (const [fid, f] of Object.entries(ws.manifest.files)) {
       if (!isMarkdownPath(f.path)) continue;
-      const path = section.mount ? `${section.mount}/${f.path}` : f.path;
+      const path = shownPath(section, f.path);
       const key = `${section.space}/${fid}`;
       keys.set(path.toLowerCase(), key);
       if (!keys.has(nameOf(path).stem.toLowerCase())) keys.set(nameOf(path).stem.toLowerCase(), key);
     }
   }
-  const documents: (DocRow & { tags?: NoteTag[] })[] = [];
+  const documents: Row[] = [];
   for (const row of listing.documents) {
     const key = row.md ? keys.get(row.path.toLowerCase()) : undefined;
     const pairs = key === undefined ? undefined : held.pairs.get(key);
@@ -224,7 +278,7 @@ async function withTags(c: Call, listing: Listing, opened: readonly OpenSection[
  *
  * A space this person is not in, a file deleted, one that never was and a
  * link from another workspace on this domain are all one answer, the same
- * a Mac gives: a restricted folder is never told apart from nothing.
+ * a Mac gives: what is not shared with you is never told apart from nothing.
  */
 export async function getFind(c: Call): Promise<Response> {
   const q = c.url.searchParams;
@@ -242,28 +296,48 @@ export async function getFind(c: Call): Promise<Response> {
   if (!bound) return notBound();
   if (bound.id !== workspace) return nothing;
   const all = await c.places.all();
-  if (all === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
-  // A file keeps its id when it moves to another section, so the id is
-  // looked for in every section, the one the link names first. While a move
-  // is half done one id is in two sections: then the named one wins, else
-  // the lowest section id, which is the shared workspace's — as on a Mac
-  // (`follow`, engine/src/cloud/engine.rs). Change both.
+  if (all === null) return noDatabase();
+  // A file keeps its id when it moves to another section — and something
+  // shared is a section of its own — so the id is looked for where the link
+  // names, then wherever that section says it went (`Tombstone.to`), then in
+  // the rest, as many as a request opens. While a move is half done one id
+  // is in two sections: then the named one wins, else the lowest section
+  // id, which is the shared workspace's — as on a Mac (`follow`,
+  // engine/src/cloud/engine.rs). Change both.
   const order = [...all].sort((a, b) => (a.space === space ? -1 : b.space === space ? 1 : a.space < b.space ? -1 : 1));
-  for (const section of order) {
-    const tree = await openTree(inSection(c, section));
-    if (!tree) return notBound();
-    const file = tree.manifest.files[fid];
-    if (!file || file.path.toLowerCase().endsWith(META_SUFFIX)) continue;
-    const { stem } = nameOf(file.path);
-    const alone = new Index(tree.manifest.files).doc(stem).mds.length <= 1;
-    return json({ path: alone ? stem : file.path });
+  const seen = new Set<string>();
+  let opened = 0;
+  for (let i = 0; i < order.length && opened < PAGE; i += 1) {
+    const section = order[i];
+    if (seen.has(section.space)) continue;
+    seen.add(section.space);
+    opened += 1;
+    const ws = await c.places.open(section);
+    if (!ws) {
+      if (section.kind === "shared") return notBound();
+      continue;
+    }
+    const file = ws.manifest.files[fid];
+    if (!file) {
+      // Where it went from here is looked at next.
+      const went = ws.manifest.tombstones?.[fid]?.to;
+      const there = went === undefined ? -1 : order.findIndex((s) => s.space === went);
+      if (there > i) order.splice(i + 1, 0, ...order.splice(there, 1));
+      continue;
+    }
+    if (file.path.toLowerCase().endsWith(META_SUFFIX)) continue;
+    const files = mounted(ws.manifest, section).files;
+    const { stem } = nameOf(files[fid].path);
+    const alone = new Index(files).doc(stem).mds.length <= 1;
+    return json({ path: alone ? stem : files[fid].path });
   }
   return nothing;
 }
 
-/** Which documents are called this or contain this text (search.ts). A
- *  folder is in one section; the workspace itself is all of them, and
- *  `Restricted` every restricted folder. */
+/** Which documents are called this or contain this text (search.ts): in a
+ *  folder's own section and whatever is shared beneath it; the workspace
+ *  itself is every section, and `Shared with me` everything shared with the
+ *  person. */
 export async function getSearch(c: Call): Promise<Response> {
   const { env, url, places } = c;
   const dir = (url.searchParams.get("dir") ?? "").replace(/^\/+|\/+$/g, "");
@@ -277,18 +351,14 @@ export async function getSearch(c: Call): Promise<Response> {
   }
   const ask = askOf(url.searchParams, dir, where);
   if (ask instanceof Refusal) return refuse(ask);
-  const at = await places.at(dir);
+  const at = await places.at(dir, true);
   if (at instanceof Refusal) return refuse(at);
-  let sections: Section[];
-  if (at !== "workspace" && at !== "restricted") {
-    sections = [at];
-  } else {
-    const all = await places.all();
-    if (all === null) {
-      return json({ error: "search needs this domain's database, which isn't answering — try again in a moment" }, 503);
-    }
-    sections = at === "restricted" ? all.filter((s) => s.kind === "restricted") : all;
+  const all = await places.all();
+  if (all === null) {
+    return json({ error: "search needs this domain's database, which isn't answering — try again in a moment" }, 503);
   }
+  const after = cursorOf(url);
+  const sections = sectionsUnder(all, at, dir).slice(after);
 
   const found = await searchIn(env, sections, ask);
   if (found instanceof Refusal) return refuse(found);
@@ -310,8 +380,8 @@ export async function getSearch(c: Call): Promise<Response> {
     ...(found.total > results.length ? { truncated: true } : {}),
     // Too large to mirror — said, rather than silently never found.
     ...(found.notSearched.length > 0 ? { notSearched: found.notSearched.map(({ path }) => nameOf(path).stem) } : {}),
-    // More sections than one request opens: search inside one of these.
-    ...(found.left.length > 0 ? { sectionsNotSearched: found.left.map((s) => s.mount) } : {}),
+    // More sections than one request opens: the rest are the next request's.
+    ...(found.left.length > 0 ? { next: after + sections.length - found.left.length } : {}),
   });
 }
 
@@ -745,6 +815,7 @@ export async function deleteDoc(c: Call): Promise<Response> {
   const path = url.searchParams.get("path") ?? "";
   const flag = versionFlag(url.searchParams.get("v"));
   if (flag instanceof Refusal) return refuse(flag);
+  if (!flag && c.section?.kind === "document") return refuse(sharedStays(itemPath(c.section.share!), "delete"));
 
   const done = await change(
     c,
@@ -767,6 +838,17 @@ export async function deleteDoc(c: Call): Promise<Response> {
 
 /* ---------- Moving ---------- */
 
+/** What an agent is told when it would change who can open something shared. */
+function sharedStays(item: string, verb: "delete" | "move"): Refusal {
+  return new Refusal(
+    409,
+    verb === "delete"
+      ? `"${item}" is shared with people — an agent does not delete something shared. Its person deletes it, or leaves it, in Doklin.`
+      : `"${item}" is shared with people — an agent renames it, or moves it inside the folder it sits in. Moving it anywhere else changes who can open it: its person does that in Doklin.`,
+    { code: "shared" },
+  );
+}
+
 export async function postMove(c: Call): Promise<Response> {
   const body = await readJsonObject(c.request);
   if (!body) return json({ error: "invalid json body" }, 400);
@@ -777,18 +859,36 @@ export async function postMove(c: Call): Promise<Response> {
   const to = trimSlashes(rawTo);
   const problem = pathProblem(from) ?? pathProblem(to);
   if (problem) return json({ error: problem }, 400);
-  const [source, dest] = [await c.places.of(rawFrom), await c.places.of(rawTo)];
+  // What was typed says what is meant, as `mv` reads it: a trailing slash
+  // names a folder, and a destination that is a folder means "into it".
+  const what = rawFrom.endsWith("/") ? "folder" : "either";
+  const source = await c.places.of(rawFrom, what === "folder");
   if (source instanceof Refusal) return refuse(source);
+  // Something shared, named itself: a document's section is the document.
+  if (source.share && (source.kind === "document" || sameName(from, source.mount))) {
+    return moveShared(c, source, source.share, rawTo, dryRun);
+  }
+  const dest = await c.places.of(rawTo, true);
   if (dest instanceof Refusal) return refuse(dest);
   if (sameName(from, source.mount)) {
     return json({ error: `${source.mount} is a section of this workspace, not a folder to move — move what is in it` }, 400);
   }
-  // What was typed says what is meant, as `mv` reads it: a trailing slash
-  // names a folder, and a destination that is a folder means "into it".
-  const what = rawFrom.endsWith("/") ? "folder" : "either";
   const intoSection = sameName(to, dest.mount);
 
   if (source.space !== dest.space) {
+    // What is shared beneath a folder would go with it, to people who could
+    // then open it — or away from people who can.
+    const tree = await openTree(inSection(c, source));
+    const held = Object.entries(tree?.manifest.mounts ?? {}).find(([, m]) => sameName(m.dir, from) || under(m.dir, from));
+    if (held) {
+      return json(
+        {
+          error: `"${from}" holds something shared — moving it to another section changes who can open that. Its person moves it in Doklin.`,
+          code: "shared",
+        },
+        409,
+      );
+    }
     const into = (there: Index): boolean => rawTo.endsWith("/") || there.isFolder(to) || intoSection;
     const moved = await moveAcross({ by: c.who.id, ctx: c.ctx, origin: c.url.origin }, source, dest, { from, to, what, into }, dryRun);
     return moved instanceof Refusal ? refuse(moved) : json(moved);
@@ -802,6 +902,86 @@ export async function postMove(c: Call): Promise<Response> {
   // A move changes no text, but it moves the etag the mirror is whole at.
   await mirrorAfter(here, done);
   return json({ ...done.value, ...(done.wrote ? {} : { moved: false }) });
+}
+
+/**
+ * Rename something shared, or move it to another folder of the section it
+ * sits in. Its name is its own: a folder's in the database, a document's its
+ * file's. Where it sits is the section it sits in's to say (`mounts`), so
+ * only somebody who can open that section moves it.
+ */
+async function moveShared(c: Call, section: Section, share: Shared, rawTo: string, dryRun: boolean): Promise<Response> {
+  const item = itemPath(share);
+  const to = trimSlashes(rawTo);
+  if (sameName(to, item) && to === item) return json({ kind: section.kind, from: item, to: item, files: 0, moved: false });
+  const parent = share.parent;
+  const container = parent ? await c.places.open(parent) : null;
+  // "Into it": a trailing slash, or a folder that is there.
+  const all = (await c.places.all()) ?? [];
+  const folderThere =
+    !sameName(to, item) &&
+    (all.some((s) => s.kind !== "document" && sameName(s.mount, to)) ||
+      (parent !== null &&
+        container !== null &&
+        (new Index(mounted(container.manifest, parent).files).isFolder(to) ||
+          all.some((s) => s.share && s.space !== section.space && under(itemPath(s.share), to)))));
+  const into = rawTo.endsWith("/") || folderThere;
+  const dir = into ? to : to.includes("/") ? to.slice(0, to.lastIndexOf("/")) : "";
+  const typed = into ? share.shown : to.slice(to.lastIndexOf("/") + 1);
+  const name = validItemName(section.kind === "document" ? nameOf(typed).stem : typed);
+  if (!name) return json({ error: "that is not a name a shared folder or document can carry" }, 400);
+
+  const moving = !sameName(dir, share.dir);
+  if (moving) {
+    // The folder it goes to has to be one of the section it sits in.
+    const there = dir === "" ? null : await c.places.at(dir, true);
+    const sameSection = parent !== null && there !== null && typeof there !== "string" && !(there instanceof Refusal) && there.space === parent.space;
+    if (!sameSection) return refuse(sharedStays(item, "move"));
+  }
+  const renaming = name !== share.shown;
+  if (!moving && !renaming) return json({ kind: section.kind, from: item, to: item, files: 0, moved: false });
+
+  // Nothing there may have its name already.
+  if (parent && container) {
+    const stored = storedPath(parent, dir, true);
+    const taken = stored === null ? null : takenIn(container.manifest, stored);
+    const among = section.kind === "document" ? taken?.documents : taken?.folders;
+    const other = all.some(
+      (s) => s.share && s.space !== section.space && s.kind === section.kind && sameName(s.share.dir, dir) && sameName(s.share.shown, name),
+    );
+    if (other || among?.has(name.toLowerCase())) {
+      return json({ error: `"${dir}/${name}" is already there` }, 409);
+    }
+  } else if (all.some((s) => s.share && s.space !== section.space && s.kind === section.kind && sameName(s.share.dir, dir) && sameName(s.share.shown, name))) {
+    return json({ error: `"${dir}/${name}" is already there` }, 409);
+  }
+  const answer = { kind: section.kind, from: item, to: `${dir}/${name}`, shared: true };
+  if (dryRun) return json({ ...answer, moved: false });
+
+  if (moving && parent) {
+    const placed = await change(inSection(c, parent), async (tx) => {
+      const mounts = (tx.m.mounts ??= {});
+      const now = mounts[share.space.id];
+      mounts[share.space.id] = { ...now, dir, rev: (now?.rev ?? 0) + 1, by: tx.by };
+      tx.touch();
+      return true;
+    });
+    if (placed instanceof Refusal) return refuse(placed);
+  }
+  if (renaming && section.kind === "folder") {
+    const renamed = await renameSpace(c.env, c.places.auth, share.space, name);
+    if (renamed === null) return noDatabase();
+  }
+  if (renaming && section.kind === "document") {
+    // Its files are in its own section, at the folder it sat in when this began.
+    const here = inSection(c, section);
+    const done = await change(here, async (tx) =>
+      moveWithin(tx, { from: item, to: `${share.dir}/${name}`, what: "document", into: () => false }),
+    );
+    if (done instanceof Refusal) return refuse(done);
+    await mirrorAfter(here, done);
+  }
+  return json(answer);
 }
 
 const trimSlashes = (p: string): string => p.replace(/^\/+|\/+$/g, "");

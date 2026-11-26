@@ -23,6 +23,8 @@ export interface Env {
   AGENT_LIMIT?: RateLimit;
   /** Never bound: the worker sets it on the `Env` it hands a space's routes
    *  (spaces.ts). `DATA` is then that space's part of the bucket and `whole`
-   *  the bucket itself. Absent for the shared workspace. */
-  SPACE?: { id: string; whole: R2Bucket };
+   *  the bucket itself. `kind` is which kind of section it is, and `placed`
+   *  whether the caller can open the section it sits in: only they take its
+   *  item out of it. Absent for Library. */
+  SPACE?: { id: string; whole: R2Bucket; kind: "private" | "folder" | "document"; placed: boolean };
 }

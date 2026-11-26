@@ -20,9 +20,10 @@ import { copyTo, keepPublic, moveAcross, moveWithin, removeDocument, removeVersi
 import { Refusal, commit, newFileId, type Committed, type Tx } from "./commit";
 import { Index, docExists, locate, nameOf, pathProblem, primaryOf, versionFlag, type Entry } from "./documents";
 import { json, readJsonObject } from "./http";
-import { MAX_FILE_BYTES, contentTypeOf } from "./layout";
+import { MAX_FILE_BYTES, SHARE_ID_RE, contentTypeOf, validPath } from "./layout";
+import { setMount } from "./mounts";
 import { askOf, mirrorAfter, searchIn } from "./search";
-import { listSpaces, sharedEnv, spaceEnv, type Where } from "./spaces";
+import { listOpenSpaces, openSpace, sharedEnv, spaceEnv, type Where } from "./spaces";
 import { filtersOf } from "./tagList";
 import { refuse, sectionOf, trimSlashes, type WebCall } from "./webCall";
 import type { SearchAnswer, SearchIndexing } from "./wire";
@@ -30,7 +31,7 @@ import { META_SUFFIX } from "../../src/metaFile";
 
 /** `commit` in a section, signed with the person at the browser. */
 const change = <T>(c: WebCall, where: Where, fn: (tx: Tx) => Promise<T | Refusal>) =>
-  commit(where.env, c.auth.memberId, fn, { mount: where.mount });
+  commit(where.env, c.auth.memberId, fn, { at: where });
 
 /** What a change is answered with: what it did, and the two etags. */
 const answered = (made: Committed<Record<string, unknown>>): Response => json({ ...made.value, etag: made.etag, over: made.over });
@@ -193,7 +194,7 @@ async function placedOf(c: WebCall, verb: "move" | "copy"): Promise<Placed | Ref
   const dest = await sectionOf(c, to.space);
   if (dest instanceof Refusal) return dest;
   // The top of a section is where a folder moved from another one goes when
-  // it is to be that section: a folder made into a restricted one.
+  // it is to be that section: a folder that is being shared.
   const top = to.path === "";
   if (top && !(verb === "move" && kind === "folder" && source.space !== dest.space)) {
     return new Refusal(400, "only a folder moved from another section goes to the top of one — say where this goes");
@@ -232,10 +233,39 @@ export async function postCopy(c: WebCall): Promise<Response> {
   return made instanceof Refusal ? refuse(made) : answered(made);
 }
 
+/* ---------- Where a share sits ---------- */
+
+/**
+ * Say where a share sits in the section it is in: the folder of that section
+ * its item is in. The entry is the section's manifest's (`mounts`), so it
+ * lands with a compare-and-swap like any change to the tree; who can open
+ * the share is never read from it (spaces.ts).
+ */
+export async function putMount(c: WebCall): Promise<Response> {
+  const q = c.url.searchParams;
+  const where = await sectionOf(c, q.get("space"));
+  if (where instanceof Refusal) return refuse(where);
+  const id = q.get("id") ?? "";
+  const body = await readJsonObject(c.request);
+  const dir = trimSlashes(body?.dir);
+  const was = body?.was === undefined ? undefined : trimSlashes(body.was);
+  if (!body || !SHARE_ID_RE.test(id) || typeof body.dir !== "string" || (dir !== "" && !validPath(dir)) || (was !== undefined && !validPath(was))) {
+    return json({ error: "a mount is {dir, was?}, for the share ?id= in the section ?space=" }, 400);
+  }
+  const share = await openSpace(c.env, c.auth, id);
+  if (share === null) return json({ error: "the domain's database isn't answering — try again in a moment" }, 503);
+  if (share === "none" || share.parent !== where.space) return json({ error: "that is not something shared from here" }, 404);
+
+  const made = await setMount(where.env, c.auth.memberId, id, { dir, ...(was === undefined ? {} : { was }) });
+  return made instanceof Refusal ? refuse(made) : json({ etag: made.etag, over: made.over });
+}
+
 /* ---------- Searching ---------- */
 
-/** Every section the person is in, the shared workspace first. A hit names
- *  its section and its file by their ids: the browser holds the manifests.
+/** Every section the person can open, the shared workspace first — as many
+ *  as a request opens, `next` saying where the next one starts (`after`). A
+ *  hit names its section and its file by their ids: the browser holds the
+ *  manifests.
  *  `tag=name:value` (repeatable) narrows it to notes with that tag, and
  *  `tag=name` to notes with the tag at all; the browser sends only listed
  *  names, spelled as the list spells them. */
@@ -244,12 +274,14 @@ export async function getSearch(c: WebCall): Promise<Response> {
   if (tags instanceof Refusal) return refuse(tags);
   const ask = askOf(c.url.searchParams, "", tags);
   if (ask instanceof Refusal) return refuse(ask);
-  const spaces = await listSpaces(c.env, c.auth);
+  const spaces = await listOpenSpaces(c.env, c.auth);
   if (spaces === null) return json({ error: "search needs this domain's database, which isn't answering — try again in a moment" }, 503);
+  const raw = Number(c.url.searchParams.get("after") ?? "0");
+  const after = Number.isInteger(raw) && raw > 0 ? raw : 0;
   const sections: Where[] = [
     { space: "", mount: "", env: sharedEnv(c.env) },
-    ...spaces.map((s) => ({ space: s.id, mount: "", env: spaceEnv(c.env, s.id) })),
-  ];
+    ...spaces.map((s) => ({ space: s.id, mount: "", env: spaceEnv(c.env, s) })),
+  ].slice(after);
 
   const found = await searchIn(c.env, sections, ask);
   if (found instanceof Refusal) return refuse(found);
@@ -269,7 +301,7 @@ export async function getSearch(c: WebCall): Promise<Response> {
     ...(found.total > found.hits.length ? { truncated: true } : {}),
     // Too large to mirror — said, rather than silently never found.
     ...(found.notSearched.length > 0 ? { notSearched: found.notSearched } : {}),
-    // More sections than one request opens.
-    ...(found.left.length > 0 ? { sectionsNotSearched: found.left.map((s) => s.space) } : {}),
+    // More sections than one request opens: the rest are the next request's.
+    ...(found.left.length > 0 ? { next: after + sections.length - found.left.length } : {}),
   } satisfies SearchAnswer);
 }

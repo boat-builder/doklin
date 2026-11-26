@@ -47,7 +47,8 @@ export default {
     const r = await sweep(env, Date.now());
     console.log(
       `sweep: ${r.deleted} copies deleted; ${r.swept} of ${r.sections} sections swept` +
-        (r.unreadable > 0 ? `, ${r.unreadable} with an unreadable manifest left alone` : ""),
+        (r.unreadable > 0 ? `, ${r.unreadable} with an unreadable manifest left alone` : "") +
+        (r.erased > 0 ? `; ${r.erased} deleted shares erased` : ""),
     );
   },
 } satisfies ExportedHandler<Env>;

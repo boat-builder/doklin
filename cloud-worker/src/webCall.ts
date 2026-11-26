@@ -26,7 +26,7 @@ export const trimSlashes = (raw: unknown): string => (typeof raw === "string" ? 
 
 /**
  * The section a request names — "" or nothing is the shared workspace —
- * when its person is in it. One they are not in and one that does not exist
+ * when its person can open it. One they cannot and one that does not exist
  * are one answer (spaces.ts). Its paths are as it stores them: mounted at "".
  */
 export async function sectionOf(c: Pick<WebCall, "env" | "auth">, raw: unknown): Promise<Where | Refusal> {
@@ -35,6 +35,6 @@ export async function sectionOf(c: Pick<WebCall, "env" | "auth">, raw: unknown):
   if (typeof id !== "string" || !SPACE_ID_RE.test(id)) return new Refusal(400, "that is not a section of this workspace");
   const space = await openSpace(c.env, c.auth, id);
   if (space === null) return new Refusal(503, "the domain's database isn't answering — try again in a moment");
-  if (space === "none") return new Refusal(404, "that section is gone, or you are no longer in it");
-  return { space: id, mount: "", env: spaceEnv(c.env, id) };
+  if (space === "none") return new Refusal(404, "that is gone, or it is no longer shared with you");
+  return { space: id, mount: "", env: spaceEnv(c.env, space) };
 }

@@ -119,19 +119,17 @@ pub fn device_name(core: &Core) -> String {
         .unwrap_or_else(|| core.device_name.clone())
 }
 
-/// The folders inside the workspace at `root` that are sections of their
-/// own — Library, once the folder is in the Library layout, this person's
-/// Private and the restricted folders they are in — by what the folders
-/// themselves say. Empty for a folder that is not a connected workspace.
-pub(crate) fn section_roots(root: &Path) -> Vec<PathBuf> {
-    let Some(marker) = read_marker(root) else { return Vec::new() };
-    let library = marker.moved().then(|| space::top(root, space::LIBRARY_DIR));
-    library.into_iter().chain(space::held(root, &marker.ws_id).into_iter().map(|held| held.dir)).collect()
+/// The sections of the connected workspace at `root`, where its engine last
+/// said each is on this device and what of its folder is its own
+/// (`Engine::set_reaches`). Empty for a folder that is not a connected
+/// workspace, and until its engine has said.
+pub(crate) fn sections_of(core: &Core, root: &str) -> Vec<status::SectionAt> {
+    core.sections.lock().ok().and_then(|table| table.get(root).cloned()).unwrap_or_default()
 }
 
 /// Whether the folder at `root` keeps a version store of its own: every
 /// folder but a connected workspace that has begun its move into the Library
-/// layout. Once it has, each section keeps one (`section_roots`), and the
+/// layout. Once it has, each section keeps one (`sections_of`), and the
 /// folder's root none — while it moves, not even that.
 pub(crate) fn keeps_own_versions(root: &Path) -> bool {
     read_marker(root).is_none_or(|marker| marker.layout.is_none())
@@ -174,6 +172,9 @@ pub(crate) struct ManagerInner {
     /// hear it on first contact — before any window is listening — so a
     /// window also asks for this list once it is up (`cloud_removed`).
     removed: Vec<Removed>,
+    /// ONE-TIME (layout.rs, `from_library`): the folders that step moved
+    /// since the app started (`cloud_layout_moved`).
+    layout_moved: Vec<String>,
 }
 
 /// The folders of the workspaces this device is connected to, as the
@@ -204,12 +205,31 @@ pub fn init(core: &Arc<Core>) {
         activity_seq: 0,
         focus: HashMap::new(),
         removed: Vec::new(),
+        layout_moved: Vec::new(),
     };
     for ws in &file.workspaces {
+        // ONE-TIME (layout.rs, `from_library`): before its engine starts,
+        // and before anything versions the folder (`versions::init` runs
+        // after this) — nothing may watch a move. One that is refused leaves
+        // the engine refusing to sync (`layout::ready`), with the sentence
+        // that says what to rename. A folder whose marker cannot be read — a
+        // disk not mounted yet — has nothing to move at this launch.
+        if let Ok(true) = layout::from_library(Path::new(&ws.root), &inner.data_dir) {
+            inner.layout_moved.push(ws.root.clone());
+        }
         spawn_engine(core, &mut inner, ws);
     }
 
     *core.cloud.lock().unwrap() = Some(inner);
+}
+
+/// ONE-TIME (layout.rs, `from_library`): the workspace folders whose
+/// `Private/` and `Restricted/` became `My files/` and `Shared with me/`
+/// since the app started. What the app stored about paths under them
+/// follows (`layout::moved_rel` says where each is now); asked again, the
+/// answer is the same, so every window may ask.
+pub fn cloud_layout_moved(core: &Arc<Core>) -> Result<Vec<String>, String> {
+    with_inner(core, |inner| Ok(inner.layout_moved.clone()))
 }
 
 /// A recursive watcher on `root` (external editors, git, Finder): any
@@ -278,9 +298,10 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
                 Arc::new(move |path: &Path| host.trash(path).is_ok()) as Trash
             }),
             on_spaces: Some({
-                let core = core.clone();
-                Box::new(move |changed| spaces_changed(&core, changed))
+                let (core, ws_id) = (core.clone(), ws.ws_id.clone());
+                Box::new(move |changed| spaces_changed(&core, &ws_id, changed))
             }),
+            sections: core.sections.clone(),
         },
         Arc::new(
             HttpRemote::new(&ws.endpoint, &ws.token, &inner.device.id, &core.client)
@@ -305,15 +326,16 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
     inner.engines.insert(ws.root.clone(), EngineHandle { tx: cmd_tx, root, stopped, _watcher: watcher });
 }
 
-/// A space's folder appeared on this Mac or left it (`EngineConfig::
-/// on_spaces`): what follows a folder follows. A folder that left takes its
+/// A section appeared on this Mac, moved or left it (`EngineConfig::
+/// on_spaces`): what follows a section follows. One that left takes its
 /// local version history with it — the history holds every file's content —
-/// and the versioners are brought in line with the folders that are here.
-fn spaces_changed(core: &Arc<Core>, changed: SpacesChanged) {
+/// and the versioners are brought in line with the sections that are here.
+fn spaces_changed(core: &Arc<Core>, ws_id: &str, changed: SpacesChanged) {
     let owned = core.clone();
+    let keys: Vec<String> = changed.removed.iter().map(|id| crate::versions::store::section_key(ws_id, id)).collect();
     core.runtime.spawn(async move {
-        for (root, store_dir) in changed.removed {
-            crate::versions::forget_root(&owned, &root, store_dir).await;
+        for key in keys {
+            crate::versions::forget_store(&owned, &key).await;
         }
         crate::versions::reconcile(&owned);
     });
@@ -368,25 +390,25 @@ async fn access_removed(core: Arc<Core>, entry: WorkspaceEntry) {
 async fn delete_copy(core: &Arc<Core>, entry: &WorkspaceEntry) -> bool {
     let data_dir = core.data_dir.clone();
     let root = PathBuf::from(&entry.root);
-    // Found while the folder still exists: a store's key is the folder's
-    // canonical path. Each section inside it has a store of its own, and a
-    // folder that never moved into the Library layout has one at its root.
-    let store_dir = crate::versions::store_for_root(&data_dir, &root).dir;
-    let library = read_marker(&root).filter(|marker| marker.moved()).map(|_| space::top(&root, space::LIBRARY_DIR));
-    let sections: Vec<(String, PathBuf)> = library
+    // A folder that never moved into the Library layout has a store at its
+    // root, keyed by its path: found while the folder still exists. Each
+    // section's store is keyed by the workspace and the section.
+    let own_store = crate::versions::store_for_root(&data_dir, &root).key;
+    let prefix = format!("{}-", entry.ws_id);
+    let sections: Vec<String> = crate::versions::stores::list(&data_dir)
         .into_iter()
-        .chain(space::held(&root, &entry.ws_id).into_iter().map(|held| held.dir))
-        .map(|dir| {
-            let store = crate::versions::store_for_root(&data_dir, &dir).dir;
-            (dir.to_string_lossy().to_string(), store)
-        })
+        .map(|store| store.key)
+        .filter(|key| key.starts_with(&prefix))
         .collect();
     let home = core.home.clone();
     let copy = entry.clone();
     let deleted = tokio::task::spawn_blocking(move || remove_copy(&copy, home.as_deref())).await.unwrap_or(false);
-    crate::versions::forget_root(core, &entry.root, store_dir).await;
-    for (section, store) in sections {
-        crate::versions::forget_root(core, &section, store).await;
+    crate::versions::forget_store(core, &own_store).await;
+    for key in sections {
+        crate::versions::forget_store(core, &key).await;
+    }
+    if let Ok(mut table) = core.sections.lock() {
+        table.remove(&entry.root);
     }
     let _ = std::fs::remove_dir_all(state_dir(&data_dir, &entry.ws_id));
     deleted
@@ -1153,7 +1175,7 @@ pub async fn cloud_join(core: &Arc<Core>, endpoint: String, token: String) -> Re
     write_json(&sdir.join("state.json"), &state).map_err(|e| format!("save the sync state: {}", e))?;
     write_marker(
         &dest,
-        &Marker { domain: domain.clone(), ws_id: workspace.id.clone(), layout: Some(layout::LIBRARY.to_string()) },
+        &Marker { domain: domain.clone(), ws_id: workspace.id.clone(), layout: Some(layout::MY_FILES.to_string()) },
     )?;
 
     record_and_spawn(
@@ -1212,8 +1234,15 @@ pub async fn cloud_resume(
     }
 
     // A folder disconnected before it moved into the Library layout moves
-    // now, before its engine starts.
+    // now, before its engine starts — and one left in the layout from before
+    // sharing in place is brought to this one (ONE-TIME, layout.rs).
     move_open_folder(core, &root).await?;
+    if layout::from_library(&root_path, &data_dir)? {
+        with_inner(core, |inner| {
+            inner.layout_moved.push(root.clone());
+            Ok(())
+        })?;
+    }
 
     let sdir = state_dir(&data_dir, &workspace.id);
     let _ = std::fs::remove_dir_all(&sdir);
@@ -1558,7 +1587,7 @@ pub async fn cloud_documents(core: &Arc<Core>, root: String) -> Result<Option<Ve
     ask(tx, |reply| EngineCmd::Documents { reply }).await.map(Some)
 }
 
-/* ---------- Restricted folders ---------- */
+/* ---------- Sharing ---------- */
 
 /// The engine of the workspace at `root`.
 fn engine_of(core: &Arc<Core>, root: &str) -> Result<mpsc::UnboundedSender<EngineCmd>, String> {
@@ -1567,27 +1596,26 @@ fn engine_of(core: &Arc<Core>, root: &str) -> Result<mpsc::UnboundedSender<Engin
     })
 }
 
-/// Make a restricted folder holding whoever is asking and `members` (member
-/// ids — people already in the workspace). With `from`, the absolute path of
-/// a folder in the workspace, that folder becomes it: it leaves the Macs of
-/// everyone not chosen. Answers the folder as the status lists it, so the
-/// caller knows where it is on this Mac.
-pub async fn cloud_space_create(
+/// Share the folder or the document at `path` (absolute) with `members`
+/// (member ids — people already in the workspace). It stays where it is; the
+/// people it is shared with find it under `Shared with me`. Something shared
+/// already gets those people as well. Answers it as the status lists it.
+pub async fn cloud_share(
     core: &Arc<Core>,
     root: String,
-    name: String,
+    path: String,
     members: Vec<String>,
-    from: Option<String>,
 ) -> Result<SpaceStatus, String> {
     let tx = engine_of(core, &root)?;
-    ask(tx, |reply| EngineCmd::MakeSpace { name, members, from, reply }).await
+    ask(tx, |reply| EngineCmd::Share { path, members, reply }).await
 }
 
-/// Add a person to a restricted folder (`add`), or take one out. Anyone in a
-/// folder may do either, to anyone in it — themselves included, which is
-/// leaving it: the folder then leaves this Mac. The last person in a folder
-/// cannot be taken out; the domain's sentence says to delete it instead.
-pub async fn cloud_space_member(
+/// Share something with one more person (`add`), or stop. Anyone who can
+/// open a share may do either, to anyone it is shared with — themselves
+/// included, which is leaving it: its copy then leaves this device. Whoever
+/// opens it through the folder it sits in cannot be taken off; the domain's
+/// sentence says so.
+pub async fn cloud_share_member(
     core: &Arc<Core>,
     root: String,
     id: String,
@@ -1595,14 +1623,22 @@ pub async fn cloud_space_member(
     add: bool,
 ) -> Result<(), String> {
     let tx = engine_of(core, &root)?;
-    ask(tx, |reply| EngineCmd::SpaceMember { id, member: member_id, add, reply }).await
+    ask(tx, |reply| EngineCmd::ShareMember { id, member: member_id, add, reply }).await
 }
 
-/// Delete a restricted folder for everyone in it: what it stored on the
-/// domain, and its copy on each of their Macs.
-pub async fn cloud_space_delete(core: &Arc<Core>, root: String, id: String) -> Result<(), String> {
+/// Delete something shared, for everyone it is shared with — for whoever
+/// can open the folder it sits in. It is kept thirty days, to be restored
+/// (`cloud_share_restore`), and goes to this device's Trash.
+pub async fn cloud_share_delete(core: &Arc<Core>, root: String, id: String) -> Result<(), String> {
     let tx = engine_of(core, &root)?;
-    ask(tx, |reply| EngineCmd::DeleteSpace { id, reply }).await
+    ask(tx, |reply| EngineCmd::DeleteShare { id, reply }).await
+}
+
+/// Bring a deleted share back, as it was: its files, its people, its
+/// history, its pages.
+pub async fn cloud_share_restore(core: &Arc<Core>, root: String, id: String) -> Result<(), String> {
+    let tx = engine_of(core, &root)?;
+    ask(tx, |reply| EngineCmd::RestoreShare { id, reply }).await
 }
 
 /* ---------- Every public address ---------- */

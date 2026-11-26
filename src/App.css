@@ -3407,8 +3407,8 @@ body.sidebar-resizing {
   background: var(--hover);
 }
 
-/* A workspace in sections: Restricted and Private are headings in the tree,
-   each over a list of its own. A drop on a section's empty space lands in
+/* A workspace in sections: Library, My files and Shared with me are headings
+   in the tree, each over a list of its own. A drop on a section's empty space lands in
    that section's folder, so the whole section lights up. */
 .tree-section {
   border-radius: 8px;
@@ -3508,15 +3508,25 @@ button.tree-section-toggle:hover {
   text-decoration: underline;
 }
 
-/* How many people a restricted folder holds, after its name. */
-.tree-space-count {
+/* The mark on the row of something shared, after its name: with how many
+   people. */
+.tree-shared {
   flex-shrink: 0;
-  margin-left: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 6px;
   font-size: var(--fs-sm);
   color: var(--text-3);
 }
 
-/* A note straight under Restricted is in no folder, so nobody else has it. */
+.tree-shared svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* What is under Shared with me and shared by nobody, or at the top of the
+   workspace's folder, is in no section. */
 .tree-row.is-nowhere .tree-label {
   color: var(--text-3);
 }
@@ -3528,7 +3538,7 @@ button.tree-section-toggle:hover {
   color: var(--warn-ink);
 }
 
-/* The people of a restricted folder, and the ones who could be added:
+/* The people something is shared with, and the ones it could be shared with:
    one line each, the action at its end. */
 .space-people {
   list-style: none;
@@ -6139,6 +6149,11 @@ body.tree-dragging.tree-drag-invalid * {
 .live-chip.is-updating {
   --chip-dot: var(--accent);
   --chip-ink: var(--accent);
+}
+
+/* The Share button beside it: quiet until the document is shared. */
+.share-chip.is-shared {
+  color: var(--text-1);
 }
 
 .live-chip.is-stale {

@@ -32,7 +32,7 @@ const notes = {
 
 See [launch-plan](../GTM/launch-plan.md) and [the budget](../Finance/budget.md).
 
-Board: [board-plan](../../Restricted/Board/board-plan.md).
+Board: [board-plan](<../../Shared with me/Board/board-plan.md>).
 
 Gone: [old-note](old-note.md).
 
@@ -43,7 +43,7 @@ Last line
     records: [
       { id: "../GTM/launch-plan.md", file: "f-launch" },
       { id: "../Finance/budget.md", file: "f-budget" },
-      { id: "../../Restricted/Board/board-plan.md", file: "f-board" },
+      { id: "../../Shared with me/Board/board-plan.md", file: "f-board" },
       { id: "old-note.md", file: "f-gone" },
     ],
   },
@@ -60,12 +60,15 @@ Paste here.
 const initialDocs: WorkspaceDocument[] = [
   { path: "Library/GTM/launch-plan-v2.md", fileId: "f-launch", section: null },
   { path: "Library/Money/budget.md", fileId: "f-budget", section: null },
-  { path: "Restricted/Board/board-plan-final.md", fileId: "f-board", section: "s-board" },
+  { path: "Shared with me/Board/board-plan-final.md", fileId: "f-board", section: "s-board" },
   { path: "Library/Roadmap/notes.md", fileId: "f-notes", section: null },
   { path: "Library/Roadmap/q1.md", fileId: "f-q1", section: null },
   { path: "Library/Deep/Down/other.md", fileId: "f-other", section: null },
-  { path: "Private/todo.md", fileId: "f-todo", section: "p-me" },
+  { path: "My files/todo.md", fileId: "f-todo", section: "p-me" },
 ];
+
+// What is shared, as the app names it for the `@` list.
+const SHARES = new Map([["s-board", { name: "Board", alone: false }]]);
 
 window.__notes = notes;
 window.__split = splitLinkRecords;
@@ -82,6 +85,7 @@ function Note({ id, docs }: { id: keyof typeof notes; docs: WorkspaceDocument[] 
       docs: index,
       recent: [],
       workspace: "Acme",
+      shares: SHARES,
       placement: "caret",
       notify: (m) => window.__notices.push(m),
     }),
