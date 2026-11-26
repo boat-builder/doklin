@@ -39,9 +39,10 @@ name: release
 #
 # workflow_dispatch cuts a release manually (same bump + build path).
 #
-# A release can be MANDATORY: every Mac app and `doklin` older than it stops
-# working — Macs as soon as it is out (latest.json's `minimum`), the command
-# and the iPhone once a domain runs its worker (cloud-worker/src/clients.ts).
+# A release can be MANDATORY: its worker turns away every Mac app, iPhone and
+# `doklin` older than it (cloud-worker/src/clients.ts). Nothing else does, so
+# it bites on a domain only once that domain's admin updates the worker; a
+# domain left on an older worker keeps answering older apps.
 # It is mandatory when a PR merged since the last release carries the label
 # `mandatory`, or when Run workflow has *mandatory* ticked; `bump` then writes
 # this version into MINIMUM_APP in cloud-worker/src/version.ts. Run workflow's
@@ -61,7 +62,7 @@ on:
   workflow_dispatch:
     inputs:
       mandatory:
-        description: "Mandatory: every Mac app and doklin older than this release stops working"
+        description: "Mandatory: a domain that updates to this release's worker turns away every Mac app and doklin older than it"
         type: boolean
         default: false
       iphone:
@@ -150,8 +151,7 @@ jobs:
           stamp_crate cli doklin-cli
 
       # The oldest clients the release's worker answers (version.ts, read by
-      # cloud-worker/src/clients.ts and by latest.json below). They only go
-      # up, and only here.
+      # cloud-worker/src/clients.ts). They only go up, and only here.
       - name: Mark the release mandatory, when it is
         id: m
         env:
@@ -489,23 +489,11 @@ jobs:
       # (the endpoint in tauri.conf.json). The .tar.gz + .sig are produced by the
       # build (createUpdaterArtifacts + TAURI_SIGNING_PRIVATE_KEY); we publish
       # them as-is. Only darwin-aarch64 is listed.
-      # `minimum` is the oldest version this release lets keep running
-      # (MINIMUM_APP, version.ts): an app older than it covers its windows
-      # until it updates (src/updater.ts). Tauri reads only the fields it
-      # knows; the app reads this one off the manifest's raw JSON.
       - name: Stage updater artifacts + latest.json
         env:
           TAG: ${{ needs.bump.outputs.tag }}
-          MANDATORY: ${{ needs.bump.outputs.mandatory }}
         run: |
           set -euo pipefail
-          MINIMUM="$(sed -nE 's/^export const MINIMUM_APP = "([^"]+)";$/\1/p' cloud-worker/src/version.ts)"
-          [ -n "$MINIMUM" ] || { echo "::error::cloud-worker/src/version.ts has no MINIMUM_APP"; exit 1; }
-          if [ "$MANDATORY" = "true" ]; then
-            NOTES="Required update to Doklin v$VERSION: older versions stop working."
-          else
-            NOTES="Automatic update to Doklin v$VERSION. See the releases page for details."
-          fi
           MACOS_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
           TARBALL="$(ls "$MACOS_DIR"/*.app.tar.gz | head -n1)"
           SIG="$(cat "$MACOS_DIR"/*.app.tar.gz.sig)"
@@ -513,15 +501,12 @@ jobs:
           URL="https://github.com/boat-builder/doklin/releases/download/${TAG}/Doklin.app.tar.gz"
           jq -n \
             --arg v "$VERSION" \
-            --arg notes "$NOTES" \
-            --arg min "$MINIMUM" \
             --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg sig "$SIG" \
             --arg url "$URL" \
             '{
               version: $v,
-              notes: $notes,
-              minimum: $min,
+              notes: "Automatic update to Doklin v\($v). See the releases page for details.",
               pub_date: $d,
               platforms: {
                 "darwin-aarch64": { signature: $sig, url: $url }
@@ -597,7 +582,7 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            ${{ needs.bump.outputs.mandatory == 'true' && format('**Mandatory.** Doklin and `doklin` older than {0} stop working: a Mac as soon as this release is out, the command once a domain runs its worker.', needs.bump.outputs.tag) || '' }}
+            ${{ needs.bump.outputs.mandatory == 'true' && format('**Mandatory.** A domain that updates to this worker turns away Doklin and `doklin` older than {0}.', needs.bump.outputs.tag) || '' }}
 
             **macOS** Apple Silicon (M-series) `.dmg`, Developer ID signed and notarized — opens with no Gatekeeper prompt. Intel Macs are not supported.
 

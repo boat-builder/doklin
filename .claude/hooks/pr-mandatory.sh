@@ -6,5 +6,5 @@
 
 jq -r '.tool_input.command // empty' | grep -q 'gh pr create' || exit 0
 
-jq -n --arg context "This repository cuts a release from every merge to main. A PR labelled \`mandatory\` makes its release turn away every older Mac app and \`doklin\`: a Mac as soon as the release is out, \`doklin\` and the iPhone once a domain runs the release's worker. Add the label (\`gh pr edit <number> --add-label mandatory\`) only when the user asks for it. If this change leaves older apps or \`doklin\` unable to work with the new worker, ask the user whether its release should be mandatory." \
+jq -n --arg context "This repository cuts a release from every merge to main. A PR labelled \`mandatory\` makes its release's worker turn away every older Mac app and \`doklin\`, on each domain whose admin updates to that worker. Add the label (\`gh pr edit <number> --add-label mandatory\`) only when the user asks for it. If this change leaves older apps or \`doklin\` unable to work with the new worker, ask the user whether its release should be mandatory." \
   '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $context}}'

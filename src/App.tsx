@@ -1068,14 +1068,14 @@ export default function App() {
     () => cloudForWorkspace(cloudStatuses, workspaceRoot),
     [cloudStatuses, workspaceRoot],
   );
-  // A release marked mandatory: its manifest says this app is too old, or a
-  // domain's worker turns it away. UpdateRequired covers the window until the
+  // A domain's worker turns this app away (a release marked mandatory, once
+  // the domain runs its worker): UpdateRequired covers the window until the
   // update is in.
   const turnedAwayBy = useMemo(
     () => [...new Set(cloudStatuses.filter((s) => s.phase === "app-outdated").map((s) => s.domain))],
     [cloudStatuses],
   );
-  const updateRequired = !!update && (update.required || turnedAwayBy.length > 0);
+  const updateRequired = !!update && turnedAwayBy.length > 0;
   // The window's shortcuts reach nothing beneath the cover either.
   const updateRequiredRef = useRef(updateRequired);
   useEffect(() => {

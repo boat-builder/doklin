@@ -25,13 +25,13 @@ macOS, Apple Silicon only. Producer: `.github/workflows/release.yml`. Consumer: 
 
 ## Mandatory releases
 
-A mandatory release turns away every Mac app and `doklin` older than it. The oldest versions a worker answers are `MINIMUM_APP` and `MINIMUM_IOS` in `cloud-worker/src/version.ts`; nothing but `bump` writes them, and they never go down.
+A mandatory release's worker turns away every Mac app, iPhone and `doklin` older than it. The worker is the only thing that does: a domain's admin decides when it updates, and a domain left on an older worker keeps answering older apps. The oldest versions a worker answers are `MINIMUM_APP` and `MINIMUM_IOS` in `cloud-worker/src/version.ts`; nothing but `bump` writes them, and they never go down.
 
 - **Mark one:** label the PR `mandatory` before it is merged. `bump` reads the label off every commit `main` took since the last tag (`--first-parent`), and any one makes the release mandatory. Forgotten, or for a release with no PR: **Run workflow** with *mandatory* ticked, which cuts a release of `main` as it is.
 - A Claude session hears about the label only when it opens a PR: `.claude/hooks/pr-mandatory.sh`, a `PostToolUse` hook on `gh pr create` (`.claude/settings.json`), which keeps it out of every other session's context. A change to what the label means changes that text too.
 - **The iPhone:** **Run workflow** with *iphone* set to a build that is on TestFlight, as TestFlight shows it (`0.1.0 (57)`), or a version alone once every release has its own. It is stored as `0.1.0+57`. A build that is not out yet locks every iPhone out with nothing to update to.
 - A mandatory release, or a new iPhone minimum, also moves `WORKER_VERSION` when nothing merged since the last tag did: that is how a domain is told to update its worker, and the minimum is in the worker.
-- **When it bites:** a Mac as soon as the release is published (`latest.json` `minimum`, checked at launch and hourly); `doklin` and the iPhone, and a Mac too, once a domain runs the release's worker (`410` on every request, [cloud-worker/README.md](../cloud-worker/README.md)). Only builds that have this know the `410`: an older Mac or iPhone shows the worker's sentence as a sync error, an older `doklin` prints it with exit `1`.
+- **When it bites:** once a domain runs the release's worker (`410` on every request, [cloud-worker/README.md](../cloud-worker/README.md)), never at publish time: `latest.json` carries no minimum. Only builds that have this know the `410`: an older Mac or iPhone shows the worker's sentence as a sync error, an older `doklin` prints it with exit `1`.
 - The Mac covers every window with *Update Doklin* (`UpdateRequired.tsx`), the iPhone every screen with *Open TestFlight* ([ios.md](ios.md)), and `doklin` exits `9` with the install line.
 
 ## Updater contract
@@ -39,10 +39,10 @@ A mandatory release turns away every Mac app and `doklin` older than it. The old
 - Endpoint `https://github.com/boat-builder/doklin/releases/latest/download/latest.json`, live only because the release is `make_latest: 'true'`.
 - Manifest, built with `jq` in `build-release`:
   ```json
-  {"version": "X.Y.Z", "notes": "…", "minimum": "X.Y.Z", "pub_date": "<UTC>", "platforms": {"darwin-aarch64":
+  {"version": "X.Y.Z", "notes": "…", "pub_date": "<UTC>", "platforms": {"darwin-aarch64":
     {"signature": "<.sig contents>", "url": "…/releases/download/vX.Y.Z/Doklin.app.tar.gz"}}}
   ```
-  Bare semver; `url` pinned to the tag; `.sig` inlined, not published; `notes` = Update button tooltip; `minimum` = `MINIMUM_APP`, which Tauri ignores and the app reads off `rawJson`. A missing platform key means "up to date" forever, silently.
+  Bare semver; `url` pinned to the tag; `.sig` inlined, not published; `notes` = Update button tooltip. A missing platform key means "up to date" forever, silently.
 - `bundle.createUpdaterArtifacts: true` emits `.app.tar.gz` + `.sig`; the build fails without `TAURI_SIGNING_PRIVATE_KEY`.
 - `src-tauri/capabilities/default.json` needs `updater:default` and `process:default` (relaunch).
 

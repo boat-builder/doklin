@@ -1,10 +1,9 @@
-// A version a release marked mandatory no longer runs: this covers the whole
-// window, nothing under it can be reached (App makes it inert), and its one
-// button installs the update and restarts (updater.ts). Two things raise it:
-// the release manifest names a minimum newer than this app
-// (`update.required`), or a domain's worker turns this app away (a workspace
-// in `app-outdated`, whose `domains` it names). The editor stays mounted
-// underneath, so a save on its way still lands.
+// A domain's worker turns this app away (a workspace in `app-outdated`, whose
+// `domains` it names): a release marked mandatory, once the domain runs its
+// worker. This covers the whole window, nothing under it can be reached (App
+// makes it inert), and its one button installs the update and restarts
+// (updater.ts). The editor stays mounted underneath, so a save on its way
+// still lands.
 
 import { useEffect, useRef, type ReactNode } from "react";
 import { RELEASES_PAGE, type UpdateController } from "./updater";
@@ -16,16 +15,18 @@ export default function UpdateRequired({
   onOpenExternal,
 }: {
   update: UpdateController;
-  /** The domains turning this app away; none when only the manifest says so. */
+  /** The domains turning this app away. */
   domains: string[];
   onOpenExternal: (url: string) => void;
 }) {
   const first = useRef<HTMLButtonElement>(null);
   // The keyboard comes here: whatever had it is inert now.
   useEffect(() => first.current?.focus(), [update.phase]);
+  // What an app left open last found may predate the release: look again.
+  const { check } = update;
+  useEffect(() => void check(), [check]);
 
   const version = update.current ? ` (v${update.current})` : "";
-  const where = domains.length > 0 ? ` with ${domains.join(" and ")}` : "";
 
   let action: ReactNode;
   switch (update.phase) {
@@ -87,8 +88,8 @@ export default function UpdateRequired({
       <div className="update-required-card">
         <h1 id="update-required-title" className="update-required-title">Update Doklin</h1>
         <p className="update-required-text">
-          This version of Doklin{version} no longer works{where}. Update it to keep going: everything you wrote stays as
-          it is.
+          This version of Doklin{version} no longer works with {domains.join(" and ")}. Update it to keep going:
+          everything you wrote stays as it is.
         </p>
         {action}
       </div>
