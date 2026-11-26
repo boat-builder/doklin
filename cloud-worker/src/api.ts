@@ -4,7 +4,8 @@
 // cookie that is its sign-in (auth.ts). Every caller is the engine or a page
 // this domain served, so there is no CORS and no preflight. Every request
 // also carries `x-doklin-device` (attribution for presence and the binding)
-// and `x-doklin-client` (the app version, for the logs — nothing reads it);
+// and `x-doklin-client` (which app and version: an older one than the
+// minimums is turned away first, clients.ts);
 // now and then, `x-doklin-used` (the caller's requests today, limits.ts).
 //
 // A bearer that sends too much is a loop, and is told so with a 429 before
