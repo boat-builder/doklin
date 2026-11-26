@@ -1,5 +1,5 @@
 {
-  "about": "Cases the comment code of the Mac (src/criticMarkup.ts, src/metaFile.ts, and the worker's placement rule in cloud-worker/src/agentComments.ts) and of the iPhone (ios/DoklinKit/Sources/DoklinKit/Comments/) must answer alike, byte for byte. Read by verify-harness/comments.test.mjs and ios/DoklinKit/Tests/DoklinKitTests/CommentsTests.swift; mergeMeta, how a sidecar changed in two places is merged, by src/web/merge.ts and the engine (engine/src/sidecar.rs, its tests); a case's `files` are the file ids the workspace holds. Times are milliseconds since 1970.",
+  "about": "Cases the comment code of the Mac (src/criticMarkup.ts, src/metaFile.ts, and the worker's placement rule in cloud-worker/src/agentComments.ts) and of the iPhone (ios/DoklinKit/Sources/DoklinKit/Comments/) must answer alike, byte for byte. Read by verify-harness/comments.test.mjs and ios/DoklinKit/Tests/DoklinKitTests/CommentsTests.swift; mergeMeta, how a sidecar changed in two places is merged, by src/web/merge.ts and the engine (engine/src/sidecar.rs, its tests); a case's `files` are the file ids the workspace holds. pages and places, how a page reads as text and how much of a thread's place its file has, by cloud-worker/src/htmlText.ts and its port; a place's `state` is what the app's script finds in the page as drawn (src/htmlBridge.ts, checked by verify-harness/drive.mjs). Times are milliseconds since 1970.",
   "metaFile": [
     {
       "path": "/a/notes.md",
@@ -745,6 +745,36 @@
       "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"../b.md\",\"file\":\"f-2\"}\n{\"t\":\"link\",\"id\":\"a.md\"}\n{\"file\":\"f-9\",\"t\":\"link\",\"id\":\"Notes/c d.md\"}\n{\"t\":\"link\",\"id\":\"\",\"file\":\"f-3\"}\n{\"t\":\"link\",\"id\":\"x.md\",\"file\":7}\n{\"t\":\"tcols\",\"id\":\"t1\",\"cols\":[10]}\n{\"t\":\"link\",\"id\":\"../b.md\",\"file\":\"f-8\"}\n{\"t\":\"mthread\",\"id\":\"m1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}",
       "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"../b.md\",\"file\":\"f-2\"}\n{\"t\":\"link\",\"id\":\"Notes/c d.md\",\"file\":\"f-9\"}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-1\"}\n{\"t\":\"mthread\",\"id\":\"m1\",\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"tcols\",\"id\":\"t1\",\"cols\":[10]}\n",
       "empty": false
+    },
+    {
+      "about": "an html thread on words: its part, the ids around it, the words and the text either side",
+      "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hw1\",\"anchor\":{\"path\":\"main > p:nth-of-type(2)\",\"tag\":\"p\",\"text\":\"The boat ships in June if the paint dries.\",\"ids\":[\"launch\",\"plan\"],\"quote\":\"ships in June\",\"prefix\":\"The boat \",\"suffix\":\" if the paint dries.\"},\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Still true?\"}]}\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hw1\",\"anchor\":{\"path\":\"main > p:nth-of-type(2)\",\"tag\":\"p\",\"text\":\"The boat ships in June if the paint dries.\",\"ids\":[\"launch\",\"plan\"],\"quote\":\"ships in June\",\"prefix\":\"The boat \",\"suffix\":\" if the paint dries.\"},\"comments\":[{\"author\":\"Ada\",\"at\":1757000000000,\"body\":\"Still true?\"}]}\n",
+      "empty": false
+    },
+    {
+      "about": "an anchor's keys are written in the app's order, whatever order they came in",
+      "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hw2\",\"anchor\":{\"suffix\":\" after\",\"quote\":\"the words\",\"ids\":[\"a\"],\"text\":\"All the words after\",\"prefix\":\"All \",\"tag\":\"p\",\"path\":\"\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hw2\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"All the words after\",\"ids\":[\"a\"],\"quote\":\"the words\",\"prefix\":\"All \",\"suffix\":\" after\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n",
+      "empty": false
+    },
+    {
+      "about": "ids that are not a list of strings, and an empty list, are no ids",
+      "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hi1\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"one\",\"ids\":[\"a\",3]},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hi2\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"two\",\"ids\":[]},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hi3\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"three\",\"ids\":\"a\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hi4\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"four\",\"ids\":[\"\",\"b\"]},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hi1\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"one\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hi2\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"two\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hi3\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"three\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hi4\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"four\",\"ids\":[\"\",\"b\"]},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n",
+      "empty": false
+    },
+    {
+      "about": "words without the text either side get none; text either side without words, or with empty ones, is dropped",
+      "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hq1\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"t\",\"quote\":\"just words\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hq2\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"t\",\"prefix\":\"before \",\"suffix\":\" after\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hq3\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"t\",\"quote\":\"\",\"prefix\":\"b\",\"suffix\":\"a\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hq4\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"t\",\"quote\":\"w\",\"prefix\":7,\"suffix\":\" s\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hq5\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"t\",\"quote\":5},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hq1\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"t\",\"quote\":\"just words\",\"prefix\":\"\",\"suffix\":\"\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hq2\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"t\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hq3\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"t\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hq4\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"t\",\"quote\":\"w\",\"prefix\":\"\",\"suffix\":\" s\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n{\"t\":\"hthread\",\"id\":\"hq5\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"t\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n",
+      "empty": false
+    },
+    {
+      "about": "words with marks no keyboard has, and an id with a quote in it",
+      "raw": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hu1\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"“Ships” in June — 🛶\",\"ids\":[\"a\\\"b\"],\"quote\":\"“Ships” in June — 🛶\",\"prefix\":\"\",\"suffix\":\"\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n",
+      "serialized": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hu1\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"“Ships” in June — 🛶\",\"ids\":[\"a\\\"b\"],\"quote\":\"“Ships” in June — 🛶\",\"prefix\":\"\",\"suffix\":\"\"},\"comments\":[{\"author\":\"A\",\"at\":1,\"body\":\"x\"}]}\n",
+      "empty": false
     }
   ],
   "expand": [
@@ -1151,7 +1181,7 @@
       "about": "a page's threads: one found, one gone, one with no text",
       "md": null,
       "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hp1\",\"anchor\":{\"path\":\"body > p:nth-of-type(1)\",\"tag\":\"p\",\"text\":\"Ship it by June, and tell everyone.\"},\"comments\":[{\"author\":\"W\",\"at\":7000,\"body\":\"When in June?\"}]}\n{\"t\":\"hthread\",\"id\":\"hp2\",\"anchor\":{\"path\":\"\",\"tag\":\"li\",\"text\":\"Second & last\"},\"comments\":[{\"author\":\"W\",\"at\":8000,\"body\":\"found by its start\"}]}\n{\"t\":\"hthread\",\"id\":\"hp3\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"not a paragraph\"},\"comments\":[{\"author\":\"W\",\"at\":9000,\"body\":\"inside a script, so gone\"}]}\n{\"t\":\"hthread\",\"id\":\"hp4\",\"anchor\":{\"path\":\"\",\"tag\":\"div\",\"text\":\"\"},\"comments\":[{\"author\":\"W\",\"at\":10000,\"body\":\"nothing to compare\"}]}\n{\"t\":\"mthread\",\"id\":\"mo1\",\"comments\":[{\"author\":\"A\",\"at\":1000,\"body\":\"a markdown thread on a page with no markdown\"}]}\n",
-      "html": "<!doctype html><html><head><title>Plan</title><style>p{}</style></head><body><h1>The plan</h1><p>Ship it by <b>June</b>, and tell   everyone.</p><ul><li>First thing<li>Second &amp; last</ul><script>var x = \"<p>not a paragraph</p>\";</script></body></html>",
+      "html": "<!doctype html><html><head><title>Plan</title><style>p{}</style></head><body><h1>The plan</h1><p>Ship it by <b>June</b>, and tell   everyone.</p><ul><li>First thing<li>Second &amp; last</ul><script type=\"application/json\">var x = \"<p>not a paragraph</p>\";</script></body></html>",
       "threads": [
         {
           "id": "mo1",
@@ -1247,7 +1277,7 @@
       "about": "a page whose element changed its start",
       "md": null,
       "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hr1\",\"anchor\":{\"path\":\"\",\"tag\":\"h1\",\"text\":\"The plan, now longer\"},\"comments\":[{\"author\":\"W\",\"at\":1000,\"body\":\"prefix the other way\"}]}\n{\"t\":\"hthread\",\"id\":\"hr2\",\"anchor\":{\"path\":\"\",\"tag\":\"h2\",\"text\":\"The plan\"},\"comments\":[{\"author\":\"W\",\"at\":2000,\"body\":\"another tag\"}]}\n",
-      "html": "<!doctype html><html><head><title>Plan</title><style>p{}</style></head><body><h1>The plan</h1><p>Ship it by <b>June</b>, and tell   everyone.</p><ul><li>First thing<li>Second &amp; last</ul><script>var x = \"<p>not a paragraph</p>\";</script></body></html>",
+      "html": "<!doctype html><html><head><title>Plan</title><style>p{}</style></head><body><h1>The plan</h1><p>Ship it by <b>June</b>, and tell   everyone.</p><ul><li>First thing<li>Second &amp; last</ul><script type=\"application/json\">var x = \"<p>not a paragraph</p>\";</script></body></html>",
       "threads": [
         {
           "id": "hr1",
@@ -1307,6 +1337,62 @@
               "author": "W",
               "at": 5000,
               "body": "On the long line."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "about": "a page's threads on words: each is on its words, and gone when the file has neither them nor their part",
+      "md": null,
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"pw1\",\"anchor\":{\"path\":\"main > p:nth-of-type(2)\",\"tag\":\"p\",\"text\":\"The boat ships in June if the paint dries.\",\"ids\":[\"launch\",\"plan\"],\"quote\":\"ships in June\",\"prefix\":\"The boat \",\"suffix\":\" if the paint dries.\"},\"comments\":[{\"author\":\"W\",\"at\":7000,\"body\":\"Still June?\"}]}\n{\"t\":\"hthread\",\"id\":\"pw2\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"Taken out\",\"quote\":\"zebra crossing quartz\",\"prefix\":\"\",\"suffix\":\"\"},\"comments\":[{\"author\":\"W\",\"at\":8000,\"body\":\"On words that are gone\"}]}\n",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "threads": [
+        {
+          "id": "pw1",
+          "version": "html",
+          "on": "ships in June",
+          "tag": "p",
+          "comments": [
+            {
+              "author": "W",
+              "at": 7000,
+              "body": "Still June?"
+            }
+          ]
+        },
+        {
+          "id": "pw2",
+          "version": "html",
+          "on": "zebra crossing quartz",
+          "tag": "p",
+          "orphaned": true,
+          "comments": [
+            {
+              "author": "W",
+              "at": 8000,
+              "body": "On words that are gone"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "about": "a page that builds itself: a thread its file has no place for is not said to be gone",
+      "md": null,
+      "meta": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"pb1\",\"anchor\":{\"path\":\"\",\"tag\":\"p\",\"text\":\"Built by the page itself.\",\"ids\":[\"app\"],\"quote\":\"the page itself\",\"prefix\":\"Built by \",\"suffix\":\".\"},\"comments\":[{\"author\":\"W\",\"at\":9000,\"body\":\"Says who?\"}]}\n",
+      "html": "<!doctype html><html><body><div id=\"app\"></div><script>document.getElementById(\"app\").innerHTML = \"<p>Built by the page itself.</p>\";</script></body></html>",
+      "threads": [
+        {
+          "id": "pb1",
+          "version": "html",
+          "on": "the page itself",
+          "tag": "p",
+          "comments": [
+            {
+              "author": "W",
+              "at": 9000,
+              "body": "Says who?"
             }
           ]
         }
@@ -2096,6 +2182,580 @@
         "f-9"
       ],
       "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"link\",\"id\":\"a.md\",\"file\":\"f-2\"}\n"
+    },
+    {
+      "about": "html threads: a thread on words keeps its ids, its words and the text either side through a reply on each side",
+      "base": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hm1\",\"anchor\":{\"path\":\"main > p:nth-of-type(2)\",\"tag\":\"p\",\"text\":\"The boat ships in June if the paint dries.\",\"ids\":[\"launch\",\"plan\"],\"quote\":\"ships in June\",\"prefix\":\"The boat \",\"suffix\":\" if the paint dries.\"},\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"}]}\n",
+      "ours": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hm1\",\"anchor\":{\"path\":\"main > p:nth-of-type(2)\",\"tag\":\"p\",\"text\":\"The boat ships in June if the paint dries.\",\"ids\":[\"launch\",\"plan\"],\"quote\":\"ships in June\",\"prefix\":\"The boat \",\"suffix\":\" if the paint dries.\"},\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"}]}\n",
+      "theirs": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hm1\",\"anchor\":{\"path\":\"main > p:nth-of-type(2)\",\"tag\":\"p\",\"text\":\"The boat ships in June if the paint dries.\",\"ids\":[\"launch\",\"plan\"],\"quote\":\"ships in June\",\"prefix\":\"The boat \",\"suffix\":\" if the paint dries.\"},\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Bo\",\"at\":1700000010000,\"body\":\"Reply there\"}]}\n",
+      "out": "{\"doklin\":\"meta\",\"v\":1}\n{\"t\":\"hthread\",\"id\":\"hm1\",\"anchor\":{\"path\":\"main > p:nth-of-type(2)\",\"tag\":\"p\",\"text\":\"The boat ships in June if the paint dries.\",\"ids\":[\"launch\",\"plan\"],\"quote\":\"ships in June\",\"prefix\":\"The boat \",\"suffix\":\" if the paint dries.\"},\"comments\":[{\"author\":\"Ada\",\"at\":1700000000000,\"body\":\"First\"},{\"author\":\"Ada\",\"at\":1700000009000,\"body\":\"Reply here\"},{\"author\":\"Bo\",\"at\":1700000010000,\"body\":\"Reply there\"}]}\n"
+    }
+  ],
+  "pages": [
+    {
+      "about": "blocks, a line break and words in a line",
+      "html": "<body><h1 id=\"top\">The  <em>plan</em></h1><p>Ship it by June,<br>and tell\n everyone.</p><ul><li>First<li>Second &amp; last</ul></body>",
+      "text": "The plan Ship it by June, and tell everyone. First Second & last",
+      "runsScript": false,
+      "elements": [
+        [
+          "body",
+          "",
+          "The plan Ship it by June, and tell everyone. First Second & last"
+        ],
+        [
+          "h1",
+          "top",
+          "The plan"
+        ],
+        [
+          "em",
+          "",
+          "plan"
+        ],
+        [
+          "p",
+          "",
+          "Ship it by June, and tell everyone."
+        ],
+        [
+          "br",
+          "",
+          ""
+        ],
+        [
+          "ul",
+          "",
+          "First Second & last"
+        ],
+        [
+          "li",
+          "",
+          "First"
+        ],
+        [
+          "li",
+          "",
+          "Second & last"
+        ]
+      ]
+    },
+    {
+      "about": "what nobody reads, pictures by their alt text or file name, a drawing's labels, and a script that runs",
+      "html": "<html><head><title>T</title><style>p{}</style></head><body><p>Seen<span style=\"display:none\"> too</span>.</p><img src=\"charts/revenue-q3.png?v=2#x\" alt=\"\"><img alt=\" Revenue  by quarter \" src=\"a.png\"><img src=\"data:image/png;base64,AAAA\"><textarea>typed</textarea><svg id=\"chart\"><title>Chart</title><text>Q1</text><desc>d</desc></svg><script>document.title = \"x\";</script></body></html>",
+      "text": "Seen too. Q1",
+      "runsScript": true,
+      "elements": [
+        [
+          "html",
+          "",
+          "Seen too. Q1"
+        ],
+        [
+          "head",
+          "",
+          ""
+        ],
+        [
+          "title",
+          "",
+          ""
+        ],
+        [
+          "style",
+          "",
+          ""
+        ],
+        [
+          "body",
+          "",
+          "Seen too. Q1"
+        ],
+        [
+          "p",
+          "",
+          "Seen too."
+        ],
+        [
+          "span",
+          "",
+          "too"
+        ],
+        [
+          "img",
+          "",
+          "revenue-q3.png"
+        ],
+        [
+          "img",
+          "",
+          "Revenue by quarter"
+        ],
+        [
+          "img",
+          "",
+          ""
+        ],
+        [
+          "textarea",
+          "",
+          ""
+        ],
+        [
+          "svg",
+          "chart",
+          "Q1"
+        ],
+        [
+          "title",
+          "",
+          ""
+        ],
+        [
+          "text",
+          "",
+          "Q1"
+        ],
+        [
+          "desc",
+          "",
+          ""
+        ],
+        [
+          "script",
+          "",
+          ""
+        ]
+      ]
+    },
+    {
+      "about": "a script that is only data runs nothing; spaces no keyboard has are one space, and marks nobody sees are nothing",
+      "html": "<p>a&nbsp;b​c d</p><script type=\"application/json\">{\"p\":\"<p>not a paragraph</p>\"}</script><p>e</p>",
+      "text": "a bc d e",
+      "runsScript": false,
+      "elements": [
+        [
+          "p",
+          "",
+          "a bc d"
+        ],
+        [
+          "script",
+          "",
+          ""
+        ],
+        [
+          "p",
+          "",
+          "e"
+        ]
+      ]
+    },
+    {
+      "about": "an id in any quotes or none, the first of two, with an entity in it",
+      "html": "<div ID='one'><p id=two class=x>a</p><p class=\"y\" id=\"th&amp;ree\" id=\"four\">b</p><p data-id=\"no\">c</p></div>",
+      "text": "a b c",
+      "runsScript": false,
+      "elements": [
+        [
+          "div",
+          "one",
+          "a b c"
+        ],
+        [
+          "p",
+          "two",
+          "a"
+        ],
+        [
+          "p",
+          "th&ree",
+          "b"
+        ],
+        [
+          "p",
+          "",
+          "c"
+        ]
+      ]
+    },
+    {
+      "about": "a letter that lower-cases to two, before what nobody reads: the rest of the page is still read",
+      "html": "<p>İstanbul</p><STYLE>p{}</Style><p>The boat ships in June.</p>",
+      "text": "İstanbul The boat ships in June.",
+      "runsScript": false,
+      "elements": [
+        [
+          "p",
+          "",
+          "İstanbul"
+        ],
+        [
+          "style",
+          "",
+          ""
+        ],
+        [
+          "p",
+          "",
+          "The boat ships in June."
+        ]
+      ]
+    },
+    {
+      "about": "an element and an entity named like something every object has",
+      "html": "<constructor>a</constructor><p>b &constructor; c &toString;</p>",
+      "text": "a b &constructor; c &toString;",
+      "runsScript": false,
+      "elements": [
+        [
+          "constructor",
+          "",
+          "a"
+        ],
+        [
+          "p",
+          "",
+          "b &constructor; c &toString;"
+        ]
+      ]
+    }
+  ],
+  "places": [
+    {
+      "about": "words as they were",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "The boat ships in June if the paint dries.",
+        "ids": [
+          "launch"
+        ],
+        "quote": "ships in June",
+        "prefix": "The boat ",
+        "suffix": " if the paint dries."
+      },
+      "level": 2,
+      "known": true,
+      "state": "found"
+    },
+    {
+      "about": "words folded: another case, plain quotes, a hyphen for a dash",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "Tell everyone",
+        "quote": "tell everyone \"early\" - twice.",
+        "prefix": "",
+        "suffix": ""
+      },
+      "level": 2,
+      "known": true,
+      "state": "found"
+    },
+    {
+      "about": "words across two blocks, which the markup puts no space between",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "section",
+        "text": "Launch",
+        "ids": [
+          "launch"
+        ],
+        "quote": "Launch The boat",
+        "prefix": "The plan ",
+        "suffix": " ships"
+      },
+      "level": 2,
+      "known": true,
+      "state": "found"
+    },
+    {
+      "about": "words reworded a little",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "Paint costs much more",
+        "ids": [
+          "costs"
+        ],
+        "quote": "Paint costs much more than we had planned for this year.",
+        "prefix": "Costs ",
+        "suffix": ""
+      },
+      "level": 2,
+      "known": true,
+      "state": "changed"
+    },
+    {
+      "about": "a few characters reworded a little",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "h2",
+        "text": "Launches",
+        "quote": "Launches",
+        "prefix": "",
+        "suffix": ""
+      },
+      "level": 2,
+      "known": true,
+      "state": "changed"
+    },
+    {
+      "about": "an id now around other content: the words are found where they went",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "The boat ships in June if the paint dries.",
+        "ids": [
+          "costs"
+        ],
+        "quote": "ships in June",
+        "prefix": "The boat ",
+        "suffix": " if the paint dries."
+      },
+      "level": 2,
+      "known": true,
+      "state": "found"
+    },
+    {
+      "about": "words gone, the part they were in still there",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "The boat ships in June if the paint dries.",
+        "ids": [
+          "launch"
+        ],
+        "quote": "sails in July at the latest, weather allowing",
+        "prefix": "The boat ",
+        "suffix": "."
+      },
+      "level": 1,
+      "known": true,
+      "state": "part"
+    },
+    {
+      "about": "words and part both gone",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "A paragraph that was taken out.",
+        "quote": "zebra crossing quartz",
+        "prefix": "",
+        "suffix": ""
+      },
+      "level": 0,
+      "known": true,
+      "state": "lost"
+    },
+    {
+      "about": "a short word is never close to another",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "Nothing like this",
+        "quote": "Juno",
+        "prefix": "in ",
+        "suffix": " if"
+      },
+      "level": 0,
+      "known": true,
+      "state": "lost"
+    },
+    {
+      "about": "a part by its tag and opening words",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "h2",
+        "text": "Costs",
+        "ids": [
+          "costs"
+        ]
+      },
+      "level": 1,
+      "known": true,
+      "state": "found"
+    },
+    {
+      "about": "a part whose text now goes on",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "Paint costs more"
+      },
+      "level": 1,
+      "known": true,
+      "state": "found"
+    },
+    {
+      "about": "a part whose text was longer",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "h1",
+        "text": "The plan, as it was"
+      },
+      "level": 1,
+      "known": true,
+      "state": "found"
+    },
+    {
+      "about": "the same words in another tag are not the part",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "h3",
+        "text": "Costs"
+      },
+      "level": 0,
+      "known": true,
+      "state": "lost"
+    },
+    {
+      "about": "a part with no words, by its own id",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "figure",
+        "text": "",
+        "ids": [
+          "revenue-chart",
+          "costs"
+        ]
+      },
+      "level": 1,
+      "known": true,
+      "state": "found"
+    },
+    {
+      "about": "a part with no words whose id is gone",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "figure",
+        "text": "",
+        "ids": [
+          "old-chart",
+          "costs"
+        ]
+      },
+      "level": 0,
+      "known": true,
+      "state": "lost"
+    },
+    {
+      "about": "a picture by its alt text",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "img",
+        "text": "The hull, painted",
+        "ids": [
+          "costs"
+        ]
+      },
+      "level": 1,
+      "known": true,
+      "state": "found"
+    },
+    {
+      "about": "nothing to go by: no words, no text, no id",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "body > div:nth-of-type(9)",
+        "tag": "div",
+        "text": ""
+      },
+      "level": 0,
+      "known": false,
+      "state": "lost"
+    },
+    {
+      "about": "the page's body is never a part",
+      "html": "<!doctype html><html><head><title>Plan</title></head><body><h1 id=\"top\">The plan</h1><section id=\"launch\"><h2>Launch</h2><p>The boat ships in June if the paint dries.</p><p>Tell everyone “early” — twice.</p></section><section id=\"costs\"><h2>Costs</h2><p>Paint costs more than we planned for this year.</p><figure id=\"revenue-chart\"><svg width=\"40\" height=\"20\"></svg></figure><img src=\"img/hull.png\" alt=\"The hull, painted\"></section></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "body",
+        "text": "The plan"
+      },
+      "level": 0,
+      "known": true,
+      "state": "lost"
+    },
+    {
+      "about": "a script's text is not the page's words",
+      "html": "<!doctype html><html><body><script type=\"application/json\">\"ships in June\"</script><p>Other words here.</p></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "ships in June",
+        "quote": "ships in June",
+        "prefix": "",
+        "suffix": ""
+      },
+      "level": 0,
+      "known": true,
+      "state": "lost"
+    },
+    {
+      "about": "a page that builds itself: the file cannot say, the page as drawn has the words",
+      "html": "<!doctype html><html><body><div id=\"app\"></div><script>document.getElementById(\"app\").innerHTML = \"<p>Built by the page itself.</p>\";</script></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "Built by the page itself.",
+        "ids": [
+          "app"
+        ],
+        "quote": "the page itself",
+        "prefix": "Built by ",
+        "suffix": "."
+      },
+      "level": 0,
+      "known": false,
+      "state": "found"
+    },
+    {
+      "about": "a page that builds itself: a part the script builds",
+      "html": "<!doctype html><html><body><div id=\"app\"></div><script>document.getElementById(\"app\").innerHTML = \"<p>Built by the page itself.</p>\";</script></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "Built by the page",
+        "ids": [
+          "app"
+        ]
+      },
+      "level": 0,
+      "known": false,
+      "state": "found"
+    },
+    {
+      "about": "a page that builds itself: what even the page as drawn does not have",
+      "html": "<!doctype html><html><body><div id=\"app\"></div><script>document.getElementById(\"app\").innerHTML = \"<p>Built by the page itself.</p>\";</script></body></html>",
+      "anchor": {
+        "path": "",
+        "tag": "p",
+        "text": "Never there",
+        "quote": "never there at all",
+        "prefix": "",
+        "suffix": ""
+      },
+      "level": 0,
+      "known": false,
+      "state": "lost"
     }
   ]
 }

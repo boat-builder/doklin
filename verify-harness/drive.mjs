@@ -1,13 +1,21 @@
-// Drives the real HtmlView + bridge + comment-mode overlay in Chromium and
-// captures evidence. The layer lives behind the floating "Comment" button:
-// mode off is the pristine page; mode on dims the page (bridge scrim with
-// spotlight holes), arms the hover bubble, and shows threads as pins/cards
-// anchored at their elements.
-import { chromium } from "playwright";
+// Drives the real HtmlView and the script it puts in the page (htmlBridge.ts)
+// in a browser, and captures evidence: comments beside the page, a thread
+// started from selected words and from a picked part, hiding and showing, a
+// page written again under its threads — and the `places` cases of
+// comments-fixture.json, which the worker's and the iPhone's reading of a
+// page are held to as well (`state` is this script's answer).
+//
+//   node verify-harness/drive.mjs
+//
+// HARNESS_ORIGIN picks the vite server (default http://localhost:1420), and
+// BROWSER=webkit the engine the app itself runs on.
+import { chromium, webkit } from "playwright";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 
 const SHOTS = new URL("./shots/", import.meta.url).pathname;
-import { existsSync, mkdirSync } from "node:fs";
 mkdirSync(SHOTS, { recursive: true });
+const ORIGIN = process.env.HARNESS_ORIGIN ?? "http://localhost:1420";
+const fixture = JSON.parse(readFileSync(new URL("./comments-fixture.json", import.meta.url), "utf8"));
 
 const results = [];
 const step = (name, ok, detail = "") => {
@@ -30,306 +38,416 @@ async function poll(fn, timeout = 5000, every = 100) {
   throw new Error("poll timeout: " + last);
 }
 
+// A step that must become true: a timeout is the step failing, not the run.
+async function eventually(name, fn, detail = "") {
+  try {
+    await poll(fn);
+    step(name, true, detail);
+  } catch (e) {
+    step(name, false, String(e.message ?? e));
+  }
+}
+
 const settle = (ms = 350) => new Promise((r) => setTimeout(r, ms));
+const near = (a, b, by) => Math.abs(a - b) <= by;
 
-// Hover an element in the frame and click the add-comment bubble once it has
-// SETTLED next to that element (it follows the pointer on rAF; clicking
-// mid-flight hits the page instead).
-async function clickBubbleFor(frame, selector) {
-  const target = frame.locator(selector);
-  await target.hover();
-  await poll(async () => {
-    const t = await target.boundingBox();
-    const b = await frame.locator("#dk-bubble.dk-on").boundingBox();
-    return !!t && !!b && Math.abs(b.y - t.y - 4) < 8;
-  });
-  await frame.locator("#dk-bubble").click();
-}
-
-// The caret must actually be in the card textarea before typing (focus moves
-// parent-ward asynchronously after the in-iframe bubble click).
-async function waitCommentInputFocused(page) {
-  await poll(async () =>
-    page.evaluate(
-      () =>
-        document.activeElement?.tagName === "TEXTAREA" &&
-        document.activeElement?.className.includes("comment-input"),
-    ),
-  );
-}
-
-// Scrim alpha (0..255) at an iframe-viewport point — 0 inside a spotlight
-// hole, ~82 (0.32 * 255) over dimmed page.
-async function scrimAlphaAt(frame, x, y) {
-  return frame.locator("#dk-scrim").evaluate((c, pt) => {
-    const dpr = window.devicePixelRatio || 1;
-    return c
-      .getContext("2d")
-      .getImageData(Math.round(pt.x * dpr), Math.round(pt.y * dpr), 1, 1).data[3];
-  }, { x, y });
-}
-
-// The harness dumps one JSON line per thread.
-const threadLines = async (page) => {
-  const text = (await page.locator("#thread-dump").textContent()).trim();
-  return text ? text.split("\n").length : 0;
-};
-
-const browser = await chromium.launch(
-  existsSync("/opt/pw-browsers/chromium")
+const engine = process.env.BROWSER === "webkit" ? webkit : chromium;
+const browser = await engine.launch(
+  engine === chromium && existsSync("/opt/pw-browsers/chromium")
     ? { executablePath: "/opt/pw-browsers/chromium", args: ["--no-sandbox"] }
     : {},
 );
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
 
-await page.goto("http://localhost:1420/verify-harness/index.html");
+await page.goto(`${ORIGIN}/verify-harness/index.html`);
 const frame = page.frameLocator("iframe.html-preview");
+const frameBox = () => page.locator(".html-frame-box").boundingBox();
+const stageBox = () => page.locator("#stage").boundingBox();
+const dump = async () => (await page.locator("#thread-dump").textContent()).trim();
+const threadLines = async () => {
+  const text = await dump();
+  return text ? text.split("\n").map((line) => JSON.parse(line)) : [];
+};
+// Inside the frame: its own scroll, and what is tinted.
+const inFrame = (fn, arg) => frame.locator("body").evaluate(fn, arg);
+// How many stretches of words the script has marked (null: the browser has
+// no highlight registry), and the intro line as it is painted — the two
+// must agree, since a mark the browser never paints is no mark.
+const tinted = () => inFrame(() => (window.CSS && CSS.highlights ? [...CSS.highlights.values()].reduce((n, h) => n + h.size, 0) : null));
+const introPainted = async () => {
+  const box = await frame.locator("#intro").boundingBox();
+  await page.mouse.move(5, 5);
+  return (await page.screenshot({ clip: { x: box.x, y: box.y - 4, width: 420, height: box.height + 8 } })).toString("base64");
+};
+// A key pressed with the keyboard in the app, on nothing that takes typing.
+async function appKey(key) {
+  await page.locator("#controls").click({ position: { x: 400, y: 6 } });
+  await page.keyboard.press(key);
+}
 
-// 1. Rendition renders inside the sandboxed iframe; bridge installed; the
-//    floating Comment button is the only comment UI visible.
+/* ---------- The page as its reader gets it ---------- */
+
 await poll(async () => (await frame.locator("#intro").count()) === 1);
-await poll(async () => (await frame.locator("#dk-bubble").count()) === 1);
 await poll(async () => page.locator(".html-comment-btn").isVisible());
-step("rendition renders in sandboxed iframe; bridge + Comment button present", true);
-await page.screenshot({ path: `${SHOTS}/01-initial.png` });
-
-// 2. DEFAULT experience is pristine: hovering shows no bubble, no scrim.
-await frame.locator("#intro").hover();
-await settle();
-const defaultClean =
-  !(await frame.locator("#dk-bubble.dk-on").isVisible()) &&
-  !(await frame.locator("#dk-scrim.dk-on").isVisible());
-step("comment mode off by default: hover shows no bubble, page undimmed", defaultClean);
-
-// 3. Enter comment mode: scrim on, hover arms the dotted border + bubble.
-await page.locator(".html-comment-btn").click();
-await poll(async () => frame.locator("#dk-scrim.dk-on").isVisible());
-await frame.locator("#intro").hover();
-await poll(async () => frame.locator("#dk-bubble.dk-on").isVisible());
-await poll(async () => (await frame.locator("#intro[data-dk-hover]").count()) === 1);
-step("Comment button enters mode: page dims, hover shows dashed border + bubble", true);
-await page.screenshot({ path: `${SHOTS}/02-mode-on-hover.png` });
-
-// 4. The hovered block is spotlit: hole over it, dim elsewhere. Frame
-//    locators report boxes in PAGE coordinates; the scrim canvas lives in
-//    iframe-viewport space, so subtract the iframe's own origin.
-const frameBox = await page.locator("iframe.html-preview").boundingBox();
-const introBox = await frame.locator("#intro").boundingBox();
-const inHole = await scrimAlphaAt(
-  frame,
-  introBox.x - frameBox.x + 10,
-  introBox.y - frameBox.y + 5,
-);
-const inDim = await scrimAlphaAt(frame, frameBox.width - 30, frameBox.height - 40);
-step(
-  "scrim cuts a spotlight over the hovered block",
-  inHole === 0 && inDim > 40,
-  `alpha in hole ${inHole}, in dim ${inDim}`,
-);
-
-// 5. Click the bubble -> floating draft card AT the element, focused; type.
-await clickBubbleFor(frame, "#intro");
-await poll(async () => page.locator(".html-comment-pop .comment-card textarea").isVisible());
-await waitCommentInputFocused(page);
-const popBox = await page.locator(".html-comment-pop").boundingBox();
-// Both boxes are page coordinates (the overlay shares the iframe's box).
-const nearAnchor = Math.abs(popBox.y - introBox.y) < 60; // card top tracks the element top
-step("bubble click opens a floating draft card at the element", nearAnchor,
-  `card y ${Math.round(popBox.y)} vs anchor y ${Math.round(introBox.y)}`);
-await page.keyboard.type("This intro reads odd");
-await page.keyboard.press("Enter");
-await poll(async () =>
-  (await page.locator("#thread-dump").textContent()).includes("This intro reads odd"),
-);
-const dump1 = await page.locator("#thread-dump").textContent();
-const hasAnchor = dump1.includes('"tag":"p"') && dump1.includes("intro paragraph");
-step("comment persists to sidecar (JSONL line with element anchor)", hasAnchor);
-await poll(async () => (await frame.locator("#intro[data-dk-t]").count()) === 1);
-step("commented element gets the highlight outline", true);
-await page.screenshot({ path: `${SHOTS}/03-first-comment.png` });
-
-// 6. Reply in the open card.
-await page.locator(".comment-reply-composer textarea").click();
-await page.keyboard.type("agree, let's rephrase");
-await page.keyboard.press("Enter");
-await poll(async () =>
-  (await page.locator("#thread-dump").textContent()).includes("agree, let's rephrase"),
-);
-const oneLine = (await threadLines(page)) === 1; // one thread line carrying both entries
-step("reply lands in the same thread (one JSONL line, two entries)", oneLine);
-await page.screenshot({ path: `${SHOTS}/04-reply.png` });
-
-// 6b. The body text is not an edit target: clicking it drops the caret in
-//     the reply composer instead of opening the entry for rewriting.
-await page.locator(".comment-card .comment-entry-body").first().click();
-const bodyClickState = await page.evaluate(() => ({
-  entryEditors: document.querySelectorAll(".comment-entry .comment-input").length,
-  inComposer: document.activeElement?.closest(".comment-reply-composer") != null,
+const pristine = await inFrame(() => ({
+  scripts: document.querySelectorAll("script").length,
+  marked: [...document.querySelectorAll("*")].filter((el) => [...el.attributes].some((a) => a.name.startsWith("data-dk"))).length,
+  added: document.querySelectorAll("[id^='dk-']").length,
+  children: document.body.children.length,
+  styles: document.querySelectorAll("style").length,
 }));
 step(
-  "clicking a comment body replies instead of editing it",
-  bodyClickState.entryEditors === 0 && bodyClickState.inComposer,
+  "the page is left as it was found: no script, attribute or element of the app's in it",
+  pristine.scripts === 0 && pristine.marked === 0 && pristine.added === 0 && pristine.children === 2 && pristine.styles === 1,
+  JSON.stringify(pristine),
 );
+{
+  const [f, s] = [await frameBox(), await stageBox()];
+  step("no comments: the page has its full width, and no column", near(f.width, s.width, 3) && (await page.locator(".html-comments-margin").count()) === 0, `${f.width} of ${s.width}`);
+}
+await page.screenshot({ path: `${SHOTS}/01-initial.png` });
+const introPlain = await introPainted();
 
-// 6c. Editing your own words goes through the explicit pencil.
-await page.locator(".comment-card .comment-entry-edit").first().click();
-await poll(async () => page.locator(".comment-entry .comment-input").isVisible());
-await page.keyboard.type(" — reworded");
+/* ---------- A thread on words ---------- */
+
+// Select a word of the intro, as a reader does.
+await frame.locator("#intro").dblclick({ position: { x: 150, y: 9 } });
+await eventually("selecting words offers Comment", () => page.locator(".html-select-comment").isVisible());
+const picked = await inFrame(() => {
+  const range = getSelection().getRangeAt(0);
+  const r = range.getBoundingClientRect();
+  return { words: String(getSelection()).trim(), top: r.top, height: r.height };
+});
+{
+  const button = await page.locator(".html-select-comment").boundingBox();
+  const f = await frameBox();
+  step(
+    "the Comment button is at the page's right edge, level with the selected words",
+    near(button.y + button.height / 2, f.y + picked.top + picked.height / 2, 6) && near(button.x + button.width, f.x + f.width - 14, 22),
+    `button ${Math.round(button.y + button.height / 2)}, words ${Math.round(f.y + picked.top + picked.height / 2)}`,
+  );
+}
+await page.screenshot({ path: `${SHOTS}/02-selected.png` });
+
+const introBefore = await frame.locator("#intro").innerHTML();
+await page.locator(".html-select-comment").click();
+await eventually("Comment opens a card beside the page, ready to type in", () =>
+  page.evaluate(() => {
+    const active = document.activeElement;
+    return !!active && active.tagName === "TEXTAREA" && !!active.closest(".html-comments-margin .comment-card.is-active");
+  }),
+);
+step("the card says the words it is on, before anything is typed", (await page.locator(".comment-card.is-active .comment-on-quote").textContent()) === picked.words, picked.words);
+await eventually("the page gives the column its width", async () => {
+  const [f, s] = [await frameBox(), await stageBox()];
+  return near(f.width, s.width - 312, 3);
+});
+await eventually("the card sits level with its words", async () => {
+  const card = await page.locator(".comment-card.is-active").boundingBox();
+  const f = await frameBox();
+  const top = await inFrame((_body, words) => {
+    const walker = document.createTreeWalker(document.querySelector("#intro"), NodeFilter.SHOW_TEXT);
+    const node = walker.nextNode();
+    const at = node.data.indexOf(words);
+    const range = document.createRange();
+    range.setStart(node, at);
+    range.setEnd(node, at + words.length);
+    return range.getBoundingClientRect().top;
+  }, picked.words);
+  return near(card.y, f.y + top, 10);
+});
+await page.keyboard.type("This word?");
 await page.keyboard.press("Enter");
-await poll(async () =>
-  (await page.locator("#thread-dump").textContent()).includes(
-    "This intro reads odd — reworded",
-  ),
-);
-step("own entries edit via the explicit pencil (threads updated)", true);
+await eventually("the thread is saved with its words, the text either side and the part they are in", async () => {
+  const [t] = await threadLines();
+  return t && t.anchor.quote === picked.words && t.anchor.tag === "p" && t.anchor.ids?.[0] === "intro" && typeof t.anchor.prefix === "string" && t.comments[0].body === "This word?";
+});
+await eventually("the words are marked and painted so, and the paragraph's markup is what it was", async () => {
+  const count = await tinted();
+  return count === 1 && (await introPainted()) !== introPlain && (await frame.locator("#intro").innerHTML()) === introBefore;
+});
+const introHot = await introPainted();
+await page.screenshot({ path: `${SHOTS}/03-words-thread.png` });
 
-// 7. Click pass-through: the rendition's own button still works, no comment
-//    is created, and clicking a non-commented spot closes the open card.
+// Outside picking, the page's clicks are its own: a click elsewhere closes
+// the card, the page's button still counts, and a click on the words opens
+// the thread again.
+await frame.locator("h1").click();
+await eventually("a click elsewhere on the page closes the card", async () => (await page.locator(".comment-card.is-active").count()) === 0);
+await eventually("the words stay marked, more lightly than while their card was open", async () => {
+  const now = await introPainted();
+  return now !== introPlain && now !== introHot;
+});
 await frame.locator("#counter").click();
-const counterText = await frame.locator("#counter").textContent();
-const threadsAfterClick = await threadLines(page);
-await poll(async () => (await page.locator(".html-comment-pop").count()) === 0);
-step(
-  "page's own interactivity untouched; clicking elsewhere closes the card",
-  counterText.includes("clicked 1x") && threadsAfterClick === 1,
-  `button: "${counterText}"`,
-);
+await eventually("the page's own button still answers its click", async () => (await frame.locator("#counter").textContent()) === "clicked 1x");
+const wordAt = await inFrame((_body, words) => {
+  const node = document.createTreeWalker(document.querySelector("#intro"), NodeFilter.SHOW_TEXT).nextNode();
+  const at = node.data.indexOf(words);
+  const range = document.createRange();
+  range.setStart(node, at);
+  range.setEnd(node, at + words.length);
+  const r = range.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}, picked.words);
+{
+  const f = await frameBox();
+  await page.mouse.click(f.x + wordAt.x, f.y + wordAt.y);
+}
+await eventually("a click on commented words opens their card", async () => (await page.locator(".comment-card.is-active").count()) === 1);
+await frame.locator("h1").click();
+await poll(async () => (await page.locator(".comment-card.is-active").count()) === 0);
 
-// 8. The closed thread now shows as a pin at its element.
-await poll(async () => (await page.locator(".html-comment-pin").count()) === 1);
-const pinBox = await page.locator(".html-comment-pin").boundingBox();
-const introBox2 = await frame.locator("#intro").boundingBox();
-const pinOnCorner =
-  Math.abs(pinBox.y - introBox2.y) < 30 &&
-  pinBox.x > introBox2.x + introBox2.width - 60;
-step("thread collapses to an avatar pin on the element's corner", pinOnCorner);
-await page.screenshot({ path: `${SHOTS}/05-pin.png` });
+/* ---------- A thread on a part ---------- */
 
-// 9. Clicking the pin reopens the floating card.
-await page.locator(".html-comment-pin").click();
-await poll(async () => page.locator(".html-comment-pop .comment-card").isVisible());
-const reopened = await page.locator(".html-comment-pop").textContent();
-step("clicking a pin opens its thread card", reopened.includes("This intro reads odd"));
+await appKey("c");
+await eventually("C starts picking, and says what a click will do", () => page.locator(".html-pick-bar").isVisible());
+const para = frame.locator("#metrics-card p");
+await para.hover();
+await eventually("the smallest part under the pointer is outlined, and named", async () => {
+  const outline = await page.locator(".html-part-outline.is-picking").boundingBox();
+  const p = await para.boundingBox();
+  const label = await page.locator(".html-part-outline-label").textContent();
+  return near(outline.x, p.x - 4, 3) && near(outline.y, p.y - 4, 3) && near(outline.width, p.width + 8, 4) && label.startsWith("Paragraph");
+});
+await page.keyboard.press("ArrowUp");
+await eventually("↑ takes the part around it", async () => {
+  const outline = await page.locator(".html-part-outline.is-picking").boundingBox();
+  const card = await frame.locator("#metrics-card").boundingBox();
+  return near(outline.y, card.y - 4, 3) && near(outline.height, card.height + 8, 4) && (await page.locator(".html-part-outline-label").textContent()).includes("Metrics");
+});
+await page.keyboard.press("ArrowDown");
+await eventually("↓ comes back in", async () => {
+  const outline = await page.locator(".html-part-outline.is-picking").boundingBox();
+  const p = await para.boundingBox();
+  return near(outline.height, p.height + 8, 4);
+});
+step("commented words keep their tint while a part is being picked", (await introPainted()) !== introPlain);
+await para.hover();
+await page.screenshot({ path: `${SHOTS}/04-picking.png` });
 
-// 10. External link: routed to the system browser, iframe not navigated
-//     away. The postMessage -> invoke hop is async — poll for it.
+// A click anywhere in a part picks it — here on a link, which is not followed.
 await frame.locator("#ext").click();
-await poll(async () => page.evaluate(() => window.__opened.length === 1));
-const opened = await page.evaluate(() => window.__opened);
-const stillThere = (await frame.locator("#intro").count()) === 1;
-step(
-  "external link opens via app (system browser), rendition stays",
-  opened.length === 1 && opened[0] === "https://example.com/details" && stillThere,
-  `opened: ${JSON.stringify(opened)}`,
-);
-
-// 11. Second thread on the card component.
-await clickBubbleFor(frame, "#metrics-card h2");
-await poll(async () => page.locator(".html-comment-pop .comment-card textarea").isVisible());
-await waitCommentInputFocused(page);
-await page.keyboard.type("Metrics need a source note");
+await eventually("a click anywhere in a part starts a thread on it, and the page's link is not followed", async () => {
+  const opened = await page.evaluate(() => window.__opened.length);
+  const on = await page.locator(".comment-card.is-active .comment-on-part").textContent();
+  return opened === 0 && on.startsWith("Paragraph") && on.includes("Read the full details online.");
+});
+step("picking has ended", !(await page.locator(".html-pick-bar").isVisible()));
+await page.keyboard.type("Which details?");
 await page.keyboard.press("Enter");
-await poll(async () =>
-  (await page.locator("#thread-dump").textContent()).includes("Metrics need a source"),
+await eventually("the thread on the part is saved by its tag and opening words, with no words of its own", async () => {
+  const list = await threadLines();
+  const t = list.find((x) => x.comments[0].body === "Which details?");
+  return t && t.anchor.tag === "p" && t.anchor.text === "Read the full details online." && t.anchor.quote === undefined;
+});
+await frame.locator("h1").click();
+await poll(async () => (await page.locator(".comment-card.is-active").count()) === 0);
+const linkPara = frame.locator("main > p", { hasText: "Read the" });
+await eventually("a part with a thread has a marker at its corner, and no outline until asked", async () => {
+  const marker = await page.locator(".html-comment-marker").boundingBox();
+  const p = await linkPara.boundingBox();
+  return near(marker.y + marker.height / 2, p.y, 4) && near(marker.x + marker.width / 2, p.x + p.width, 14) && (await page.locator(".html-part-outline").count()) === 0;
+});
+await page.locator(".html-comment-marker").hover();
+await eventually("the marker and its card light together, and the part is outlined", async () =>
+  (await page.locator(".comment-card.is-lit").count()) === 1 && (await page.locator(".html-part-outline").count()) === 1,
 );
-step("second thread on another component", true);
-await page.screenshot({ path: `${SHOTS}/06-two-threads.png` });
-
-// 12. Leave comment mode: everything vanishes — pins, cards, scrim,
-//     highlights — and the hover bubble is disarmed; the button shows the
-//     thread count instead.
-await page.locator(".html-comment-btn").click();
-await poll(async () => (await frame.locator("html[data-dk-hidden]").count()) === 1);
-await poll(async () => !(await frame.locator("#dk-scrim.dk-on").isVisible()));
-const nothingShown =
-  (await page.locator(".html-comment-pin").count()) === 0 &&
-  (await page.locator(".html-comment-pop").count()) === 0;
-await frame.locator("#tail").hover();
-await settle();
-const bubbleDisarmed = !(await frame.locator("#dk-bubble.dk-on").isVisible());
-const countChip = await page.locator(".html-comment-btn-count").textContent();
-step(
-  "Done restores the pristine page (no pins/cards/scrim, bubble disarmed)",
-  nothingShown && bubbleDisarmed && countChip === "2",
-  `count chip: ${countChip}`,
-);
-await page.screenshot({ path: `${SHOTS}/07-mode-off.png` });
-
-// 13. Re-enter mode: pins come back where the threads live.
-await page.locator(".html-comment-btn").click();
-await poll(async () => (await page.locator(".html-comment-pin").count()) === 2);
-step("re-entering mode shows a pin per thread", true);
-await page.screenshot({ path: `${SHOTS}/08-two-pins.png` });
-
-// 14. Draft abandon: open a draft, Esc -> thread discarded.
-await clickBubbleFor(frame, "#tail");
-await poll(async () => page.locator(".html-comment-pop .comment-card textarea").isVisible());
-await waitCommentInputFocused(page);
+await page.locator(".html-comment-marker").click();
+await eventually("the marker opens its card", async () => (await page.locator(".comment-card.is-active").textContent()).includes("Which details?"));
+step("and after it: the words are painted as marked beside the open thread on a part", (await introPainted()) !== introPlain);
+await page.locator(".html-comment-marker").hover();
+await page.screenshot({ path: `${SHOTS}/05-part-thread.png` });
 await page.keyboard.press("Escape");
-await settle(300);
-step("abandoned draft (Esc without typing) is discarded", (await threadLines(page)) === 2);
+await eventually("Esc closes the open card", async () => (await page.locator(".comment-card.is-active").count()) === 0);
 
-// 15. Leaving mode with an unwritten draft open also discards it.
-await clickBubbleFor(frame, "#tail");
-await poll(async () => page.locator(".html-comment-pop .comment-card textarea").isVisible());
-await waitCommentInputFocused(page);
-await page.locator(".html-comment-btn").click(); // "Done" while the draft is open
-await settle(300);
-const draftSwept = (await threadLines(page)) === 2;
-step("leaving mode discards an unwritten draft", draftSwept);
-await page.locator(".html-comment-btn").click(); // back into mode for the rest
-await poll(async () => frame.locator("#dk-scrim.dk-on").isVisible());
+// Esc also stops picking, and an abandoned draft is not saved.
+await appKey("c");
+await poll(() => page.locator(".html-pick-bar").isVisible());
+await appKey("Escape");
+await eventually("Esc stops picking", async () => !(await page.locator(".html-pick-bar").isVisible()));
 
-// 16. Comment on the subtitle (will be orphaned by regeneration).
-await clickBubbleFor(frame, "#subtitle");
-await poll(async () => page.locator(".html-comment-pop .comment-card textarea").isVisible());
-await waitCommentInputFocused(page);
-await page.keyboard.type("Subtitle wording?");
-await page.keyboard.press("Enter");
-await poll(async () =>
-  (await page.locator("#thread-dump").textContent()).includes("Subtitle wording?"),
-);
+// The same keys with the keyboard inside the page, where the app's window
+// never hears them: the script passes them on. A message that only claims
+// to be a key, posted by the page while the keyboard is elsewhere, is not
+// one.
+await frame.locator("h1").click();
+await page.keyboard.press("c");
+await eventually("C pressed inside the page starts picking too", () => page.locator(".html-pick-bar").isVisible());
+await page.keyboard.press("Escape");
+await eventually("and Esc pressed there stops it", async () => !(await page.locator(".html-pick-bar").isVisible()));
+await page.locator("#controls").click({ position: { x: 400, y: 6 } });
+await inFrame(() => window.parent.postMessage({ dk: "doklin-comments", type: "key", key: "c" }, "*"));
+await settle();
+step("a key the page only says was pressed, while the keyboard is elsewhere, does nothing", !(await page.locator(".html-pick-bar").isVisible()));
+await appKey("c");
+await frame.locator("#tail").scrollIntoViewIfNeeded();
+await frame.locator("#tail").click();
+await poll(async () => (await page.locator(".comment-card.is-active").count()) === 1);
+await page.keyboard.press("Escape");
+await eventually("a draft left empty is not saved", async () => (await threadLines()).length === 2 && (await page.locator(".comment-card").count()) === 2);
 
-// 17. Regenerate the rendition (structure reshuffled, intro/tail text kept,
-//     subtitle removed): intro re-anchors, subtitle + metrics orphan into
-//     the stack under the button.
+/* ---------- The cards follow the page ---------- */
+
+await inFrame(() => window.scrollTo(0, 0));
+await settle();
+{
+  const margin = await page.locator(".html-comments-margin").boundingBox();
+  const before = await page.locator(".comment-card").first().boundingBox();
+  await page.mouse.move(margin.x + margin.width / 2, margin.y + margin.height - 60);
+  await page.mouse.wheel(0, 240);
+  await eventually("the wheel over the cards scrolls the page, and the cards move with it", async () => {
+    const y = await inFrame(() => window.scrollY);
+    const after = await page.locator(".comment-card").first().boundingBox();
+    return y > 100 && near(before.y - after.y, y, 3);
+  });
+  await inFrame(() => window.scrollTo(0, 0));
+  await settle();
+}
+
+/* ---------- Hidden is as the reader gets the page ---------- */
+
+await page.evaluate(() => window.__setVisible(false));
+await eventually("hidden: no column, nothing marked or painted, no marker, the page's full width", async () => {
+  const [f, s] = [await frameBox(), await stageBox()];
+  const count = await tinted();
+  return near(f.width, s.width, 3) && (await page.locator(".html-comments-margin").count()) === 0 && !count && (await introPainted()) === introPlain && (await page.locator(".html-comment-marker").count()) === 0;
+});
+await page.screenshot({ path: `${SHOTS}/06-hidden.png` });
+await appKey("Shift+C");
+await eventually("⇧C shows them again, where they were", async () => {
+  const f = await frameBox();
+  const s = await stageBox();
+  return near(f.width, s.width - 312, 3) && (await page.locator(".comment-card").count()) === 2 && (await page.locator(".html-comment-marker").count()) === 1 && (await introPainted()) !== introPlain;
+});
+
+/* ---------- Zoomed, the app's layers stay on what they are about ---------- */
+
+// Where the page's parts are is asked of the browser from outside the frame,
+// so the script's own arithmetic is not what it is checked against.
+const partsLineUp = async () => {
+  const marker = await page.locator(".html-comment-marker").boundingBox();
+  const p = await linkPara.boundingBox();
+  if (!near(marker.y + marker.height / 2, p.y, 4) || !near(marker.x + marker.width / 2, p.x + p.width, 14)) return false;
+  await page.locator(".html-comment-marker").hover();
+  const outline = await page.locator(".html-part-outline").boundingBox();
+  await page.mouse.move(5, 5);
+  return !!outline && near(outline.x, p.x - 4, 3) && near(outline.y, p.y - 4, 3) && near(outline.width, p.width + 8, 4) && near(outline.height, p.height + 8, 4);
+};
+{
+  const before = await linkPara.boundingBox();
+  await page.evaluate(() => window.__setZoom(1.5));
+  await poll(async () => (await linkPara.boundingBox()).height > before.height * 1.3);
+  await eventually("zoomed in: a part's marker and outline are still on the part", partsLineUp);
+  // The browser scrolls the column itself to show something in a card (the
+  // caret, a control the Tab key lands on). Zoomed, the cards run past the
+  // column's foot, so here it can.
+  const column = page.locator(".html-comments-margin");
+  await poll(() => column.evaluate((el) => el.scrollHeight >= el.clientHeight + 40));
+  await column.evaluate((el) => { el.scrollTop = 40; });
+  await eventually("the column never scrolls by itself: the move is the page's, and the cards stay with their places", async () => {
+    const own = await column.evaluate((el) => el.scrollTop);
+    const y = await inFrame(() => window.scrollY);
+    return own === 0 && near(y, 40, 1) && (await partsLineUp());
+  });
+  await inFrame(() => window.scrollTo(0, 0));
+  await poll(async () => (await inFrame(() => window.scrollY)) === 0);
+  await page.locator(".comment-card", { hasText: "This word?" }).click();
+  await eventually("zoomed in: the card of a thread on words is level with their paragraph", async () => {
+    const card = await page.locator(".comment-card.is-active").boundingBox();
+    const intro = await frame.locator("#intro").boundingBox();
+    return card.y >= intro.y - 10 && card.y <= intro.y + intro.height;
+  });
+  await page.screenshot({ path: `${SHOTS}/07-zoomed.png` });
+  await frame.locator("h1").click();
+  await poll(async () => (await page.locator(".comment-card.is-active").count()) === 0);
+  await page.evaluate(() => window.__setZoom(1));
+  await poll(async () => near((await linkPara.boundingBox()).height, before.height, 1));
+  await eventually("and at its own size again, they are back with it", partsLineUp);
+}
+
+/* ---------- The page is written again ---------- */
+
 await page.locator("#regen-keep").click();
-await poll(async () => (await frame.locator("section #intro").count()) === 1);
-await poll(async () => (await frame.locator("#intro[data-dk-t]").count()) === 1);
-step("after regeneration, thread re-anchors to same text in new structure", true);
-await poll(async () => (await page.locator(".comment-orphan-note").count()) === 2);
-const orphanStack = await page.locator(".html-comment-orphans").textContent();
-step(
-  "threads whose elements vanished become orphan cards (kept, labeled)",
-  orphanStack.includes("Subtitle wording?") && orphanStack.includes("Metrics need a source"),
-);
-await page.screenshot({ path: `${SHOTS}/09-regenerated-orphan.png` });
+await poll(async () => (await frame.locator("h1").textContent()).includes("(v2)"));
+await eventually("words that are still there are found, though everything around them changed", async () => {
+  const card = page.locator(".comment-card", { hasText: "This word?" });
+  return (await card.count()) === 1 && (await card.locator(".comment-orphan-note").count()) === 0 && (await card.locator(".comment-on-note").count()) === 0;
+});
+await eventually("a part that is gone is said to be gone, at the top of the column, with what it was on", async () => {
+  const card = page.locator(".comment-card", { hasText: "Which details?" });
+  const note = await card.locator(".comment-orphan-note").textContent();
+  const on = await card.locator(".comment-on-part").textContent();
+  const first = await page.locator(".comment-card").first().textContent();
+  return note.includes("no longer in the document") && on.includes("Read the full details online.") && first.includes("Which details?");
+});
+step("finding a thread again rewrites nothing: its anchor is as it was saved", (await threadLines()).every((t) => t.anchor.path.includes("main")));
+await page.screenshot({ path: `${SHOTS}/07-regenerated.png` });
 
-// 18. Clicking a highlighted element opens its floating card.
-await frame.locator("#intro").click();
-await poll(async () => page.locator(".html-comment-pop .comment-card").isVisible());
-const activeText = await page.locator(".html-comment-pop .comment-card").textContent();
-step(
-  "clicking a commented element opens its card",
-  activeText.includes("This intro reads odd"),
-);
-await page.screenshot({ path: `${SHOTS}/10-activated.png` });
+const lost = page.locator(".comment-card", { hasText: "Which details?" });
+await lost.locator(".comment-entry").first().hover();
+await lost.locator(".comment-entry-delete").first().click();
+await eventually("deleting a thread removes its record", async () => !(await dump()).includes("Which details?"));
 
-// 19. Delete the orphan thread via its trash button.
-await frame.locator("h1").click(); // deselect first
-await poll(async () => (await page.locator(".html-comment-pop").count()) === 0);
-const orphanCard = page
-  .locator(".html-comment-orphans .comment-card")
-  .filter({ hasText: "Subtitle wording?" });
-await orphanCard.locator(".comment-entry").first().hover();
-await orphanCard.locator(".comment-entry-delete").first().click();
-await poll(async () =>
-  !(await page.locator("#thread-dump").textContent()).includes("Subtitle wording?"),
-);
-step("deleting a thread removes its sidecar line", true);
+/* ---------- The shared cases: what this script finds in the page as drawn ---------- */
 
-console.log("\nFinal thread dump:\n" + (await page.locator("#thread-dump").textContent()));
+let n = 0;
+for (const c of fixture.places) {
+  const id = `case${(n += 1)}`;
+  await page.evaluate(
+    ([html, thread]) => window.__setCase(html, [thread]),
+    [c.html, { id, anchor: c.anchor, comments: [{ author: "A", at: 1, body: "x" }] }],
+  );
+  let said = "nothing";
+  try {
+    said = await poll(() => page.evaluate((key) => window.__places[key]?.state, id), 10000);
+  } catch {
+    // left as "nothing"
+  }
+  step(`place: ${c.about}`, said === c.state, said === c.state ? "" : `${said}, not ${c.state}`);
+}
+
+/* ---------- Cards that open, and a thread at the page's end ---------- */
+
+{
+  const said = (n) => ["One", "Two", "Three", "Four", "Five", "Six"].slice(0, n).map((body, i) => ({ author: "A", at: i + 1, body }));
+  const on = (id, text, n) => ({ id, anchor: { path: "", tag: "p", text, ids: [id] }, comments: said(n) });
+  await page.evaluate(
+    ([html, threads]) => window.__setCase(html, threads),
+    [
+      `<!doctype html><html><body style="margin:0"><p id="first" style="margin:0">The opening line.</p><p id="second" style="margin:0">The line after it.</p><div style="height:1400px"></div><p id="last" style="margin:0">The closing line.</p></body></html>`,
+      [on("first", "The opening line.", 4), on("second", "The line after it.", 1), on("last", "The closing line.", 6)],
+    ],
+  );
+  await poll(() => page.evaluate(() => ["first", "second", "last"].every((id) => window.__places[id]?.state === "found")), 10000);
+  const card = (text) => page.locator(".comment-card", { hasText: text });
+
+  // A card grows when it opens: the one under it is stacked by the height
+  // it has now, not the one it had closed.
+  await card("The opening line.").click();
+  await eventually("a card that opens pushes the one under it down, never over it", async () => {
+    const [open, next] = [await card("The opening line.").boundingBox(), await card("The line after it.").boundingBox()];
+    return (await page.locator(".comment-card.is-active").textContent()).includes("Four") && next.y >= open.y + open.height + 8;
+  });
+  await frame.locator("body").click({ position: { x: 300, y: 300 } });
+  await poll(async () => (await page.locator(".comment-card.is-active").count()) === 0);
+
+  // Nothing scrolls past the page's end, so a card there is kept above it,
+  // closed or open: its last reply and the box to answer in can be reached.
+  const atEnd = async () => {
+    await inFrame(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    const [box, f] = [await card("The closing line.").boundingBox(), await frameBox()];
+    return !!box && box.y >= f.y && box.y + box.height <= f.y + f.height + 1;
+  };
+  await eventually("a card at the page's end sits whole above it", atEnd);
+  await card("The closing line.").click();
+  await eventually("and open, with every reply and the box to answer in, it still does", async () =>
+    (await page.locator(".comment-card.is-active .comment-input").count()) === 1 && (await page.locator(".comment-card.is-active").textContent()).includes("Six") && (await atEnd()),
+  );
+  await page.screenshot({ path: `${SHOTS}/08-page-end.png` });
+}
+
+console.log("\nFinal thread dump:\n" + (await dump()));
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} steps passed`);
 await browser.close();

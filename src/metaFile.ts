@@ -55,7 +55,7 @@ import {
   formatThreadSpans,
   type CommentEntry,
 } from "./criticMarkup";
-import type { HtmlThread, HtmlAnchor } from "./htmlComments";
+import { storedAnchor, type HtmlThread } from "./htmlComments";
 
 export type MdThread = { id: string; comments: CommentEntry[] };
 
@@ -128,17 +128,6 @@ const isColWidths = (value: unknown): value is number[] =>
   value.length > 0 &&
   value.every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0);
 
-const isAnchor = (value: unknown): value is HtmlAnchor => {
-  const a = value as HtmlAnchor;
-  return (
-    !!a &&
-    typeof a === "object" &&
-    typeof a.path === "string" &&
-    typeof a.tag === "string" &&
-    typeof a.text === "string"
-  );
-};
-
 // Tolerant parse: skip the header, skip malformed lines (a sync conflict marker or hand edit must never take every
 // thread down with it), fold duplicate (type, id) pairs — first wins.
 export function parseEntityMeta(raw: string): EntityMeta {
@@ -165,20 +154,10 @@ export function parseEntityMeta(raw: string): EntityMeta {
       seen.add(key);
       meta.mthreads.push({ id, comments: r.comments as CommentEntry[] });
     } else if (r.t === "hthread") {
-      if (
-        id === "" ||
-        !isAnchor(r.anchor) ||
-        !Array.isArray(r.comments) ||
-        !r.comments.every(isEntry)
-      ) {
-        continue;
-      }
+      const anchor = storedAnchor(r.anchor);
+      if (id === "" || !anchor || !Array.isArray(r.comments) || !r.comments.every(isEntry)) continue;
       seen.add(key);
-      meta.hthreads.push({
-        id,
-        anchor: r.anchor as HtmlAnchor,
-        comments: r.comments as CommentEntry[],
-      });
+      meta.hthreads.push({ id, anchor, comments: r.comments as CommentEntry[] });
     } else if (r.t === "tcols") {
       if (id === "" || !isColWidths(r.cols)) continue;
       seen.add(key);
@@ -210,7 +189,7 @@ export function serializeEntityMeta(meta: EntityMeta): string {
       line: JSON.stringify({
         t: "hthread",
         id: t.id,
-        anchor: { path: t.anchor.path, tag: t.anchor.tag, text: t.anchor.text },
+        anchor: storedAnchor(t.anchor),
         comments: t.comments.map(canonicalEntry),
       }),
     });

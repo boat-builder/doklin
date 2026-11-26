@@ -60,7 +60,7 @@ import {
 } from "./documents";
 import type { Env } from "./env";
 import { PersonDocs, linksWritten, sectionOfCall, shownNote } from "./agentLinks";
-import { anchorResolves, elementsOf } from "./htmlText";
+import { placeOf, readPage } from "./htmlText";
 import { json, readJsonObject } from "./http";
 import { ID_RE, MAX_FILE_BYTES, SPACE_ID_RE, blobKey, contentTypeOf } from "./layout";
 import type { Manifest } from "./manifest";
@@ -711,23 +711,41 @@ function markersKept(before: string, after: string, stem: string): Refusal | nul
 }
 
 /**
- * An html thread's place is an element of the page, found again by its tag
- * and opening words. Every thread that has a place now must have one after.
- * One that has none already is not this write's doing.
+ * An html thread's place is words of the page, or a part of it found again by
+ * its tag and opening words (`placeOf`, htmlText.ts). A write may not leave a
+ * thread with less of its place than the file had: its words gone, or its
+ * part. Words reworded a little are still its words, as a marker in markdown
+ * may move with its words. A thread the file had no place for already is not
+ * this write's doing.
  */
 async function anchorsKept(tx: Tx, doc: Doc, before: string, after: string): Promise<Refusal | null> {
   if (!doc.meta) return null;
   const threads = parseEntityMeta((await tx.readText(doc.meta.fid)) ?? "").hthreads;
   if (threads.length === 0) return null;
-  const was = elementsOf(before);
-  const now = elementsOf(after);
-  const gone = threads.filter((t) => anchorResolves(was, t.anchor) && !anchorResolves(now, t.anchor));
+  const was = readPage(before);
+  const now = readPage(after);
+  const gone = threads.flatMap((t) => {
+    const had = placeOf(was, t.anchor).level;
+    return placeOf(now, t.anchor).level < had ? [{ thread: t, words: had === 2 }] : [];
+  });
   if (gone.length === 0) return null;
-  const names = gone.map((t) => `the <${t.anchor.tag}> comment #${t.id} is on (${quoted(t.anchor.text)})`);
+  const names = gone.map(({ thread: t, words }) => {
+    if (words) return `the words comment #${t.id} is on (${quoted(t.anchor.quote ?? "")})`;
+    const id = t.anchor.ids?.[0] && t.anchor.text === "" ? ` id="${t.anchor.ids[0]}"` : "";
+    return `the <${t.anchor.tag}${id}> comment #${t.id} is on${t.anchor.text === "" ? "" : ` (${quoted(t.anchor.text)})`}`;
+  });
+  const keep =
+    gone.length > 1
+      ? "keep them"
+      : gone[0].words
+        ? "keep those words"
+        : gone[0].thread.anchor.text === ""
+          ? "keep that element and its id"
+          : "keep that element and its opening words";
   return new Refusal(
     400,
-    `this write would take away ${andList(names)} — keep ${gone.length === 1 ? "that element and its opening words" : "those elements and their opening words"}, or remove the thread first with ${commentRm(doc.stem, gone.length === 1 ? gone[0].id : "<thread>")}`,
-    { code: "comments", threads: gone.map((t) => t.id) },
+    `this write would take away ${andList(names)} — ${keep}, or remove the thread first with ${commentRm(doc.stem, gone.length === 1 ? gone[0].thread.id : "<thread>")}`,
+    { code: "comments", threads: gone.map((g) => g.thread.id) },
   );
 }
 

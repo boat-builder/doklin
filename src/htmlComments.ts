@@ -3,18 +3,17 @@
 // The rendition is generated markup Doklin never writes (an AI tool owns it),
 // so unlike markdown comments — whose anchors live inline as CriticMarkup —
 // HTML threads live entirely in the entity meta file beside the document,
-// one `hthread` record per thread (metaFile.ts). One record per line is
-// deliberate: cloud sync merges files with a three-way *text* merge
-// (engine/src/cloud/merge.rs), so two people adding or replying to
-// different threads concurrently merge cleanly line by line.
+// one `hthread` record per thread (metaFile.ts).
 //
-// A thread anchors to an ELEMENT of the rendition (markdown comments anchor
-// to text ranges; the html view is component-level by design): a structural
-// path resolved first, with the element's tag and leading text as the
-// re-anchoring fallback when regeneration reshuffles the structure. Threads
-// whose anchor no longer resolves are "orphaned" — kept, shown at the top of
-// the rail, never silently dropped. Entries reuse the markdown side's
-// CommentEntry shape, so the rail renders both sides identically.
+// A thread is on WORDS of the page, or on a PART of it as a whole (a
+// paragraph, a heading, a row, a picture). Either way it is found again by
+// what the page says, never by where the markup had it: ids and the
+// structural path only say where to look first, and whatever they lead to is
+// checked against the words before it is believed (htmlBridge.ts, "finding a
+// place"). A thread whose place is not found is kept and shown as lost,
+// never silently dropped — and finding a thread never rewrites its anchor.
+// Entries reuse the markdown side's CommentEntry shape, so both views draw
+// the same card.
 
 import {
   newThreadId,
@@ -25,15 +24,77 @@ import {
 
 export type { CommentEntry };
 
-// How a thread finds its element again. `path` is a structural CSS selector
-// from the document root ("section:nth-of-type(2) > p:nth-of-type(3)");
-// `tag` and `text` (normalized leading text, ~120 chars) let the bridge
-// re-anchor by content when the path no longer matches.
+// How much of the page an anchor keeps. The page script, the worker's reading
+// of a page (cloud-worker/src/htmlText.ts) and the iPhone's
+// (ios/DoklinKit/Sources/DoklinKit/Comments/HtmlText.swift) cut to the same
+// lengths — change all three.
+export const ANCHOR_TEXT_LEN = 120;
+export const ANCHOR_QUOTE_LEN = 1000;
+export const ANCHOR_CONTEXT_LEN = 32;
+export const ANCHOR_IDS_MAX = 12;
+export const ANCHOR_ID_LEN = 200;
+
+// Where a thread is. `path`, `tag` and `text` are its part: a structural CSS
+// selector from the document root ("section:nth-of-type(2) > p:nth-of-type(3)",
+// a hint only), the part's tag, and the start of what it says (a picture's
+// alt text, else its file name). `ids` are the ids of the part and of
+// everything around it, nearest first. A thread on words also has them
+// (`quote`) with the text either side (`prefix`, `suffix`), and its part is
+// then the smallest one holding all of them.
 export type HtmlAnchor = {
   path: string;
   tag: string;
   text: string;
+  ids?: string[];
+  quote?: string;
+  prefix?: string;
+  suffix?: string;
 };
+
+// An anchor as it is stored, from anything that claims to be one: the keys in
+// the order every device writes them, `ids` only when there are some, and the
+// words only when there are some. Null for what is no anchor at all. The
+// engine (engine/src/sidecar.rs `anchor`) and the iPhone (MetaFile.swift)
+// read one the same way — change all three.
+export function storedAnchor(value: unknown): HtmlAnchor | null {
+  const a = value as Record<string, unknown> | null;
+  if (!a || typeof a !== "object") return null;
+  if (typeof a.path !== "string" || typeof a.tag !== "string" || typeof a.text !== "string") return null;
+  const out: HtmlAnchor = { path: a.path, tag: a.tag, text: a.text };
+  if (Array.isArray(a.ids) && a.ids.length > 0 && a.ids.every((id) => typeof id === "string")) {
+    out.ids = a.ids as string[];
+  }
+  if (typeof a.quote === "string" && a.quote !== "") {
+    out.quote = a.quote;
+    out.prefix = typeof a.prefix === "string" ? a.prefix : "";
+    out.suffix = typeof a.suffix === "string" ? a.suffix : "";
+  }
+  return out;
+}
+
+// An anchor the page's frame sent. The frame is untrusted and the sidecar is
+// synced to every device, so it is taken as strings and cut to what an
+// anchor keeps.
+export function anchorFromFrame(value: unknown): HtmlAnchor | null {
+  const a = storedAnchor(value);
+  if (!a || !/^[a-z][a-z0-9-]*$/.test(a.tag)) return null;
+  const out: HtmlAnchor = {
+    path: a.path.slice(0, 2000),
+    tag: a.tag.slice(0, 60),
+    text: a.text.slice(0, ANCHOR_TEXT_LEN),
+  };
+  const ids = (a.ids ?? [])
+    .filter((id) => id !== "")
+    .slice(0, ANCHOR_IDS_MAX)
+    .map((id) => id.slice(0, ANCHOR_ID_LEN));
+  if (ids.length > 0) out.ids = ids;
+  if (a.quote !== undefined) {
+    out.quote = a.quote.slice(0, ANCHOR_QUOTE_LEN);
+    out.prefix = (a.prefix ?? "").slice(-ANCHOR_CONTEXT_LEN);
+    out.suffix = (a.suffix ?? "").slice(0, ANCHOR_CONTEXT_LEN);
+  }
+  return out;
+}
 
 export type HtmlThread = {
   id: string;
@@ -115,10 +176,10 @@ export function deleteHtmlThread(threads: HtmlThread[], id: string): HtmlThread[
 
 /* ---------- Three-way merge of two copies of a thread list ----------
 
-   A document's threads can change in two places at once: the live rail in
-   this window, and the meta file on disk when another device's edit lands
+   A document's threads can change in two places at once: the cards in this
+   window, and the meta file on disk when another device's edit lands
    (cloud sync, or another window). `base` is the state both sides last
-   agreed on, `mine` is the rail, `theirs` is what arrived — so an addition
+   agreed on, `mine` is this window's, `theirs` is what arrived — so an addition
    on either side lands on both, and a deletion on either side sticks
    instead of resurrecting on the next write. */
 

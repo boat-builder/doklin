@@ -22,14 +22,15 @@ public struct CommentThread: Identifiable, Equatable, Sendable {
     /// only a hand edit makes one — reads here, and is answered on a Mac.
     public let id: String
     public let version: CommentVersion
-    /// What it is on: the marked words, or the start of the element's text.
+    /// What it is on: the marked words; on a page, its words, or the start
+    /// of the part it is on.
     public let on: String
     /// A markdown thread's line in the file, from 1, when it can be told.
     public let line: Int?
-    /// An html thread's element.
+    /// An html thread's part, or the part its words are in.
     public let tag: String?
-    /// What it was on is gone: its marker was taken out of the note, or no
-    /// element of the page begins with its words any more.
+    /// What it was on is gone: its marker was taken out of the note, or the
+    /// page's file has neither its words nor its part.
     public let orphaned: Bool
     public let comments: [CommentEntry]
 }
@@ -157,12 +158,16 @@ public struct DocumentComments: Equatable, Sendable {
                 out.append(CommentThread(id: thread.id.string, version: .md, on: "", line: nil, tag: nil, orphaned: true, comments: thread.comments))
             }
         }
-        let elements = read.hthreads.isEmpty ? nil : html.map(HtmlText.elements)
+        // A thread is gone when the file has neither its words nor its
+        // part, and the file can say so (`HtmlText.place`): what a page's
+        // script builds is not in it. With no page there is nothing it is on.
+        let page = read.hthreads.isEmpty ? nil : html.map(HtmlText.page)
         for thread in read.hthreads {
-            let found = elements.map { HtmlText.resolves(thread.anchor, in: $0) } ?? false
+            let anchor = thread.anchor
+            let place = page.map { HtmlText.place(of: anchor, in: $0) } ?? FilePlace(level: 0, known: true)
             out.append(CommentThread(
-                id: thread.id.string, version: .html, on: thread.anchor.text.string, line: nil, tag: thread.anchor.tag.string,
-                orphaned: !found, comments: thread.comments
+                id: thread.id.string, version: .html, on: (anchor.quote.isEmpty ? anchor.text : anchor.quote).string, line: nil,
+                tag: anchor.tag.string, orphaned: place.level == 0 && place.known, comments: thread.comments
             ))
         }
         return out

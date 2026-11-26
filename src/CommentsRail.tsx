@@ -12,16 +12,23 @@ import type { CommentEntry } from "./criticMark";
 
 // One thread as the rail renders it. `anchorTop` is the anchor's vertical
 // offset in the host's coordinate space — the scroll container's content
-// space for the markdown editor (cards translate with the document), the
-// viewport for the html view (the host re-sends tops as the iframe scrolls).
-// `orphaned` marks a thread whose anchor no longer exists in the document
-// (an html rendition regenerated out from under its comments); the card
-// stays, labeled, instead of vanishing.
+// space for the markdown editor, the page's for the html view; either way
+// the cards move with the document. `orphaned` marks a thread whose anchor
+// no longer exists in the document (an html rendition regenerated out from
+// under its comments); the card stays, labeled, instead of vanishing.
+//
+// `on` and `note` are the html view's: there a thread's place is not always
+// marked in the text (a thread on a part has no words to tint), so its card
+// says what it is on — the quoted words, or the kind of part and what it is
+// called — and `note` says when that is no longer quite what was commented
+// on.
 export type RailThread = {
   id: string;
   comments: CommentEntry[];
   anchorTop: number;
   orphaned?: boolean;
+  on?: { quote: string } | { kind: string; title: string };
+  note?: string;
 };
 
 // Which entry is being edited: the thread + its index (0 = the opener).
@@ -38,6 +45,15 @@ type Props = {
   // Macs share. Display-name matching, not security — the document format has no identity stronger
   // than a name, and that's fine here.
   selfAuthor: string;
+  // The thread whose place is under the pointer (its card lights with it),
+  // and the card the pointer is over (so its place can light). The html
+  // view's; a note's threads light in the text itself.
+  hoverId?: string | null;
+  onHover?: (id: string | null) => void;
+  // Where what the cards sit beside ends, when nothing can scroll past it
+  // (an html page's height): a card is kept above it, or its foot could
+  // never be reached. A note's rail has none: it grows its own scroller.
+  floor?: number;
   onActivate: (id: string) => void;
   onStartEdit: (id: string, index: number) => void;
   onCommitEdit: (id: string, index: number, body: string) => void;
@@ -55,10 +71,15 @@ const EST_HEIGHT = 76;
 // their anchors. With a selection, the active card pins exactly to its
 // anchor; cards below flow down from it and cards above stack tightly
 // upward — the Google-Docs feel, with real measured heights.
+//
+// With a `floor`, cards that would run past it are pushed up from it the
+// same way, and the active card is kept whole above it: cards below the
+// active one may still run past, since it is the one being read.
 function layoutCards(
   threads: RailThread[],
   heights: Map<string, number>,
   activeId: string | null,
+  floor: number | null,
 ): Map<string, number> {
   const tops = new Map<string, number>();
   const h = (t: RailThread) => heights.get(t.id) ?? EST_HEIGHT;
@@ -70,10 +91,21 @@ function layoutCards(
       tops.set(t.id, top);
       cursor = top + h(t) + CARD_GAP;
     }
+    if (floor !== null) {
+      let ceiling = floor - TOP_MIN;
+      for (let i = threads.length - 1; i >= 0; i -= 1) {
+        const at = tops.get(threads[i].id) ?? threads[i].anchorTop;
+        if (at + h(threads[i]) <= ceiling) break;
+        const top = Math.max(TOP_MIN, ceiling - h(threads[i]));
+        tops.set(threads[i].id, top);
+        ceiling = top - CARD_GAP;
+      }
+    }
     return tops;
   }
   const active = threads[ai];
-  const activeTop = Math.max(TOP_MIN, active.anchorTop);
+  const lowest = floor === null ? Infinity : floor - TOP_MIN - h(active);
+  const activeTop = Math.max(TOP_MIN, Math.min(active.anchorTop, lowest));
   tops.set(active.id, activeTop);
   let cursor = activeTop + h(active) + CARD_GAP;
   for (let i = ai + 1; i < threads.length; i += 1) {
@@ -101,6 +133,9 @@ export default function CommentsRail({
   activeId,
   editing,
   selfAuthor,
+  hoverId = null,
+  onHover,
+  floor,
   onActivate,
   onStartEdit,
   onCommitEdit,
@@ -147,10 +182,10 @@ export default function CommentsRail({
   }, []);
 
   const tops = useMemo(
-    () => layoutCards(threads, heightsRef.current, activeId),
+    () => layoutCards(threads, heightsRef.current, activeId, floor ?? null),
     // measureTick invalidates when observed card heights change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [threads, activeId, measureTick],
+    [threads, activeId, floor, measureTick],
   );
 
   if (threads.length === 0) return null;
@@ -163,8 +198,10 @@ export default function CommentsRail({
           thread={t}
           top={tops.get(t.id) ?? t.anchorTop}
           active={t.id === activeId}
+          lit={t.id === hoverId}
           editing={editing && editing.id === t.id ? editing.index : null}
           selfAuthor={selfAuthor}
+          onHover={onHover}
           onActivate={onActivate}
           onStartEdit={onStartEdit}
           onCommitEdit={onCommitEdit}
@@ -178,15 +215,15 @@ export default function CommentsRail({
   );
 }
 
-// Exported for the html view, which renders the same card floating at the
-// commented element (inside .html-comment-pop) instead of in a rail.
-export function ThreadCard({
+function ThreadCard({
   setRef,
   thread,
   top,
   active,
+  lit,
   editing,
   selfAuthor,
+  onHover,
   onActivate,
   onStartEdit,
   onCommitEdit,
@@ -199,8 +236,10 @@ export function ThreadCard({
   thread: RailThread;
   top: number;
   active: boolean;
+  lit: boolean; // its place is under the pointer
   editing: number | null; // index of the entry being edited, if in this card
   selfAuthor: string;
+  onHover?: (id: string | null) => void;
   onActivate: (id: string) => void;
   onStartEdit: (id: string, index: number) => void;
   onCommitEdit: (id: string, index: number, body: string) => void;
@@ -230,8 +269,10 @@ export function ThreadCard({
   return (
     <div
       ref={setRef}
-      className={`comment-card ${active ? "is-active" : ""}`}
+      className={`comment-card ${active ? "is-active" : ""} ${lit ? "is-lit" : ""}`}
       style={{ top: `${top}px` }}
+      onMouseEnter={onHover && (() => onHover(id))}
+      onMouseLeave={onHover && (() => onHover(null))}
       onMouseDown={(e) => {
         // Activate without stealing focus from a textarea inside the card
         // (or an editing textarea elsewhere).
@@ -248,6 +289,16 @@ export function ThreadCard({
       {thread.orphaned && (
         <div className="comment-orphan-note">Commented spot no longer in the document</div>
       )}
+      {thread.on &&
+        ("quote" in thread.on ? (
+          <blockquote className="comment-on-quote">{thread.on.quote}</blockquote>
+        ) : (
+          <div className="comment-on-part">
+            {thread.on.kind}
+            {thread.on.title && <span className="comment-on-title"> · {thread.on.title}</span>}
+          </div>
+        ))}
+      {thread.note && <div className="comment-on-note">{thread.note}</div>}
       <EntryRow
         entry={opener}
         editing={editing === 0}
