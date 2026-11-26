@@ -42,13 +42,15 @@ docs the way every other rule is kept.
 
 ## Decisions that bind phase 2
 
-- **Decided: `@` is only the editor's way to pick.** It is never stored in a note's
-  text, so agents learn one kind of link, not two.
+- **Decided: `@` is only the editor's way to pick a document.** It is never stored in a
+  note's text, so agents learn one kind of link, not two. A person's mention is
+  the one `@` a note keeps (piece 4).
 - **Decided: the note's text decides which links there are.** A sidecar only adds ids,
   and only Doklin writes notes.
 - **Decided: writing back never reveals (rule 4).** A save never puts a Private or
   restricted document's new name or folder into notes that people outside it read.
-- **Decided: Doklin sends no notifications.**
+- **Decided (2026-11-26): a mention notifies the person mentioned.** How:
+  `notifications-plan.md`, which builds piece 4 with its mention notifications.
 - **Decided: no legacy code.** No compatibility layers or fallback chains; the one
   exception is a commented one-time migration of stored data.
 - **The worker version:** `WORKER_VERSION` moves once per release, from main's number.
@@ -90,30 +92,68 @@ Asked for by the user, to match Notion.
   means the next one) or a typed date.
 - **What it writes:** the date as plain text, with no record, so `@` stays the
   editor's alone.
-- **No reminders,** since Doklin sends no notifications.
+- **No reminders:** a date notifies nobody (`notifications-plan.md` has none).
 - **Open question, the format:** Notion's default ("November 28, 2026") or ISO
   (`2026-11-28`), which is plainer for agents.
 
 ### 4. People in `@`
 
-The third of Notion's three groups (documents, dates, people). This piece has no design yet.
+The third of Notion's three groups (documents, dates, people). Built in release 2
+of `notifications-plan.md`, with the notification a mention sends. The user left
+the architecture to me (2026-11-26); everything below is mine, not yet objected to.
 
-- **What it writes into the note:**
-  - **A plain name,** like a date: simple, but it doesn't follow a rename and
-    can't be found as "mentions of me".
-  - **Or a name plus a member id** in the sidecar, like a link (a new record type
-    such as `{"t":"person",…}`). Old apps keep unknown records verbatim.
-  - Either way, `@` itself is never stored.
-- **What the mentioned person gets:** no notification. Most likely a mention shows in
-  what's new for them:
-  - `cloud_recent` (`backend.cloud.recent`);
-  - the iPhone's `Models/Recent.swift`, with its read and unread marks.
-- **Who can be mentioned:** the workspace's members (`/api/meta`'s people, the engine's
-  `people`).
-  - A note in a restricted folder could offer only that folder's members.
-  - A mention of someone who can't read the note could get a warning, like `pickNotice`.
-- **Agents:** what does `doklin read` show for a mention, and may an agent write one?
-- **A person who leaves or is renamed:** what does their mention show?
+**What a note holds:**
+
+- **The text says `@Maya Chen`:** an `@` and the person's name as the directory has
+  it. The `@` is kept so that a mention can be told from a name by anyone reading
+  the text: people, agents, other editors, a search for "mentions of me".
+- **The sidecar says whom it means:** `{"t":"person","id":<the words, folded>,"member":"m-…"}`,
+  one record per name for the whole document, its markdown and every comment on it.
+  As with a link, the text says it and the record only finds the person again after
+  a rename, or when a second person takes the same name. Old apps keep unknown
+  records verbatim.
+- **No member id in the text,** as no file id is: people and agents never see one.
+- Where a mention sits is the `@` list's own rule (`opensAt`, `mentionMenu.ts`):
+  after a space or punctuation, never inside a word (an email address stays one),
+  code or a link's words.
+
+**What a save writes** (`peopleToSave`, beside `linksToSave` in `src/docLinks.ts`,
+ported to `Markdown/Links.swift`, held to `links-fixture.json`, **change both**):
+
+1. A mention picked from `@`, or pasted from another note, gets a record from the
+   person it was made with.
+2. A mention that has a record keeps it, written as `@` and that person's name now:
+   a rename reaches the text at the next save, as a named link's words do.
+3. An `@` followed by a name that exactly one person in the workspace has (any case)
+   and no record gets one. That is how a hand-typed mention and an agent's become
+   mentions. A name two people share, or nobody has, stays text.
+4. Nothing to hide: names are in everyone's directory, so rule 4 of links has no
+   counterpart.
+
+**How it shows:**
+
+- A pill with the person's name now. A removed person's pill is greyed (the directory
+  keeps their name). A person record whose words are gone from the document is
+  dropped at the save, as a link's is.
+- The iPhone's reader draws the same pill; its editor is the Mac's.
+- Search finds `@Maya Chen` as words; "mentions of me" is the notifications list.
+
+**The `@` list:**
+
+- People come above documents, as Notion has them, agents never.
+- The people who can open the document come first. Anyone else is below a line,
+  and picking them warns "Dave can't open this. Share it with him?" with **Share**,
+  as `pickNotice` warns for documents.
+- The same list opens in a comment's box; a comment keeps `@Maya Chen` in its body.
+- Two people of one name in one document: the list warns, and the first keeps the
+  words. Rare, and left at that.
+
+**Agents:**
+
+- `doklin read` shows `@Maya Chen` as stored. An agent mentions someone by writing
+  `@` and their full name (rule 3); the write answers which names became mentions
+  and which stayed text. `doklin help documents` says so.
+- An html document's own text holds no mentions; its comments do.
 
 ### 5. `[[`
 
