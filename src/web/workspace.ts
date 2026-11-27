@@ -660,6 +660,7 @@ export class Workspace {
       presence: this.presence(),
       leases: this.leases(),
       spaces: this.spaces(),
+      tags: this.sections.get("")?.manifest.tags ?? [],
     };
   }
 

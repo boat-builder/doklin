@@ -50,7 +50,7 @@ import type {
   EveryPage,
 } from "./cloud";
 import type { WorkspaceDocument } from "./docLinks";
-import type { TagFilter } from "./tags";
+import type { TagDef, TagFilter } from "./tags";
 import type { StoredTab } from "./tabs";
 import type {
   DeletedFile,
@@ -249,6 +249,16 @@ export interface Cloud {
   pages(root: string): Promise<{ pages: EveryPage[]; truncated: boolean }>;
   /** Take a page down, whoever published it (an owner's to do). */
   pageTakeDown(root: string, slug: string): Promise<void>;
+
+  /** Change the workspace's tags: the tag that was `at` — or a new one, at
+   *  the end, when none is called that — is now `def`, in its place. In the
+   *  status once this resolves; of two changes of one tag, the later wins.
+   *  Rejects with a sentence for a tag the list can't hold. Nothing here
+   *  changes a note. */
+  setTag(root: string, at: string, def: TagDef): Promise<void>;
+  /** Take a tag out of the list. The notes that have it keep their line,
+   *  which is then plain frontmatter. */
+  removeTag(root: string, name: string): Promise<void>;
 }
 
 /* ---------- What a platform may not have ---------- */

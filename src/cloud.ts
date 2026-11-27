@@ -6,6 +6,7 @@
 // change all three.
 
 import { COMPATIBILITY_DATE, WORKER_VERSION } from "virtual:cloud-worker-version";
+import type { TagDef } from "./tags";
 
 /** The worker version this app was built for — parsed out of the worker's
  *  source at build time (vite.config.ts), never typed here. A domain whose
@@ -184,6 +185,10 @@ export type CloudStatus = {
   /** This person's sections besides Library — their Private and the
    *  restricted folders they are in — that have a folder on this Mac. */
   spaces: CloudSpace[];
+  /** The workspace's tags, in order, as this device believes them: the
+   *  shared workspace's list with the changes made here and not yet sent
+   *  (`tags` in status.rs; a browser's own, src/web/workspace.ts). */
+  tags: TagDef[];
 };
 
 /** One section of a workspace that only some people have. Mirrors

@@ -125,17 +125,10 @@ import {
 import type { LinkContext } from "./linkMark";
 import { useDismiss } from "./dismiss";
 import { splitFrontmatter } from "./frontmatter";
-import {
-  TAG_NOTE,
-  keyedLines,
-  parseTagList,
-  writeTag,
-  writeTagList,
-  type TagDef,
-  type TagFilter,
-} from "./tags";
-import { TagListView, TagsRow } from "./TagsRow";
+import { TAGS_MAX, keyedLines, writeTag, type TagDef, type TagFilter } from "./tags";
+import { TagsRow } from "./TagsRow";
 import { EditTagDialog, NewTagDialog, type TagEdit } from "./TagDialogs";
+import TagsSettings from "./TagsSettings";
 import {
   backend,
   SaveConflict,
@@ -5642,47 +5635,36 @@ export default function App() {
   const companionLinks = useMemo(() => linkContextOf(companionPath), [linkContextOf, companionPath]);
 
   /* ---------- Tags (src/tags.ts) ----------
-     The workspace's tag list is a note: `Tags.md` in the sidebar's first
-     list (Library, when connected), found whatever its case. It is read
-     again whenever the tree is, and is the open note's own block while it
-     is the open note. A tag change is a write of the note it is on, through
-     the save path when that note is open. */
-  const tagNotePath = useMemo(() => {
-    if (!workspaceRoot || !libraryDir) return null;
-    const at = `${libraryDir}/${TAG_NOTE}`;
-    const rel = relPathIn(workspaceRoot, at);
-    const found = rel !== null ? workspaceDocs?.byPath.get(rel.toLowerCase()) : undefined;
-    return found ? `${workspaceRoot}/${found.path}` : at;
-  }, [workspaceRoot, libraryDir, workspaceDocs]);
-  const [tagNote, setTagNote] = useState<{ path: string; text: string } | null>(null);
-  const readTagNote = useCallback(async (path: string) => {
-    const text = await backend.documents.read(path).then(
-      (r) => r.text,
-      () => "",
-    );
-    setTagNote((cur) => (cur && cur.path === path && cur.text === text ? cur : { path, text }));
-  }, []);
-  useEffect(() => {
-    if (tagNotePath) void readTagNote(tagNotePath);
-  }, [tagNotePath, treeRefreshToken, readTagNote]);
-  const isTagNote = useCallback(
-    (path: string | null | undefined) =>
-      path != null && tagNotePath != null && path.toLowerCase() === tagNotePath.toLowerCase(),
-    [tagNotePath],
-  );
-  const activeIsTagNote = isTagNote(activeFilePath);
-  const tagListText = activeIsTagNote ? frontmatter : tagNote && tagNote.path === tagNotePath ? tagNote.text : "";
-  const tagList = useMemo(() => parseTagList(tagListText), [tagListText]);
+     The workspace's tags are its status's (`CloudStatus.tags`): a folder
+     that isn't connected has none. A change of the list is the backend's,
+     and the status is read again before anything goes on, so what shows
+     next is the list with it. A tag change on a note is a write of that
+     note, through the save path when it is open. */
+  const tagsSaid = JSON.stringify(cloudForRoot?.tags ?? []);
+  const tagList = useMemo((): TagDef[] => JSON.parse(tagsSaid), [tagsSaid]);
   const tagListRef = useRef<TagDef[]>(tagList);
   tagListRef.current = tagList;
+  const tagRoot = cloudForRoot?.root ?? null;
+  const changeTagList = useCallback(
+    async (change: (root: string) => Promise<void>): Promise<string | null> => {
+      if (!tagRoot) return "Tags belong to a workspace connected to a domain, and this folder isn't connected.";
+      try {
+        await change(tagRoot);
+      } catch (e) {
+        return errText(e);
+      }
+      setCloudStatuses(await backend.cloud.status());
+      return null;
+    },
+    [tagRoot],
+  );
 
   // Change a note's text where it is. The open note takes the change to its
   // block and saves through the save path, after any write in flight; any
   // other is read and written over the rev that was read, once more on a
-  // conflict. With `create`, a note that isn't there is made. Resolves to a
-  // sentence when it couldn't be written.
+  // conflict. Resolves to a sentence when it couldn't be written.
   const rewriteNote = useCallback(
-    async (path: string, change: (text: string) => string, create = false): Promise<string | null> => {
+    async (path: string, change: (text: string) => string): Promise<string | null> => {
       const name = basename(path).replace(/\.(md|markdown|mdown|mkd)$/i, "");
       if (pathRef.current === path) await savingRef.current;
       if (pathRef.current === path) {
@@ -5723,24 +5705,22 @@ export default function App() {
           : `Couldn't save the tags on ${name}.`;
       }
       for (let tries = 0; tries < 2; tries += 1) {
-        let read: DocumentText | null = null;
+        let read: DocumentText;
         try {
           read = await backend.documents.read(path);
         } catch (e) {
-          if (!create) return `Couldn't read ${name}: ${errText(e)}`;
+          return `Couldn't read ${name}: ${errText(e)}`;
         }
-        const text = read?.text ?? "";
-        const next = change(text);
-        if (read && next === text) return null;
+        const next = change(read.text);
+        if (next === read.text) return null;
         try {
-          const saved = await backend.documents.save(path, { text: next }, read?.rev ?? null);
+          const saved = await backend.documents.save(path, { text: next }, read.rev);
           // A note in the other pane follows: a write of this window's own
           // is never reported back to it.
           const s = splitRef.current;
           if (s?.doc && s.doc.path === path && saved.rev) {
             setSplitState({ ...s, doc: { ...s.doc, head: splitFrontmatter(next).head, snapshot: saved.rev } });
           }
-          if (!read) setTreeRefreshToken((t) => t + 1);
           return null;
         } catch (e) {
           if (!(e instanceof SaveConflict)) return `Couldn't save ${name}: ${errText(e)}`;
@@ -5764,36 +5744,26 @@ export default function App() {
     [rewriteNote, pushToast],
   );
 
-  // A change to the list: written to its note, and read back.
-  const writeTagNote = useCallback(
-    async (change: (text: string) => string): Promise<string | null> => {
-      if (!tagNotePath) return "There's no folder open to keep the tags in.";
-      const failed = await rewriteNote(tagNotePath, change, true);
-      if (!failed) await readTagNote(tagNotePath);
-      return failed;
-    },
-    [tagNotePath, rewriteNote, readTagNote],
-  );
-
-  const [tagDialog, setTagDialog] = useState<
-    { kind: "new"; note: string | null } | { kind: "edit"; name: string } | null
-  >(null);
+  // A note's own *New tag…* and *Edit…*, and Settings' *Tags*.
+  const [tagDialog, setTagDialog] = useState<{ kind: "new"; note: string } | { kind: "edit"; def: TagDef } | null>(null);
+  const [tagsPageOpen, setTagsPageOpen] = useState(false);
+  const editTagNamed = useCallback((name: string) => {
+    const def = tagListRef.current.find((d) => d.name === name);
+    if (def) setTagDialog({ kind: "edit", def });
+  }, []);
   // Bumped by the Edit menu's *Add Tag…*: the open note's tag menu opens.
   const [addTagToken, setAddTagToken] = useState(0);
   useEffect(() => backend.windows?.onAddTag(() => setAddTagToken((t) => t + 1)), []);
 
+  // A new tag, at the end of the list; from a note, the note gets `value`.
   const createTag = useCallback(
     async (def: TagDef, value: string | null, note: string | null): Promise<string | null> => {
-      const failed = await writeTagNote((text) => writeTagList(text, def.name, def));
+      const failed = await changeTagList((root) => backend.cloud.setTag(root, def.name, def));
       if (failed) return failed;
-      if (note && value !== null) {
-        const unset = await rewriteNote(note, (text) => writeTag(text, def.name, { name: def.name, value }));
-        if (unset) return unset;
-      }
-      setTagDialog(null);
+      if (note && value !== null) return rewriteNote(note, (text) => writeTag(text, def.name, { name: def.name, value }));
       return null;
     },
-    [writeTagNote, rewriteNote],
+    [changeTagList, rewriteNote],
   );
 
   // A notice that counts as it goes: its text changes in place.
@@ -5845,34 +5815,34 @@ export default function App() {
     [workspaceRoot, rewriteNote, pushToast, retextToast, dismissToast],
   );
 
-  // *Edit*'s save. A rename puts the new name or value in the list beside
-  // the old, rewrites the notes, and only then takes the old out, so one
-  // that stops part-way leaves nothing reading as wrong.
+  // *Edit*'s save; `saved` once the list is. A rename puts the new name or
+  // value in the list, keeps the old beside it (an old name at the end,
+  // where the list has room), rewrites the notes, and only then takes the
+  // old out, so one that stops part-way leaves nothing reading as wrong.
   const editTag = useCallback(
-    async ({ from, def, renames }: TagEdit): Promise<string | null> => {
+    async ({ from, def, renames }: TagEdit, saved: () => void): Promise<string | null> => {
       const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
       const renamedTag = def.name !== from;
       if (!renamedTag && renames.length === 0) {
-        const failed = await writeTagNote((text) => writeTagList(text, from, def));
-        if (!failed) setTagDialog(null);
+        const failed = await changeTagList((root) => backend.cloud.setTag(root, from, def));
+        if (!failed) saved();
         return failed;
       }
       const both = def.values.flatMap((v) => {
         const old = renames.find(([, n]) => n === v)?.[0];
         return old !== undefined && !same(old, v) ? [old, v] : [v];
       });
-      const twoLines = renamedTag && !same(from, def.name);
-      const failed = await writeTagNote((text) =>
-        twoLines
-          ? writeTagList(writeTagList(text, from, { name: from, values: both }), def.name, { name: def.name, values: both }, from)
-          : writeTagList(text, from, { name: def.name, values: both }),
-      );
+      const keepOld = renamedTag && !same(from, def.name) && tagListRef.current.length < TAGS_MAX;
+      const failed = await changeTagList(async (root) => {
+        await backend.cloud.setTag(root, from, { ...def, values: both });
+        if (keepOld) await backend.cloud.setTag(root, from, { name: from, values: both });
+      });
       if (failed) return failed;
-      setTagDialog(null);
+      saved();
       const done = await renameInNotes(from, def, renames);
-      const left = await writeTagNote((text) => {
-        const next = writeTagList(text, def.name, def);
-        return twoLines ? writeTagList(next, from, null) : next;
+      const left = await changeTagList(async (root) => {
+        if (keepOld) await backend.cloud.removeTag(root, from);
+        await backend.cloud.setTag(root, def.name, def);
       });
       if (left) pushToast("error", left);
       if (done.failed.length > 0) {
@@ -5883,16 +5853,12 @@ export default function App() {
       }
       return null;
     },
-    [writeTagNote, renameInNotes, pushToast],
+    [changeTagList, renameInNotes, pushToast],
   );
 
   const deleteTag = useCallback(
-    async (name: string): Promise<string | null> => {
-      const failed = await writeTagNote((text) => writeTagList(text, name, null));
-      if (!failed) setTagDialog(null);
-      return failed;
-    },
-    [writeTagNote],
+    (name: string): Promise<string | null> => changeTagList((root) => backend.cloud.removeTag(root, name)),
+    [changeTagList],
   );
 
   // No hooks below this line: a hook after the early return crashes React
@@ -6057,29 +6023,19 @@ export default function App() {
           )}
           {showEditorHere && paneTab?.kind === "file" && (
             // The note's tags, right below its title, from its frontmatter
-            // block (src/tags.ts); the tag list's own note shows its block
-            // as the list. Only the focused pane's can be changed, and not
-            // while another device holds the note.
-            isTagNote(paneTab.path) ? (
-              <TagListView
-                key={`tags:${paneTab.id}`}
-                head={focused || isMirror ? frontmatter : doc!.head}
-                readOnly={!focused || leasedHere}
-                onEdit={(name) => setTagDialog({ kind: "edit", name })}
-                onNew={() => setTagDialog({ kind: "new", note: null })}
-              />
-            ) : (
-              <TagsRow
-                key={`tags:${paneTab.id}`}
-                head={focused || isMirror ? frontmatter : doc!.head}
-                list={tagList}
-                readOnly={!focused || leasedHere}
-                onSet={focused && !leasedHere ? setActiveTag : undefined}
-                onNewTag={() => setTagDialog({ kind: "new", note: paneTab.path })}
-                onEditTag={(name) => setTagDialog({ kind: "edit", name })}
-                addToken={addTagToken}
-              />
-            )
+            // block (src/tags.ts). Only the focused pane's can be changed,
+            // not while another device holds the note, and only in a
+            // connected workspace: a folder that isn't has no tags.
+            <TagsRow
+              key={`tags:${paneTab.id}`}
+              head={focused || isMirror ? frontmatter : doc!.head}
+              list={tagList}
+              readOnly={!focused || leasedHere}
+              onSet={focused && !leasedHere && tagRoot ? setActiveTag : undefined}
+              onNewTag={() => setTagDialog({ kind: "new", note: paneTab.path })}
+              onEditTag={editTagNamed}
+              addToken={addTagToken}
+            />
           )}
           {showEditorHere && (
             // Three wirings, one slot: the live machinery editor (focused),
@@ -6255,6 +6211,7 @@ export default function App() {
       onCopyAgentInstructions={copyAgentInstructions}
       cloudAttention={cloudNeedsAttention(cloudStatuses)}
       onOpenVersions={versionStore ? () => setVersionsSettingsOpen(true) : undefined}
+      onOpenTags={workspaceRoot ? () => setTagsPageOpen(true) : undefined}
     />
   );
 
@@ -6500,25 +6457,40 @@ export default function App() {
       {tagDialog?.kind === "new" && (
         <NewTagDialog
           list={tagList}
-          forNote={tagDialog.note !== null}
-          onSubmit={(def, value) => createTag(def, value, tagDialog.note)}
+          forNote
+          onSubmit={async (def, value) => {
+            const failed = await createTag(def, value, tagDialog.note);
+            if (!failed) setTagDialog(null);
+            return failed;
+          }}
           onClose={() => setTagDialog(null)}
         />
       )}
-      {tagDialog?.kind === "edit" &&
-        (() => {
-          const def = tagList.find((d) => d.name === tagDialog.name);
-          return def ? (
-            <EditTagDialog
-              key={def.name}
-              def={def}
-              list={tagList}
-              onSave={editTag}
-              onDelete={() => deleteTag(def.name)}
-              onClose={() => setTagDialog(null)}
-            />
-          ) : null;
-        })()}
+      {tagDialog?.kind === "edit" && (
+        <EditTagDialog
+          key={tagDialog.def.name}
+          def={tagDialog.def}
+          list={tagList}
+          onSave={(edit) => editTag(edit, () => setTagDialog(null))}
+          onDelete={async () => {
+            const failed = await deleteTag(tagDialog.def.name);
+            if (!failed) setTagDialog(null);
+            return failed;
+          }}
+          onClose={() => setTagDialog(null)}
+        />
+      )}
+      {tagsPageOpen && (
+        <TagsSettings
+          list={tagList}
+          connected={tagRoot !== null}
+          canEdit={mayOn(cloudForRoot, "work")}
+          onCreate={(def) => createTag(def, null, null)}
+          onEdit={editTag}
+          onDelete={deleteTag}
+          onClose={() => setTagsPageOpen(false)}
+        />
+      )}
       {accessSpace && cloudForRoot && restricted && (
         <SpaceAccess
           access={restricted.access}
@@ -7416,6 +7388,7 @@ function Settings({
   onCopyAgentInstructions,
   cloudAttention,
   onOpenVersions,
+  onOpenTags,
 }: {
   /** In the left column's footer (true) or floating bottom-left. */
   docked: boolean;
@@ -7444,6 +7417,8 @@ function Settings({
   /** Open the Versions settings: the two horizons, the space each store
    *  uses, the export, and the folders whose history outlived them. */
   onOpenVersions?: () => void;
+  /** Open the workspace's tags (TagsSettings.tsx); absent with no folder open. */
+  onOpenTags?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -7587,6 +7562,25 @@ function Settings({
             <span className="settings-option-check" />
             <span className="settings-option-label">Copy instructions for agents</span>
           </button>
+          {onOpenTags && (
+            <>
+              <div className="settings-divider" />
+              <div className="settings-section-label">Tags</div>
+              <button
+                role="menuitem"
+                className="settings-option"
+                data-testid="settings-tags"
+                title="The workspace's tags, their values and what they mean"
+                onClick={() => {
+                  setOpen(false);
+                  onOpenTags();
+                }}
+              >
+                <span className="settings-option-check" />
+                <span className="settings-option-label">Tags…</span>
+              </button>
+            </>
+          )}
           {onOpenVersions && (
             <>
               <div className="settings-divider" />

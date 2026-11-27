@@ -1,17 +1,17 @@
-// Tags: a note's choice tags, as lines of its frontmatter, and the
-// workspace's one list of them, kept in a note of its own.
+// Tags: a note's choice tags, as lines of its frontmatter, and the rules of
+// the workspace's one list of them.
 //
 // A note's tag is an unindented `key: value` line in its frontmatter block
-// (src/frontmatter.ts), `status: Doing`. The tag list says which keys are
-// tags and which values each takes: `Library/Tags.md` in a connected
-// workspace, `Tags.md` at the top of a folder that isn't, whose block holds
-// one line per tag, `status: [Todo, Doing, Done]`. Its body says what the
-// values mean, for the people and agents who set them.
+// (src/frontmatter.ts), `status: Doing`. The list says which keys are tags,
+// which values each takes and what they mean. It is a connected workspace's,
+// kept in its manifest with nothing in anyone's folder: the app reads it from
+// the status (`CloudStatus.tags`) and changes it through the backend, and a
+// folder that isn't connected has none.
 //
-// The file format can't hold a note to the list, so the writers do: the
-// picker is the only way a person sets a tag, and the worker checks what an
-// agent writes. Readers are lenient: a value that isn't in the list is still
-// the note's, shown marked and never dropped. Matching is case-insensitive
+// Nothing in a note holds it to the list, so the writers do: the picker is
+// the only way a person sets a tag, and the worker checks what an agent
+// writes. Readers are lenient: a value that isn't in the list is still the
+// note's, shown marked and never dropped. Matching is case-insensitive
 // everywhere, and what shows is the list's spelling.
 //
 // The iPhone ports this (ios/DoklinKit/Sources/DoklinKit/Markdown/Tags.swift),
@@ -39,14 +39,6 @@ export type NoteTag = { name: string; value: string; known: boolean };
  *  the tag at all. */
 export type TagFilter = { name: string; value: string | null };
 
-/** The tag list's file name, in Library or at the top of a folder that
- *  doesn't sync. Found whatever its case. */
-export const TAG_NOTE = "Tags.md";
-
-/** What a tag list made by *New tag…* says under its block. */
-export const TAG_NOTE_BODY =
-  "The workspace's tags. Each line at the top is a tag and the values a note can have. Say here what each value means, for the people and agents who set them.\n";
-
 // The engine reads these from here (engine/build.rs): keep each on one line
 // in exactly this shape.
 export const NAME_MAX = 40;
@@ -62,10 +54,6 @@ const length = (s: string) => [...s].length;
 /* ---------- The block, line by line ---------- */
 
 type Entry = KeyedLine & {
-  /** What follows the key's colon, trimmed. */
-  rest: string;
-  /** An indented run belongs to the line. */
-  run: boolean;
   /** Where the line starts, and where its run ends (after its newline):
    *  what a write replaces. */
   from: number;
@@ -117,8 +105,6 @@ function blockOf(text: string): Block | null {
     entries.push({
       key: keyed.key,
       value: runEnd > i ? null : keyed.value,
-      rest: keyed.rest,
-      run: runEnd > i,
       from: lines[i].from,
       end: lines[runEnd].end,
     });
@@ -129,7 +115,7 @@ function blockOf(text: string): Block | null {
 
 /** A line's key and value: the text before the first `:` that a space, a
  *  tab or the line's end follows, and the scalar after it. */
-function keyedLine(line: string): (KeyedLine & { rest: string }) | null {
+function keyedLine(line: string): KeyedLine | null {
   if (line === "" || /^[\s#-]/.test(line)) return null;
   for (let at = 0; ; ) {
     const colon = line.indexOf(":", at);
@@ -138,14 +124,13 @@ function keyedLine(line: string): (KeyedLine & { rest: string }) | null {
     if (next === undefined || next === " " || next === "\t") {
       const key = line.slice(0, colon).trimEnd();
       if (!key) return null;
-      const rest = line.slice(colon + 1).trim();
-      return { key, value: scalarOf(rest), rest };
+      return { key, value: scalarOf(line.slice(colon + 1).trim()) };
     }
     at = colon + 1;
   }
 }
 
-/** What may follow a quoted value or a list: nothing, or a comment. */
+/** What may follow a quoted value: nothing, or a comment. */
 const trailerOk = (rest: string) => rest.trim() === "" || /^\s+#/.test(rest);
 
 /** A double-quoted value at the start of `s`, with where it ends. Its
@@ -276,81 +261,6 @@ function writeLine(text: string, at: string, line: string | null, after?: string
  *  it. A set followed by a clear gives back the original bytes. */
 export function writeTag(text: string, at: string, tag: { name: string; value: string } | null): string {
   return writeLine(text, at, tag ? `${tag.name}: ${quoteValue(tag.value)}` : null);
-}
-
-/* ---------- The tag list ---------- */
-
-/** A flow list, `[a, "b, c", 'd']`, and what follows it; null when it isn't
- *  one. */
-function flowList(rest: string): string[] | null {
-  if (rest[0] !== "[") return null;
-  const out: string[] = [];
-  let i = 1;
-  const skip = () => {
-    while (rest[i] === " " || rest[i] === "\t") i += 1;
-  };
-  skip();
-  if (rest[i] === "]") return trailerOk(rest.slice(i + 1)) ? out : null;
-  for (;;) {
-    skip();
-    const c = rest[i];
-    if (c === '"' || c === "'") {
-      const q = c === '"' ? doubleQuoted(rest.slice(i)) : singleQuoted(rest.slice(i));
-      if (!q) return null;
-      out.push(q.value);
-      i += q.end;
-    } else {
-      let j = i;
-      while (j < rest.length && rest[j] !== "," && rest[j] !== "]") j += 1;
-      const bare = rest.slice(i, j).trim();
-      if (bare === "" || /[[{}"']|\s#/.test(bare) || /^[&*!|>%@`]/.test(bare)) return null;
-      out.push(bare);
-      i = j;
-    }
-    skip();
-    if (rest[i] === ",") {
-      i += 1;
-      skip();
-      // A trailing comma is allowed, as YAML allows it.
-      if (rest[i] === "]") return trailerOk(rest.slice(i + 1)) ? out : null;
-      continue;
-    }
-    if (rest[i] === "]") return trailerOk(rest.slice(i + 1)) ? out : null;
-    return null;
-  }
-}
-
-/** The workspace's tags from its list's text, in order. A line that doesn't
- *  parse is skipped (it stays on disk), and so is a second line for a name
- *  already listed. No note, or no lines: no tags. */
-export function parseTagList(text: string): TagDef[] {
-  const out: TagDef[] = [];
-  for (const entry of blockOf(text)?.entries ?? []) {
-    const values = entry.run ? null : flowList(entry.rest);
-    if (!values || values.length === 0 || nameProblem(entry.key, out) !== null) continue;
-    if (values.some((v, i) => valueProblem(v, values.slice(0, i)) !== null)) continue;
-    out.push({ name: entry.key, values });
-  }
-  return out;
-}
-
-/** Whether the list's block holds lines that aren't tags it lists. */
-export function otherListLines(text: string): boolean {
-  const block = blockOf(text);
-  if (!block) return false;
-  return block.lines.filter((l) => l.text.trim() !== "").length > parseTagList(text).length;
-}
-
-/** A tag's line in the list. */
-export const tagLine = (def: TagDef) => `${def.name}: [${def.values.map(quoteValue).join(", ")}]`;
-
-/** Put a tag in the list: the line keyed `at` becomes `def`'s, or `def` is
- *  added (after the line keyed `after`, else at the end); null removes the
- *  line keyed `at`. A list with no note yet starts as `TAG_NOTE_BODY`
- *  under its block. */
-export function writeTagList(text: string, at: string, def: TagDef | null, after?: string): string {
-  const base = text === "" && def !== null ? TAG_NOTE_BODY : text;
-  return writeLine(base, at, def ? tagLine(def) : null, after);
 }
 
 /* ---------- Names and values ---------- */

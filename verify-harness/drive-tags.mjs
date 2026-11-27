@@ -1,18 +1,20 @@
-// Drives the REAL App over tags.html (a pretend workspace held in memory)
-// through a note's tags: the chips right below the title, set from their
-// menus, and the tag list they come from (Tags.md).
+// Drives the REAL App over tags.html (a pretend connected workspace held in
+// memory) through a note's tags: the chips right below the title, set from
+// their menus, and the workspace's tags they come from, in Settings.
 //
 // The walk: a note's tags show in the list's order and spelling, the rest of
 // its block in a closed disclosure; a chip's menu sets a value in place
 // (nothing else in the file changes) and a tag set while typing lands with
 // the typing; *+ Tag* on a note with none adds a block, and removing the
 // tag gives back the bytes; a value the list doesn't have is marked; *New
-// tag…* writes the list and the note; a value renamed in *Edit* rewrites
-// every note that has it, the open one through its save path, CRLF kept; a
-// tag renamed keeps its place in the list; `name:value` in search finds
-// notes by tag; the tag list's note shows its tags; a deleted tag's lines
-// stay as plain frontmatter; a change from elsewhere to the open note's
-// block shows without a reload; and an html document has no tags.
+// tag…* changes the list and the note; a value renamed in *Edit* rewrites
+// every note that has it, the open one through its save path, CRLF kept,
+// with both values listed meanwhile; a tag renamed keeps its place in the
+// list; `name:value` in search finds notes by tag; Settings' *Tags* lists
+// the tags and what their values mean, makes and changes one; a deleted
+// tag's lines stay as plain frontmatter; a change from elsewhere to the
+// open note's block shows without a reload; an html document has no tags;
+// and a folder that isn't connected has none.
 //
 // `PORT` picks the vite server (default 1420).
 import { chromium } from "playwright";
@@ -56,7 +58,7 @@ page.on("pageerror", (e) => {
   console.log("PAGEERROR:", e.message);
 });
 
-const ROOT = "/Team notes";
+const ROOT = "/Team notes/Library";
 const pane = () => page.locator(".editor-pane.is-focused");
 const editor = () => pane().locator(".ProseMirror");
 const chips = () => pane().locator(".doc-tags-row .tag-chip");
@@ -67,6 +69,14 @@ const menuItem = (label) => menu().getByRole("menuitem", { name: label, exact: t
 const activeLabel = () => page.locator(".tab.is-active .tab-label").innerText();
 const row = (path) => page.locator(`[data-tree-path="${path}"]`);
 const text = (path) => page.evaluate((p) => window.__tags.doc(p)?.text ?? null, path);
+const tagsNow = () => page.evaluate(() => window.__tags.tags());
+const tagCalls = () => page.evaluate(() => window.__tags.tagCalls());
+const page_ = () => page.locator('[data-testid="tags-settings"]');
+const openTagsPage = async () => {
+  await page.locator(".settings-fab").click();
+  await page.locator('[data-testid="settings-tags"]').click();
+  await poll(async () => (await page_().count()) === 1);
+};
 const open = async (path, label) => {
   await row(path).click();
   await poll(async () => (await activeLabel()) === label);
@@ -216,18 +226,20 @@ await poll(async () => (await chips().count()) === 2);
   const taken = await dialog.locator(".modal-error").innerText();
   await dialog.locator('[data-testid="tag-new-name"]').fill("Area");
   await dialog.locator('[data-testid="tag-new-values"]').fill("Web\niPhone\n");
+  await dialog.locator('[data-testid="tag-new-desc"]').fill("  Which part of the product.  ");
   await dialog.locator('[data-testid="tag-new-gets"]').selectOption("iPhone");
   await page.screenshot({ path: SHOTS + "tags-03-new.png" });
   await dialog.locator('[data-testid="tag-new-create"]').click();
   await poll(async () => (await dialog.count()) === 0);
+  const list = await tagsNow();
   step(
-    "New tag says a taken name, then writes the list and gives the note the value picked",
+    "New tag says a taken name, then puts the tag at the end of the list, what its values mean trimmed, and gives the note the value picked",
     taken === "There's already a tag called Status." &&
-      (await text(`${ROOT}/Tags.md`)) ===
-        "---\nStatus: [Todo, Doing, Done]\nPriority: [p1, p2, p3]\nArea: [Web, iPhone]\n---\nStatus is where a piece of work is. Priority is how soon it matters: p1 first.\n" &&
+      JSON.stringify(list.map((d) => d.name)) === JSON.stringify(["Status", "Priority", "Area"]) &&
+      JSON.stringify(list[2]) === JSON.stringify({ name: "Area", values: ["Web", "iPhone"], desc: "Which part of the product." }) &&
       (await text(`${ROOT}/Ideas.md`)).startsWith("---\nArea: iPhone\n---\n") &&
       JSON.stringify(await chipTexts()) === JSON.stringify(["Area iPhone"]),
-    taken,
+    `${taken} ${JSON.stringify(list)}`,
   );
 }
 
@@ -240,22 +252,27 @@ await poll(async () => (await chips().count()) === 2);
   const dialog = page.locator('[data-testid="tag-edit-dialog"]');
   await dialog.locator('[data-testid="tag-edit-value-1"]').fill("In progress");
   const effect = await dialog.locator('[data-testid="tag-edit-effect"]').innerText();
+  const desc = await dialog.locator('[data-testid="tag-edit-desc"]').inputValue();
   await settle(250); // past the menus' and dialogs' fade-in
   await page.screenshot({ path: SHOTS + "tags-04-edit.png" });
+  const calls = (await tagCalls()).length;
   await dialog.locator('[data-testid="tag-edit-save"]').click();
   await poll(async () => (await text(`${ROOT}/Projects/Beta.md`)).includes("In progress"));
   await poll(async () => (await page.locator(".toast", { hasText: "changed to match" }).count()) === 1);
+  const made = (await tagCalls()).slice(calls);
   step(
-    "a value renamed rewrites the list and every note that has it, the open one too, each note's line endings kept",
+    "a value renamed lists both while every note that has it is rewritten, the open one too, each note's line endings kept",
     effect.includes("Doing") &&
-      (await text(`${ROOT}/Tags.md`)).startsWith("---\nStatus: [Todo, In progress, Done]\nPriority:") &&
+      desc === "Where a piece of work is." &&
+      JSON.stringify(made.map((c) => c.def?.values)) === JSON.stringify([["Todo", "Doing", "In progress", "Done"], ["Todo", "In progress", "Done"]]) &&
+      JSON.stringify((await tagsNow())[0]) === JSON.stringify({ name: "Status", values: ["Todo", "In progress", "Done"], desc: "Where a piece of work is." }) &&
       (await text(`${ROOT}/Roadmap.md`)) === "---\nStatus: In progress\n---\n## Now\n\nTags on notes.\n" &&
       (await text(`${ROOT}/Projects/Beta.md`)) === "---\r\nStatus: In progress\r\n---\r\nTen teams in the beta.\r\n" &&
       (await text(`${ROOT}/Projects/Notes.md`)) === "---\nStatus: Todo\n---\nNothing yet.\n" &&
       JSON.stringify(await chipTexts()) === JSON.stringify(["Status In progress"]) &&
       (await page.locator(".toast", { hasText: "2 notes changed to match." }).count()) === 1 &&
       (await page.locator(".conflict-banner").count()) === 0,
-    effect,
+    `${effect} ${JSON.stringify(made)}`,
   );
 }
 
@@ -265,18 +282,21 @@ await poll(async () => (await chips().count()) === 2);
   await menuItem("Edit Status…").click();
   const dialog = page.locator('[data-testid="tag-edit-dialog"]');
   await dialog.locator('[data-testid="tag-edit-name"]').fill("Stage");
+  const calls = (await tagCalls()).length;
   await dialog.locator('[data-testid="tag-edit-save"]').click();
   await poll(async () => (await text(`${ROOT}/Projects/Notes.md`)).includes("Stage: Todo"));
-  // The list's block, not its body (which speaks of Status still).
-  const block = async () => (await text(`${ROOT}/Tags.md`)).split("\n---\n")[0];
-  await poll(async () => (await block()).startsWith("---\nStage:") && !(await block()).includes("Status"));
+  await poll(async () => (await tagCalls()).length === calls + 4);
+  const made = (await tagCalls()).slice(calls).map((c) => (c.remove ? `-${c.remove}` : `${c.set}=${c.def.name}`));
   step(
-    "a tag renamed rewrites every note's line, and keeps its place in the list",
-    (await text(`${ROOT}/Tags.md`)).startsWith("---\nStage: [Todo, In progress, Done]\nPriority: [p1, p2, p3]\nArea:") &&
+    "a tag renamed rewrites every note's line, lists the old name meanwhile, and keeps its place in the list",
+    JSON.stringify(made) === JSON.stringify(["Status=Stage", "Status=Status", "-Status", "Stage=Stage"]) &&
+      JSON.stringify((await tagsNow()).map((d) => d.name)) === JSON.stringify(["Stage", "Priority", "Area"]) &&
+      (await tagsNow())[0].desc === "Where a piece of work is." &&
       (await text(`${ROOT}/Launch plan.md`)).startsWith("---\nStage: Done\nPriority: p2\n") &&
       (await text(`${ROOT}/Old.md`)) === "---\nStage: Blocked\n---\nWaiting on the vendor.\n" &&
       (await text(`${ROOT}/Roadmap.md`)).startsWith("---\nStage: In progress\n---\n") &&
       JSON.stringify(await chipTexts()) === JSON.stringify(["Stage In progress"]),
+    JSON.stringify(made),
   );
 }
 
@@ -302,32 +322,50 @@ await poll(async () => (await chips().count()) === 2);
   await input.press("Escape");
 }
 
-/* 10 — the tag list's note shows its tags, each with Edit. */
+/* 10 — Settings' Tags: each tag with its values and what they mean, Edit
+        on each, and New tag; both come back to the list. */
 {
-  await open(`${ROOT}/Tags.md`, "Tags");
-  const list = pane().locator('[data-testid="tag-list"]');
-  await poll(async () => (await list.count()) === 1);
-  const rows = await list.locator(".doc-taglist-row").evaluateAll((els) => els.map((el) => el.innerText.replace(/\s+/g, " ").trim()));
+  await openTagsPage();
+  const rows = () => page_().locator(".tags-page-row").evaluateAll((els) => els.map((el) => el.innerText.replace(/\s+/g, " ").trim()));
+  const listed = await rows();
   await settle(250); // past the menus' and dialogs' fade-in
-  await page.screenshot({ path: SHOTS + "tags-05-list.png" });
+  await page.screenshot({ path: SHOTS + "tags-05-settings.png" });
+  await page_().locator('[data-testid="tags-new"]').click();
+  await page_().locator('[data-testid="tag-new-name"]').fill("Size");
+  await page_().locator('[data-testid="tag-new-values"]').fill("S\nM\nL");
+  const gets = await page_().locator('[data-testid="tag-new-gets"]').count();
+  await page_().locator('[data-testid="tag-new-create"]').click();
+  await poll(async () => (await rows()).length === 4);
+  await page_().locator('[data-testid="tags-edit-Priority"]').click();
+  await page_().locator('[data-testid="tag-edit-desc"]').fill("p1 first.");
+  await page_().locator('[data-testid="tag-edit-save"]').click();
+  await poll(async () => (await tagsNow())[1].desc === "p1 first.");
+  await poll(async () => (await rows()).length === 4);
   step(
-    "the tag list's note shows its tags and their values, each with Edit, and no chips of its own",
-    JSON.stringify(rows) ===
-      JSON.stringify(["Stage Todo In progress Done Edit", "Priority p1 p2 p3 Edit", "Area Web iPhone Edit", "New tag"]) &&
-      (await pane().locator(".doc-tags-row").count()) === 0 &&
-      (await editor().innerText()).includes("Status is where a piece of work is."),
-    JSON.stringify(rows),
+    "Settings' Tags lists each tag with its values and what they mean; New tag adds one at the end, Edit changes what they mean, and both come back to the list",
+    JSON.stringify(listed) ===
+      JSON.stringify([
+        "Stage Edit Todo In progress Done Where a piece of work is.",
+        "Priority Edit p1 p2 p3 How soon it matters: p1 first.",
+        "Area Edit Web iPhone Which part of the product.",
+      ]) &&
+      gets === 0 &&
+      JSON.stringify((await tagsNow()).at(-1)) === JSON.stringify({ name: "Size", values: ["S", "M", "L"] }) &&
+      (await rows())[1] === "Priority Edit p1 p2 p3 p1 first.",
+    JSON.stringify({ listed, now: await rows() }),
   );
 }
 
 /* 11 — a tag deleted: it leaves the list, and notes keep their line as
         plain frontmatter. */
 {
-  await pane().locator('[data-testid="tag-edit-Area"]').click();
-  const dialog = page.locator('[data-testid="tag-edit-dialog"]');
-  await dialog.locator('[data-testid="tag-edit-delete"]').click();
-  await dialog.locator('[data-testid="tag-edit-delete-confirm"]').click();
-  await poll(async () => !(await text(`${ROOT}/Tags.md`)).includes("Area"));
+  await page_().locator('[data-testid="tags-edit-Area"]').click();
+  await page_().locator('[data-testid="tag-edit-delete"]').click();
+  await page_().locator('[data-testid="tag-edit-delete-confirm"]').click();
+  await poll(async () => !(await tagsNow()).some((d) => d.name === "Area"));
+  await poll(async () => (await page_().locator(".tags-page-row").count()) === 3);
+  await page.keyboard.press("Escape");
+  await poll(async () => (await page_().count()) === 0);
   await open(`${ROOT}/Ideas.md`, "Ideas");
   step(
     "a deleted tag leaves the list, and a note keeps its line as plain frontmatter",
@@ -361,6 +399,25 @@ await poll(async () => (await chips().count()) === 2);
   await poll(async () => (await activeLabel()) === "Pricing");
   await settle();
   step("an html document has no tags row", (await page.locator(".editor-pane.is-focused .doc-tags").count()) === 0);
+}
+
+/* 14 — a folder that isn't connected has no tags: no chips, no Add tag,
+        and Settings' Tags says why. */
+{
+  await open(`${ROOT}/Roadmap.md`, "Roadmap");
+  await poll(async () => (await chips().count()) === 2);
+  await page.evaluate(() => window.__tags.disconnect());
+  await poll(async () => (await chips().count()) === 0);
+  await pane().locator(".doc-title").hover();
+  const add = await pane().locator('[data-testid="tag-add"]').count();
+  await openTagsPage();
+  step(
+    "a folder that isn't connected shows no tags and no Add tag, and Settings' Tags says it isn't connected",
+    add === 0 &&
+      (await pane().locator(".doc-frontmatter-more pre").textContent()).includes("Stage: Done") &&
+      (await page_().locator('[data-testid="tags-not-connected"]').count()) === 1 &&
+      (await page_().locator('[data-testid="tags-new"]').count()) === 0,
+  );
 }
 
 step("no page errors along the way", errors.length === 0, errors.join(" | "));

@@ -334,6 +334,8 @@ const cloud: Cloud = {
   setRoot: (root, slug) => invoke("cloud_set_root", { root, slug }),
   pages: (root) => invoke("cloud_pages", { root }),
   pageTakeDown: (root, slug) => invoke("cloud_page_take_down", { root, slug }),
+  setTag: (root, at, def) => invoke("cloud_set_tag", { root, at, def }),
+  removeTag: (root, name) => invoke("cloud_remove_tag", { root, name }),
 };
 
 const setup: CloudSetup = {

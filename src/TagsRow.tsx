@@ -4,16 +4,13 @@
 // tag…*. The rest of the block, when there is any, is a closed
 // *Frontmatter* disclosure under the chips, as the file has it.
 //
-// The tag list's own note shows its block as the list instead
-// (`TagListView`): each tag with its values, and *Edit* beside it.
-//
 // Nothing here writes. The host does (App.tsx: through the save path), and
 // the rules are src/tags.ts's.
 
 import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useDismiss } from "./dismiss";
 import { splitFrontmatter } from "./frontmatter";
-import { hasOtherFrontmatter, noteTags, otherListLines, parseTagList, type NoteTag, type TagDef } from "./tags";
+import { hasOtherFrontmatter, noteTags, type NoteTag, type TagDef } from "./tags";
 
 type MenuState =
   | { kind: "chip"; tag: NoteTag; x: number; y: number }
@@ -289,62 +286,6 @@ export function TagsRow({
             </>
           )}
         </Menu>
-      )}
-    </div>
-  );
-}
-
-/** The tag list's own note: its block, as the tags it lists. */
-export function TagListView({
-  head,
-  readOnly,
-  onEdit,
-  onNew,
-}: {
-  head: string;
-  readOnly: boolean;
-  onEdit: (name: string) => void;
-  onNew: () => void;
-}) {
-  const list = useMemo(() => parseTagList(head), [head]);
-  const other = useMemo(() => otherListLines(head), [head]);
-  const ref = useRef<HTMLDivElement>(null);
-  useHeightVar(ref);
-  return (
-    <div className="doc-tags doc-taglist" ref={ref} data-testid="tag-list">
-      {list.length === 0 && <p className="doc-taglist-empty">No tags yet.</p>}
-      {list.map((def) => (
-        <div className="doc-taglist-row" key={def.name}>
-          <span className="doc-taglist-name">{def.name}</span>
-          <span className="doc-taglist-values">
-            {def.values.map((v) => (
-              <span className="tag-chip is-value" key={v}>
-                <span className="tag-chip-value">{v}</span>
-              </span>
-            ))}
-          </span>
-          {!readOnly && (
-            <button className="tag-add" data-testid={`tag-edit-${def.name}`} onClick={() => onEdit(def.name)}>
-              Edit
-            </button>
-          )}
-        </div>
-      ))}
-      {!readOnly && (
-        <div className="doc-taglist-row">
-          <button className="tag-add" data-testid="tag-new" onClick={onNew}>
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden>
-              <path d="M8 3v10M3 8h10" />
-            </svg>
-            New tag
-          </button>
-        </div>
-      )}
-      {other && (
-        <details className="doc-frontmatter-more">
-          <summary>Lines that aren't tags</summary>
-          <pre aria-label="Frontmatter">{splitFrontmatter(head).inner}</pre>
-        </details>
       )}
     </div>
   );

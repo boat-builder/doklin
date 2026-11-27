@@ -11,6 +11,7 @@ use doklin_engine::cloud::status::{
     AgentAdded, AgentLogin, CloudStatus, DeviceCode, HeldWorkspace, Invited, PageLinkCopy, People, Probe, RecentFiles,
     Redeemed, Removed, SpaceStatus, WorkspaceDocument,
 };
+use doklin_engine::cloud::tags::TagDef;
 use tauri::{AppHandle, Manager};
 
 use crate::engine::{core, try_core};
@@ -269,6 +270,16 @@ pub(crate) async fn cloud_unpublish(app: AppHandle, root: String, slug: String) 
 #[tauri::command]
 pub(crate) async fn cloud_set_root(app: AppHandle, root: String, slug: Option<String>) -> Result<(), String> {
     cloud::cloud_set_root(&core(&app)?, root, slug).await
+}
+
+#[tauri::command]
+pub(crate) async fn cloud_set_tag(app: AppHandle, root: String, at: String, def: TagDef) -> Result<(), String> {
+    cloud::cloud_set_tag(&core(&app)?, root, at, def).await
+}
+
+#[tauri::command]
+pub(crate) async fn cloud_remove_tag(app: AppHandle, root: String, name: String) -> Result<(), String> {
+    cloud::cloud_remove_tag(&core(&app)?, root, name).await
 }
 
 #[tauri::command]

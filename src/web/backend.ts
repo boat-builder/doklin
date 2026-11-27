@@ -202,6 +202,15 @@ function cloudOf(ws: Workspace, saving: Saving): Cloud {
       await ask("DELETE", `/api/pages/${encodeURIComponent(slug)}`);
       await ws.reread([space]);
     },
+    // The list is the shared workspace's manifest's: read again once changed.
+    async setTag(_root, at, def) {
+      await ask("PUT", "/api/web/tags", { body: { at, tag: def } });
+      await ws.reread([""]);
+    },
+    async removeTag(_root, name) {
+      await ask("DELETE", `/api/web/tags?name=${encodeURIComponent(name)}`);
+      await ws.reread([""]);
+    },
   };
 }
 

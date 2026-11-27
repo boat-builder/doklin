@@ -1,9 +1,10 @@
-// Mounts the REAL App on a pretend workspace held in memory, to try tags by
-// hand: notes with tags, one whose value isn't in the list, one with other
-// frontmatter beside its tags, one with none, and the tag list's own note
-// (`Tags.md`: this folder doesn't sync, so it's at the top). The search
-// reads tags the way the Mac's does (src-tauri/src/tags.rs), through the
-// same rules in TypeScript. Nothing is kept: a reload starts again.
+// Mounts the REAL App on a pretend connected workspace held in memory, to
+// try tags by hand: notes in Library with tags, one whose value isn't in the
+// list, one with other frontmatter beside its tags, and one with none. The
+// list is the status's, as a Mac's engine says it, and changed the way the
+// engine changes it (src/tags.ts's rules and `withTag`). The search reads
+// tags the way the Mac's does (src-tauri/src/tags.rs), through the same
+// rules in TypeScript. Nothing is kept: a reload starts again.
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "../src/App";
@@ -13,6 +14,7 @@ import {
   SaveConflict,
   type Backend,
   type Cloud,
+  type CloudStatus,
   type DocumentChange,
   type Documents,
   type FileClipboardPayload,
@@ -20,29 +22,21 @@ import {
   type TreeNode,
   type WatchedDocument,
 } from "../src/backend";
-import { matchesTags } from "../src/tags";
+import { TAGS_MAX, matchesTags, tagProblem, withTag, withoutTag, type TagDef } from "../src/tags";
 
 const ROOT = "/Team notes";
+const LIB = `${ROOT}/Library`;
 const UNTITLED = "/untitled";
 
 // A file as the pretend disk holds it. `rev` counts the text's writes.
 type File = { text: string; rev: number; meta: string | null };
 
 const files = new Map<string, File>();
-const dirs = new Set<string>([ROOT, `${ROOT}/Projects`]);
+const dirs = new Set<string>([ROOT, LIB, `${LIB}/Projects`]);
 const put = (path: string, text: string) => files.set(path, { text, rev: 1, meta: null });
 
 put(
-  `${ROOT}/Tags.md`,
-  `---
-Status: [Todo, Doing, Done]
-Priority: [p1, p2, p3]
----
-Status is where a piece of work is. Priority is how soon it matters: p1 first.
-`,
-);
-put(
-  `${ROOT}/Launch plan.md`,
+  `${LIB}/Launch plan.md`,
   `---
 status: Doing
 priority: p1
@@ -53,13 +47,13 @@ owner: ada
 Ship the launch to ten teams by the end of the quarter.
 `,
 );
-put(`${ROOT}/Ideas.md`, `- A weekly digest of what changed\n- Pin a note to the top of a folder\n`);
-put(`${ROOT}/Old.md`, `---\nstatus: Blocked\n---\nWaiting on the vendor.\n`);
-put(`${ROOT}/Roadmap.md`, `---\nstatus: doing\n---\n## Now\n\nTags on notes.\n`);
-put(`${ROOT}/Projects/Beta.md`, `---\r\nStatus: Doing\r\n---\r\nTen teams in the beta.\r\n`);
-put(`${ROOT}/Projects/Notes.md`, `---\nStatus: Todo\n---\nNothing yet.\n`);
+put(`${LIB}/Ideas.md`, `- A weekly digest of what changed\n- Pin a note to the top of a folder\n`);
+put(`${LIB}/Old.md`, `---\nstatus: Blocked\n---\nWaiting on the vendor.\n`);
+put(`${LIB}/Roadmap.md`, `---\nstatus: doing\n---\n## Now\n\nTags on notes.\n`);
+put(`${LIB}/Projects/Beta.md`, `---\r\nStatus: Doing\r\n---\r\nTen teams in the beta.\r\n`);
+put(`${LIB}/Projects/Notes.md`, `---\nStatus: Todo\n---\nNothing yet.\n`);
 put(
-  `${ROOT}/Projects/Pricing.html`,
+  `${LIB}/Projects/Pricing.html`,
   `<!doctype html><html><body style="font-family: sans-serif; padding: 32px"><h1>Pricing</h1><p>An html document: no tags.</p></body></html>`,
 );
 
@@ -215,18 +209,82 @@ const setClip = (next: FileClipboardPayload | null) => {
   for (const cb of clipListeners) cb(clip);
 };
 
-// Not connected: the cloud answers "none", hears nothing, and refuses the rest.
+// Connected, until `__tags.disconnect()`: the status holds the list, a
+// change of it is checked and made as the engine does (engine/src/cloud/
+// unit.rs `queue_tag`), and the rest of the cloud refuses.
+let connected = true;
+let tags: TagDef[] = [
+  { name: "Status", values: ["Todo", "Doing", "Done"], desc: "Where a piece of work is." },
+  { name: "Priority", values: ["p1", "p2", "p3"], desc: "How soon it matters: p1 first." },
+];
+const statusListeners = new Set<(statuses: CloudStatus[]) => void>();
+const statusNow = (): CloudStatus[] =>
+  connected
+    ? [
+        {
+          root: ROOT,
+          domain: "notes.example.com",
+          endpoint: "https://notes.example.com",
+          wsId: "w-tags",
+          name: "Team notes",
+          phase: "idle",
+          lastSyncMs: Date.now(),
+          error: null,
+          pendingDeletes: 0,
+          pendingAdds: 0,
+          usage: { mode: "normal", cause: null, today: 0, fleetToday: null, cap: 100000, plan: "free", resumesAt: null, waiting: 0, liftable: false, lifted: false },
+          me: "You",
+          meId: "m-you",
+          can: ["work"],
+          superadmin: "You",
+          workerVersion: null,
+          versions: { mirrored: 0, cloud: 0, lastMirrorMs: null, horizonDays: null },
+          public: [],
+          presence: [],
+          leases: [],
+          spaces: [],
+          tags,
+        },
+      ]
+    : [];
+const tell = () => {
+  for (const cb of statusListeners) cb(statusNow());
+};
+const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+const tagCalls: unknown[] = [];
 const cloud = new Proxy({} as Cloud, {
-  get: (_, name: string) =>
-    name === "status"
-      ? async () => []
-      : name.startsWith("on")
-        ? () => () => {}
-        : name === "setActivity"
-          ? async () => {}
-          : async () => {
-              throw new Error(`This page has no cloud: ${name}.`);
-            },
+  get: (_, name: string) => {
+    if (name === "status") return async () => statusNow();
+    if (name === "onStatus") {
+      return (cb: (statuses: CloudStatus[]) => void) => {
+        statusListeners.add(cb);
+        return () => statusListeners.delete(cb);
+      };
+    }
+    if (name.startsWith("on")) return () => () => {};
+    if (name === "setActivity") return async () => {};
+    if (name === "setTag") {
+      return async (_root: string, at: string, def: TagDef) => {
+        const was = tags.find((d) => same(d.name, at));
+        const wrong = tagProblem(def, tags, was?.name) ?? (!was && tags.length >= TAGS_MAX ? `A workspace can have ${TAGS_MAX} tags at most.` : null);
+        if (wrong) throw new Error(wrong);
+        tagCalls.push({ set: at, def });
+        tags = withTag(tags, at, def);
+        tell();
+      };
+    }
+    if (name === "removeTag") {
+      return async (_root: string, tag: string) => {
+        if (!tags.some((d) => same(d.name, tag))) throw new Error(`There's no tag called ${tag}.`);
+        tagCalls.push({ remove: tag });
+        tags = withoutTag(tags, tag);
+        tell();
+      };
+    }
+    return async () => {
+      throw new Error(`This page has no cloud: ${name}.`);
+    };
+  },
 });
 
 const backend: Backend = {
@@ -267,6 +325,14 @@ window.__tags = {
   files: () => [...files.keys()].sort(),
   doc: (path: string) => files.get(path) ?? null,
   watched: () => watched,
+  tags: () => tags,
+  // Each change of the list, in order.
+  tagCalls: () => tagCalls,
+  // The folder is no longer a connected workspace's.
+  disconnect() {
+    connected = false;
+    tell();
+  },
   // Another device changed a note: its text, and the change heard.
   external(path: string, text: string) {
     const f = files.get(path);
@@ -285,7 +351,7 @@ try {
     JSON.stringify({
       version: 2,
       lastRoot: ROOT,
-      sessions: { [ROOT]: { tabs: [{ id: "t-launch", kind: "file", path: `${ROOT}/Launch plan.md` }], activeId: "t-launch" } },
+      sessions: { [ROOT]: { tabs: [{ id: "t-launch", kind: "file", path: `${LIB}/Launch plan.md` }], activeId: "t-launch" } },
     }),
   );
 } catch {

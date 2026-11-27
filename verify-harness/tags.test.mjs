@@ -67,20 +67,6 @@ for (const c of fx.quote) {
   assert.equal(tags.quoteValue(c.value), c.line, `quote ${show(c.value)}`);
   // What is written reads back as the value.
   assert.deepStrictEqual(tags.keyedLines(`---\nk: ${c.line}\n---\n`), [{ key: "k", value: c.value }], `read back ${show(c.line)}`);
-  assert.deepStrictEqual(tags.parseTagList(`---\nk: [${c.line}]\n---\n`), [{ name: "k", values: [c.value] }], `list read back ${show(c.line)}`);
-  n += 1;
-}
-for (const c of fx.list) {
-  assert.deepStrictEqual(tags.parseTagList(c.text), c.tags, `list of ${show(c.text)}`);
-  n += 1;
-}
-for (const c of fx.writeList) {
-  const got = tags.writeTagList(c.text, c.at, c.def, c.after);
-  assert.equal(got, c.out, `list write ${show(c.at)} = ${show(c.def)} in ${show(c.text)}`);
-  if (c.def) {
-    const listed = tags.parseTagList(got).find((d) => d.name === c.def.name);
-    assert.deepStrictEqual(listed, c.def, `list reads back ${show(c.def)}`);
-  }
   n += 1;
 }
 for (const c of fx.names) {

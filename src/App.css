@@ -4822,37 +4822,6 @@ body.tree-dragging.tree-drag-invalid * {
   overflow-wrap: anywhere;
 }
 
-/* The tag list's own note: a row per tag. */
-.doc-taglist-row {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 3px 0;
-}
-
-.doc-taglist-name {
-  flex: none;
-  min-width: 90px;
-  color: var(--text-2);
-  font-weight: 500;
-}
-
-.doc-taglist-values {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-width: 0;
-}
-
-.tag-chip.is-value {
-  cursor: default;
-}
-
-.doc-taglist-empty {
-  margin: 0;
-  color: var(--text-3);
-}
-
 /* A title's problem shows over the chips while it's typed, so the note
    never moves. */
 .editor-wrap:has(> .doc-tags) .doc-title-problem {
@@ -4981,6 +4950,61 @@ body.tree-dragging.tree-drag-invalid * {
 
 .tag-edit-buttons .tag-edit-gap {
   flex: 1;
+}
+
+/* Settings' Tags: a row per tag, its values as chips, what they mean under
+   them. */
+.tags-page-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.tags-page-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.tags-page-row:first-child {
+  border-top: 0;
+}
+
+.tags-page-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tags-page-name {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-1);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.tags-page-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tag-chip.is-value {
+  cursor: default;
+}
+
+.tags-page-desc {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 720px) {

@@ -1907,7 +1907,7 @@ async function driveTags(name) {
   });
   page.on("pageerror", (e) => trouble.push(`${stage}: ${String(e).slice(0, 200)}`));
 
-  // A folder of this engine's own; the list is the workspace's, written by each engine in its turn.
+  // A folder of this engine's own; the list is the workspace's (its manifest's), made by each engine in its turn.
   const DIR = `Tags in ${name}`;
   const ONE = `${DIR}/One.md`;
   const TWO = `${DIR}/Two.md`;
@@ -1915,7 +1915,11 @@ async function driveTags(name) {
   const other = await elsewhere(browser);
   const put = async (path, text) =>
     other.ask(`/api/web/doc?path=${encodeURIComponent(path)}`, { method: "PUT", body: JSON.stringify({ md: { text, ifRev: (await storedAt(path))?.rev ?? null } }) });
-  await put("Tags.md", "---\nstatus: [Todo, Doing, Done]\n---\nWhat each value means.\n");
+  const tagsNow = async () => (await (await owner("/api/manifest")).json()).tags ?? [];
+  await other.ask("/api/web/tags", {
+    method: "PUT",
+    body: JSON.stringify({ at: "status", tag: { name: "status", values: ["Todo", "Doing", "Done"], desc: "What each value means." } }),
+  });
   await put(ONE, "---\nstatus: Doing\n---\n# One\n\nA heron by the water.\n");
   await put(TWO, "---\nstatus: doing\nowner: Ada\n---\nTwo.\n");
   await put(THREE, "---\nstatus: Done\n---\nA heron too.\n");
@@ -1969,10 +1973,10 @@ async function driveTags(name) {
   from = answered.length;
   await dialog.locator('[data-testid="tag-edit-save"]').click();
   const rewritten = await until(async () => {
-    const [one, two, list] = await Promise.all([storedAt(ONE), storedAt(TWO), storedAt("Tags.md")]);
+    const [one, two, list] = await Promise.all([storedAt(ONE), storedAt(TWO), tagsNow()]);
     return one?.text.startsWith("---\nstatus: In progress\n---\n") &&
       two?.text === "---\nstatus: In progress\nowner: Ada\n---\nTwo.\n" &&
-      list?.text.startsWith("---\nstatus: [Todo, In progress, Done]\n---\n")
+      JSON.stringify(list) === JSON.stringify([{ name: "status", values: ["Todo", "In progress", "Done"], desc: "What each value means." }])
       ? true
       : null;
   }, 45_000);
@@ -1980,7 +1984,7 @@ async function driveTags(name) {
   say(
     "a value renamed rewrites the list, the open note and every other note that has it",
     rewritten && (await storedAt(THREE)).text === "---\nstatus: Done\n---\nA heron too.\n",
-    JSON.stringify([(await storedAt(ONE))?.text, (await storedAt(TWO))?.text, (await storedAt("Tags.md"))?.text]),
+    JSON.stringify([(await storedAt(ONE))?.text, (await storedAt(TWO))?.text, await tagsNow()]),
   );
   say("…the notes found by a search for the old value", searched(from).some((a) => /[?&]tag=status%3ADoing\b/.test(a.path)));
   const after = await until(async () => {
@@ -1988,10 +1992,46 @@ async function driveTags(name) {
     return text === "status In progress" ? text : null;
   }, 15_000);
   say("the open note's chip follows", after !== null);
+
+  /* 3 — Settings' Tags */
+  stage = "Settings' Tags";
+  const tagsPage = page.locator('[data-testid="tags-settings"]');
+  await page.locator(".settings-fab").click();
+  await page.locator('[data-testid="settings-tags"]').click();
+  await tagsPage.waitFor({ timeout: 15_000 });
+  const listed = (await tagsPage.locator(".tags-page-row").first().innerText()).replace(/\s+/g, " ").trim();
+  from = answered.length;
+  await tagsPage.locator('[data-testid="tags-new"]').click();
+  await tagsPage.locator('[data-testid="tag-new-name"]').fill("Size");
+  await tagsPage.locator('[data-testid="tag-new-values"]').fill("S\nM");
+  await tagsPage.locator('[data-testid="tag-new-create"]').click();
+  const made = await until(async () => ((await tagsNow()).some((d) => d.name === "Size") ? true : null), 15_000);
+  const rows = await until(async () => ((await tagsPage.locator(".tags-page-row").count()) === 2 ? true : null), 15_000);
+  say(
+    "Settings' Tags lists the workspace's tags with what their values mean, and New tag adds one to the workspace",
+    listed === "status Edit Todo In progress Done What each value means." &&
+      made &&
+      rows &&
+      answered.slice(from).some((a) => a.method === "PUT" && a.path === "/api/web/tags" && a.status === 200),
+    listed,
+  );
+  await tagsPage.locator('[data-testid="tags-edit-Size"]').click();
+  await tagsPage.locator('[data-testid="tag-edit-delete"]').click();
+  await tagsPage.locator('[data-testid="tag-edit-delete-confirm"]').click();
+  const gone = await until(
+    async () => (!(await tagsNow()).some((d) => d.name === "Size") && (await tagsPage.locator(".tags-page-row").count()) === 1 ? true : null),
+    15_000,
+  );
+  say(
+    "Delete takes it out of the workspace's tags, and the page's list follows",
+    gone,
+    JSON.stringify({ tags: await tagsNow(), rows: await tagsPage.locator(".tags-page-row").count(), error: await tagsPage.locator(".modal-error").allInnerTexts() }),
+  );
+  await page.keyboard.press("Escape");
   say("nothing was refused by the page's policy, and nothing threw", trouble.length === 0, trouble.join(" | "));
 
   await other.ask(`/api/web/folder?path=${encodeURIComponent(DIR)}`, { method: "DELETE" });
-  await other.ask("/api/web/doc?path=Tags.md", { method: "DELETE" });
+  await other.ask("/api/web/tags?name=status", { method: "DELETE" });
   await other.close();
   await browser.close();
 }
