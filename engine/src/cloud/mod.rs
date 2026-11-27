@@ -57,6 +57,7 @@ pub mod versions;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -141,6 +142,8 @@ pub(crate) fn keeps_own_versions(root: &Path) -> bool {
 struct EngineHandle {
     tx: mpsc::UnboundedSender<EngineCmd>,
     root: PathBuf,
+    /// The engine's `stopped`.
+    stopped: Arc<AtomicBool>,
     // Held so the recursive watcher lives exactly as long as the engine.
     // None when the watcher couldn't start, or the app asked for none
     // (`Setup::watch`): the bus and the poll still carry the engine.
@@ -286,6 +289,7 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
         core.sync_events(),
         inner.statuses.clone(),
     );
+    let stopped = engine.stopped();
     // The one way an engine ends by itself: the domain said this Mac's access
     // was taken away. The engine stops there and touches nothing; taking the
     // workspace off this Mac is the manager's, because the manager is what
@@ -298,7 +302,7 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
     });
 
     core.edit_bus.register(root.clone(), cmd_tx.clone());
-    inner.engines.insert(ws.root.clone(), EngineHandle { tx: cmd_tx, root, _watcher: watcher });
+    inner.engines.insert(ws.root.clone(), EngineHandle { tx: cmd_tx, root, stopped, _watcher: watcher });
 }
 
 /// A space's folder appeared on this Mac or left it (`EngineConfig::
@@ -450,7 +454,10 @@ fn stop_engine(core: &Core, inner: &mut ManagerInner, root: &str) -> bool {
     let Some(handle) = inner.engines.remove(root) else { return false };
     let _ = handle.tx.send(EngineCmd::Shutdown);
     core.edit_bus.unregister(&handle.root);
+    // A pass may still be running, and writes the row again as it ends
+    // unless the engine is marked stopped under the same lock.
     if let Ok(mut table) = inner.statuses.lock() {
+        handle.stopped.store(true, Ordering::SeqCst);
         table.remove(root);
     }
     true

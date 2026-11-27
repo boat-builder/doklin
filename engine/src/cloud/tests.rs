@@ -1644,6 +1644,28 @@ fn public_of(be: &SharedWorker) -> BTreeMap<String, PublicEntry> {
 
 /* ---------- The sync matrix (ported) ---------- */
 
+/// A workspace taken off this device mid-pass keeps no status: the
+/// manager marks the engine stopped and takes its row out (`stop_engine`),
+/// and the pass that ends after writes nothing back.
+#[tokio::test]
+async fn a_pass_that_ends_after_its_workspace_was_stopped_writes_no_status() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("doc.md", "# doc\n");
+    a.cycle().await;
+    let key = a.root.path().to_string_lossy().to_string();
+    assert!(a.statuses.lock().unwrap().contains_key(&key));
+
+    {
+        let mut table = a.statuses.lock().unwrap();
+        a.engine.stopped().store(true, std::sync::atomic::Ordering::SeqCst);
+        table.remove(&key);
+    }
+    a.write("doc.md", "# doc, again\n");
+    a.cycle().await;
+    assert!(!a.statuses.lock().unwrap().contains_key(&key), "a gone workspace written back");
+}
+
 #[tokio::test]
 async fn initial_push_then_second_device_pulls() {
     let be = fake_worker();

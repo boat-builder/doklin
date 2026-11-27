@@ -53,7 +53,38 @@ struct DocumentView: View {
 
     private var workspace: Workspace { model.workspace }
 
+    // In three parts: one chain of every modifier is more than the compiler
+    // type-checks in reasonable time.
     var body: some View {
+        following
+            .alert("Not saved", isPresented: Binding(get: { session?.failure != nil }, set: { if !$0 { session?.failure = nil } })) {
+                Button("OK", role: .cancel) { session?.failure = nil }
+            } message: {
+                Text(session?.failure ?? "")
+            }
+            .sheet(item: $commentStart) { start in
+                CommentsView(model: comments, start: start, mayComment: mayComment)
+            }
+            .sheet(isPresented: $publishing) {
+                PublishView(workspace: workspace, path: model.path, kind: .file) { route.append(.publishedPages) }
+            }
+            .sheet(item: $tagSheet) { TagSheetView(sheet: $0, workspace: workspace, toaster: toaster) }
+            .alert("Doklin", isPresented: problemShown) {
+                Button("OK", role: .cancel) { model.problem = nil }
+            } message: {
+                Text(model.problem ?? "")
+            }
+            .modifier(FindQuestion(asking: $askingFind, words: $findWords) { words in
+                let wanted = words.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !wanted.isEmpty else { return }
+                find = wanted
+                foundIndex = 0
+                markFound()
+            })
+    }
+
+    /// The note, its bars and its title.
+    private var framed: some View {
         content
             .background(Theme.sheet)
             .navigationTitle(session == nil ? model.title : "")
@@ -62,6 +93,12 @@ struct DocumentView: View {
             .toolbar { editingToolbar }
             .toolbar(.hidden, for: .tabBar)
             .safeAreaInset(edge: .bottom, spacing: 0) { bottom }
+    }
+
+    /// What the note follows while it is shown: its files, its lease, the
+    /// tag list, the app going to the background.
+    private var following: some View {
+        framed
             .onAppear {
                 shell.documents += 1
                 model.load()
@@ -112,30 +149,6 @@ struct DocumentView: View {
                 // what is shown, edited and outlined is the markdown again.
                 if gone { showingPage = false }
             }
-            .alert("Not saved", isPresented: Binding(get: { session?.failure != nil }, set: { if !$0 { session?.failure = nil } })) {
-                Button("OK", role: .cancel) { session?.failure = nil }
-            } message: {
-                Text(session?.failure ?? "")
-            }
-            .sheet(item: $commentStart) { start in
-                CommentsView(model: comments, start: start, mayComment: mayComment)
-            }
-            .sheet(isPresented: $publishing) {
-                PublishView(workspace: workspace, path: model.path, kind: .file) { route.append(.publishedPages) }
-            }
-            .sheet(item: $tagSheet) { TagSheetView(sheet: $0, workspace: workspace, toaster: toaster) }
-            .alert("Doklin", isPresented: problemShown) {
-                Button("OK", role: .cancel) { model.problem = nil }
-            } message: {
-                Text(model.problem ?? "")
-            }
-            .modifier(FindQuestion(asking: $askingFind, words: $findWords) { words in
-                let wanted = words.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !wanted.isEmpty else { return }
-                find = wanted
-                foundIndex = 0
-                markFound()
-            })
     }
 
     private var problemShown: Binding<Bool> {
