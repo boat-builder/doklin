@@ -161,10 +161,10 @@ class UITestCase: XCTestCase {
     func setting(_ item: String) {
         settings()
         let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", item)).firstMatch
-        for _ in 0..<4 where row.waitForExistence(timeout: 2) && !row.isHittable {
-            app.swipeUp()
-        }
-        expect(row, "\(item) in Settings").tap()
+        // Settings, done arriving: a row below its edge, which a list
+        // doesn't make until it is scrolled to, is revealed.
+        _ = app.staticTexts["People and access"].waitForExistence(timeout: 5)
+        reveal(row, "\(item) in Settings").tap()
     }
 
     /* ---------- Typing ---------- */
@@ -257,10 +257,10 @@ class UITestCase: XCTestCase {
     func removeFromThisPhone() {
         settings()
         let remove = app.buttons["Remove from this iPhone"]
-        for _ in 0..<4 where remove.waitForExistence(timeout: 2) && !remove.isHittable {
-            app.swipeUp()
-        }
-        expect(remove, "Remove from this iPhone in Settings").tap()
+        // Settings, done arriving: the button is at its foot, which a list
+        // doesn't make until it is scrolled to, and is revealed.
+        _ = app.staticTexts["People and access"].waitForExistence(timeout: 5)
+        reveal(remove, "Remove from this iPhone in Settings").tap()
         let confirm = app.sheets.buttons["Remove from this iPhone"]
         if confirm.waitForExistence(timeout: 5) {
             confirm.tap()
