@@ -47,10 +47,12 @@ final class PeopleUITests: UITestCase {
         if knob.exists { knob.tap() } else { toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap() }
     }
 
-    /// Wait for something to be on screen, where a finger can reach it.
+    /// Wait for something to be on screen, where a finger can reach it: as
+    /// long as `expect` waits, since one look at the screen can take a slow
+    /// runner most of ten seconds.
     private func inView(_ element: XCUIElement, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
         let shown = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true"), object: element)
-        if XCTWaiter().wait(for: [shown], timeout: 10) != .completed {
+        if XCTWaiter().wait(for: [shown], timeout: 30) != .completed {
             record("out of view — \(what)")
             XCTFail("\(what) is not in view", file: file, line: line)
         }
