@@ -135,8 +135,9 @@ final class HistoryUITests: UITestCase {
         back()
 
         // A note removed here is under Recently deleted, as one row with its
-        // comments, and comes back to its folder.
-        let comments = expect(marked("entry-Comments"), "the Comments note")
+        // comments, and comes back to its folder. The tree is longer than a
+        // screen, and finding Scratch left this row under the navigation bar.
+        let comments = reveal(marked("entry-Comments"), "the Comments note")
         comments.swipeLeft()
         expect(app.buttons["Remove"], "Remove, under the swipe").tap()
         answer("Remove")
