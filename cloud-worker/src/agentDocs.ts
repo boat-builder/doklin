@@ -29,8 +29,8 @@
 // A listing's notes carry their tags, and `where=name:value` (repeatable, or
 // a name alone for any value) narrows a listing or a search to the notes
 // that have them, from the index the search catch-up keeps (search.ts). A
-// write of a note is held to the tag list where it changes a tag's line,
-// and a write of the list itself to the list's format (tagList.ts).
+// write of a note is held to the tag list where it changes a tag's line
+// (tagList.ts).
 
 import { change, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
 import type { Section } from "./agentPlace";
@@ -68,7 +68,7 @@ import { listDirectory } from "./members";
 import { mounted } from "./mount";
 import { askOf, catchUpOpen, mirrorAfter, pairsIn, searchIn, type OpenSection } from "./search";
 import { MAX_SECTIONS_READ, sharedEnv, spaceOf } from "./spaces";
-import { filtersOf, isTagNote, listKept, listedFilters, readTagList, tagsKept, type TagList } from "./tagList";
+import { filtersOf, listedFilters, readTagList, tagsKept } from "./tagList";
 import { isHtmlPath, isMarkdownPath, openWorkspace } from "./workspace";
 import { CRITIC_BLOCK_RE, parseSpans, stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, emptyMeta, metaFileOf, metaIsEmpty, parseEntityMeta, serializeEntityMeta, type LinkRecord } from "../../src/metaFile";
@@ -173,16 +173,15 @@ const holds = (tags: readonly NoteTag[], where: readonly TagFilter[]): boolean =
 async function withTags(c: Call, listing: Listing, opened: readonly OpenSection[], asked: readonly TagFilter[], extra: Record<string, unknown>): Promise<Response> {
   if (listing.documents.length === 0 && asked.length === 0) return json({ ...listing, ...extra });
   const list = await readTagList(c.env);
-  if (list instanceof Refusal) return refuse(list);
   const where = listedFilters(asked, list);
   if (where instanceof Refusal) return refuse(where);
-  if (list.tags.length === 0) return json({ ...listing, ...extra });
+  if (list.length === 0) return json({ ...listing, ...extra });
   if (where.length > 0) {
     const up = await catchUpOpen(c.env, opened);
     if (up instanceof Refusal) return refuse(up);
     if ("indexing" in up) return json({ indexing: true, pending: up.indexing }, 202);
   }
-  const held = await pairsIn(c.env, opened, list.tags.map((d) => d.name.toLowerCase()));
+  const held = await pairsIn(c.env, opened, list.map((d) => d.name.toLowerCase()));
   if (held === null) {
     if (where.length > 0) return json({ error: "this needs the domain's database, which isn't answering — try again in a moment" }, 503);
     return json({ ...listing, ...extra, tagsBehind: true });
@@ -202,7 +201,7 @@ async function withTags(c: Call, listing: Listing, opened: readonly OpenSection[
   for (const row of listing.documents) {
     const key = row.md ? keys.get(row.path.toLowerCase()) : undefined;
     const pairs = key === undefined ? undefined : held.pairs.get(key);
-    const tags = pairs ? tagsHeld(pairs, list.tags) : [];
+    const tags = pairs ? tagsHeld(pairs, list) : [];
     if (!holds(tags, where)) continue;
     documents.push(tags.length > 0 ? { ...row, tags } : row);
   }
@@ -272,9 +271,7 @@ export async function getSearch(c: Call): Promise<Response> {
   if (asked instanceof Refusal) return refuse(asked);
   let where: TagFilter[] = [];
   if (asked.length > 0) {
-    const list = await readTagList(env);
-    if (list instanceof Refusal) return refuse(list);
-    const listed = listedFilters(asked, list);
+    const listed = listedFilters(asked, await readTagList(env));
     if (listed instanceof Refusal) return refuse(listed);
     where = listed;
   }
@@ -440,9 +437,9 @@ async function docInfo(env: Env, m: Manifest, origin: string, doc: Doc): Promise
 async function tagsOfNote(env: Env, doc: Doc): Promise<NoteTag[]> {
   if (!doc.md) return [];
   const list = await readTagList(env);
-  if (list instanceof Refusal || list.tags.length === 0) return [];
+  if (list.length === 0) return [];
   const text = await blobText(env, doc.md);
-  return text === null ? [] : noteTags(text, list.tags);
+  return text === null ? [] : noteTags(text, list);
 }
 
 /* ---------- Writing ---------- */
@@ -495,8 +492,8 @@ export async function putDoc(c: Call): Promise<Response> {
 
   // Read once for every attempt; the section written to is the change's own.
   const person = new PersonDocs(c);
-  let listed: Promise<TagList | Refusal> | undefined;
-  const tagList = (): Promise<TagList | Refusal> => (listed ??= readTagList(c.env));
+  let listed: Promise<TagDef[]> | undefined;
+  const tagList = (): Promise<TagDef[]> => (listed ??= readTagList(c.env));
   const done = await change(
     c,
     async (tx) => {
@@ -526,7 +523,7 @@ async function writeVersion(
   force: boolean,
   person: PersonDocs,
   section: string | null,
-  tagList: () => Promise<TagList | Refusal>,
+  tagList: () => Promise<TagDef[]>,
 ): Promise<Written | Refusal> {
   const { doc } = at;
   let version: Version;
@@ -566,7 +563,7 @@ async function writeVersion(
   // Compared with what the agent read; the text as stored passes too.
   const lost = markersKept(shown, text, doc.stem);
   if (lost && (shown === now || markersKept(now, text, doc.stem))) return lost;
-  const untagged = await tagsChecked(tagList, section, target, now, text);
+  const untagged = await tagsChecked(tagList, now, text);
   if (untagged) return untagged;
   const written = await linksWritten(person, { path: target, section }, text, { text: now, records: meta.links });
   const value = await finish(tx, doc, version, current, target, written.text === text ? bytes : new TextEncoder().encode(written.text));
@@ -584,23 +581,15 @@ async function writeVersion(
 }
 
 /**
- * What the tag list says of a note's new text (tagList.ts): the list itself
- * must read whole, and a note keep to it where the write changes a tag's
- * line. The list is read only for a write that changes a keyed line.
+ * What the tag list says of a note's new text (tagList.ts): it keeps to the
+ * list where the write changes a tag's line. The list is read only for a
+ * write that changes a keyed line.
  */
-async function tagsChecked(
-  tagList: () => Promise<TagList | Refusal>,
-  section: string | null,
-  target: string,
-  now: string,
-  text: string,
-): Promise<Refusal | null> {
-  if (isTagNote(section ?? "", target)) return listKept(text, nameOf(target).stem);
+async function tagsChecked(tagList: () => Promise<TagDef[]>, now: string, text: string): Promise<Refusal | null> {
   const before = keyedLines(now);
   const after = keyedLines(text);
   if (after.every((l, i) => before[i] && before[i].key === l.key && before[i].value === l.value)) return null;
-  const list = await tagList();
-  return list instanceof Refusal ? list : tagsKept(now, text, list.tags);
+  return tagsKept(now, text, await tagList());
 }
 
 /** Whether two sets of link records say the same. */

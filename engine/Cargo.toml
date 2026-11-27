@@ -36,6 +36,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # one tar.gz of the workspace and its store. Both are pure Rust.
 flate2 = "1"
 tar = "0.4"
+# The tag list's names are letters and digits as JavaScript's \p{L} and \p{N}
+# say (src/tags.ts), which `char::is_alphanumeric` is not quite.
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 
 # The folder watcher. Not on iOS: nothing but the app writes into its own
 # folder there, and every write it makes rings the edit bus.

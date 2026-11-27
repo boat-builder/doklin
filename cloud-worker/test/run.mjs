@@ -87,6 +87,11 @@ const fake = new FakeR2();
 const db = new FakeD1();
 const env = { OWNER_TOKEN: KEY, DATA: fake, DB: db };
 
+/** The manifest's format, from its one source. */
+const MANIFEST_VERSION = Number(
+  readFileSync(path.join(workerDir, "src", "version.ts"), "utf8").match(/^export const MANIFEST_VERSION = (\d+);$/m)[1],
+);
+
 /** What a fully migrated database reports, and the tables it then holds. */
 const D1_SCHEMA = 12;
 const D1_TABLES = [
@@ -209,7 +214,7 @@ async function test(name, fn) {
 }
 
 const manifest = (seq, files, extra = {}) => ({
-  version: 4,
+  version: MANIFEST_VERSION,
   name: "Notes",
   seq,
   files,
@@ -1204,7 +1209,7 @@ await test("manifest: the empty manifest, 304 on since, CAS PUT, a stale PUT los
   const etag0 = first.headers.get("x-manifest-etag");
   assert.equal(etag0, ws.manifestEtag, "the etag the bind returned is the manifest's");
   const fresh = JSON.parse(first.text);
-  assert.equal(fresh.version, 4);
+  assert.equal(fresh.version, MANIFEST_VERSION);
   assert.equal(fresh.name, "Notes");
   assert.deepEqual([fresh.seq, fresh.files, fresh.tombstones, fresh.public], [0, {}, {}, {}]);
 
@@ -1327,15 +1332,15 @@ await test("manifest: only documents sync — a file, a tombstone or a page of a
 });
 
 await test("manifest: either side of a schema skew is 426, and the sentence says which one is behind", async () => {
-  const newer = await putManifest(manifest(3, {}, { version: 5 }));
+  const newer = await putManifest(manifest(3, {}, { version: MANIFEST_VERSION + 1 }));
   assert.equal(newer.status, 426);
   assert.match(newer.json.error, /update the worker/);
   // An app writing an older version is not corrupt, it is behind, and 426 is
   // the status that says so.
-  const older = await putManifest(manifest(3, {}, { version: 3 }));
+  const older = await putManifest(manifest(3, {}, { version: MANIFEST_VERSION - 1 }));
   assert.equal(older.status, 426);
   assert.match(older.json.error, /update the app/);
-  assert.equal((await putManifest(manifest(3, {}, { version: "4" }))).status, 400, "a version that is not a number is garbage");
+  assert.equal((await putManifest(manifest(3, {}, { version: String(MANIFEST_VERSION) }))).status, 400, "a version that is not a number is garbage");
 });
 
 await test("manifest: the shared workspace holds nothing under Library, Private or Restricted, a space holds what it likes, and a tombstone may say where its file went", async () => {
@@ -2031,7 +2036,7 @@ await test("spaces: a space syncs like the workspace does — its own manifest, 
   const sharedBefore = await currentEtag();
   const got = await finance("/manifest", { token: MEMBER });
   assert.equal(got.status, 200);
-  assert.deepEqual(got.json, { version: 4, name: "Finance", seq: 0, files: {}, tombstones: {}, public: {} });
+  assert.deepEqual(got.json, { version: MANIFEST_VERSION, name: "Finance", seq: 0, files: {}, tombstones: {}, public: {} });
   const etag0 = got.headers.get("x-manifest-etag");
   assert.equal(etag0, FINANCE.etag, "the etag the space was made with");
   assert.equal((await finance(`/manifest?since=${etag0}`, { token: MEMBER })).status, 304);
@@ -2885,12 +2890,14 @@ async function macWrite(change) {
   assert.equal(res.status, 200, res.text);
   return res.json.etag;
 }
-/** Start from a workspace holding exactly these files — `{path: content}`. */
+/** Start from a workspace holding exactly these files — `{path: content}` —
+ *  and no tags. */
 const freshWorkspace = (files, extra = {}) =>
   macWrite((m, put) => {
     m.files = {};
     m.tombstones = {};
     m.public = {};
+    delete m.tags;
     for (const [p, content] of Object.entries(files)) put(p, content, extra[p] ?? {});
   });
 /** The sidecar as the app writes one: a header, then a record a line. */
@@ -5119,7 +5126,15 @@ await test("search: a document is found by its name as well as its text — its 
 
 /* ---------- The document API: tags ---------- */
 
-const TAG_LIST = "---\nstatus: [Todo, Doing, Done]\npriority: [p1, p2]\n---\nWhat each value means.\n";
+const TAGS = [
+  { name: "status", values: ["Todo", "Doing", "Done"], desc: "Where a task stands." },
+  { name: "priority", values: ["p1", "p2"] },
+];
+/** A Mac's write of the tag list. */
+const macTags = (tags) =>
+  macWrite((m) => {
+    m.tags = tags;
+  });
 const treeUrl = (dir, more = "") => `/api/agent/tree?dir=${encodeURIComponent(dir)}${more}`;
 const where = (...filters) => filters.map((f) => `&where=${encodeURIComponent(f)}`).join("");
 const pathsIn = (listing) => listing.documents.map((d) => d.path);
@@ -5133,7 +5148,6 @@ const macRemove = (m, p) => {
 
 await test("tags: the index holds each note's pairs, filled and cleared with the search mirror; a listing carries each note's listed tags, and where narrows a listing or a search", async () => {
   await freshWorkspace({
-    "Tags.md": TAG_LIST,
     "Work/a.md": "---\nstatus: Doing\npriority: p1\nowner: Sam\n---\n# A\n\nAlpha text.\n",
     "Work/b.md": "---\nStatus: doing\n---\nBeta text.\n",
     "Work/c.md": "---\nstatus: Blocked\n---\nGamma.\n",
@@ -5141,17 +5155,11 @@ await test("tags: the index holds each note's pairs, filled and cleared with the
     "Work/e.md": "No block here, and it says alpha.\n",
     "Work/page.html": "<p>An html page.</p>\n",
   });
+  await macTags(TAGS);
   const bot = await addAgent("Tagger", ["read"]);
   const api = as(bot);
 
-  assert.deepEqual((await api("/api/agent/tags")).json, {
-    note: "Library/Tags",
-    exists: true,
-    tags: [
-      { name: "status", values: ["Todo", "Doing", "Done"] },
-      { name: "priority", values: ["p1", "p2"] },
-    ],
-  });
+  assert.deepEqual((await api("/api/agent/tags")).json, { tags: TAGS }, "the manifest's list, with what each tag's values mean");
 
   // Narrowed: the index catches up first, as a search's does.
   const doing = await api(treeUrl("Library/Work", where("status:Doing")));
@@ -5209,7 +5217,7 @@ await test("tags: the index holds each note's pairs, filled and cleared with the
     { path: "Library/Work/a", version: "md", matches: [] },
     { path: "Library/Work/b", version: "md", matches: [] },
   ]);
-  assert.equal(only.reads, 1, "a tag alone reads the list, and no note");
+  assert.equal(only.reads, 0, "a tag alone reads no note: the list is the manifest's");
   assert.deepEqual((await api(`/api/agent/search?q=${where("status:Done")}`)).json.results, []);
   assert.equal((await api(`/api/agent/search?q=`)).status, 400, "text, or a tag");
 
@@ -5237,19 +5245,18 @@ await test("tags: the index holds each note's pairs, filled and cleared with the
   assert.equal(db.value("SELECT COUNT(*) FROM tags WHERE fid = ?", bFid), 0);
 
   // No list: no tags, and nothing to narrow by.
-  await macWrite((m) => {
-    macRemove(m, "Tags.md");
-  });
-  assert.deepEqual((await api("/api/agent/tags")).json, { note: "Library/Tags", exists: false, tags: [] });
+  await macTags([]);
+  assert.deepEqual((await api("/api/agent/tags")).json, { tags: [] });
   assert.equal((await api(treeUrl("Library/Work"))).json.documents[0].tags, undefined);
   const none = await api(treeUrl("Library/Work", where("status:Doing")));
   assert.equal(none.status, 400);
-  assert.match(none.json.error, /this workspace has no tags yet — a tag is a line in Library\/Tags/);
+  assert.match(none.json.error, /this workspace has no tags yet — people make them in Doklin's Settings, and doklin tags add makes one/);
 });
 
-await test("tags: an agent's write keeps to the list where it changes a tag's line; tag sets and clears one through the app's own writer; a write of the list must read whole", async () => {
+await test("tags: an agent's write keeps to the list where it changes a tag's line; tag sets and clears one through the app's own writer; a note called Tags is a note", async () => {
   const c = "---\nstatus: Blocked\nowner: Sam\n---\nGamma.\n";
-  await freshWorkspace({ "tags.md": TAG_LIST, "Work/c.md": c, "Work/e.md": "No block.\r\n", "Work/page.html": "<p>Page.</p>\n" });
+  await freshWorkspace({ "Work/c.md": c, "Work/e.md": "No block.\r\n", "Work/page.html": "<p>Page.</p>\n" });
+  await macTags(TAGS);
   const bot = await addAgent("Setter", ["edit"]);
   const api = as(bot);
   const write = (p, text, rev) => api(docUrl(p), { method: "PUT", body: text, headers: rev ? { "if-rev": String(rev) } : {} });
@@ -5259,7 +5266,7 @@ await test("tags: an agent's write keeps to the list where it changes a tag's li
   assert.deepEqual([wrong.status, wrong.json.code, wrong.json.tag, wrong.json.values], [400, "tag_value", "status", ["Todo", "Doing", "Done"]]);
   assert.equal(
     wrong.json.error,
-    'status takes Todo, Doing or Done, not "Doinf" — use one of those, or add "Doinf" to status\'s line in Library/Tags first (ask your person if you aren\'t sure)',
+    'status takes Todo, Doing or Done, not "Doinf" — use one of those, or add it first with doklin tags add status Doinf (ask your person if you aren\'t sure)',
   );
   assert.equal(entryAt(storedManifest(), "Work/new.md"), undefined, "nothing written");
   assert.equal((await api(docUrl("Library/Work/new", "", "&dry=1"), { method: "PUT", body: "---\nstatus: Doinf\n---\n" })).status, 400, "a dry run says the same");
@@ -5306,22 +5313,106 @@ await test("tags: an agent's write keeps to the list where it changes a tag's li
   await refused({ path: "Library/Work/new", set: {} }, 400, /set is/);
   await refused({ path: "Library/Work/new", set: { status: 3 } }, 400, /set is/);
   await refused({ path: "Library/Work/page", set: { status: "Done" } }, 400, /only an html version/);
-  await refused({ path: "Library/tags", set: { status: "Done" } }, 400, /is the tag list itself/);
   await refused({ path: "Library/Work/nothing", set: { status: "Done" } }, 404, /there is no document/);
   const reader = await addAgent("Reader", ["read"]);
   assert.equal((await as(reader)("/api/agent/tag", { method: "POST", body: { path: "Library/Work/new", set: { status: "Done" } } })).status, 403);
 
-  // The list itself: every line of its block a tag.
-  const bad = await write("Library/tags", "---\nstatus: [Todo, Doing, Done]\nowner: Sam\n---\n", 1);
-  assert.deepEqual([bad.status, bad.json.code, bad.json.line], [400, "tag_list", 3]);
-  assert.equal(bad.json.error, 'the tag list (Library/tags) can\'t hold line 3, "owner: Sam". Write a tag and its values as status: [Todo, Doing, Done].');
-  const twice = await write("Library/tags", "---\nstatus: [Todo, todo]\n---\n", 1);
-  assert.match(twice.json.error, /line 2, "status: \[Todo, todo\]"\. Todo is there twice\./);
-  assert.equal((await write("Library/tags", "---\nstatus: [Todo, Doing, Done, Shipped]\n---\nNow with Shipped.\n", 1)).status, 200);
-  assert.equal((await tag({ path: "Library/Work/new", set: { status: "shipped" } })).json.tags[0].value, "Shipped", "a value added to the list is one at once");
-  // A Tags note anywhere else is a note like any other.
-  assert.equal((await write("Private/Tags", "---\nanything: at all\n---\n")).status, 201);
-  assert.equal((await api(docUrl("Private/Tags"), { method: "DELETE" })).status, 200);
+  const spaced = await write("Library/Work/new", "---\nstatus: In review\n---\nNew.\n", 2);
+  assert.match(spaced.json.error, /add it first with doklin tags add status "In review"/, "a value a shell would split is quoted");
+
+  // A note called Tags is a note like any other: its lines are its own, and it takes tags.
+  assert.equal((await write("Library/Tags", "---\nanything: at all\nother: [Todo, Doing]\n---\n")).status, 201);
+  assert.equal((await tag({ path: "Library/Tags", set: { status: "Done" } })).status, 200);
+  assert.deepEqual(storedManifest().tags, TAGS, "and the list is the manifest's, whatever it says");
+});
+
+await test("tags: the list is the shared workspace's manifest's — a PUT holds it to the app's rules, a space's has none, and every write keeps it", async () => {
+  await freshWorkspace({ "Work/a.md": "---\nstatus: Doing\n---\nA.\n" });
+  await macTags(TAGS);
+  const now = () => JSON.parse(fake.store.get("manifest.json").bytes.toString("utf8"));
+  const put = async (tags) => putManifest({ ...now(), seq: now().seq + 1, tags });
+  const refused = async (tags, pattern) => {
+    const res = await put(tags);
+    assert.equal(res.status, 400, `${JSON.stringify(tags)}: ${res.text}`);
+    assert.match(res.json.error, pattern);
+  };
+  await refused({ status: ["Todo"] }, /tags must be a list/);
+  await refused([{ name: "status" }], /invalid values for tag status/);
+  await refused([{ name: "status", values: ["Todo", 3] }], /invalid values for tag status/);
+  await refused([{ name: "status", values: ["Todo"], desc: 3 }], /invalid desc for tag status/);
+  await refused([{ values: ["Todo"] }], /invalid tag/);
+  await refused([TAGS[0], { name: "Status", values: ["x"] }], /^invalid tags: Status: There's already a tag called status\.$/);
+  await refused([{ name: "a:b", values: ["x"] }], /^invalid tags: a:b: A tag's name holds letters/);
+  await refused([{ name: "status", values: [] }], /A tag needs at least one value/);
+  await refused([{ name: "status", values: ["Done", "done"] }], /Done is there twice/);
+  await refused([{ name: "status", values: ["x"], desc: "x".repeat(1001) }], /can be 1000 characters at most/);
+  await refused(Array.from({ length: 51 }, (_, i) => ({ name: `t${i}`, values: ["a"] })), /^invalid tags: A workspace can have 50 tags at most\.$/);
+  assert.equal((await put(Array.from({ length: 50 }, (_, i) => ({ name: `t${i}`, values: ["a"] })))).status, 200, "fifty is the most");
+  assert.equal((await put(TAGS)).status, 200);
+  assert.equal((await put(undefined)).status, 200, "no list is none");
+  assert.equal(now().tags, undefined);
+  await macTags(TAGS);
+
+  // A space's manifest holds none.
+  const own = (await call("/api/spaces/private", { method: "PUT", token: OWNER })).json.space;
+  const stored = () => fake.store.get(`spaces/${own.id}/manifest.json`);
+  const spacePut = (tags) => {
+    const m = JSON.parse(stored().bytes.toString("utf8"));
+    return call(`/api/spaces/${own.id}/manifest`, {
+      method: "PUT",
+      token: OWNER,
+      headers: { "x-base-etag": stored().etag },
+      body: { ...m, seq: m.seq + 1, tags },
+    });
+  };
+  const inSpace = await spacePut(TAGS);
+  assert.deepEqual([inSpace.status, inSpace.json.error], [400, "The tags are the workspace's, kept with Library."]);
+  assert.equal((await spacePut([])).status, 200, "an empty list says nothing");
+
+  // The worker's own writes keep it.
+  const bot = await addAgent("Keeper", ["edit"]);
+  assert.equal((await as(bot)(docUrl("Library/Work/b"), { method: "PUT", body: "# B\n" })).status, 201);
+  assert.deepEqual(now().tags, TAGS);
+});
+
+await test("tags: an agent adds a tag, or values at the end of one, with tags add — what the list has already, in any case, is left as it is; it never renames or removes", async () => {
+  await freshWorkspace({ "Work/a.md": "A.\n" });
+  await macTags(TAGS);
+  const bot = await addAgent("Adder", ["edit"]);
+  const add = (body) => as(bot)("/api/agent/tags", { method: "POST", body });
+
+  const more = await add({ name: "STATUS", values: ["Blocked", "todo", " Shipped "] });
+  assert.equal(more.status, 200, more.text);
+  assert.deepEqual(more.json, { tag: { ...TAGS[0], values: ["Todo", "Doing", "Done", "Blocked", "Shipped"] }, added: ["Blocked", "Shipped"] });
+  assert.deepEqual(storedManifest().tags, [more.json.tag, TAGS[1]], "in its place, spelled as the list spells it, what its values mean kept");
+  const etag = etagNow();
+  assert.deepEqual((await add({ name: "status", values: ["blocked"] })).json.unchanged, true);
+  assert.equal(etagNow(), etag, "nothing new, nothing written");
+
+  const made = await add({ name: "area", values: ["Web", "web", "iPhone"] });
+  assert.deepEqual(made.json, { tag: { name: "area", values: ["Web", "iPhone"] }, added: ["Web", "iPhone"], created: true });
+  assert.deepEqual(storedManifest().tags.map((d) => d.name), ["status", "priority", "area"], "a new tag at the end");
+  const dry = await add({ name: "owner", values: ["Sam"], dryRun: true });
+  assert.deepEqual([dry.json.created, dry.json.written], [true, false]);
+  assert.equal(storedManifest().tags.length, 3);
+
+  // A tagged write takes a value added a moment ago.
+  assert.equal((await as(bot)("/api/agent/tag", { method: "POST", body: { path: "Library/Work/a", set: { status: "shipped" } } })).json.tags[0].value, "Shipped");
+
+  const refused = async (body, status, pattern) => {
+    const res = await add(body);
+    assert.equal(res.status, status, res.text);
+    assert.match(res.json.error, pattern);
+  };
+  await refused({ name: "a:b", values: ["x"] }, 400, /A tag's name holds letters/);
+  await refused({ name: "area", values: [] }, 400, /name is the tag, and values what to add/);
+  await refused({ name: "area", values: ["x".repeat(61)] }, 400, /A value can be 60 characters at most/);
+  await refused({ name: "area", values: "Web" }, 400, /name is the tag/);
+  const reader = await addAgent("Looker", ["read"]);
+  assert.equal((await as(reader)("/api/agent/tags", { method: "POST", body: { name: "area", values: ["x"] } })).status, 403);
+  await macTags(Array.from({ length: 50 }, (_, i) => ({ name: `t${i}`, values: ["a"] })));
+  await refused({ name: "one more", values: ["a"] }, 400, /this workspace has 50 tags, the most it can have/);
+  assert.equal((await add({ name: "t0", values: ["b"] })).status, 200, "a full list still takes a value");
 });
 
 await test("directory: /api/meta names agents beside people, so every Mac can put a name to what an agent changed", async () => {
@@ -5391,7 +5482,7 @@ await test("addresses: an address is one space's for the whole domain — the se
   const hash = blobHash(text);
   await sp(`/blobs/f-budget02/${hash}`, { method: "PUT", token: MEMBER, body: text, headers: { "content-type": "text/markdown" } });
   const withPages = (seq, pages) => ({
-    version: 4,
+    version: MANIFEST_VERSION,
     name: "Books",
     seq,
     files: { "f-budget02": { path: "Budget.md", rev: 1, hash, size: Buffer.byteLength(text), mtime: 1700000000000, by: ALICE.id } },
@@ -5438,7 +5529,7 @@ await test("addresses: an address is one space's for the whole domain — the se
     method: "PUT",
     ...jo,
     headers: { "x-base-etag": joPrivate.etag },
-    body: { version: 4, name: "Private", seq: 1, files: {}, tombstones: {}, public: { budget: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1757000000000 } } },
+    body: { version: MANIFEST_VERSION, name: "Private", seq: 1, files: {}, tombstones: {}, public: { budget: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1757000000000 } } },
   });
   assert.equal(second.status, 409, "the second claim is told it is taken");
   assert.deepEqual(second.json.taken, ["budget"]);
@@ -5467,7 +5558,7 @@ await test("addresses: an address is one space's for the whole domain — the se
     ...jo,
     headers: { "x-base-etag": joPrivate.etag },
     body: {
-      version: 4,
+      version: MANIFEST_VERSION,
       name: "Private",
       seq: 1,
       files: {},
@@ -7289,6 +7380,47 @@ await test("web: a search narrows by tags — tag=name:value or a name alone, wi
 
   assert.equal((await browser("/api/web/folder?path=tagged", { method: "DELETE", cookie: WEB })).status, 200);
   assert.deepEqual((await search("tag=status")).json.results, []);
+});
+
+await test("web: the tag list from a browser — a tag set in its place or made, held to the app's rules, or removed; two changes at once and the later one wins; a note saved from a browser keeps the list", async () => {
+  const before = (await sharedManifest()).tags;
+  await macTags(TAGS);
+  const set = (at, tag) => browser("/api/web/tags", { method: "PUT", cookie: WEB, body: { at, tag } });
+  const remove = (name) => browser(`/api/web/tags?name=${encodeURIComponent(name)}`, { method: "DELETE", cookie: WEB });
+  const stored = () => storedManifest().tags;
+
+  const edited = await set("Status", { name: " Stage ", values: ["Todo", " Done"], desc: "  " });
+  assert.equal(edited.status, 200, edited.text);
+  assert.deepEqual(edited.json, { tags: [{ name: "Stage", values: ["Todo", "Done"] }, TAGS[1]], etag: etagNow() }, "trimmed, in its place, and nothing said of its values is none");
+  assert.deepEqual(stored(), edited.json.tags);
+  const made = await set("area", { name: "area", values: ["Web"], desc: "Which app." });
+  assert.deepEqual(made.json.tags.at(-1), { name: "area", values: ["Web"], desc: "Which app." });
+
+  // A browser that had not seen the other change: the later one wins, over the list as it is now.
+  await macTags([...stored().slice(0, 2), { name: "area", values: ["Web", "iPhone"] }]);
+  assert.deepEqual((await set("AREA", { name: "Area", values: ["Mac"] })).json.tags.at(-1), { name: "Area", values: ["Mac"] });
+
+  const refused = async (res, status, pattern) => {
+    assert.equal(res.status, status, res.text);
+    assert.match(res.json.error, pattern);
+  };
+  await refused(await set("area", { name: "priority", values: ["x"] }), 400, /^There's already a tag called priority\.$/);
+  await refused(await set("new", { name: "new", values: [] }), 400, /^A tag needs at least one value\.$/);
+  await refused(await set("new", { name: "new", values: ["a", "A"] }), 400, /^a is there twice\.$/);
+  await refused(await set("new", { name: "new" }), 400, /at is the tag's name before/);
+  await refused(await set(3, { name: "new", values: ["a"] }), 400, /at is the tag's name before/);
+  await refused(await remove("nothing"), 404, /^There's no tag called nothing\.$/);
+  await refused(await remove(""), 400, /name is the tag to remove/);
+
+  const gone = await remove("STAGE");
+  assert.deepEqual(gone.json.tags.map((d) => d.name), ["priority", "Area"]);
+
+  // A note saved here keeps the list.
+  const saved = await browser(`/api/web/doc?path=${encodeURIComponent("tag-list/kept.md")}`, { method: "PUT", cookie: WEB, body: { md: { text: "# Kept\n", ifRev: null } } });
+  assert.equal(saved.status, 200, saved.text);
+  assert.deepEqual(stored().map((d) => d.name), ["priority", "Area"]);
+  assert.equal((await browser("/api/web/folder?path=tag-list", { method: "DELETE", cookie: WEB })).status, 200);
+  await macTags(before ?? []);
 });
 
 await test("web: publishing from a browser is the same entry in the public map — an address answers at once, the home page is chosen from Library, and `app` is no page's address", async () => {

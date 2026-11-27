@@ -50,6 +50,9 @@
 //   PUT    /api/web/pages              {space, path, kind, slug?, title?, desc?} → {slug, url, …}
 //   DELETE /api/web/pages?slug=        stop a page, in whichever section of theirs holds it
 //   PUT    /api/web/home               {slug: string | null}: the page at `/`, or none
+//   PUT    /api/web/tags               {at, tag: {name, values, desc?}} → {tags, etag}: the tag
+//                                      that was `at`, or a new one, is now `tag` (webTags.ts)
+//   DELETE /api/web/tags?name=         the tag leaves the list → {tags, etag}
 //
 // A change to documents answers two etags beside what it did: `etag`, the
 // section's manifest once the change was made, and `over`, the manifest it
@@ -92,6 +95,7 @@ import { redeemInvite } from "./members";
 import type { WebCall } from "./webCall";
 import { deleteDoc, deleteFolder, getSearch, postCopy, postMove, putDoc } from "./webDocs";
 import { deletePage, putHome, putPage } from "./webPages";
+import { deleteTags, putTags } from "./webTags";
 
 /* ---------- Signing in ---------- */
 
@@ -182,6 +186,7 @@ const ROUTES: Record<string, Partial<Record<string, Handler>>> = {
   search: { GET: getSearch },
   pages: { PUT: putPage, DELETE: deletePage },
   home: { PUT: putHome },
+  tags: { PUT: putTags, DELETE: deleteTags },
   // POST is answered above the gate (api.ts); nothing else is asked of it.
   session: {},
 };

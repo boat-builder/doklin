@@ -91,6 +91,16 @@ for (const c of fx.values) {
   assert.equal(tags.valueProblem(c.value, []) === null, c.ok, `value ${show(c.value)}`);
   n += 1;
 }
+for (const c of fx.defs) {
+  assert.equal(tags.tagProblem(c.def, c.list, c.except), c.problem, `def ${show(c.def)} beside ${show(c.list)}`);
+  n += 1;
+}
+for (const c of fx.changes) {
+  const got = c.def ? tags.withTag(c.list, c.at, c.def) : tags.withoutTag(c.list, c.remove);
+  assert.deepStrictEqual(got, c.out, `change ${show(c.def ?? c.remove)} in ${show(c.list)}`);
+  assert.equal(tags.listProblem(got), null, `a change leaves a list whole: ${show(got)}`);
+  n += 1;
+}
 for (const c of fx.query) {
   assert.deepStrictEqual(tags.searchQuery(c.q, c.list), { text: c.text, tags: c.tags }, `query ${show(c.q)}`);
   n += 1;
@@ -124,30 +134,20 @@ for (const c of fx.query) {
   n += 3;
 }
 {
-  // The first line of a list that isn't a tag, as the worker refuses it.
-  const problem = (text) => tags.listProblem(text);
-  assert.equal(problem("No block.\n"), null);
-  assert.equal(problem("---\n---\nEmpty.\n"), null);
-  assert.equal(problem("---\nstatus: [Todo, Doing]\n\npriority: [p1, 'p2']\n---\nWhat they mean.\n"), null);
-  const shape = "Write a tag and its values as status: [Todo, Doing, Done].";
-  assert.deepStrictEqual(problem("---\nstatus: [Todo]\nowner: Sam\n---\n"), { line: 3, text: "owner: Sam", problem: shape });
-  assert.deepStrictEqual(problem("---\n# what these are\nstatus: [Todo]\n---\n"), { line: 2, text: "# what these are", problem: shape });
-  assert.deepStrictEqual(problem("---\nstatus: [Todo]\n- loose\n---\n"), { line: 3, text: "- loose", problem: shape });
-  assert.deepStrictEqual(problem("---\r\nstatus: [Todo, Doing\r\n---\r\n"), { line: 2, text: "status: [Todo, Doing", problem: shape });
-  assert.deepStrictEqual(problem("---\nstatus:\n  - Todo\n---\n"), {
-    line: 2,
-    text: "status:",
-    problem: "Its values go in brackets on its own line, as status: [Todo, Doing, Done].",
-  });
-  assert.deepStrictEqual(problem("---\nstatus: []\n---\n"), { line: 2, text: "status: []", problem: "A tag needs at least one value." });
-  assert.deepStrictEqual(problem("---\nstatus: [a]\nStatus: [b]\n---\n"), { line: 3, text: "Status: [b]", problem: "There's already a tag called status." });
-  assert.deepStrictEqual(problem("---\nstatus: [Done, done]\n---\n"), { line: 2, text: "status: [Done, done]", problem: "Done is there twice." });
-  assert.deepStrictEqual(problem("---\nbad!: [a]\n---\n"), {
-    line: 2,
-    text: "bad!: [a]",
-    problem: "A tag's name holds letters, digits, spaces, _ and -, and starts and ends with a letter or a digit.",
-  });
-  n += 11;
+  // The limits, and a list whole, as the worker refuses a manifest's.
+  const def = (name, values, desc) => ({ name, values, ...(desc === undefined ? {} : { desc }) });
+  const values = (count) => Array.from({ length: count }, (_, i) => `v${i}`);
+  assert.equal(tags.tagProblem(def("s", values(tags.VALUES_MAX)), []), null);
+  assert.equal(tags.tagProblem(def("s", values(tags.VALUES_MAX + 1)), []), `A tag can have ${tags.VALUES_MAX} values at most.`);
+  assert.equal(tags.tagProblem(def("s", ["a"], "x".repeat(tags.DESC_MAX)), []), null);
+  assert.equal(tags.tagProblem(def("s", ["a"], "状".repeat(tags.DESC_MAX)), []), null, "characters, not UTF-16 units");
+  assert.equal(tags.tagProblem(def("s", ["a"], "x".repeat(tags.DESC_MAX + 1)), []), `What a tag's values mean can be ${tags.DESC_MAX} characters at most.`);
+  const many = Array.from({ length: tags.TAGS_MAX }, (_, i) => def(`t${i}`, ["a"]));
+  assert.equal(tags.listProblem(many), null);
+  assert.equal(tags.listProblem([...many, def("one more", ["a"])]), `A workspace can have ${tags.TAGS_MAX} tags at most.`);
+  assert.equal(tags.listProblem([def("status", ["a"]), def("Status", ["b"])]), "Status: There's already a tag called status.");
+  assert.equal(tags.listProblem([]), null);
+  n += 9;
 }
 
 console.log(`tags: ${n} checks passed`);

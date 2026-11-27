@@ -27,6 +27,7 @@
 //              DELETE /api/agent/doc?path=&v=[&dry=1]
 //              POST   /api/agent/move               {from, to, dryRun?}
 //              POST   /api/agent/tag                {path, set: {<tag>: value | null}, dryRun?}
+//              POST   /api/agent/tags               {name, values, dryRun?}: a tag, or values, added
 //   comment    POST   /api/agent/comments           {path, on, body, v?, dryRun?} | {path, thread, body, dryRun?}
 //              DELETE /api/agent/comments?path=&thread=[&dry=1]
 //   publish    PUT    /api/agent/pages              {path, slug?, title?, desc?, dryRun?}
@@ -57,7 +58,7 @@ import { deleteComment, getComments, postComment } from "./agentComments";
 import { deleteDoc, getDoc, getFind, getSearch, getTree, postMove, putDoc } from "./agentDocs";
 import { getLinks } from "./agentLinks";
 import { deletePage, getPages, putPage } from "./agentPages";
-import { getTags, postTag } from "./agentTags";
+import { getTags, postTag, postTags } from "./agentTags";
 import { Places } from "./agentPlace";
 import {
   AGENT_TOKEN_ID_RE,
@@ -156,7 +157,7 @@ const ROUTES: Record<string, Partial<Record<string, [Scope, Handler, PathIn]>>> 
   search: { GET: ["read", getSearch, "self"] },
   links: { GET: ["read", getLinks, "query"] },
   pages: { GET: ["read", getPages, "self"], PUT: ["publish", putPage, "body"], DELETE: ["publish", deletePage, "self"] },
-  tags: { GET: ["read", getTags, "self"] },
+  tags: { GET: ["read", getTags, "self"], POST: ["edit", postTags, "self"] },
   tag: { POST: ["edit", postTag, "body"] },
 };
 

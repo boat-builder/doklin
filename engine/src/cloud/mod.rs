@@ -13,6 +13,7 @@
 //! unit.rs       Unit<R>: one section and its manifest — the cycle, fold_public
 //! space.rs      where a workspace's sections are on disk, and their markers
 //! manifest.rs   the wire types (the manifest, the public map) + their grammar
+//! tags.rs       the tag list the manifest holds: its rules, and the changes queued
 //! remote.rs     the Remote trait; HttpRemote (the real worker)
 //! flows.rs      bind + upload, download, wipe — generic, tested
 //! invite.rs     the invite code and the paste blob — the grammar, and the
@@ -47,6 +48,7 @@ pub(crate) mod scan;
 // The versioner asks which folders are sections of their own.
 pub(crate) mod space;
 pub mod status;
+pub mod tags;
 mod terminal;
 #[cfg(test)]
 mod tests;
@@ -76,6 +78,7 @@ use engine::{Engine, EngineCmd, EngineConfig, Exit, PublishRequest, SpacesChange
 use manifest::{clean_name, PublicKind};
 use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
+use tags::{TagDef, TagOp};
 use status::{
     emit_statuses, snapshot, AgentAdded, AgentLogin, CloudStatus, DeviceCode, HeldWorkspace, Invited, PageLinkCopy,
     People, LinkTarget, Phase, Probe, RecentFiles, Redeemed, Removed, SpaceStatus, StatusTable, WorkspaceDocument,
@@ -1444,6 +1447,29 @@ pub async fn cloud_set_root(core: &Arc<Core>, root: String, slug: Option<String>
         inner.engines.get(&root).map(|h| h.tx.clone()).ok_or_else(|| "that workspace isn't connected".to_string())
     })?;
     ask(tx, |reply| EngineCmd::SetRoot { slug, reply }).await
+}
+
+/* ---------- The tag list ---------- */
+
+/// Put a tag in the workspace's list: the tag that was `at` — or a new one,
+/// when none is called that — becomes `def`, in its place. Queued, and rides
+/// the next won manifest write, so it works offline; a change of the same
+/// tag on another device at once, and the later one wins. Renaming a tag or
+/// a value here changes no note: the app rewrites the notes that have it.
+pub async fn cloud_set_tag(core: &Arc<Core>, root: String, at: String, def: TagDef) -> Result<(), String> {
+    let tx = with_inner(core, |inner| {
+        inner.engines.get(&root).map(|h| h.tx.clone()).ok_or_else(|| "that workspace isn't connected".to_string())
+    })?;
+    ask(tx, |reply| EngineCmd::Tag { op: TagOp::Set { at, def }, reply }).await
+}
+
+/// Take a tag out of the workspace's list. The notes that have it keep their
+/// line, which is then plain frontmatter.
+pub async fn cloud_remove_tag(core: &Arc<Core>, root: String, name: String) -> Result<(), String> {
+    let tx = with_inner(core, |inner| {
+        inner.engines.get(&root).map(|h| h.tx.clone()).ok_or_else(|| "that workspace isn't connected".to_string())
+    })?;
+    ask(tx, |reply| EngineCmd::Tag { op: TagOp::Remove { name }, reply }).await
 }
 
 /* ---------- Links ---------- */

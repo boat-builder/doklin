@@ -228,14 +228,17 @@ GET links?path=[&from=1][&to=1]  {path, from?: [{words, path} | {words, closed: 
     documents; to: the documents this agent's person can open that link here (D1 `links`)
 GET pages  {pages: [{slug, url, kind: document|folder, path, title?, desc?, home?, by?, byName?,
     at, missing?}], notListed?}
-GET tags  {note: "Library/Tags", exists, tags: [{name, values}]}
+GET tags  {tags: [{name, values, desc?}]}: the shared manifest's list
 edit:
 PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → {kind, path, version,
        file, rev, size, created, unchanged?, htmlBehind?}; 409 {rev}; 413 > 25 MB. Markdown: the
        sidecar's link records in the same commit (cloud-people-agents.md, *Links between documents*)
 DELETE doc?path=&v=[&dry=1]  document, or one version → {kind, path, versions, stillPublic, threadsRemoved?}
 POST   tag {path, set: {<tag>: value | null}, dryRun?} → {path, version, rev, tags, unchanged?}; a
-       note's markdown, never the list itself
+       note's markdown
+POST   tags {name, values, dryRun?} → {tag, added, created?, unchanged?}: a new tag at the end of the
+       list, or values at the end of a tag's; one it has, in any case, is left. Never a rename or
+       a removal
 POST   move {from, to, dryRun?}  document/folder; to ending in /, or a section's own folder,
        = into → {kind, from, to, files, unpublished?}. A section's own folder
        (`Library`, `Private`, `Restricted/<f>`) never moves → 400. Between two sections:
@@ -265,7 +268,7 @@ DELETE pages?path= | ?slug= → {stopped: [...]}; a path in no section that is a
 | `comments` | 400 | a write would drop, change or add a comment marker, or lose an html thread's element; `threads`, `added` |
 | `tag_value` | 400 | a write or `tag` gives a listed tag a value the list lacks, or more than one; `tag`, `values` |
 | `no_tag` | 400 | `tag` or `where` names a tag the list lacks; `tags` |
-| `tag_list` | 400 | a write of the list leaves a line of its block that isn't a tag; `line` |
+| `tag_list` | 400 | `tags` would break the list's rules: a name, a value, the most it can hold |
 
 There are no plain files: only documents sync (`syncs`, `src/layout.ts`). A
 path is a document's stem (`plan`) or a version's full name (`plan.md`,
@@ -347,6 +350,10 @@ PUT    pages  {space?, path, kind, slug?, title?, desc?} → 201|200 {slug, url,
        created}; path "" + folder = the whole section
 DELETE pages?slug=  in whichever section of theirs holds it; elsewhere or nowhere → 404
 PUT    home  {slug | null} → {home}; a page of the shared workspace (another section's → 409)
+PUT    tags  {at, tag: {name, values, desc?}} → {tags, etag}: the tag that was `at` (any case), or a
+       new one at the end, is now `tag`, trimmed, in its place; another of its name goes. 400 with
+       the app's sentence (src/tags.ts `tagProblem`); renames no note
+DELETE tags?name=  → {tags, etag}; 404 none of that name
 ```
 
 Shared with the document API, never copied: `commit.ts`; `changes.ts`
@@ -401,7 +408,7 @@ One of those paths that reaches the worker names nothing: a 404, no bucket read.
 
 ```
 workspace.json   {id, name, createdAt, createdBy: {deviceId, deviceName}}; create-only; bound iff present
-manifest.json    manifest v4; CAS on etag
+manifest.json    manifest v5; CAS on etag
 blobs/<fileId>/<hash>   immutable; hash = sha256 hex prefix, 16–64 chars
 versions/index.json     {version, horizonDays, snapshots: [{id, ts, device, reason, files, bytes,
                         digest, pinned?, label?, restoredFrom?}]}; CAS on etag
@@ -416,11 +423,11 @@ Caps: file 25 MB; manifest 4 MB, 5000 files, 10,000 tombstones, 5000 public
 entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
 `^[a-z0-9][a-z0-9_-]{2,63}$`.
 
-## Manifest v4 (`src/manifest.ts` ⇄ `engine/src/cloud/manifest.rs`)
+## Manifest v5 (`src/manifest.ts` ⇄ `engine/src/cloud/manifest.rs`)
 
 ```json
 {
-  "version": 4, "name": "Notes", "seq": 812,
+  "version": 5, "name": "Notes", "seq": 812,
   "files": { "f-3kq8x1": { "path": "Projects/plan.md", "rev": 7, "hash": "9c1e…", "size": 4310,
                             "mtime": 1757000000000, "by": "m-1a2b3c4d" } },
   "tombstones": { "f-old": { "path": "Scratch.md", "rev": 3, "ts": 1756800000000, "by": "m-1a2b3c4d" } },
@@ -428,7 +435,10 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
     "k7m2p9qx": { "kind": "file", "file": "f-3kq8x1", "path": "Projects/plan.md", "by": "…", "at": 1757000000000 },
     "roadmap":  { "kind": "dir", "path": "Projects/Roadmap", "title": "Roadmap", "desc": "…", "by": "…", "at": 1757000000000 },
     "home":     { "kind": "file", "file": "f-77a1b2", "path": "Home.md", "root": true, "by": "…", "at": 1757000000000 }
-  }
+  },
+  "tags": [
+    { "name": "status", "values": ["Todo", "Doing", "Done"], "desc": "Where a task stands." }
+  ]
 }
 ```
 
@@ -454,6 +464,12 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   sentence. The worker's own writes (`src/commit.ts`) leave out such entries a
   stored manifest still has — giving up the address of a page they drop — and
   every read (`src/workspace.ts`) treats them as absent.
+- `tags` is the workspace's tag list, in order, the shared manifest's alone (a
+  space's with any → `400`). PUT holds it to the app's rules (`listProblem`,
+  `src/tags.ts` ⇄ `engine/src/cloud/tags.rs`, **change both**): each name and
+  value, ≥ 1 value, no name or value twice in any case, ≤ 50 tags of ≤ 50
+  values, `desc` ≤ 1000 characters. Every writer keeps it as it found it but
+  for its own change, over the list as it is then: the later change wins.
 - Other `version` → `426`, sentence names which side is behind.
 
 ## D1 (`src/schema.ts`, schema 12)

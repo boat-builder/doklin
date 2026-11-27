@@ -14,14 +14,17 @@
 // the note's, shown marked and never dropped. Matching is case-insensitive
 // everywhere, and what shows is the list's spelling.
 //
-// The iPhone ports this (ios/DoklinKit/Sources/DoklinKit/Markdown/Tags.swift)
-// and the Mac's search reads a note's lines in Rust (src-tauri/src/tags.rs).
-// All three are held to verify-harness/tags-fixture.json: change all three.
+// The iPhone ports this (ios/DoklinKit/Sources/DoklinKit/Markdown/Tags.swift),
+// the Mac's search reads a note's lines in Rust (src-tauri/src/tags.rs), and
+// the sync engine checks and changes the list in Rust
+// (engine/src/cloud/tags.rs). All four are held to
+// verify-harness/tags-fixture.json: change all four.
 
 import { splitFrontmatter } from "./frontmatter";
 
-/** A tag of the list: its name, and the values a note can have, in order. */
-export type TagDef = { name: string; values: string[] };
+/** A tag of the list: its name, the values a note can have, in order, and
+ *  what they mean, for the people and agents who set them. */
+export type TagDef = { name: string; values: string[]; desc?: string };
 
 /** An unindented `key: …` line of a block. `value` is null when the line
  *  isn't a pair: an empty value, a list or map, a block scalar, or a line
@@ -44,8 +47,14 @@ export const TAG_NOTE = "Tags.md";
 export const TAG_NOTE_BODY =
   "The workspace's tags. Each line at the top is a tag and the values a note can have. Say here what each value means, for the people and agents who set them.\n";
 
+// The engine reads these from here (engine/build.rs): keep each on one line
+// in exactly this shape.
 export const NAME_MAX = 40;
 export const VALUE_MAX = 60;
+export const DESC_MAX = 1000;
+/** Tags in a workspace's list, and values in a tag, at most. */
+export const TAGS_MAX = 50;
+export const VALUES_MAX = 50;
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const length = (s: string) => [...s].length;
@@ -325,39 +334,6 @@ export function parseTagList(text: string): TagDef[] {
   return out;
 }
 
-/** The first line of the list's block that isn't a tag it lists, with why,
- *  in a sentence: what the worker refuses an agent's write of the list for.
- *  Null when every line is one. `line` counts from the file's first line. */
-export function listProblem(text: string): { line: number; text: string; problem: string } | null {
-  const block = blockOf(text);
-  if (!block) return null;
-  const listed: TagDef[] = [];
-  const at = (from: number, problem: string) => {
-    const line = block.lines.find((l) => l.from === from)!;
-    return { line: text.slice(0, from).split("\n").length, text: line.text, problem };
-  };
-  const shape = "Write a tag and its values as status: [Todo, Doing, Done].";
-  let covered = block.start;
-  for (const entry of block.entries) {
-    const stray = block.lines.find((l) => l.from >= covered && l.from < entry.from && l.text.trim() !== "");
-    if (stray) return at(stray.from, shape);
-    covered = entry.end;
-    if (entry.run) return at(entry.from, "Its values go in brackets on its own line, as status: [Todo, Doing, Done].");
-    const values = flowList(entry.rest);
-    if (!values) return at(entry.from, shape);
-    if (values.length === 0) return at(entry.from, "A tag needs at least one value.");
-    const named = nameProblem(entry.key, listed);
-    if (named) return at(entry.from, named);
-    for (let i = 0; i < values.length; i += 1) {
-      const wrong = valueProblem(values[i], values.slice(0, i));
-      if (wrong) return at(entry.from, wrong);
-    }
-    listed.push({ name: entry.key, values });
-  }
-  const stray = block.lines.find((l) => l.from >= covered && l.text.trim() !== "");
-  return stray ? at(stray.from, shape) : null;
-}
-
 /** Whether the list's block holds lines that aren't tags it lists. */
 export function otherListLines(text: string): boolean {
   const block = blockOf(text);
@@ -402,6 +378,51 @@ export function valueProblem(value: string, others: string[]): string | null {
   const twin = others.find((o) => same(o, value));
   return twin ? `${twin} is there twice.` : null;
 }
+
+/** Why `def` can't be a tag beside the others of `list` (a sentence), or
+ *  null. `except` is the tag being renamed, whose own name doesn't count. */
+export function tagProblem(def: TagDef, list: TagDef[], except?: string): string | null {
+  const named = nameProblem(def.name, list, except);
+  if (named) return named;
+  if (def.values.length === 0) return "A tag needs at least one value.";
+  if (def.values.length > VALUES_MAX) return `A tag can have ${VALUES_MAX} values at most.`;
+  for (let i = 0; i < def.values.length; i += 1) {
+    const wrong = valueProblem(def.values[i], def.values.slice(0, i));
+    if (wrong) return wrong;
+  }
+  if (def.desc !== undefined && length(def.desc) > DESC_MAX) return `What a tag's values mean can be ${DESC_MAX} characters at most.`;
+  return null;
+}
+
+/** Why a workspace's list can't be `list` (a sentence naming the tag), or
+ *  null: what the worker refuses a manifest's `tags` for. */
+export function listProblem(list: TagDef[]): string | null {
+  if (list.length > TAGS_MAX) return `A workspace can have ${TAGS_MAX} tags at most.`;
+  for (let i = 0; i < list.length; i += 1) {
+    const wrong = tagProblem(list[i], list.slice(0, i));
+    if (wrong) return `${list[i].name}: ${wrong}`;
+  }
+  return null;
+}
+
+/* ---------- Changing the list ---------- */
+
+// Whoever changes the list says what one tag is now, or that it is gone,
+// over the list as it is when the change lands: two changes of one tag at
+// once, and the later one wins. The engine folds the changes a device has
+// queued the same way (engine/src/cloud/tags.rs): change both.
+
+/** The list with the tag that was `at` now `def` — in its place, or at the
+ *  end when no tag is called `at` — and no other tag of `def`'s name. */
+export function withTag(list: TagDef[], at: string, def: TagDef): TagDef[] {
+  const i = list.findIndex((d) => same(d.name, at));
+  const kept = list.filter((d, j) => j === i || !same(d.name, def.name));
+  const k = i === -1 ? -1 : kept.indexOf(list[i]);
+  return k === -1 ? [...kept, def] : kept.map((d, j) => (j === k ? def : d));
+}
+
+/** The list without the tag called `name`. */
+export const withoutTag = (list: TagDef[], name: string): TagDef[] => list.filter((d) => !same(d.name, name));
 
 /* ---------- Search ---------- */
 

@@ -28,6 +28,7 @@ use super::remote::*;
 use super::scan::{hash16, now_ms, random_id, scan_local};
 use super::space::{self, LIBRARY_DIR, RESERVED_DIRS};
 use super::status::*;
+use super::tags::{list_problem, TagDef, TagOp, TAGS_MAX};
 use super::versions::{snapshot_id, VersionsEntry, VersionsIndex, CLOUD_GC_GRACE_MS, NO_INDEX};
 use crate::versions::store::{
     digest_of, hash_full, FileEntry, Index, Reason, Snapshot, SnapshotRow, Store, STORE_VERSION,
@@ -808,6 +809,15 @@ impl Remote for FakeRemote {
                 return Err(RemoteError::Offline("cut short".into()));
             }
             b.put_manifest_calls += 1;
+            // The worker's check of the tag list (manifest.ts): one that
+            // breaks the app's rules, or any in a space's manifest, is not
+            // stored.
+            if let Some(problem) = list_problem(&manifest.tags) {
+                return Err(RemoteError::Other(format!("invalid tags: {}", problem)));
+            }
+            if this.space.is_some() && !manifest.tags.is_empty() {
+                return Err(RemoteError::Other("The tags are the workspace's, kept with Library.".into()));
+            }
             if b.reject_schema {
                 return Err(RemoteError::Outdated(format!(
                     "manifest version {} is newer than this worker understands",
@@ -2340,6 +2350,152 @@ async fn custom_slug_race_suffixes_the_loser() {
     assert_eq!(public["plan"].path, "a.md");
     assert!(d.engine.shared().state.public_ops.is_empty());
     let _ = c;
+}
+
+/* ---------- The tag list ---------- */
+
+fn tag(name: &str, values: &[&str]) -> TagDef {
+    TagDef { name: name.into(), values: values.iter().map(|v| v.to_string()).collect(), desc: None }
+}
+
+fn set_tag(at: &str, def: &TagDef) -> TagOp {
+    TagOp::Set { at: at.into(), def: def.clone() }
+}
+
+#[tokio::test]
+async fn a_tag_made_on_one_device_shows_at_once_and_rides_the_next_write_to_the_other() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "# doc\n");
+    a.cycle().await;
+    b.cycle().await;
+
+    let status = TagDef { desc: Some("Where a task stands.".into()), ..tag("status", &["Todo", "Doing", "Done"]) };
+    a.engine.queue_tag(set_tag("status", &status)).unwrap();
+    assert_eq!(a.status().tags, vec![status.clone()], "shown before any write");
+    assert!(manifest_of(&be).tags.is_empty());
+
+    let before = be.lock().unwrap().put_manifest_calls;
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().put_manifest_calls, before + 1, "a tag alone is a write");
+    assert_eq!(manifest_of(&be).tags, vec![status.clone()]);
+    assert!(a.engine.shared().state.tag_ops.is_empty(), "carried, so spent");
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().put_manifest_calls, before + 1, "and then nothing more");
+
+    b.cycle().await;
+    assert_eq!(b.status().tags, vec![status]);
+    // A manifest with no tags says nothing of them: a space's never has any.
+    assert!(!serde_json::to_string(&Manifest::default()).unwrap().contains("tags"));
+}
+
+#[tokio::test]
+async fn two_changes_of_one_tag_at_once_and_the_later_wins_and_every_other_write_keeps_the_list() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "# doc\n");
+    a.engine.queue_tag(set_tag("status", &tag("status", &["Todo", "Done"]))).unwrap();
+    a.cycle().await;
+    b.cycle().await;
+
+    // Neither has seen the other's: Bob's write lands second, over Alice's.
+    a.engine.queue_tag(set_tag("status", &tag("status", &["Todo", "Doing", "Done"]))).unwrap();
+    a.engine.queue_tag(set_tag("area", &tag("area", &["Web"]))).unwrap();
+    b.engine.queue_tag(set_tag("STATUS", &tag("Status", &["Todo", "Done", "Shipped"]))).unwrap();
+    a.cycle().await;
+    b.cycle().await;
+    assert_eq!(
+        manifest_of(&be).tags,
+        vec![tag("Status", &["Todo", "Done", "Shipped"]), tag("area", &["Web"])],
+        "Bob's status in its place, and Alice's new tag kept"
+    );
+    a.cycle().await;
+    assert_eq!(a.status().tags, manifest_of(&be).tags);
+
+    // A device that only edits a note keeps the list as it is.
+    let mut c = device("Carol", &be);
+    c.cycle().await;
+    c.write("doc.md", "# doc, edited\n");
+    c.cycle().await;
+    assert_eq!(manifest_of(&be).tags.len(), 2);
+}
+
+#[tokio::test]
+async fn a_rename_takes_the_tags_place_and_a_removal_and_an_offline_change_are_carried() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("doc.md", "# doc\n");
+    a.engine.queue_tag(set_tag("status", &tag("status", &["Todo", "Done"]))).unwrap();
+    a.engine.queue_tag(set_tag("priority", &tag("priority", &["p1", "p2"]))).unwrap();
+    a.cycle().await;
+
+    // Cut short: the changes stay queued and shown, and go with the next write.
+    be.lock().unwrap().fail_manifest_puts = 1;
+    a.engine.queue_tag(set_tag("Status", &tag("Stage", &["Todo", "Done"]))).unwrap();
+    a.engine.queue_tag(TagOp::Remove { name: "PRIORITY".into() }).unwrap();
+    a.engine.queue_tag(set_tag("owner", &tag("owner", &["Sam"]))).unwrap();
+    assert!(a.engine.cycle().await.is_err());
+    assert_eq!(a.engine.shared().state.tag_ops.len(), 3);
+    let after = vec![tag("Stage", &["Todo", "Done"]), tag("owner", &["Sam"])];
+    assert_eq!(a.status().tags, after);
+    assert_eq!(manifest_of(&be).tags.len(), 2, "nothing stored yet");
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).tags, after);
+    assert!(a.engine.shared().state.tag_ops.is_empty());
+}
+
+#[tokio::test]
+async fn a_tag_change_the_worker_would_refuse_is_refused_here_in_a_sentence() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("doc.md", "# doc\n");
+    a.engine.queue_tag(set_tag("status", &tag("status", &["Todo"]))).unwrap();
+    a.engine.queue_tag(set_tag("priority", &tag("priority", &["p1"]))).unwrap();
+    a.cycle().await;
+
+    let refused = |a: &mut Device, op: TagOp| a.engine.queue_tag(op).unwrap_err();
+    assert_eq!(refused(&mut a, set_tag("area", &tag("Status", &["x"]))), "There's already a tag called status.");
+    assert_eq!(refused(&mut a, set_tag("priority", &tag("STATUS", &["x"]))), "There's already a tag called status.", "a rename onto another tag");
+    assert_eq!(refused(&mut a, set_tag("area", &tag("area", &[]))), "A tag needs at least one value.");
+    assert_eq!(refused(&mut a, set_tag("area", &tag("area", &["Web", "web"]))), "Web is there twice.");
+    assert!(refused(&mut a, set_tag("area", &tag("a:b", &["x"]))).starts_with("A tag's name holds letters"));
+    assert_eq!(refused(&mut a, TagOp::Remove { name: "area".into() }), "There's no tag called area.");
+    assert!(a.engine.shared().state.tag_ops.is_empty(), "nothing queued");
+
+    // What a person typed is trimmed; a tag's own name in another case is a rename.
+    a.engine.queue_tag(set_tag(" status ", &TagDef { desc: Some("  ".into()), ..tag(" Status", &[" Todo ", "Done"]) })).unwrap();
+    assert_eq!(a.status().tags[0], tag("Status", &["Todo", "Done"]));
+
+    // A full list takes no more, and a change of a tag in it still goes.
+    for i in 2..TAGS_MAX {
+        a.engine.queue_tag(set_tag(&format!("t{}", i), &tag(&format!("t{}", i), &["a"]))).unwrap();
+    }
+    assert_eq!(a.status().tags.len(), TAGS_MAX);
+    assert_eq!(refused(&mut a, set_tag("more", &tag("more", &["a"]))), format!("A workspace can have {} tags at most.", TAGS_MAX));
+    a.engine.queue_tag(set_tag("priority", &tag("priority", &["p1", "p2"]))).unwrap();
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).tags.len(), TAGS_MAX, "stored, so the worker took it");
+}
+
+#[tokio::test]
+async fn a_manifest_of_an_older_format_is_written_again_in_this_one_by_the_first_sync_so_its_tags_can_be_kept() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("doc.md", "# doc\n");
+    a.cycle().await;
+    {
+        let mut b = be.lock().unwrap();
+        b.manifest.version = MANIFEST_VERSION - 1;
+        b.etag += 1;
+    }
+    let before = be.lock().unwrap().put_manifest_calls;
+    a.cycle().await;
+    assert_eq!(manifest_of(&be).version, MANIFEST_VERSION, "with nothing else to say");
+    assert_eq!(be.lock().unwrap().put_manifest_calls, before + 1);
+    a.cycle().await;
+    assert_eq!(be.lock().unwrap().put_manifest_calls, before + 1);
 }
 
 /* ---------- The flows ---------- */

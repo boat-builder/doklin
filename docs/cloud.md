@@ -5,7 +5,7 @@ database on the user's own account. Connected = the folder's documents are
 backed up and synced on every Mac holding it; publishing is a flag in the
 synced manifest, rendered by the worker from the synced files.
 
-- [cloud-worker/README.md](../cloud-worker/README.md) — wire contract: routes, bucket, D1, manifest v4, auth.
+- [cloud-worker/README.md](../cloud-worker/README.md) — wire contract: routes, bucket, D1, manifest v5, auth.
 - [cloud-publishing.md](cloud-publishing.md) — public pages.
 - [cloud-people-agents.md](cloud-people-agents.md) — members, presence, leases, agents, document API, CLI, limits.
 - [versioning.md](versioning.md) — history (the cloud mirrors the version store).
@@ -128,7 +128,7 @@ synced manifest, rendered by the worker from the synced files.
 1. fetch the manifest since our etag;
 2. `apply_remote`: downloads, renames, tombstoned deletions to the Trash; three-way merge (`merge.rs`, diffy) where both sides moved; conflict copy `Name (conflict — Alice, Jul 11 14.32).md` on overlap, binary content or no base. A sidecar is merged by its records, never conflicts and never gets a copy (`engine/src/sidecar.rs` ⇄ `mergeMeta` in `src/web/merge.ts`, **change both**; `comments-fixture.json`'s `mergeMeta` holds them alike). When both sides file one link destination under two different files, the one whose file is in any section's manifest wins, else the lowest id. A document's conflict copy gets a copy of its sidecar, made once the pass is done, so it holds both sides' records. Identical bytes on both sides are adopted as synced, never merged;
 3. `scan_local` + `stage_local`; mass-delete valve: > 30 % of files and ≥ 5 gone in one scan → hold, phase `pending-deletes`, wait for `cloud_confirm_deletes`. Many-new-documents valve (`Engine::weigh_new`, from the surveys, across units): `manyNew` (200) or more new documents in one pass — not renames, not moves between sections — are held, phase `pending-adds`, `cloud-pending-adds` once; `cloud_confirm_adds {sync: true}` sends them (and lifts this device's bulk wait for the day), `false` leaves them until more arrive or *Sync now*. Held in memory, found again after a restart;
-4. `build_manifest` + `fold_public`;
+4. `build_manifest` + `fold_public` + `fold_tags`; a manifest of an older format is written again even with nothing else to say, so the worker's own writes (which take only this one) can change it;
 5. upload blobs, then CAS the manifest; a lost race refetches and redoes, 4 attempts. A new file's id is written down before its bytes go (`pending_new`) and each upload once it lands (`uploaded`, 12 h), so a lost race, a batch, a quit or a crash sends nothing twice and leaves nothing under an id no manifest names.
 
 **Traps.**
@@ -136,6 +136,7 @@ synced manifest, rendered by the worker from the synced files.
 - A cycle that holds bulk work leaves `Unit::owes`; the task comes back for it when the bucket holds a batch (`bulk_due`), or at the reset while bulk waits.
 - Every fallible step lives in `cycle_inner` so every exit funnels through `pass`'s one status report; a `?` in `pass` skips offline/revoked reporting.
 - `409 {taken}` on a manifest (`RemoteError::Taken`): the queued page is dropped, `cloud-address-taken` says so, the rest of the cycle goes again.
+- **The tag list** is the shared manifest's `tags` (`engine/src/cloud/tags.rs`). `cloud_set_tag {root, at, def}` / `cloud_remove_tag {root, name}` queue a `TagOp` in the shared unit's `tag_ops`, in order, refused in a sentence when the list after it would break the worker's rules (a refused manifest stops sync); the status's `tags` is the list with them made (`effective_tags`), and each cycle folds them over the list as the remote has it (`folded`, ⇄ `withTag`/`withoutTag` in `src/tags.ts`, **change both**): the later change of one tag wins. One that would overfill the list is passed over. Nothing here renames a note.
 - A missing root (unmounted, renamed) touches nothing: phase `error`.
 - After a merge the stored disk snapshot is left stale on purpose so the next scan re-hashes and pushes the merged bytes. Refreshing it silently drops the push.
 - Tombstones expire after 30 days: `TOMBSTONE_TTL_MS` in `engine.rs` ⇄ `commit.ts`. **Change both.** A move keeps `mtime` in both (`staged.moves` ⇄ `Tx.move`).
@@ -178,7 +179,7 @@ synced manifest, rendered by the worker from the synced files.
 - `<app_data_dir>/cloud.json`: `{version, device: {id, name}, workspaces: [{root, domain, endpoint, wsId, name, token}]}`. One entry per root and per domain; parsed by shape (malformed = nothing connected; an entry with no token = not connected). It is read and written only by `read_cloud_file`/`write_cloud_file` (`cloud/config.rs`).
 - Where the token lives: in that entry on a Mac. An app whose `Host::secrets` keeps sign-ins (the iPhone: its Keychain, by `wsId`, this device only, never in a backup) gets each token there and finds `token: ""` in the file; a workspace dropped from the file has its kept sign-in deleted with it. A sign-in the keeper cannot read just now leaves that entry out of the engine and writes it back untouched. The phone keeps its engine files out of backups, so a restored phone has no device id or entries either, and joins again as a new device.
 - `<root>/.doklin/cloud.json`: the marker `{domain, wsId, layout}` (`layout`: *The move into Library*). Never a secret (a copied folder must not carry a credential). Hidden, so tree walk, search and scan skip it. A marker with no `cloud.json` entry → offer *Resume*.
-- `<app_data_dir>/cloud/<wsId>/state.json` + `base/`: last applied manifest and etag, per-file synced state, queued public ops; merge bases. Each space's are under `spaces/<spaceId>/` in it.
+- `<app_data_dir>/cloud/<wsId>/state.json` + `base/`: last applied manifest and etag, per-file synced state, queued public ops and tag changes; merge bases. Each space's are under `spaces/<spaceId>/` in it.
 - `<folder>/.doklin/space.json`: a space's marker (*Sections*). No secret.
 
 ## Worker versions and updates

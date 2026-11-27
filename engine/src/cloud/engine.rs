@@ -42,6 +42,7 @@ use super::status::{
     documents_of, emit_statuses, CloudStatus, DirectoryPerson, Events, LeaseHolder, Phase, PresenceDevice, PublicPage,
     RecentFiles, SpaceStatus, StatusTable, UsageStatus, VersionsMirror, WorkspaceDocument, EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT,
 };
+use super::tags::TagOp;
 use super::unit::{lock, Ctx, MovedOut, PendingPublic, PublicOp, Survey, Unit, UnitConfig};
 use super::versions::{VersionsIndex, MIRROR_EVERY};
 use crate::versions::store::Snapshot as VersionSnapshot;
@@ -157,6 +158,11 @@ pub enum EngineCmd {
     },
     SetRoot {
         slug: Option<String>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// A change of the workspace's tag list.
+    Tag {
+        op: TagOp,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// The cloud version store, for the history rail's read-through: what
@@ -694,6 +700,7 @@ impl<R: Remote> Engine<R> {
                 horizon_days: mirror.and_then(|m| m.horizon_days),
             },
             public: self.public_pages(),
+            tags: self.shared().effective_tags(),
             presence: self.presence.clone(),
             leases: self.lease_holders(),
             spaces: self.space_statuses(),
@@ -1750,6 +1757,18 @@ impl<R: Remote> Engine<R> {
         Ok(())
     }
 
+    /* ----- the tag list: queued changes ----- */
+
+    /// Queue a change of the workspace's tag list, which the shared
+    /// workspace's manifest holds.
+    pub(crate) fn queue_tag(&mut self, op: TagOp) -> Result<(), String> {
+        let Some(shared) = self.units.get_mut(SHARED) else { return Err("that workspace isn't connected".into()) };
+        shared.queue_tag(op)?;
+        shared.poke = true;
+        self.refresh_status();
+        Ok(())
+    }
+
     /* ----- activity + presence ----- */
 
     pub(crate) fn set_activity(&mut self, abs_path: Option<String>) {
@@ -2270,6 +2289,10 @@ impl<R: Remote> Engine<R> {
                     }
                     Some(EngineCmd::SetRoot { slug, reply }) => {
                         let _ = reply.send(self.queue_set_root(slug));
+                        cycle_now = true;
+                    }
+                    Some(EngineCmd::Tag { op, reply }) => {
+                        let _ = reply.send(self.queue_tag(op));
                         cycle_now = true;
                     }
                     Some(EngineCmd::VersionsIndex { rel, reply }) => {

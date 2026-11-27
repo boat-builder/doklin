@@ -36,6 +36,8 @@ on:
       - "verify-harness/comments-fixture.json"
       - "verify-harness/flowchart-fixture.json"
       - "verify-harness/tags-fixture.json"
+      # The engine reads the tag list's limits from here (engine/build.rs).
+      - "src/tags.ts"
       - ".github/workflows/ios.yml"
   workflow_dispatch:
 

@@ -253,6 +253,21 @@ async function macWrites(files, { mtime = Date.now() } = {}) {
   throw new Error("the Mac's manifest write kept losing the race");
 }
 
+/** A person's change of the tag list, as their Mac writes it. */
+async function macTags(tags) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const current = await owner("/api/manifest");
+    const etag = current.headers.get("x-manifest-etag");
+    const manifest = await current.json();
+    manifest.tags = tags;
+    manifest.seq += 1;
+    const res = await owner("/api/manifest", { method: "PUT", headers: { "x-base-etag": etag, "content-type": "application/json" }, body: JSON.stringify(manifest) });
+    if (res.status === 200) return;
+    if (res.status !== 409 && res.status !== 412) throw new Error(`the Mac's manifest write failed: ${res.status} ${await res.text()}`);
+  }
+  throw new Error("the Mac's manifest write kept losing the race");
+}
+
 /* ---------- Running the binary ---------- */
 
 const COMMANDS = [
@@ -1400,14 +1415,16 @@ await check("links: a link written through the CLI keeps its document when that 
 /* 9 — tags                                                               */
 /* ====================================================================== */
 
-await check("tags: the list is Library/Tags; tag sets values from it and removes one, and a value it lacks is refused with the ones it has; ls and info show a document's tags; --where narrows ls and search, waiting for the index", async () => {
-  const LIST = "---\nstatus: [Todo, Doing, Done]\npriority: [p1, p2]\n---\nWhat the values mean.\n";
+await check("tags: a person's list, and tags add adds a tag or a value to it; tag sets values from it and removes one, and a value it lacks is refused with the ones it has; ls and info show a document's tags; --where narrows ls and search, waiting for the index", async () => {
+  await macTags([{ name: "status", values: ["Todo", "Doing", "Done"], desc: "Where a card stands.\nDone is shipped." }]);
   const made = [
-    await doklin(editorBox, ["write", "Library/Tags"], { input: LIST }),
+    await doklin(editorBox, ["tags", "add", "priority", "p1", "P1"]),
     await doklin(editorBox, ["write", "Library/Board/one"], { input: "# One\n\nThe first card.\n" }),
     await doklin(editorBox, ["write", "Library/Board/two"], { input: "---\nstatus: Doing\n---\n# Two\n" }),
   ];
-  const badList = await doklin(editorBox, ["edit", "Library/Tags", "--find", "priority: [p1, p2]", "--replace", "priority: p1"]);
+  const added = await doklin(editorBox, ["tags", "add", "Priority", "p2"]);
+  const addedWords = (await doklin(editorBox, ["tags", "add", "priority", "P2"], { tty: true })).out;
+  const readerAdds = await doklin(readerBox, ["tags", "add", "priority", "p3"]);
   const list = await doklin(readerBox, ["tags"]);
   const set = await doklin(editorBox, ["tag", "Library/Board/one", "status=doing", "priority=P1"]);
   const text = await doklin(editorBox, ["read", "Library/Board/one"]);
@@ -1428,12 +1445,15 @@ await check("tags: the list is Library/Tags; tag sets values from it and removes
   const tagsWords = (await doklin(editorBox, ["tags"], { tty: true })).out;
   const setWords = (await doklin(editorBox, ["tag", "Library/Board/two", "status=Done"], { tty: true })).out;
   const noneWords = (await doklin(editorBox, ["ls", "Library/Board", "--where", "status=Todo"], { tty: true })).out;
-  const gone = await Promise.all(["Library/Board/one", "Library/Board/two", "Library/Board/four", "Library/Tags"].map((d) => doklin(editorBox, ["rm", d])));
+  const gone = await Promise.all(["Library/Board/one", "Library/Board/two", "Library/Board/four"].map((d) => doklin(editorBox, ["rm", d])));
+  await macTags([]);
   const doingTag = { name: "status", value: "Doing", known: true };
   return {
-    "the list and two notes are written": made.every((r) => r.code === 0),
-    "a write that leaves a line of the list unreadable is refused, naming it": refused(badList, 2, /the tag list \(Library\/Tags\) can't hold line 3, "priority: p1"\./),
-    "tags: the list, and where it is": same(list.json, { note: "Library/Tags", exists: true, tags: [{ name: "status", values: ["Todo", "Doing", "Done"] }, { name: "priority", values: ["p1", "p2"] }] }),
+    "a tag is added, and two notes are written": made.every((r) => r.code === 0) && same(made[0].json, { tag: { name: "priority", values: ["p1"] }, added: ["p1"], created: true }),
+    "a value is added to a tag, as the list spells it": same(added.json, { tag: { name: "priority", values: ["p1", "p2"] }, added: ["p2"] }),
+    "…and one it has already is said so": addedWords.includes("priority has those already — p1 · p2. Nothing was written."),
+    "adding needs edit": refused(readerAdds, 4),
+    "tags: the list, with what its values mean": same(list.json, { tags: [{ name: "status", values: ["Todo", "Doing", "Done"], desc: "Where a card stands.\nDone is shipped." }, { name: "priority", values: ["p1", "p2"] }] }),
     "tag: the values as the list spells them": set.code === 0 && same(set.json, { path: "Library/Board/one", version: "md", rev: 2, tags: [doingTag, { name: "priority", value: "p1", known: true }] }),
     "…written at the top of the note": text.out === "---\nstatus: Doing\npriority: p1\n---\n# One\n\nThe first card.\n",
     "a value the list lacks is refused, saying the ones it has": refused(wrong, 2, /status takes Todo, Doing or Done, not "Shipped"/),
@@ -1448,7 +1468,7 @@ await check("tags: the list is Library/Tags; tag sets values from it and removes
     "search with a tag alone, any value": same(anyPriority.results, [{ path: "Library/Board/one", version: "md", matches: [] }]),
     "tag priority= removes it": same(removed.tags, [doingTag]),
     "a person reads ls with the tags": /^Library\/Board\/one  \[md\]  status: Doing\r?$/m.test(lsWords),
-    "…and the list": /The tags, from Library\/Tags:\r?\n  status    Todo · Doing · Done\r?\n  priority  p1 · p2/.test(tagsWords),
+    "…and the list": /The tags:\r?\n  status    Todo · Doing · Done\r?\n            Where a card stands\.\r?\n            Done is shipped\.\r?\n  priority  p1 · p2/.test(tagsWords),
     "…and what tag did": setWords.includes("Library/Board/two now has status: Done — revision 2."),
     "…and that nothing has it": noneWords.includes("No document here has status: Todo."),
     "and it is all removed again": gone.every((r) => r.code === 0),
