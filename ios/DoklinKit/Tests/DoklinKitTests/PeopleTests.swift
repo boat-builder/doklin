@@ -145,7 +145,7 @@ final class PeopleTests: XCTestCase {
          "phase":"idle","lastSyncMs":null,"error":null,"pendingDeletes":0,"pendingAdds":0,
          "usage":{"mode":"normal","cause":null,"today":0,"fleetToday":null,"cap":null,"plan":null,"resumesAt":null,"waiting":0,"liftable":false,"lifted":false},
          "me":"Ada","meId":"m-ada","can":[],
-         "workerVersion":17,"public":[],"presence":[],"leases":[],
+         "workerVersion":17,"public":[],"tags":[],"presence":[],"leases":[],
          "spaces":[
           {"id":"p-ada","kind":"private","name":"Private","path":"Private","by":"Ada","members":["m-ada"]},
           {"id":"s-fin","kind":"restricted","name":"Finance","path":"Restricted/Finance","by":"Ada","members":["m-ada","m-cy"]},

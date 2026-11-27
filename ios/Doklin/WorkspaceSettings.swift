@@ -148,8 +148,9 @@ struct WorkspaceBadge: View {
     }
 }
 
-/// A workspace's settings: how it syncs and on which plan, its people,
-/// agents and devices, its pages and history, and taking it off this iPhone.
+/// A workspace's settings: how it syncs and on which plan, its tags, its
+/// people, agents and devices, its pages and history, and taking it off this
+/// iPhone.
 struct SettingsView: View {
     let workspace: Workspace
     @Binding var path: [Route]
@@ -176,6 +177,9 @@ struct SettingsView: View {
                 plan
             } header: {
                 Text(workspace.domain)
+            }
+            Section {
+                row("Tags", "tag", .tags, count: workspace.tagList.count)
             }
             Section("People and access") {
                 row("People", "person.2", .people)

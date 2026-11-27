@@ -355,7 +355,8 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   and the workspace's tag list says which keys are tags, which values each
   takes and what they mean. The rules (what a pair is, how a line is written
   and quoted, names and values, how the list changes, the search's tokens)
-  are `src/tags.ts`'s, ported for the iPhone (`Markdown/Tags.swift`), read in
+  are `src/tags.ts`'s, ported for the iPhone (`Markdown/Tags.swift`, but for
+  how the list changes, which the engine does there), read in
   Rust for the Mac's search (`src-tauri/src/tags.rs`) and checked by the sync
   engine (`engine/src/cloud/tags.rs`), all held to
   `verify-harness/tags-fixture.json`: **change all four**.

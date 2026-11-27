@@ -428,7 +428,7 @@ final class NoteEditing {
         let meta = try? model.workspace.files.text(DocLinks.metaFile(of: model.path))
         let workspace = model.workspace
         head = Frontmatter.split(saved).head
-        shownTags = workspace.tagList.tags
+        shownTags = workspace.tagList
         await page.open(
             saved, meta: meta, path: model.path, name: model.title, workspace: workspace.name,
             documents: workspace.documents.documents, recent: workspace.recent?.files.map(\.path) ?? [], files: workspace.files,
@@ -533,14 +533,17 @@ final class NoteEditing {
         return false
     }
 
+    /// The workspace's tag list changed: the chips are drawn with it.
+    func tagsChanged() {
+        guard model.workspace.tagList != shownTags else { return }
+        shownTags = model.workspace.tagList
+        EditorPage.shared.head(head, tags: shownTags)
+    }
+
     /// Files of the workspace changed: when this note is one of them and
     /// not by this editing's hand, take the new text — or, with unsaved
     /// typing here, ask. True when the note is gone and editing is over.
     func heardChange() async -> Bool {
-        if model.workspace.tagList.tags != shownTags {
-            shownTags = model.workspace.tagList.tags
-            EditorPage.shared.head(head, tags: shownTags)
-        }
         guard model.isAffected(by: model.workspace.lastChanged) else { return false }
         if !model.exists {
             // Moved or removed on another device, or its folder left this

@@ -13,7 +13,7 @@ final class LimitsTests: XCTestCase {
         {"root":"/w","domain":"notes.example.com","endpoint":"https://notes.example.com","wsId":"w1","name":"Notes",
          "phase":"\(phase)","lastSyncMs":1000,"error":null,"pendingDeletes":0,"pendingAdds":\(pendingAdds),
          "usage":\(usage),"me":"Ada","meId":"m1","can":["work"],"superadmin":null,"workerVersion":20,
-         "public":[],"presence":[],"leases":[],"spaces":[]}
+         "public":[],"tags":[],"presence":[],"leases":[],"spaces":[]}
         """
         return try JSONDecoder().decode(CloudStatus.self, from: Data(json.utf8))
     }

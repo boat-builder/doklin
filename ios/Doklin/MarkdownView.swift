@@ -208,7 +208,6 @@ private struct RemovedBlocks: View {
 /// The YAML block at the top of a note, as it is, closed: what Doklin reads
 /// of it is the note's tags, shown as chips.
 struct FrontmatterView: View {
-    var title = "Frontmatter"
     let text: String
     @State private var open = false
 
@@ -220,7 +219,7 @@ struct FrontmatterView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 6)
         } label: {
-            Text(title)
+            Text("Frontmatter")
                 .font(.footnote)
                 .foregroundStyle(Theme.text3)
         }

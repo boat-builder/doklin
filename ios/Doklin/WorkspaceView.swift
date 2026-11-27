@@ -137,6 +137,8 @@ struct RouteView: View {
             SpaceAccessView(workspace: workspace, id: id)
         case .publishedPages:
             PublishedPagesView(workspace: workspace, route: $path)
+        case .tags:
+            TagsView(workspace: workspace)
         }
     }
 }

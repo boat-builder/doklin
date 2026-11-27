@@ -517,18 +517,13 @@ public final class Workspace: Identifiable {
     public private(set) var documents = DocumentIndex([])
     /// Moves whenever something is marked read here, so the dots follow.
     public private(set) var reads = 0
-    /// The workspace's tags, from its list's note in Library (Tagging.swift),
-    /// read again whenever files here change.
-    public internal(set) var tagList: TagList
 
     public nonisolated var id: String { root }
 
     init(root: String, device: Workspaces) {
-        let files = WorkspaceFiles(root: URL(fileURLWithPath: root))
         self.root = root
-        self.files = files
+        files = WorkspaceFiles(root: URL(fileURLWithPath: root))
         self.device = device
-        tagList = TagList.read(files)
     }
 
     public var status: CloudStatus? { device?.status(root) }
@@ -586,6 +581,11 @@ public final class Workspace: Identifiable {
         reads += 1
     }
 
+    /// Ask the engine for the status again, after a change that shows in it.
+    func refreshStatus() async {
+        await device?.refresh()
+    }
+
     /// Sync now rather than at the next poll.
     public func syncNow() async {
         try? await Engine.shared.run("cloud_sync_now", ["root": .string(root)])
@@ -624,7 +624,6 @@ public final class Workspace: Identifiable {
 
     func changed(_ paths: [String]) {
         lastChanged = Set(paths.map { $0.lowercased() })
-        readTags()
         changes += 1
         // A rename or a move elsewhere changes where this note's links lead.
         Task { await loadDocuments() }

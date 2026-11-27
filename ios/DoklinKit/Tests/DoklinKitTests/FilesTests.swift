@@ -229,7 +229,7 @@ final class AudienceTests: XCTestCase {
          "lastSyncMs":1,"error":null,"pendingDeletes":0,"pendingAdds":0,
          "usage":{"mode":"normal","cause":null,"today":0,"fleetToday":null,"cap":null,"plan":null,"resumesAt":null,"waiting":0,"liftable":false,"lifted":false},
          "me":"Ada","meId":"m-1","can":[],"workerVersion":17,
-         "public":[],"presence":[],"leases":[],"spaces":\(spaces)}
+         "public":[],"tags":[],"presence":[],"leases":[],"spaces":\(spaces)}
         """
         return try JSONDecoder().decode(CloudStatus.self, from: Data(json.utf8))
     }

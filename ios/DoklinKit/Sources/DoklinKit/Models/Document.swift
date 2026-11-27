@@ -68,21 +68,17 @@ public final class DocumentModel {
 
     /* ---------- Tags ---------- */
 
-    /// The workspace's tag list's own note, which shows as the list.
-    public var isTagList: Bool { isNote && workspace.tagList.isNote(path) }
-
     /// The note's tags, in the list's order.
     public var tags: [NoteTag] {
-        guard isNote, !isTagList, let text else { return [] }
-        return Tags.noteTags(text, list: workspace.tagList.tags)
+        guard isNote, let text else { return [] }
+        return Tags.noteTags(text, list: workspace.tagList)
     }
 
     /// What its *Frontmatter* disclosure shows: the block, unless it holds
-    /// the note's tags alone. The list's own note shows its block as the
-    /// list.
+    /// the note's tags alone.
     public var otherFrontmatter: String? {
-        guard let text, !isTagList else { return nil }
-        return workspace.tagList.frontmatter(of: text, reader: document?.frontmatter)
+        guard let text else { return nil }
+        return workspace.otherFrontmatter(of: text, reader: document?.frontmatter)
     }
 
     /// Give the note `value` for the tag `name`, both spelled as the list

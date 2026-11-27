@@ -60,6 +60,10 @@ public struct CloudStatus: Decodable, Equatable, Sendable, Identifiable {
     public let superadmin: String?
     public let workerVersion: Int?
     public let `public`: [PublicPage]
+    /// The workspace's tags, in order: the shared list with the changes made
+    /// on this device that haven't gone up yet — so a tag made here shows at
+    /// once.
+    public let tags: [TagDef]
     public let presence: [PresenceDevice]
     public let leases: [LeaseHolder]
     public let spaces: [SpaceStatus]

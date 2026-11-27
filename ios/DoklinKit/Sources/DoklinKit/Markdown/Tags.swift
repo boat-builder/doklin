@@ -1,32 +1,38 @@
-// Tags: a note's choice tags, as lines of its frontmatter, and the
-// workspace's one list of them, kept in a note of its own — the Mac's rules
-// (src/tags.ts), ported.
+// Tags: a note's choice tags, as lines of its frontmatter, and the rules of
+// the workspace's one list of them — the Mac's (src/tags.ts), ported.
 //
 // A note's tag is an unindented `key: value` line in its frontmatter block,
-// `status: Doing`. The tag list says which keys are tags and which values
-// each takes: `Library/Tags.md`, whose block holds one line per tag,
-// `status: [Todo, Doing, Done]`. Its body says what the values mean.
+// `status: Doing`. The list says which keys are tags, which values each
+// takes and what they mean. It is the workspace's manifest's, with nothing
+// in anyone's folder: the app reads it from the engine's status
+// (`CloudStatus.tags`) and changes it through the engine (Tagging.swift),
+// which refuses a change the worker would, in the same words — the limits
+// on how many values a tag has and how long what they mean is are its alone.
 //
 // The writers hold a note to the list: the picker is the only way a person
 // sets a tag. Readers are lenient: a value that isn't in the list is still
 // the note's, shown marked and never dropped. Matching is case-insensitive
 // everywhere, and what shows is the list's spelling.
 //
-// Held to verify-harness/tags-fixture.json with src/tags.ts and the Mac's
-// search in Rust (src-tauri/src/tags.rs): change all three. The text is
-// worked on as unicode scalars, which is what the TypeScript counts a
-// character as where it counts them, and never splits `\r\n`.
+// Held to verify-harness/tags-fixture.json with src/tags.ts, the Mac's
+// search in Rust (src-tauri/src/tags.rs) and the sync engine
+// (engine/src/cloud/tags.rs): change all four. The text is worked on as
+// unicode scalars, which is what the TypeScript counts a character as where
+// it counts them, and never splits `\r\n`.
 
 import Foundation
 
-/// A tag of the list: its name, and the values a note can have, in order.
-public struct TagDef: Equatable, Hashable, Sendable {
+/// A tag of the list: its name, the values a note can have, in order, and
+/// what they mean, for the people and agents who set them.
+public struct TagDef: Codable, Equatable, Hashable, Sendable {
     public var name: String
     public var values: [String]
+    public var desc: String?
 
-    public init(name: String, values: [String]) {
+    public init(name: String, values: [String], desc: String? = nil) {
         self.name = name
         self.values = values
+        self.desc = desc
     }
 }
 
@@ -101,13 +107,7 @@ public struct Frontmatter: Equatable, Sendable {
 }
 
 public enum Tags {
-    /// The tag list's file name, in Library. Found whatever its case.
-    public static let note = "Tags.md"
-
-    /// What a tag list made by *New tag* says under its block.
-    public static let noteBody =
-        "The workspace's tags. Each line at the top is a tag and the values a note can have. Say here what each value means, for the people and agents who set them.\n"
-
+    /// src/tags.ts's `NAME_MAX` and `VALUE_MAX`, which TagsTests holds these to.
     public static let nameMax = 40
     public static let valueMax = 60
 
@@ -118,10 +118,6 @@ public enum Tags {
     private struct Entry {
         let key: String
         let value: String?
-        /// What follows the key's colon, trimmed.
-        let rest: String
-        /// An indented run belongs to the line.
-        let run: Bool
         /// Where the line starts, and where its run ends (after its
         /// newline): what a write replaces.
         let from: Int
@@ -182,8 +178,7 @@ public enum Tags {
                 j += 1
             }
             entries.append(Entry(
-                key: keyed.key, value: runEnd > i ? nil : keyed.value, rest: keyed.rest, run: runEnd > i,
-                from: lines[i].from, end: lines[runEnd].end
+                key: keyed.key, value: runEnd > i ? nil : keyed.value, from: lines[i].from, end: lines[runEnd].end
             ))
             i = runEnd
         }
@@ -192,7 +187,7 @@ public enum Tags {
 
     /// A line's key and value: the text before the first `:` that a space,
     /// a tab or the line's end follows, and the scalar after it.
-    private static func keyedLine(_ line: String) -> (key: String, value: String?, rest: String)? {
+    private static func keyedLine(_ line: String) -> KeyedLine? {
         let s = Scalars(line)
         guard let first = s.first, !isSpace(first), first != "#", first != "-" else { return nil }
         var at = 0
@@ -201,15 +196,14 @@ public enum Tags {
             if next == nil || next == " " || next == "\t" {
                 let key = jsTrimEnd(s.string(0, colon))
                 guard !key.isEmpty else { return nil }
-                let rest = jsTrim(s.string(colon + 1))
-                return (key, scalarOf(rest), rest)
+                return KeyedLine(key: key, value: scalarOf(jsTrim(s.string(colon + 1))))
             }
             at = colon + 1
         }
         return nil
     }
 
-    /// What may follow a quoted value or a list: nothing, or a comment.
+    /// What may follow a quoted value: nothing, or a comment.
     private static func trailerOk(_ rest: String) -> Bool {
         if jsTrim(rest).isEmpty { return true }
         let s = Scalars(rest)
@@ -367,89 +361,6 @@ public enum Tags {
         writeLine(text, at: at, line: tag.map { "\($0.name): \(quoteValue($0.value))" })
     }
 
-    /* ---------- The tag list ---------- */
-
-    /// A flow list, `[a, "b, c", 'd']`, and what follows it; nil when it
-    /// isn't one.
-    private static func flowList(_ rest: String) -> [String]? {
-        let s = Scalars(rest)
-        guard s.first == "[" else { return nil }
-        var out: [String] = []
-        var i = 1
-        func skip() {
-            while i < s.count, s[i] == " " || s[i] == "\t" { i += 1 }
-        }
-        func closes() -> [String]? { trailerOk(s.string(i + 1)) ? out : nil }
-        skip()
-        if i < s.count, s[i] == "]" { return closes() }
-        while true {
-            skip()
-            if i < s.count, s[i] == "\"" || s[i] == "'" {
-                guard let q = quoted(s, from: i) else { return nil }
-                out.append(q.value)
-                i = q.end
-            } else {
-                var j = i
-                while j < s.count, s[j] != ",", s[j] != "]" { j += 1 }
-                let bare = jsTrim(s.string(i, j))
-                guard !bare.isEmpty, !looksLikeYAML(bare) else { return nil }
-                out.append(bare)
-                i = j
-            }
-            skip()
-            if i < s.count, s[i] == "," {
-                i += 1
-                skip()
-                // A trailing comma is allowed, as YAML allows it.
-                if i < s.count, s[i] == "]" { return closes() }
-                continue
-            }
-            if i < s.count, s[i] == "]" { return closes() }
-            return nil
-        }
-    }
-
-    /// A bare value of a flow list that YAML would read as something else.
-    private static func looksLikeYAML(_ bare: String) -> Bool {
-        let s = Array(bare.unicodeScalars)
-        if s.contains(where: { "[{}\"'".unicodeScalars.contains($0) }) { return true }
-        if s.indices.contains(where: { $0 + 1 < s.count && isSpace(s[$0]) && s[$0 + 1] == "#" }) { return true }
-        return s.first.map { "&*!|>%@`".unicodeScalars.contains($0) } ?? false
-    }
-
-    /// The workspace's tags from its list's text, in order. A line that
-    /// doesn't parse is skipped (it stays on disk), and so is a second line
-    /// for a name already listed. No note, or no lines: no tags.
-    public static func parseList(_ text: String) -> [TagDef] {
-        var out: [TagDef] = []
-        for entry in blockOf(Scalars(text))?.entries ?? [] {
-            guard let values = entry.run ? nil : flowList(entry.rest), !values.isEmpty, nameProblem(entry.key, list: out) == nil else { continue }
-            if values.indices.contains(where: { valueProblem(values[$0], others: Array(values[..<$0])) != nil }) { continue }
-            out.append(TagDef(name: entry.key, values: values))
-        }
-        return out
-    }
-
-    /// Whether the list's block holds lines that aren't tags it lists.
-    public static func otherListLines(_ text: String) -> Bool {
-        guard let block = blockOf(Scalars(text)) else { return false }
-        return block.lines.filter { !jsTrim($0.text).isEmpty }.count > parseList(text).count
-    }
-
-    /// A tag's line in the list.
-    public static func tagLine(_ def: TagDef) -> String {
-        "\(def.name): [\(def.values.map(quoteValue).joined(separator: ", "))]"
-    }
-
-    /// Put a tag in the list: the line keyed `at` becomes `def`'s, or `def`
-    /// is added (after the line keyed `after`, else at the end); nil removes
-    /// the line keyed `at`. A list with no note yet starts as `noteBody`
-    /// under its block.
-    public static func writeList(_ text: String, at: String, def: TagDef?, after: String? = nil) -> String {
-        let base = text.isEmpty && def != nil ? noteBody : text
-        return writeLine(base, at: at, line: def.map(tagLine), after: after)
-    }
-
     /* ---------- Names and values ---------- */
 
     private static func letterOrDigit(_ c: Unicode.Scalar) -> Bool {
@@ -490,13 +401,15 @@ public enum Tags {
         return nil
     }
 
-    /// The first thing wrong with a tag as typed (src/TagDialogs.tsx's
-    /// `tagProblem`), or nil.
-    public static func tagProblem(name: String, values: [String], list: [TagDef], except: String? = nil) -> String? {
-        if let named = nameProblem(name, list: list, except: except) { return named }
-        if values.isEmpty { return "A tag needs at least one value." }
-        for i in values.indices {
-            if let wrong = valueProblem(values[i], others: Array(values[..<i])) { return wrong }
+    /// Why `def` can't be a tag beside the others of `list` (a sentence), or
+    /// nil: its name and its values. `except` is the tag being renamed, whose
+    /// own name doesn't count. How many values it has and how long what they
+    /// mean is are the engine's to refuse.
+    public static func tagProblem(_ def: TagDef, list: [TagDef], except: String? = nil) -> String? {
+        if let named = nameProblem(def.name, list: list, except: except) { return named }
+        if def.values.isEmpty { return "A tag needs at least one value." }
+        for i in def.values.indices {
+            if let wrong = valueProblem(def.values[i], others: Array(def.values[..<i])) { return wrong }
         }
         return nil
     }
