@@ -161,10 +161,18 @@ class UITestCase: XCTestCase {
     }
 
     /// A tab, by its name: Browse, Recent, Search. A document hides the tab
-    /// bar, so it is backed out of first.
+    /// bar, so it is backed out of first. A list scrolled down shrinks the
+    /// bar to the tab in front, which a tap opens out again, as scrolling
+    /// back up does.
     func tab(_ name: String) {
-        backTo(app.tabBars.buttons[name])
-        expect(app.tabBars.buttons[name], "the \(name) tab").tap()
+        let button = app.tabBars.buttons[name]
+        backTo(button)
+        if !button.exists {
+            let shrunk = app.tabBars.buttons.matching(NSPredicate(format: "value == %@", "Collapsed")).firstMatch
+            if shrunk.exists { shrunk.tap() }
+            if !button.waitForExistence(timeout: 3) { app.swipeDown() }
+        }
+        expect(button, "the \(name) tab").tap()
     }
 
     /// Back until `root` shows: the top of a tab.
