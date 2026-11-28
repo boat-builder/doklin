@@ -110,8 +110,10 @@ final class CommentsUITests: UITestCase {
 
         // A folder not yet public is offered an address made of its name,
         // and none at all is not one.
-        expect(marked("entry-Projects"), "the Projects folder").tap()
-        expect(marked("entry-Roadmap"), "the Roadmap folder, opened in place").press(forDuration: 1.2)
+        // Out from under the bars first: what another journey left in
+        // Library can leave Projects under the navigation bar.
+        reveal(marked("entry-Projects"), "the Projects folder").tap()
+        reveal(marked("entry-Roadmap"), "the Roadmap folder, opened in place").press(forDuration: 1.2)
         expect(app.buttons["Publish folder…"], "Publish folder… in its menu").tap()
         let folderAddress = expect(marked("publish-slug"), "the folder's address field")
         XCTAssertEqual(folderAddress.value as? String, "roadmap", "the address offered for Roadmap")

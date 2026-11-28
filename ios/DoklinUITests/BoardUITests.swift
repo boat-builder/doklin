@@ -43,14 +43,21 @@ final class BoardUITests: UITestCase {
 
         // Held and dragged onto the next column, at the board's edge. Held
         // a moment and moved, as a person drags; held still longer, the card
-        // gives its menu instead.
-        let docs = expect(card("Write the docs", in: "none"), "Write the docs, to drag")
-        docs.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(
-            forDuration: 0.5,
-            thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.3)),
-            withVelocity: .fast,
-            thenHoldForDuration: 0.2
-        )
+        // gives its menu instead. A slower simulator lifts it later: held a
+        // little longer each time, until it moves.
+        for hold in [0.5, 0.8, 1.1] {
+            let docs = expect(card("Write the docs", in: "none"), "Write the docs, to drag")
+            if !docs.isHittable { app.swipeRight() }
+            docs.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(
+                forDuration: hold,
+                thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.3)),
+                withVelocity: .fast,
+                thenHoldForDuration: 0.2
+            )
+            if card("Write the docs", in: "Todo").waitForExistence(timeout: 8) { break }
+            // Its menu, when it was held too still: shut with a tap on the title.
+            if app.buttons["Move to"].exists { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.09)).tap() }
+        }
         expect(card("Write the docs", in: "Todo"), "Write the docs, dragged to Todo", timeout: 15)
         record("a card, dragged")
 
