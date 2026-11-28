@@ -55,6 +55,17 @@ final class HistoryUITests: UITestCase {
         app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: screen.midX, dy: y)).tap()
     }
 
+    /// The toast's Undo, which takes the toast away as it runs. A tap on it
+    /// can be lost: the toast stays as it was, with nothing undone. Tap
+    /// again while Undo is still offered.
+    private func undo(file: StaticString = #filePath, line: UInt = #line) {
+        let button = expect(app.buttons["Undo"], "Undo, in the toast", file: file, line: line)
+        for _ in 0..<3 where button.exists {
+            button.tap()
+            _ = button.waitForNonExistence(timeout: 5)
+        }
+    }
+
     func testANotesVersionsTheWorkspacesMomentsAndWhatWasDeleted() throws {
         launchAndJoin()
 
@@ -98,7 +109,7 @@ final class HistoryUITests: UITestCase {
         record("restored")
 
         // Undo puts back what it said before.
-        app.buttons["Undo"].tap()
+        undo()
         expect(app.staticTexts["A line for history."], "the line, back after Undo")
         record("undone")
         back()
@@ -127,7 +138,7 @@ final class HistoryUITests: UITestCase {
         answer("Restore")
         expect(text(containing: "Restored — 1 file written."), "the moment restore's toast")
         record("a moment restored")
-        app.buttons["Undo"].tap()
+        undo()
         expectGone(text(containing: "Restored — 1 file written."), "the moment restore's toast, after Undo")
         browse()
         reveal(marked("entry-Scratch"), "the Scratch note, after the moment's undo").tap()
