@@ -11,7 +11,7 @@ final class PublishingTests: XCTestCase {
          "phase":"\(phase)","lastSyncMs":\(lastSyncMs.map(String.init) ?? "null"),"error":null,"pendingDeletes":0,"pendingAdds":0,
          "usage":{"mode":"normal","cause":null,"today":0,"fleetToday":null,"cap":null,"plan":null,"resumesAt":null,"waiting":0,"liftable":false,"lifted":false},
          "me":"\(me)",
-         "meId":"m1","can":["work"],"workerVersion":17,"public":\(pages),"presence":[],"leases":[],"spaces":[]}
+         "meId":"m1","can":["work"],"workerVersion":17,"public":\(pages),"tags":[],"presence":[],"leases":[],"spaces":[]}
         """
         return try JSONDecoder().decode(CloudStatus.self, from: Data(json.utf8))
     }

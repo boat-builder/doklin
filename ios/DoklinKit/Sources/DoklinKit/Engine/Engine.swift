@@ -27,6 +27,7 @@ public enum JSONValue: Sendable, Equatable {
     case int(Int)
     case string(String)
     case array([JSONValue])
+    case object([String: JSONValue])
 
     var any: Any {
         switch self {
@@ -35,6 +36,7 @@ public enum JSONValue: Sendable, Equatable {
         case .int(let value): return value
         case .string(let value): return value
         case .array(let values): return values.map(\.any)
+        case .object(let fields): return fields.mapValues(\.any)
         }
     }
 }

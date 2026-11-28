@@ -32,6 +32,7 @@ use super::scan::{
 };
 use super::space::{reserved_top, RESERVED_DIRS, SHARED};
 use super::status::{Events, PublicPage, RecentFile, EV_ADDRESS_TAKEN, EV_CONFLICT, EV_PENDING_DELETES};
+use super::tags::{self as tag_list, TagDef, TagOp, TAGS_MAX};
 // The cloud half of versioning. `crate::versions` is the local versioner —
 // this module only mirrors what that one wrote.
 use super::versions as version_store;
@@ -114,6 +115,11 @@ pub struct WorkspaceState {
     /// A pending "make this the root page" (`Some(None)` clears the root).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_op: Option<Option<String>>,
+    /// Changes of the workspace's tag list this device owes the manifest, in
+    /// the order they were made — the shared section's alone. Kept, like
+    /// `public_ops`, until a won write carries them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tag_ops: Vec<TagOp>,
     /// When the cloud version store was last thinned — daily, by whichever
     /// device gets there first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,12 +174,14 @@ impl Staged {
     }
 }
 
-/// What `fold_public` folded in: the op keys the caller clears once the CAS
-/// carrying them wins.
+/// What `fold_public` and `fold_tags` folded in: the ops the caller clears
+/// once the CAS carrying them wins.
 #[derive(Default, Debug)]
 struct Folded {
     slugs: Vec<String>,
     root: bool,
+    /// How many of `tag_ops`, from the first.
+    tags: usize,
 }
 
 /* ---------- What a cycle is told ---------- */
@@ -509,17 +517,20 @@ impl<R: Remote> Unit<R> {
             //     re-bound, pending ops overlaid).
             let mut next = remote_manifest.clone();
             self.build_manifest(&mut next, &staged, ctx);
-            let folded = self.fold_public(&mut next, &remote_manifest, &staged, ctx);
+            let mut folded = self.fold_public(&mut next, &remote_manifest, &staged, ctx);
             for slug in &refused {
                 next.public.remove(slug);
             }
+            folded.tags = self.fold_tags(&mut next);
             let public_changed = next.public != remote_manifest.public;
+            let tags_changed = next.tags != remote_manifest.tags;
             // A manifest from before the md + html rule still names files
-            // nobody syncs; the first write cleans it.
-            let cleans = !in_scope(&remote_manifest);
+            // nobody syncs, and one of an older format is one the worker's
+            // own writes can't change: the first write cleans it.
+            let cleans = !in_scope(&remote_manifest) || remote_manifest.version < MANIFEST_VERSION;
 
             // Remote moved under us but we have nothing to say: adopt theirs.
-            if staged.is_empty() && !public_changed && !cleans {
+            if staged.is_empty() && !public_changed && !tags_changed && !cleans {
                 // Ops that resolved to exactly what the manifest already says
                 // are spent — a CAS carrying no change would be pure waste.
                 self.clear_folded(&folded);
@@ -853,6 +864,58 @@ impl<R: Remote> Unit<R> {
         if folded.root {
             self.state.root_op = None;
         }
+        self.state.tag_ops.drain(..folded.tags.min(self.state.tag_ops.len()));
+    }
+
+    /* ----- the tag list ----- */
+
+    /// The workspace's tags as this device believes them: the last applied
+    /// manifest's, with the changes queued here made — the same fold
+    /// `fold_tags` will make, so a tag made here shows at once.
+    pub(crate) fn effective_tags(&self) -> Vec<TagDef> {
+        tag_list::folded(&self.state.manifest.tags, &self.state.tag_ops)
+    }
+
+    /// The changes queued here, over the list as the manifest about to be
+    /// written has it: the later change wins. Answers how many it folded.
+    fn fold_tags(&self, next: &mut Manifest) -> usize {
+        next.tags = tag_list::folded(&next.tags, &self.state.tag_ops);
+        self.state.tag_ops.len()
+    }
+
+    /// Queue a change of the list, or say why it can't be made, in a
+    /// sentence: a tag of the name another tag has, a value twice, a list
+    /// that's full, a tag that isn't there.
+    pub(crate) fn queue_tag(&mut self, op: TagOp) -> Result<(), String> {
+        let now = self.effective_tags();
+        let op = match op {
+            TagOp::Set { at, def } => {
+                let def = tag_list::cleaned(def);
+                let at = at.trim().to_string();
+                let new = tag_list::tag(&now, &at).is_none();
+                if let Some(problem) = tag_list::tag_problem(&def, &now, (!new).then_some(at.as_str())) {
+                    return Err(problem);
+                }
+                if new && now.len() >= TAGS_MAX {
+                    return Err(format!("A workspace can have {} tags at most.", TAGS_MAX));
+                }
+                TagOp::Set { at, def }
+            }
+            TagOp::Remove { name } => {
+                let Some(def) = tag_list::tag(&now, name.trim()) else {
+                    return Err(format!("There's no tag called {}.", name.trim()));
+                };
+                TagOp::Remove { name: def.name.clone() }
+            }
+        };
+        if let Some(problem) = tag_list::list_problem(&op.apply(&now)) {
+            return Err(problem);
+        }
+        self.state.tag_ops.push(op);
+        // Persist before anything can go wrong: a tag made offline must
+        // survive a restart.
+        self.persist_state();
+        Ok(())
     }
 
     /// Bring the local tree up to date with what changed remotely since the

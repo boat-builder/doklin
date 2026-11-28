@@ -113,12 +113,12 @@ struct VersionView: View {
     /// The version's tags, read with the list as it is now: shown, never
     /// changed here.
     private var versionTags: [NoteTag] {
-        reader.text.map { Tags.noteTags($0, list: workspace.tagList.tags) } ?? []
+        reader.text.map { Tags.noteTags($0, list: workspace.tagList) } ?? []
     }
 
     /// The rest of the version's block, when it holds more than its tags.
     private var frontmatterShown: Bool {
-        reader.text.map { workspace.tagList.frontmatter(of: $0, reader: reader.document?.frontmatter) != nil } ?? true
+        reader.text.map { workspace.otherFrontmatter(of: $0, reader: reader.document?.frontmatter) != nil } ?? true
     }
 
     @ViewBuilder private var version: some View {
@@ -127,7 +127,7 @@ struct VersionView: View {
                 ScrollView {
                     MarkdownView(
                         document: document, file: opened.path, workspace: workspace,
-                        underTitle: versionTags.isEmpty ? nil : AnyView(TagsRow(tags: versionTags, list: workspace.tagList.tags)),
+                        underTitle: versionTags.isEmpty ? nil : AnyView(TagsRow(tags: versionTags, list: workspace.tagList)),
                         showsFrontmatter: frontmatterShown
                     )
                         .padding(.horizontal, 20)

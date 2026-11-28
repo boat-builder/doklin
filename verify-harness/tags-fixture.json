@@ -1,5 +1,5 @@
 {
-  "about": "Cases the tag rules of the Mac and browser (src/tags.ts), of the iPhone (Markdown/Tags.swift) and of the Mac's search (src-tauri/src/tags.rs) must answer alike. The Rust side reads `lines` and `match` only. Read by verify-harness/tags.test.mjs, ios/DoklinKit/Tests/DoklinKitTests/TagsTests.swift and src-tauri/src/tags.rs: change all three.",
+  "about": "Cases the tag rules of the Mac and browser (src/tags.ts), of the iPhone (Markdown/Tags.swift), of the Mac's search (src-tauri/src/tags.rs) and of the sync engine (engine/src/cloud/tags.rs) must answer alike. The Mac's search reads `lines` and `match` only; the engine reads `names`, `values`, `defs` and `changes`; the iPhone reads all but `changes`, since its list is changed by the engine. Read by verify-harness/tags.test.mjs, ios/DoklinKit/Tests/DoklinKitTests/TagsTests.swift, src-tauri/src/tags.rs and engine/src/cloud/tags.rs: change all four.",
   "lines": [
     {
       "text": "No block.\n",
@@ -706,182 +706,6 @@
       "line": "v1.2"
     }
   ],
-  "list": [
-    {
-      "text": "",
-      "tags": []
-    },
-    {
-      "text": "Just a note.\n",
-      "tags": []
-    },
-    {
-      "text": "---\nstatus: [Todo, Doing, Done]\npriority: [p1, p2, p3, p4, p5]\n---\nWhat each tag means.\n",
-      "tags": [
-        {
-          "name": "status",
-          "values": [
-            "Todo",
-            "Doing",
-            "Done"
-          ]
-        },
-        {
-          "name": "priority",
-          "values": [
-            "p1",
-            "p2",
-            "p3",
-            "p4",
-            "p5"
-          ]
-        }
-      ]
-    },
-    {
-      "text": "---\nStatus: [ \"In progress\" , 'it''s', \"a, b\", plain ,]  # trailing comma and a comment\n---\n",
-      "tags": [
-        {
-          "name": "Status",
-          "values": [
-            "In progress",
-            "it's",
-            "a, b",
-            "plain"
-          ]
-        }
-      ]
-    },
-    {
-      "text": "---\nstatus: []\nempty: [a, , b]\nbad name!: [a]\n-dash: [a]\ntwice: [a, A]\nscalar: a\nblock:\n  - a\nunclosed: [a, b\nafter: [a] b\nlong: [aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]\nok: [x]\nOK: [y]\n---\n",
-      "tags": [
-        {
-          "name": "ok",
-          "values": [
-            "x"
-          ]
-        }
-      ]
-    },
-    {
-      "text": "---\nDue date: [soon, later]\nwhere_1: [here]\n---\n",
-      "tags": [
-        {
-          "name": "Due date",
-          "values": [
-            "soon",
-            "later"
-          ]
-        },
-        {
-          "name": "where_1",
-          "values": [
-            "here"
-          ]
-        }
-      ]
-    },
-    {
-      "text": "---\r\nstatus: [Todo, Done]\r\n---\r\n",
-      "tags": [
-        {
-          "name": "status",
-          "values": [
-            "Todo",
-            "Done"
-          ]
-        }
-      ]
-    },
-    {
-      "text": "---\nstatus: [a #b]\nstage: [\"a #b\", c]\n---\n",
-      "tags": [
-        {
-          "name": "stage",
-          "values": [
-            "a #b",
-            "c"
-          ]
-        }
-      ]
-    }
-  ],
-  "writeList": [
-    {
-      "text": "",
-      "at": "status",
-      "def": {
-        "name": "status",
-        "values": [
-          "Todo",
-          "Doing",
-          "Done"
-        ]
-      },
-      "out": "---\nstatus: [Todo, Doing, Done]\n---\nThe workspace's tags. Each line at the top is a tag and the values a note can have. Say here what each value means, for the people and agents who set them.\n"
-    },
-    {
-      "text": "---\nstatus: [Todo, Done]\npriority: [p1]\n---\nBody\n",
-      "at": "Status",
-      "def": {
-        "name": "Status",
-        "values": [
-          "Todo",
-          "In: review",
-          "Done"
-        ]
-      },
-      "out": "---\nStatus: [Todo, \"In: review\", Done]\npriority: [p1]\n---\nBody\n"
-    },
-    {
-      "text": "---\nstatus: [Todo, Done]\npriority: [p1]\n---\nBody\n",
-      "at": "State",
-      "def": {
-        "name": "State",
-        "values": [
-          "Todo",
-          "Done"
-        ]
-      },
-      "after": "status",
-      "out": "---\nstatus: [Todo, Done]\nState: [Todo, Done]\npriority: [p1]\n---\nBody\n"
-    },
-    {
-      "text": "---\nstatus: [Todo, Done]\n---\nBody\n",
-      "at": "area",
-      "def": {
-        "name": "area",
-        "values": [
-          "Web",
-          "iPhone"
-        ]
-      },
-      "out": "---\nstatus: [Todo, Done]\narea: [Web, iPhone]\n---\nBody\n"
-    },
-    {
-      "text": "---\nstatus: [Todo, Done]\npriority: [p1]\n---\nBody\n",
-      "at": "status",
-      "def": null,
-      "out": "---\npriority: [p1]\n---\nBody\n"
-    },
-    {
-      "text": "---\nstatus: [Todo, Done]\n---\nBody\n",
-      "at": "status",
-      "def": null,
-      "out": "Body\n"
-    },
-    {
-      "text": "Body\n",
-      "at": "status",
-      "def": {
-        "name": "status",
-        "values": [
-          "a"
-        ]
-      },
-      "out": "---\nstatus: [a]\n---\nBody\n"
-    }
-  ],
   "names": [
     {
       "name": "status",
@@ -1295,6 +1119,404 @@
       "list": [],
       "text": "status:Doing",
       "tags": []
+    }
+  ],
+  "defs": [
+    {
+      "def": {
+        "name": "status",
+        "values": [
+          "Todo",
+          "Doing",
+          "Done"
+        ]
+      },
+      "list": [],
+      "problem": null
+    },
+    {
+      "def": {
+        "name": "status",
+        "values": [
+          "Todo"
+        ],
+        "desc": "Where a task stands."
+      },
+      "list": [
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2"
+          ]
+        }
+      ],
+      "problem": null
+    },
+    {
+      "def": {
+        "name": "status",
+        "values": []
+      },
+      "list": [],
+      "problem": "A tag needs at least one value."
+    },
+    {
+      "def": {
+        "name": "Status",
+        "values": [
+          "Todo"
+        ]
+      },
+      "list": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        }
+      ],
+      "problem": "There's already a tag called status."
+    },
+    {
+      "def": {
+        "name": "Status",
+        "values": [
+          "Todo"
+        ]
+      },
+      "list": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        }
+      ],
+      "except": "STATUS",
+      "problem": null
+    },
+    {
+      "def": {
+        "name": "status",
+        "values": [
+          "Done",
+          "done"
+        ]
+      },
+      "list": [],
+      "problem": "Done is there twice."
+    },
+    {
+      "def": {
+        "name": "status",
+        "values": [
+          "Todo",
+          " Doing"
+        ]
+      },
+      "list": [],
+      "problem": "A value can't start or end with a space."
+    },
+    {
+      "def": {
+        "name": "bad!",
+        "values": [
+          "Todo"
+        ]
+      },
+      "list": [],
+      "problem": "A tag's name holds letters, digits, spaces, _ and -, and starts and ends with a letter or a digit."
+    }
+  ],
+  "changes": [
+    {
+      "list": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2"
+          ]
+        }
+      ],
+      "at": "Priority",
+      "def": {
+        "name": "priority",
+        "values": [
+          "p1",
+          "p2",
+          "p3"
+        ],
+        "desc": "How soon."
+      },
+      "out": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2",
+            "p3"
+          ],
+          "desc": "How soon."
+        }
+      ]
+    },
+    {
+      "list": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2"
+          ]
+        }
+      ],
+      "at": "area",
+      "def": {
+        "name": "area",
+        "values": [
+          "Web",
+          "iPhone"
+        ]
+      },
+      "out": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2"
+          ]
+        },
+        {
+          "name": "area",
+          "values": [
+            "Web",
+            "iPhone"
+          ]
+        }
+      ]
+    },
+    {
+      "list": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2"
+          ]
+        }
+      ],
+      "at": "status",
+      "def": {
+        "name": "Stage",
+        "values": [
+          "Todo",
+          "Done"
+        ]
+      },
+      "out": [
+        {
+          "name": "Stage",
+          "values": [
+            "Todo",
+            "Done"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2"
+          ]
+        }
+      ]
+    },
+    {
+      "list": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2"
+          ]
+        },
+        {
+          "name": "area",
+          "values": [
+            "Web",
+            "iPhone"
+          ]
+        }
+      ],
+      "at": "status",
+      "def": {
+        "name": "Area",
+        "values": [
+          "Web"
+        ]
+      },
+      "out": [
+        {
+          "name": "Area",
+          "values": [
+            "Web"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2"
+          ]
+        }
+      ]
+    },
+    {
+      "list": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2"
+          ]
+        }
+      ],
+      "at": "stage",
+      "def": {
+        "name": "PRIORITY",
+        "values": [
+          "p9"
+        ]
+      },
+      "out": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        },
+        {
+          "name": "PRIORITY",
+          "values": [
+            "p9"
+          ]
+        }
+      ]
+    },
+    {
+      "list": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        },
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2"
+          ]
+        }
+      ],
+      "remove": "STATUS",
+      "out": [
+        {
+          "name": "priority",
+          "values": [
+            "p1",
+            "p2"
+          ]
+        }
+      ]
+    },
+    {
+      "list": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        }
+      ],
+      "remove": "area",
+      "out": [
+        {
+          "name": "status",
+          "values": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        }
+      ]
     }
   ]
 }

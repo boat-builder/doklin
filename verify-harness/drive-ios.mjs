@@ -46,6 +46,7 @@ import { createServer as createHttpServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { SEED_FILES } from "../cloud-worker/test/seed.mjs";
 
 const ROOT = new URL("../", import.meta.url).pathname;
@@ -160,6 +161,24 @@ async function onTheDomain(path) {
   return Object.values(manifest.files ?? {}).some((file) => file.path === path && !file.deleted);
 }
 
+/** The workspace's tags, as the domain's manifest holds them. */
+async function tagsOnTheDomain() {
+  const res = await fetch(`${WORKER}/api/manifest`, { headers: asOwner });
+  if (!res.ok) throw new Error(`could not read the manifest: ${res.status}`);
+  return (await res.json()).tags ?? [];
+}
+
+/** Whether the domain holds the tags `want`, and Ideas with `line` above the seed's text. */
+async function tagsAre(want, line) {
+  const tags = await tagsOnTheDomain();
+  const ideas = await textOnTheDomain("Ideas.md");
+  if (!isDeepStrictEqual(tags, want) || ideas !== `---\n${line}\n---\n${SEED_FILES["Ideas.md"]}`) {
+    console.error(`the tags the app made are not on the domain as a Mac would make them:\n${JSON.stringify(tags)}\n${ideas}`);
+    return false;
+  }
+  return true;
+}
+
 /** The text of a file in the shared workspace, as the domain holds it; null when it holds none. */
 async function textOnTheDomain(path) {
   const res = await fetch(`${WORKER}/api/manifest`, { headers: asOwner });
@@ -195,17 +214,12 @@ const ON_THE_DOMAIN = {
     console.log("the comments the app wrote are on the domain");
     return true;
   },
-  // The list the app made, with the value renamed, and the note that has it
+  // The tag the app made, with the value renamed, and the note that has it
   // renamed to match — its own text untouched under its block.
   TagsUITests: async () => {
-    const list = await textOnTheDomain("Tags.md");
-    const ideas = await textOnTheDomain("Ideas.md");
-    const listed = /^---\nStatus: \[Todo, Underway, Done\]\n---\n/;
-    if (!listed.test(list ?? "") || ideas !== `---\nStatus: Underway\n---\n${SEED_FILES["Ideas.md"]}`) {
-      console.error(`the tags the app wrote are not on the domain as a Mac would write them:\n${list}\n${ideas}`);
-      return false;
-    }
-    console.log("the tags the app wrote are on the domain");
+    const status = { name: "Status", values: ["Todo", "Underway", "Done"], desc: "Where a piece of work is." };
+    if (!(await tagsAre([status], "Status: Underway"))) return false;
+    console.log("the tags the app made are on the domain");
     return true;
   },
 };
@@ -236,6 +250,10 @@ async function driveCore() {
     return 1;
   }
   console.log("the note the engine wrote is on the domain");
+  // The tag EngineLiveTests made and renamed, and the note it renamed.
+  const stage = { name: "Stage", values: ["Todo", "Underway", "Done"], desc: "Where a piece of work is." };
+  if (!(await tagsAre([stage], "Stage: Underway"))) return 1;
+  console.log("the tags the engine made are on the domain");
   return 0;
 }
 

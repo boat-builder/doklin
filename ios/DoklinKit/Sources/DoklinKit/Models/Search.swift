@@ -117,7 +117,7 @@ public final class SearchModel {
     public func run(_ text: String) async {
         asked += 1
         let ticket = asked
-        let split = Tags.searchQuery(text, list: workspace.tagList.tags)
+        let split = Tags.searchQuery(text, list: workspace.tagList)
         let query = split.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let tags = split.tags
         guard !query.isEmpty || !tags.isEmpty else {

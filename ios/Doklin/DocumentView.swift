@@ -53,7 +53,38 @@ struct DocumentView: View {
 
     private var workspace: Workspace { model.workspace }
 
+    // In three parts: one chain of every modifier is more than the compiler
+    // type-checks in reasonable time.
     var body: some View {
+        following
+            .alert("Not saved", isPresented: Binding(get: { session?.failure != nil }, set: { if !$0 { session?.failure = nil } })) {
+                Button("OK", role: .cancel) { session?.failure = nil }
+            } message: {
+                Text(session?.failure ?? "")
+            }
+            .sheet(item: $commentStart) { start in
+                CommentsView(model: comments, start: start, mayComment: mayComment)
+            }
+            .sheet(isPresented: $publishing) {
+                PublishView(workspace: workspace, path: model.path, kind: .file) { route.append(.publishedPages) }
+            }
+            .sheet(item: $tagSheet) { TagSheetView(sheet: $0, workspace: workspace, toaster: toaster) }
+            .alert("Doklin", isPresented: problemShown) {
+                Button("OK", role: .cancel) { model.problem = nil }
+            } message: {
+                Text(model.problem ?? "")
+            }
+            .modifier(FindQuestion(asking: $askingFind, words: $findWords) { words in
+                let wanted = words.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !wanted.isEmpty else { return }
+                find = wanted
+                foundIndex = 0
+                markFound()
+            })
+    }
+
+    /// The note, its bars and its title.
+    private var framed: some View {
         content
             .background(Theme.sheet)
             .navigationTitle(session == nil ? model.title : "")
@@ -62,6 +93,12 @@ struct DocumentView: View {
             .toolbar { editingToolbar }
             .toolbar(.hidden, for: .tabBar)
             .safeAreaInset(edge: .bottom, spacing: 0) { bottom }
+    }
+
+    /// What the note follows while it is shown: its files, its lease, the
+    /// tag list, the app going to the background.
+    private var following: some View {
+        framed
             .onAppear {
                 shell.documents += 1
                 model.load()
@@ -99,6 +136,7 @@ struct DocumentView: View {
                 if comments.isAffected(by: workspace.lastChanged) { comments.load() }
             }
             .onChange(of: model.lease) { session?.leaseChanged() }
+            .onChange(of: workspace.tagList) { session?.tagsChanged() }
             .onChange(of: scenePhase) { _, phase in
                 if phase != .active, let session { Task { await session.save() } }
             }
@@ -111,30 +149,6 @@ struct DocumentView: View {
                 // what is shown, edited and outlined is the markdown again.
                 if gone { showingPage = false }
             }
-            .alert("Not saved", isPresented: Binding(get: { session?.failure != nil }, set: { if !$0 { session?.failure = nil } })) {
-                Button("OK", role: .cancel) { session?.failure = nil }
-            } message: {
-                Text(session?.failure ?? "")
-            }
-            .sheet(item: $commentStart) { start in
-                CommentsView(model: comments, start: start, mayComment: mayComment)
-            }
-            .sheet(isPresented: $publishing) {
-                PublishView(workspace: workspace, path: model.path, kind: .file) { route.append(.publishedPages) }
-            }
-            .sheet(item: $tagSheet) { sheet in tagSheetView(sheet) }
-            .alert("Doklin", isPresented: problemShown) {
-                Button("OK", role: .cancel) { model.problem = nil }
-            } message: {
-                Text(model.problem ?? "")
-            }
-            .modifier(FindQuestion(asking: $askingFind, words: $findWords) { words in
-                let wanted = words.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !wanted.isEmpty else { return }
-                find = wanted
-                foundIndex = 0
-                markFound()
-            })
     }
 
     private var problemShown: Binding<Bool> {
@@ -247,20 +261,11 @@ struct DocumentView: View {
             }
     }
 
-    /// Under the title: the note's tags — or, for the tag list's own note,
-    /// the list — then who made it or changed it last and what changed,
-    /// then the rest of the block at its top.
+    /// Under the title: the note's tags, then who made it or changed it last
+    /// and what changed, then the rest of the block at its top.
     private var underTitle: some View {
         VStack(alignment: .leading, spacing: 16) {
-            if model.isTagList, let text = model.text {
-                TagListView(
-                    text: text,
-                    edit: mayTag ? { tagSheet = .edit($0) } : nil,
-                    newTag: mayTag ? { tagSheet = .new(forNote: false) } : nil
-                )
-            } else {
-                TagsRow(tags: model.tags, list: workspace.tagList.tags, actions: mayTag ? tagActions : nil)
-            }
+            TagsRow(tags: model.tags, list: workspace.tagList, actions: mayTag ? tagActions : nil)
             header
             if let block = model.otherFrontmatter {
                 FrontmatterView(text: block)
@@ -275,43 +280,9 @@ struct DocumentView: View {
     private var tagActions: TagActions {
         TagActions(
             set: { name, value in Task { await model.setTag(name, to: value) } },
-            newTag: { tagSheet = .new(forNote: true) },
-            edit: { tagSheet = .edit($0) }
+            newTag: { tagSheet = .new(note: model.path) },
+            edit: { tagSheet = workspace.tag(named: $0).map(TagSheet.edit) }
         )
-    }
-
-    @ViewBuilder private func tagSheetView(_ sheet: TagSheet) -> some View {
-        let list = workspace.tagList.tags
-        switch sheet {
-        case .new(let forNote):
-            NewTagSheet(list: list, forNote: forNote) { def, value in
-                await workspace.createTag(def, value: value, on: forNote ? model.path : nil)
-            }
-        case .edit(let name):
-            if let def = workspace.tagList.tag(name) {
-                EditTagSheet(def: def, list: list) { edit in
-                    if let failed = await workspace.saveTagEdit(edit) { return failed }
-                    if edit.rewritesNotes { renameInNotes(edit) }
-                    return nil
-                } delete: {
-                    await workspace.deleteTag(def.name)
-                }
-            }
-        }
-    }
-
-    /// The rest of a rename, once its sheet is down: every note on this
-    /// iPhone that has the tag, counted as it goes.
-    private func renameInNotes(_ edit: TagEdit) {
-        let toaster = toaster
-        Task {
-            toaster.show("Changing notes…", tone: .info)
-            let done = await workspace.renameInNotes(edit) { count in
-                toaster.show("Changing notes: \(count) so far…", tone: .info)
-            }
-            let ok = done.failed.isEmpty && done.listLeft == nil
-            toaster.show([done.words, done.listLeft].compactMap { $0 }.joined(separator: " "), tone: ok ? .done : .error)
-        }
     }
 
     /// Who made it or changed it last, and what changed since it was read
@@ -678,9 +649,9 @@ struct DocumentView: View {
             }
         }
         // A note with no tags has no row of chips: its first is added here.
-        if mayTag, model.isNote, !model.isTagList, model.tags.isEmpty {
+        if mayTag, model.isNote, model.tags.isEmpty {
             Menu {
-                TagMenus.add(workspace.tagList.tags, actions: tagActions)
+                TagMenus.add(workspace.tagList, actions: tagActions)
             } label: {
                 Label("Add tag", systemImage: "tag")
             }

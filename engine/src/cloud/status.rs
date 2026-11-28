@@ -12,6 +12,7 @@ use serde::Serialize;
 use super::manifest::{PublicKind, SpaceKind};
 use super::pace::{Cause, Mode, Plan};
 use super::remote::{AgentRecord, InviteRecord, MemberRecord, DeviceRecord, WorkspaceRecord};
+use super::tags::TagDef;
 
 /// `CloudStatus[]` — the whole model, on every change.
 pub const EV_STATUS: &str = "cloud-status";
@@ -103,6 +104,10 @@ pub struct CloudStatus {
     /// overlaid with the ops queued here — so a page the user just
     /// published shows up immediately, not a CAS later.
     pub public: Vec<PublicPage>,
+    /// The workspace's tags, in order, as this device believes them: the
+    /// shared workspace's list with the changes queued here made — so a tag
+    /// made here shows at once.
+    pub tags: Vec<TagDef>,
     /// Every other device here, from the last poll.
     pub presence: Vec<PresenceDevice>,
     /// The documents another Mac holds, from the same poll.

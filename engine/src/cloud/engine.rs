@@ -21,6 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,6 +43,7 @@ use super::status::{
     documents_of, emit_statuses, CloudStatus, DirectoryPerson, Events, LeaseHolder, Phase, PresenceDevice, PublicPage,
     RecentFiles, SpaceStatus, StatusTable, UsageStatus, VersionsMirror, WorkspaceDocument, EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT,
 };
+use super::tags::TagOp;
 use super::unit::{lock, Ctx, MovedOut, PendingPublic, PublicOp, Survey, Unit, UnitConfig};
 use super::versions::{VersionsIndex, MIRROR_EVERY};
 use crate::versions::store::Snapshot as VersionSnapshot;
@@ -157,6 +159,11 @@ pub enum EngineCmd {
     },
     SetRoot {
         slug: Option<String>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// A change of the workspace's tag list.
+    Tag {
+        op: TagOp,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// The cloud version store, for the history rail's read-through: what
@@ -344,6 +351,10 @@ pub struct Engine<R: Remote> {
     remote: Arc<R>,
     events: Arc<dyn Events>,
     statuses: StatusTable,
+    /// Set by the manager, under the status table's lock, when it stops this
+    /// engine and takes its row out (`stop_engine`): a pass still running
+    /// then never writes the row back for a workspace that has gone.
+    stopped: Arc<AtomicBool>,
     /// Every section this Mac holds, by id. The shared workspace is `SHARED`
     /// and always here; a unit is out of the map only while its cycle runs.
     units: BTreeMap<String, Unit<R>>,
@@ -443,6 +454,7 @@ impl<R: Remote> Engine<R> {
             remote,
             events,
             statuses,
+            stopped: Arc::new(AtomicBool::new(false)),
             units,
             spaces: None,
             private_refusals: 0,
@@ -694,14 +706,22 @@ impl<R: Remote> Engine<R> {
                 horizon_days: mirror.and_then(|m| m.horizon_days),
             },
             public: self.public_pages(),
+            tags: self.shared().effective_tags(),
             presence: self.presence.clone(),
             leases: self.lease_holders(),
             spaces: self.space_statuses(),
         };
         if let Ok(mut table) = self.statuses.lock() {
-            table.insert(self.root_key(), status);
+            if !self.stopped.load(Ordering::SeqCst) {
+                table.insert(self.root_key(), status);
+            }
         }
         emit_statuses(self.events.as_ref(), &self.statuses);
+    }
+
+    /// What the manager sets when it stops this engine.
+    pub(crate) fn stopped(&self) -> Arc<AtomicBool> {
+        self.stopped.clone()
     }
 
     /// `CloudStatus.usage`.
@@ -1750,6 +1770,18 @@ impl<R: Remote> Engine<R> {
         Ok(())
     }
 
+    /* ----- the tag list: queued changes ----- */
+
+    /// Queue a change of the workspace's tag list, which the shared
+    /// workspace's manifest holds.
+    pub(crate) fn queue_tag(&mut self, op: TagOp) -> Result<(), String> {
+        let Some(shared) = self.units.get_mut(SHARED) else { return Err("that workspace isn't connected".into()) };
+        shared.queue_tag(op)?;
+        shared.poke = true;
+        self.refresh_status();
+        Ok(())
+    }
+
     /* ----- activity + presence ----- */
 
     pub(crate) fn set_activity(&mut self, abs_path: Option<String>) {
@@ -2270,6 +2302,10 @@ impl<R: Remote> Engine<R> {
                     }
                     Some(EngineCmd::SetRoot { slug, reply }) => {
                         let _ = reply.send(self.queue_set_root(slug));
+                        cycle_now = true;
+                    }
+                    Some(EngineCmd::Tag { op, reply }) => {
+                        let _ = reply.send(self.queue_tag(op));
                         cycle_now = true;
                     }
                     Some(EngineCmd::VersionsIndex { rel, reply }) => {

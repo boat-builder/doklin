@@ -12,6 +12,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use super::tags::TagDef;
+
 /// The schema this engine writes; parsed out of cloud-worker/src/version.ts
 /// at build time (build.rs) so the app and its worker can't drift apart.
 pub const MANIFEST_VERSION: u32 = super::parse_u32(env!("DOKLIN_MANIFEST_VERSION"));
@@ -65,6 +67,10 @@ pub struct Manifest {
     /// The public map, keyed by slug — the only truth about what is public.
     #[serde(default)]
     pub public: BTreeMap<String, PublicEntry>,
+    /// The workspace's tags, in order (`super::tags`). Only the shared
+    /// workspace's manifest holds any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<TagDef>,
 }
 
 impl Default for Manifest {
@@ -76,6 +82,7 @@ impl Default for Manifest {
             files: BTreeMap::new(),
             tombstones: BTreeMap::new(),
             public: BTreeMap::new(),
+            tags: Vec::new(),
         }
     }
 }

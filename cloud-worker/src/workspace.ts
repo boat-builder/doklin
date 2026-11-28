@@ -14,6 +14,7 @@ import { spaceOf } from "./spaces";
 import { MANIFEST_VERSION } from "./version";
 import type { WorkspaceRecord } from "./wire";
 import { META_SUFFIX, parseEntityMeta, type EntityMeta } from "../../src/metaFile";
+import type { TagDef } from "../../src/tags";
 
 /** What the app opens as a note — the same rule as App.tsx's MD_EXT_RE. */
 export const MD_EXT_RE = /\.(md|markdown|mdown|mkd)$/i;
@@ -85,8 +86,18 @@ function readManifest(v: unknown): Manifest {
     }
     manifest.public = map;
   }
+  // Checked whole on the way in (manifest.ts): a list that reads at all is
+  // the workspace's.
+  if (Array.isArray(v.tags) && v.tags.every(isTag)) manifest.tags = v.tags;
   return manifest;
 }
+
+const isTag = (t: unknown): t is TagDef =>
+  isObject(t) &&
+  typeof t.name === "string" &&
+  Array.isArray(t.values) &&
+  t.values.every((x) => typeof x === "string") &&
+  (t.desc === undefined || typeof t.desc === "string");
 
 type Loaded = {
   etag: string;

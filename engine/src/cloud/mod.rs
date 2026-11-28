@@ -13,6 +13,7 @@
 //! unit.rs       Unit<R>: one section and its manifest — the cycle, fold_public
 //! space.rs      where a workspace's sections are on disk, and their markers
 //! manifest.rs   the wire types (the manifest, the public map) + their grammar
+//! tags.rs       the tag list the manifest holds: its rules, and the changes queued
 //! remote.rs     the Remote trait; HttpRemote (the real worker)
 //! flows.rs      bind + upload, download, wipe — generic, tested
 //! invite.rs     the invite code and the paste blob — the grammar, and the
@@ -47,6 +48,7 @@ pub(crate) mod scan;
 // The versioner asks which folders are sections of their own.
 pub(crate) mod space;
 pub mod status;
+pub mod tags;
 mod terminal;
 #[cfg(test)]
 mod tests;
@@ -55,6 +57,7 @@ pub mod versions;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -76,6 +79,7 @@ use engine::{Engine, EngineCmd, EngineConfig, Exit, PublishRequest, SpacesChange
 use manifest::{clean_name, PublicKind};
 use remote::{HttpRemote, Remote as _};
 use scan::{rel_path, write_json};
+use tags::{TagDef, TagOp};
 use status::{
     emit_statuses, snapshot, AgentAdded, AgentLogin, CloudStatus, DeviceCode, HeldWorkspace, Invited, PageLinkCopy,
     People, LinkTarget, Phase, Probe, RecentFiles, Redeemed, Removed, SpaceStatus, StatusTable, WorkspaceDocument,
@@ -138,6 +142,8 @@ pub(crate) fn keeps_own_versions(root: &Path) -> bool {
 struct EngineHandle {
     tx: mpsc::UnboundedSender<EngineCmd>,
     root: PathBuf,
+    /// The engine's `stopped`.
+    stopped: Arc<AtomicBool>,
     // Held so the recursive watcher lives exactly as long as the engine.
     // None when the watcher couldn't start, or the app asked for none
     // (`Setup::watch`): the bus and the poll still carry the engine.
@@ -283,6 +289,7 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
         core.sync_events(),
         inner.statuses.clone(),
     );
+    let stopped = engine.stopped();
     // The one way an engine ends by itself: the domain said this Mac's access
     // was taken away. The engine stops there and touches nothing; taking the
     // workspace off this Mac is the manager's, because the manager is what
@@ -295,7 +302,7 @@ fn spawn_engine(core: &Arc<Core>, inner: &mut ManagerInner, ws: &WorkspaceEntry)
     });
 
     core.edit_bus.register(root.clone(), cmd_tx.clone());
-    inner.engines.insert(ws.root.clone(), EngineHandle { tx: cmd_tx, root, _watcher: watcher });
+    inner.engines.insert(ws.root.clone(), EngineHandle { tx: cmd_tx, root, stopped, _watcher: watcher });
 }
 
 /// A space's folder appeared on this Mac or left it (`EngineConfig::
@@ -447,7 +454,10 @@ fn stop_engine(core: &Core, inner: &mut ManagerInner, root: &str) -> bool {
     let Some(handle) = inner.engines.remove(root) else { return false };
     let _ = handle.tx.send(EngineCmd::Shutdown);
     core.edit_bus.unregister(&handle.root);
+    // A pass may still be running, and writes the row again as it ends
+    // unless the engine is marked stopped under the same lock.
     if let Ok(mut table) = inner.statuses.lock() {
+        handle.stopped.store(true, Ordering::SeqCst);
         table.remove(root);
     }
     true
@@ -1444,6 +1454,29 @@ pub async fn cloud_set_root(core: &Arc<Core>, root: String, slug: Option<String>
         inner.engines.get(&root).map(|h| h.tx.clone()).ok_or_else(|| "that workspace isn't connected".to_string())
     })?;
     ask(tx, |reply| EngineCmd::SetRoot { slug, reply }).await
+}
+
+/* ---------- The tag list ---------- */
+
+/// Put a tag in the workspace's list: the tag that was `at` — or a new one,
+/// when none is called that — becomes `def`, in its place. Queued, and rides
+/// the next won manifest write, so it works offline; a change of the same
+/// tag on another device at once, and the later one wins. Renaming a tag or
+/// a value here changes no note: the app rewrites the notes that have it.
+pub async fn cloud_set_tag(core: &Arc<Core>, root: String, at: String, def: TagDef) -> Result<(), String> {
+    let tx = with_inner(core, |inner| {
+        inner.engines.get(&root).map(|h| h.tx.clone()).ok_or_else(|| "that workspace isn't connected".to_string())
+    })?;
+    ask(tx, |reply| EngineCmd::Tag { op: TagOp::Set { at, def }, reply }).await
+}
+
+/// Take a tag out of the workspace's list. The notes that have it keep their
+/// line, which is then plain frontmatter.
+pub async fn cloud_remove_tag(core: &Arc<Core>, root: String, name: String) -> Result<(), String> {
+    let tx = with_inner(core, |inner| {
+        inner.engines.get(&root).map(|h| h.tx.clone()).ok_or_else(|| "that workspace isn't connected".to_string())
+    })?;
+    ask(tx, |reply| EngineCmd::Tag { op: TagOp::Remove { name }, reply }).await
 }
 
 /* ---------- Links ---------- */

@@ -109,6 +109,8 @@ pub async fn call(core: &Arc<Core>, name: &str, args: Value) -> Result<Value, St
         ),
         "cloud_unpublish" => json(cloud::cloud_unpublish(core, a.get("root")?, a.get("slug")?).await?),
         "cloud_set_root" => json(cloud::cloud_set_root(core, a.get("root")?, a.get("slug")?).await?),
+        "cloud_set_tag" => json(cloud::cloud_set_tag(core, a.get("root")?, a.get("at")?, a.get("def")?).await?),
+        "cloud_remove_tag" => json(cloud::cloud_remove_tag(core, a.get("root")?, a.get("name")?).await?),
         "cloud_space_create" => json(
             cloud::cloud_space_create(core, a.get("root")?, a.get("name")?, a.get("members")?, a.get("from")?).await?,
         ),

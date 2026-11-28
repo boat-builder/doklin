@@ -1838,6 +1838,8 @@ pub fn run() {
             cloud::cloud_publish,
             cloud::cloud_unpublish,
             cloud::cloud_set_root,
+            cloud::cloud_set_tag,
+            cloud::cloud_remove_tag,
             cloud::cloud_space_create,
             cloud::cloud_space_member,
             cloud::cloud_space_delete,

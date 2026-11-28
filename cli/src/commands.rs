@@ -1021,25 +1021,67 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
 /* ---------- tags ---------- */
 
 pub fn tags(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
-    args.at_most(0)?;
+    match args.positionals.first().map(String::as_str) {
+        None => list_tags(ctx),
+        Some("add") => add_tag(args, ctx),
+        Some(word) => Err(Failure::usage(format!(
+            "\"{}\" is not something tags does — doklin tags lists them, doklin tags add <tag> <value>… adds one",
+            word
+        ))),
+    }
+}
+
+fn list_tags(ctx: &Ctx) -> Result<(), Failure> {
     let s = session(ctx)?;
     let v = s.client.send("GET", "tags", &[], &[], None)?.json()?;
     ctx.answer(&v, || {
-        let note = text(&v, "note");
         let tags = v["tags"].as_array().cloned().unwrap_or_default();
         if tags.is_empty() {
-            return format!(
-                "This workspace has no tags yet. A tag is a line at the top of {}, as status: [Todo, Doing, Done] — see `doklin help tags`.",
-                note
-            );
+            return "This workspace has no tags yet. People make them in Doklin's Settings, and `doklin tags add <tag> <value>…` makes one — ask your person first.".to_string();
         }
         let width = tags.iter().map(|t| text(t, "name").chars().count()).max().unwrap_or(0);
-        let mut lines = vec![format!("The tags, from {}:", note)];
+        let mut lines = vec!["The tags:".to_string()];
         for t in &tags {
             lines.push(format!("  {:<width$}  {}", text(t, "name"), strings(&t["values"]).join(" · "), width = width));
+            // What its values mean, under them.
+            for line in text(t, "desc").lines() {
+                lines.push(format!("  {:<width$}  {}", "", line, width = width).trim_end().to_string());
+            }
         }
-        lines.push(format!("Set one with `doklin tag <doc> <tag>=<value>`. What each value means is in {}.", note));
+        lines.push("Set one with `doklin tag <doc> <tag>=<value>`; add a tag, or a value, with `doklin tags add <tag> <value>…`.".to_string());
         lines.join("\n")
+    });
+    Ok(())
+}
+
+/// `doklin tags add <tag> <value>…`: a new tag with those values, or the
+/// values at the end of a tag the list has. Renaming and removing are the
+/// app's.
+fn add_tag(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
+    let usage = "which tag and which values — doklin tags add status Blocked";
+    let name = args.need(1, usage)?;
+    let values = &args.positionals[2..];
+    if values.is_empty() {
+        return Err(Failure::usage(format!("say {}", usage)));
+    }
+    let s = session(ctx)?;
+    let body = json!({ "name": name, "values": values, "dryRun": ctx.dry_run });
+    let v = s.client.send("POST", "tags", &[], &[], Some(Body::Json(&body)))?.json()?;
+    ctx.answer(&v, || {
+        let tag = &v["tag"];
+        let all = strings(&tag["values"]).join(" · ");
+        let name = text(tag, "name");
+        if v.get("unchanged").is_some() {
+            format!("{} has those already — {}. Nothing was written.", name, all)
+        } else if ctx.dry_run && v.get("created").is_some() {
+            format!("There would be a tag {}, taking {}.", name, all)
+        } else if ctx.dry_run {
+            format!("{} would take {}.", name, all)
+        } else if v.get("created").is_some() {
+            format!("Added the tag {}, taking {}.", name, all)
+        } else {
+            format!("{} now takes {}.", name, all)
+        }
     });
     Ok(())
 }

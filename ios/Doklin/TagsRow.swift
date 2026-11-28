@@ -136,68 +136,6 @@ enum TagMenus {
     }
 }
 
-/// The tag list's own note: its block, as the tags it lists — each with its
-/// values, and *Edit* — then *New tag*. Lines of the block that aren't tags
-/// are a closed disclosure, as the file has them.
-struct TagListView: View {
-    let text: String
-    var edit: ((String) -> Void)?
-    var newTag: (() -> Void)?
-
-    var body: some View {
-        let list = Tags.parseList(text)
-        VStack(alignment: .leading, spacing: 10) {
-            if list.isEmpty {
-                Text("No tags yet.")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.text3)
-            }
-            ForEach(list, id: \.name) { def in
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text(def.name)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Theme.text1)
-                        Spacer()
-                        if let edit {
-                            Button("Edit") { edit(def.name) }
-                                .font(.subheadline)
-                                .accessibilityLabel("Edit \(def.name)")
-                                .accessibilityIdentifier("tag-edit-\(def.name)")
-                        }
-                    }
-                    ChipFlow {
-                        ForEach(def.values, id: \.self) { value in
-                            Text(value)
-                                .font(.subheadline)
-                                .foregroundStyle(Theme.text1)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(Theme.sheet, in: Capsule())
-                        }
-                    }
-                }
-                .padding(12)
-                .background(Theme.sunken, in: RoundedRectangle(cornerRadius: 10))
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("tag-list-\(def.name)")
-            }
-            if let newTag {
-                Button {
-                    newTag()
-                } label: {
-                    Label("New tag", systemImage: "plus")
-                        .font(.subheadline)
-                }
-                .accessibilityIdentifier("tag-new")
-            }
-            if Tags.otherListLines(text) {
-                FrontmatterView(title: "Lines that aren't tags", text: Frontmatter.split(text).inner)
-            }
-        }
-    }
-}
-
 /// Chips in rows that wrap: as many to a row as fit.
 struct ChipFlow: Layout {
     var spacing: CGFloat = 6

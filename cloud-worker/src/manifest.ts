@@ -30,6 +30,7 @@ import {
   validPath,
 } from "./layout";
 import { MANIFEST_VERSION } from "./version";
+import { listProblem, type TagDef } from "../../src/tags";
 
 export type ManifestFile = {
   path: string;
@@ -83,6 +84,10 @@ export type Manifest = {
   files: Record<string, ManifestFile>;
   tombstones?: Record<string, Tombstone>;
   public?: Record<string, PublicEntry>;
+  /** The workspace's tags, in order: which of a note's frontmatter lines
+   *  are tags, and the values each takes (src/tags.ts). The shared
+   *  workspace's manifest alone holds any. */
+  tags?: TagDef[];
 };
 
 /** What a PUT that fails validation answers with: 400 for garbage, 426 for a schema this worker predates. */
@@ -194,6 +199,24 @@ function validatePublic(map: unknown, space: boolean): string | null {
   return null;
 }
 
+/**
+ * The tag list, held to the rules the app keeps it by (src/tags.ts) —
+ * every tag's name and values, the limits, no name twice. It is the
+ * workspace's, so a space's manifest has none.
+ */
+function validateTags(tags: unknown, space: boolean): string | null {
+  if (tags === undefined) return null;
+  if (!Array.isArray(tags)) return "tags must be a list";
+  if (space && tags.length > 0) return "The tags are the workspace's, kept with Library.";
+  for (const t of tags) {
+    if (!isObject(t) || typeof t.name !== "string") return "invalid tag";
+    if (!Array.isArray(t.values) || !t.values.every((v) => typeof v === "string")) return `invalid values for tag ${t.name}`;
+    if (t.desc !== undefined && typeof t.desc !== "string") return `invalid desc for tag ${t.name}`;
+  }
+  const problem = listProblem(tags as TagDef[]);
+  return problem ? `invalid tags: ${problem}` : null;
+}
+
 /** Shape-check a manifest without trusting the client. `space` is true for
  *  the manifest of a restricted folder or a Private, false for the shared
  *  workspace's. */
@@ -216,7 +239,10 @@ export function validateManifest(data: unknown, space: boolean): ManifestProblem
   if (!isCount(data.seq)) return bad("seq must be a non-negative integer");
   if (!optionalText(data.name, MAX_NAME_LEN)) return bad("invalid name");
   const problem =
-    validateFiles(data.files, space) ?? validateTombstones(data.tombstones, space) ?? validatePublic(data.public, space);
+    validateFiles(data.files, space) ??
+    validateTombstones(data.tombstones, space) ??
+    validatePublic(data.public, space) ??
+    validateTags(data.tags, space);
   return problem ? bad(problem) : null;
 }
 

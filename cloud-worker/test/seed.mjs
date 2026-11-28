@@ -223,11 +223,13 @@ export async function seedThroughApi(worker, env, { token, files = SEED_FILES, p
   }
   const current = await call("/api/manifest");
   const etag = current.headers.get("x-manifest-etag");
-  const seq = (await current.json()).seq + 1;
+  // The format the worker made it in, which is the one it takes.
+  const { version, seq: was } = await current.json();
+  const seq = was + 1;
   const put = await call("/api/manifest", {
     method: "PUT",
     headers: { "x-base-etag": etag, "content-type": "application/json" },
-    body: JSON.stringify({ version: 4, name, seq, files: entries, tombstones: {}, public: publicMap }),
+    body: JSON.stringify({ version, name, seq, files: entries, tombstones: {}, public: publicMap }),
   });
   if (put.status !== 200) throw new Error(`manifest failed: ${put.status} ${await put.text()}`);
   return (await put.json()).etag;

@@ -1,25 +1,90 @@
 import DoklinKit
 import SwiftUI
 
-/// Which tag sheet is up over a note.
+/// Which tag sheet is up, over a note or Settings' *Tags*.
 enum TagSheet: Identifiable {
-    /// *New tag*; `forNote`: the open note gets one of its values.
-    case new(forNote: Bool)
-    /// *Edit*, of the tag called so.
-    case edit(String)
+    /// *New tag*; from a note, that note gets one of its values.
+    case new(note: String?)
+    /// *Edit*, of the tag as it was when it was opened.
+    case edit(TagDef)
 
     var id: String {
         switch self {
-        case .new(let forNote): return "new-\(forNote)"
-        case .edit(let name): return "edit-\(name)"
+        case .new(let note): return "new-\(note ?? "")"
+        case .edit(let def): return "edit-\(def.name)"
         }
     }
 }
 
-/// *New tag*: a name, the values one per line, and (from a note) which value
-/// the note gets — as the Mac asks (src/TagDialogs.tsx). The sheet only asks
-/// and says what's wrong with what was typed; `create` writes, and answers
-/// why it couldn't in a sentence.
+/// A tag sheet, saved through the workspace. A rename's notes are changed
+/// once the sheet is down, counted in a notice as it goes.
+struct TagSheetView: View {
+    let sheet: TagSheet
+    let workspace: Workspace
+    let toaster: Toaster
+
+    var body: some View {
+        switch sheet {
+        case .new(let note):
+            NewTagSheet(list: workspace.tagList, forNote: note != nil) { def, value in
+                await workspace.createTag(def, value: value, on: note)
+            }
+        case .edit(let def):
+            EditTagSheet(def: def, list: workspace.tagList) { edit in
+                if let failed = await workspace.saveTagEdit(edit) { return failed }
+                if edit.rewritesNotes { renameInNotes(edit) }
+                return nil
+            } delete: {
+                await workspace.deleteTag(def.name)
+            }
+        }
+    }
+
+    /// The rest of a rename: every note on this iPhone that has the tag.
+    private func renameInNotes(_ edit: TagEdit) {
+        let (workspace, toaster) = (self.workspace, self.toaster)
+        Task {
+            toaster.show("Changing notes…", tone: .info)
+            let done = await workspace.renameInNotes(edit) { count in
+                toaster.show("Changing notes: \(count) so far…", tone: .info)
+            }
+            let ok = done.failed.isEmpty && done.listLeft == nil
+            toaster.show([done.words, done.listLeft].compactMap { $0 }.joined(separator: " "), tone: ok ? .done : .error)
+        }
+    }
+}
+
+/// What a tag's values mean, for both sheets: people see it in Settings'
+/// *Tags*, and agents read it with the tags.
+private struct DescField: View {
+    @Binding var desc: String
+    let busy: Bool
+
+    var body: some View {
+        Section {
+            TextField("Todo: nobody has started. Doing: somebody is on it. Done: finished.", text: $desc, axis: .vertical)
+                .lineLimit(2...)
+                .disabled(busy)
+                .accessibilityIdentifier("tag-desc")
+        } header: {
+            Text("What the values mean")
+        } footer: {
+            Text("People see it in Settings, and agents read it with the tags.")
+        }
+    }
+}
+
+/// A tag as typed: its name and values trimmed, and what they mean, unless
+/// that is blank.
+private func typed(_ name: String, _ values: [String], _ desc: String) -> TagDef {
+    let meaning = desc.trimmingCharacters(in: .whitespacesAndNewlines)
+    return TagDef(name: name.trimmingCharacters(in: .whitespaces), values: values, desc: meaning.isEmpty ? nil : meaning)
+}
+
+/// *New tag*: a name, the values one per line, what they mean, and (from a
+/// note) which value the note gets — as the Mac asks (src/TagDialogs.tsx).
+/// The sheet only asks and says what's wrong with what was typed; `create`
+/// writes, and answers why it couldn't in a sentence.
 struct NewTagSheet: View {
     let list: [TagDef]
     let forNote: Bool
@@ -27,6 +92,7 @@ struct NewTagSheet: View {
 
     @State private var name = ""
     @State private var valuesText = ""
+    @State private var desc = ""
     @State private var chosen: String?
     @State private var tried = false
     @State private var failure: String?
@@ -37,8 +103,8 @@ struct NewTagSheet: View {
         valuesText.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
-    private var trimmedName: String { name.trimmingCharacters(in: .whitespaces) }
-    private var problem: String? { Tags.tagProblem(name: trimmedName, values: values, list: list) }
+    private var def: TagDef { typed(name, values, desc) }
+    private var problem: String? { Tags.tagProblem(def, list: list) }
     /// The note gets the first value until another is picked.
     private var gets: String? { chosen.flatMap { values.contains($0) ? $0 : nil } ?? values.first }
 
@@ -62,6 +128,7 @@ struct NewTagSheet: View {
                         .disabled(busy)
                         .accessibilityIdentifier("tag-values")
                 }
+                DescField(desc: $desc, busy: busy)
                 if forNote, !values.isEmpty {
                     Section {
                         Picker("This note gets", selection: Binding(get: { gets ?? "" }, set: { chosen = $0 })) {
@@ -108,7 +175,7 @@ struct NewTagSheet: View {
         guard problem == nil, !busy else { return }
         busy = true
         failure = nil
-        let def = TagDef(name: trimmedName, values: values)
+        let def = self.def
         let value = forNote ? gets : nil
         Task {
             let failed = await create(def, value)
@@ -119,7 +186,7 @@ struct NewTagSheet: View {
 }
 
 /// *Edit Status*: rename the tag; rename, add, remove and reorder its
-/// values; or delete it. A rename changes every note on this iPhone that
+/// values; say what they mean; or delete it. A rename changes every note on this iPhone that
 /// has it, once the sheet is down: `save` writes the list and answers why
 /// it couldn't in a sentence; the notes are its caller's.
 struct EditTagSheet: View {
@@ -138,6 +205,7 @@ struct EditTagSheet: View {
 
     @State private var name: String
     @State private var rows: [Row]
+    @State private var desc: String
     @State private var adding = ""
     @State private var deleting = false
     @State private var tried = false
@@ -152,11 +220,13 @@ struct EditTagSheet: View {
         self.delete = delete
         _name = State(initialValue: def.name)
         _rows = State(initialValue: def.values.map { Row(from: $0, value: $0) })
+        _desc = State(initialValue: def.desc ?? "")
     }
 
     private var trimmedName: String { name.trimmingCharacters(in: .whitespaces) }
     private var values: [String] { rows.map { $0.value.trimmingCharacters(in: .whitespaces) } }
-    private var problem: String? { Tags.tagProblem(name: trimmedName, values: values, list: list, except: def.name) }
+    private var next: TagDef { typed(name, values, desc) }
+    private var problem: String? { Tags.tagProblem(next, list: list, except: def.name) }
     private var renames: [TagEdit.Rename] {
         rows.compactMap { row in
             let now = row.value.trimmingCharacters(in: .whitespaces)
@@ -207,6 +277,7 @@ struct EditTagSheet: View {
                         }
                     }
                 }
+                DescField(desc: $desc, busy: busy)
                 Section {
                     Button(role: .destructive) {
                         deleting = true
@@ -254,7 +325,7 @@ struct EditTagSheet: View {
         guard problem == nil, !busy else { return }
         busy = true
         failure = nil
-        let edit = TagEdit(from: def.name, def: TagDef(name: trimmedName, values: values), renames: renames)
+        let edit = TagEdit(from: def.name, def: next, renames: renames)
         Task {
             let failed = await save(edit)
             busy = false

@@ -163,29 +163,22 @@ A tag is a name and a short list of values, the same for the whole workspace:
 status takes Todo, Doing or Done. A document holds at most one value of each tag.
 People set them in the Doklin app, under a document's title; you set them here.
 
-  doklin tags                                        every tag and its values
+  doklin tags                                        every tag and what its values mean
   doklin tag Library/Projects/plan status=Doing      set one, or several at once
   doklin tag Library/Projects/plan status=           remove one
   doklin ls Library/Projects --where status=Doing    the documents that have it
   doklin ls --deep --where status                    the ones with any status
   doklin search "launch" --where priority=p1         text and tags together
+  doklin tags add status Blocked                     a value at the end of a tag's
+  doklin tags add area Web iPhone                    a new tag, with its values
 
 Only a value the tag lists can be set, in any case. A write that gives a tag any
-other value is refused, and so is one that gives it two. Never invent a value: ask
-your person, or add it to the list.
+other value is refused, and so is one that gives it two. Never invent a value or
+a tag: ask your person, and add it with `doklin tags add` only when they agree.
 
-The list is a document of its own, Library/Tags. Each line at its top is a tag
-and its values, in order:
-
-  ---
-  status: [Todo, Doing, Done]
-  priority: [p1, p2, p3]
-  ---
-  What each value means, for the people and agents who set them.
-
-Change it with `doklin edit`: every line at its top must be a tag like these, or
-the write is refused. Renaming a value there leaves every document that holds the
-old one as it was — ask your person to rename it in the app, which changes them.
+People keep the list in the app's Settings, where they rename and remove tags and
+say what each value means — a rename there changes every document that has it.
+You can only add.
 
 In a document, a tag is a line at the top of its markdown, between two --- lines:
 
@@ -494,8 +487,8 @@ What matters here
     working when that document is renamed or moved. doklin links <doc> lists
     what a document links to, and what links to it.
   · Set a document's tags with doklin tag <doc> status=Done, to a value that
-    doklin tags lists. Never invent one: ask your person, or add it to the list
-    in Library/Tags (doklin help tags).
+    doklin tags lists. Never invent one: ask your person, and add it with
+    doklin tags add only when they agree (doklin help tags).
   · Publishing makes a document readable by anyone. Do it only when asked, and
     look at a folder with --dry-run first (doklin help publishing).
   · A diagram is a ```svg drawing you place by hand, in the theme's colours —

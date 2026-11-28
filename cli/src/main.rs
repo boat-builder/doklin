@@ -136,8 +136,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "tags",
-        usage: "doklin tags",
-        about: "The workspace's tags and the values each takes, from the tag list in Library/Tags.",
+        usage: "doklin tags [add <tag> <value>…]",
+        about: "The workspace's tags, the values each takes and what they mean. `add` adds a tag, or values at the end of one; renaming and removing are your person's, in the app.",
         accepts: Accepts { values: &[], switches: &[] },
         run: commands::tags,
     },

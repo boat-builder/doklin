@@ -86,7 +86,7 @@ struct SearchView: View {
         .overlay { state }
         .navigationTitle("Search")
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $query, prompt: workspace.tagList.tags.isEmpty ? "A name, or words in a note" : "A name, words, or a tag")
+        .searchable(text: $query, prompt: workspace.tagList.isEmpty ? "A name, or words in a note" : "A name, words, or a tag")
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
         .onSubmit(of: .search) { remember() }
@@ -198,7 +198,7 @@ struct SearchView: View {
                 ContentUnavailableView(
                     "Search \(workspace.name)",
                     systemImage: "magnifyingglass",
-                    description: Text(TagWords.searchHint(workspace.tagList.tags))
+                    description: Text(TagWords.searchHint(workspace.tagList))
                 )
             }
         } else {

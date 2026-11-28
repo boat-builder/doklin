@@ -6,7 +6,7 @@
 // One journey, because the engine is one per process and a device code
 // works once: join as a device through the models the screens use, hold the
 // whole workspace locally — its shared files in `Library/` — sync a change
-// up, and leave.
+// up, make and rename the workspace's tags, and leave.
 
 import XCTest
 @testable import DoklinKit
@@ -293,7 +293,79 @@ final class EngineLiveTests: XCTestCase {
         XCTAssertEqual(deleted.place(of: gone), "Library")
         let back = try await gone.bringBack(in: workspace)
         XCTAssertEqual(back, "Library/Ideas.md")
-        XCTAssertTrue(try workspace.files.text("Library/Ideas.md").hasPrefix("# Ideas"))
+        let ideasText = try workspace.files.text("Library/Ideas.md")
+        XCTAssertTrue(ideasText.hasPrefix("# Ideas"))
+
+        // Tags: the workspace's list is its manifest's, changed through the
+        // engine and shown before it syncs; a note's tag is a line of the
+        // note, and a rename changes every note that has it.
+        XCTAssertEqual(workspace.tagList, [], "the seed has no tags")
+        let workflow = TagDef(name: "Status", values: ["Todo", "Doing", "Done"], desc: "Where a piece of work is.")
+        let tagMade = await workspace.createTag(workflow, value: "Doing", on: "Library/Ideas.md")
+        XCTAssertNil(tagMade)
+        XCTAssertEqual(workspace.tagList, [workflow])
+        let tagged = DocumentModel(workspace: workspace, path: "Library/Ideas.md")
+        tagged.load()
+        XCTAssertEqual(tagged.tags, [NoteTag(name: "Status", value: "Doing", known: true)])
+        XCTAssertNil(tagged.otherFrontmatter, "a block of tags alone has no disclosure")
+
+        // Search: a listed tag's token, spelled as the list spells it; with
+        // no words, every note that has it.
+        let byTag = SearchModel(workspace: workspace)
+        await byTag.run("status:doing")
+        XCTAssertTrue(byTag.onlyTags)
+        XCTAssertEqual(byTag.tags, [TagFilter(name: "Status", value: "Doing")])
+        XCTAssertEqual(byTag.tagged.map(\.path), ["Library/Ideas.md"])
+
+        // A value renamed: both in the list while the notes change, then the
+        // new one alone.
+        let underway = TagEdit(
+            from: "Status", def: TagDef(name: "Status", values: ["Todo", "Underway", "Done"], desc: workflow.desc),
+            renames: [TagEdit.Rename(from: "Doing", to: "Underway")]
+        )
+        let beside = await workspace.saveTagEdit(underway)
+        XCTAssertNil(beside)
+        XCTAssertEqual(workspace.tagList.map(\.values), [["Todo", "Doing", "Underway", "Done"]])
+        let valueRenamed = await workspace.renameInNotes(underway) { _ in }
+        XCTAssertEqual(valueRenamed, TagRenamed(changed: 1, failed: [], listLeft: nil))
+        XCTAssertEqual(workspace.tagList, [underway.def])
+        XCTAssertEqual(try workspace.files.text("Library/Ideas.md"), "---\nStatus: Underway\n---\n" + ideasText)
+
+        // The tag renamed: the old name at the end until the notes have the
+        // new — the seed's note with a value the list lacks too.
+        let stage = TagEdit(from: "Status", def: TagDef(name: "Stage", values: underway.def.values, desc: workflow.desc), renames: [])
+        let named = await workspace.saveTagEdit(stage)
+        XCTAssertNil(named)
+        XCTAssertEqual(workspace.tagList.map(\.name), ["Stage", "Status"])
+        let nameRenamed = await workspace.renameInNotes(stage) { _ in }
+        XCTAssertEqual(nameRenamed, TagRenamed(changed: 2, failed: [], listLeft: nil))
+        XCTAssertEqual(workspace.tagList, [stage.def])
+        XCTAssertEqual(try workspace.files.text("Library/Ideas.md"), "---\nStage: Underway\n---\n" + ideasText)
+        XCTAssertTrue(try workspace.files.text("Library/Projects/Roadmap/Ship the boat.md").hasPrefix("---\nStage: In progress\nowner: Ada\n"))
+
+        // A tag deleted leaves the list; a note keeps its line, now plain
+        // frontmatter.
+        let size = TagDef(name: "Size", values: ["S", "M"])
+        let sized = await workspace.createTag(size, value: "M", on: "Library/Ideas.md")
+        XCTAssertNil(sized)
+        XCTAssertEqual(workspace.tagList, [stage.def, size])
+        let onto = await workspace.saveTagEdit(TagEdit(from: "Size", def: TagDef(name: "stage", values: size.values), renames: []))
+        XCTAssertEqual(onto, "There's already a tag called Stage.", "refused in the worker's words")
+        XCTAssertEqual(workspace.tagList, [stage.def, size])
+        let unsized = await workspace.deleteTag("size")
+        XCTAssertNil(unsized)
+        XCTAssertEqual(workspace.tagList, [stage.def])
+        tagged.load()
+        XCTAssertEqual(tagged.tags, [NoteTag(name: "Stage", value: "Underway", known: true)])
+        XCTAssertEqual(tagged.otherFrontmatter, "Stage: Underway\nSize: M")
+        await tagged.setTag("Size", to: nil)
+        XCTAssertNil(tagged.problem)
+
+        // Synced, the list is the manifest's: what drive-ios.mjs reads back.
+        let tagsMade = try XCTUnwrap(device.status(root)?.lastSyncMs)
+        await device.syncNow(root)
+        try await synced(device, root, after: tagsMade)
+        XCTAssertEqual(workspace.tagList, [stage.def])
 
         // Leaving ends the sign-in and takes the copy, and the keeper's
         // sign-in, with it.

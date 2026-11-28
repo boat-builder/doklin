@@ -1,16 +1,18 @@
-// The two dialogs a tag is made and changed in. *New tag…* asks for a name,
-// the values one per line, and (from a note) which value the note gets.
-// *Edit Status…* renames the tag, renames, adds, removes and reorders its
-// values (drag a value's handle, or ⌥↑ ⌥↓ in its field), and deletes the
-// tag.
+// The forms a tag is made and changed in. *New tag* asks for a name, the
+// values one per line, what they mean, and (from a note) which value the
+// note gets. *Edit* renames the tag, renames, adds, removes and reorders its
+// values (drag a value's handle, or ⌥↑ ⌥↓ in its field), says what they
+// mean, and deletes the tag. From a note's tags each is a dialog of its own
+// (`NewTagDialog`, `EditTagDialog`); in Settings' *Tags* each is a page of
+// that one (TagsSettings.tsx).
 //
-// The dialogs only ask, and say what's wrong with a name or a value as
-// src/tags.ts does. The host writes the list (and the notes a rename
-// changes), and answers with a sentence when it couldn't.
+// The forms only ask, and say what's wrong with a tag as src/tags.ts does.
+// The host changes the list (and the notes a rename changes), and answers
+// with a sentence when it couldn't.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
-import { nameProblem, valueProblem, type TagDef } from "./tags";
+import { TAGS_MAX, tagProblem, type TagDef } from "./tags";
 
 /** What *Edit* saves: the tag that was `from`, now `def`, with the values
  *  renamed old → new. */
@@ -25,19 +27,46 @@ function CloseIcon() {
   );
 }
 
-/** The first thing wrong with a tag as typed, or null. */
-function tagProblem(name: string, values: string[], list: TagDef[], except?: string): string | null {
-  const named = nameProblem(name, list, except);
-  if (named) return named;
-  if (values.length === 0) return "A tag needs at least one value.";
-  for (let i = 0; i < values.length; i += 1) {
-    const wrong = valueProblem(values[i], values.slice(0, i));
-    if (wrong) return wrong;
-  }
-  return null;
+/** A tag as the form holds it: trimmed, and what its values mean left out
+ *  when nothing is written there. */
+function typed(name: string, values: string[], desc: string): TagDef {
+  const meaning = desc.trim();
+  return { name: name.trim(), values, ...(meaning ? { desc: meaning } : {}) };
 }
 
-function Shell({
+/** A form's busy state, told to the card it is in: nothing closes while the
+ *  list is being changed. */
+function useBusy(onBusy?: (busy: boolean) => void): [boolean, (busy: boolean) => void] {
+  const [busy, setBusy] = useState(false);
+  return [
+    busy,
+    (b: boolean) => {
+      setBusy(b);
+      onBusy?.(b);
+    },
+  ];
+}
+
+function DescField({ value, busy, onChange, testId }: { value: string; busy: boolean; onChange: (v: string) => void; testId: string }) {
+  return (
+    <div className="modal-field">
+      <div className="modal-field-label">What the values mean</div>
+      <textarea
+        className="modal-field-input tag-values-text"
+        data-testid={testId}
+        value={value}
+        placeholder={"Todo: nobody has started. Doing: somebody is on it. Done: finished."}
+        rows={3}
+        disabled={busy}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <p className="cloud-hint">People see it here, and agents read it with the tags.</p>
+    </div>
+  );
+}
+
+/** The card a tag's form is in: a dialog of its own, or Settings' *Tags*. */
+export function TagShell({
   title,
   busy,
   onClose,
@@ -51,7 +80,7 @@ function Shell({
   children: React.ReactNode;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
-  // Nothing closes while the list is being written.
+  // Nothing closes while the list is being changed.
   useDismiss(() => {
     if (!busy) onClose();
   }, cardRef);
@@ -70,29 +99,33 @@ function Shell({
   );
 }
 
-export function NewTagDialog({
+export function NewTagForm({
   list,
   forNote,
   onSubmit,
-  onClose,
+  onCancel,
+  onBusy,
 }: {
   list: TagDef[];
   /** Made from a note's *+ Tag*: the note gets one of the values. */
   forNote: boolean;
   onSubmit: (def: TagDef, value: string | null) => Promise<string | null>;
-  onClose: () => void;
+  onCancel: () => void;
+  onBusy?: (busy: boolean) => void;
 }) {
   const [name, setName] = useState("");
   const [valuesText, setValuesText] = useState("");
+  const [desc, setDesc] = useState("");
   const [chosen, setChosen] = useState<string | null>(null);
   const [tried, setTried] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useBusy(onBusy);
   const values = useMemo(
     () => valuesText.split("\n").map((v) => v.trim()).filter((v) => v !== ""),
     [valuesText],
   );
-  const problem = tagProblem(name.trim(), values, list);
+  const def = typed(name, values, desc);
+  const problem = tagProblem(def, list) ?? (list.length >= TAGS_MAX ? `A workspace can have ${TAGS_MAX} tags at most.` : null);
   // The note gets the first value until another is picked.
   const gets = chosen !== null && values.includes(chosen) ? chosen : (values[0] ?? null);
 
@@ -101,13 +134,13 @@ export function NewTagDialog({
     if (problem || busy) return;
     setBusy(true);
     setError(null);
-    const failed = await onSubmit({ name: name.trim(), values }, forNote ? gets : null);
+    const failed = await onSubmit(def, forNote ? gets : null);
     setBusy(false);
     if (failed) setError(failed);
   };
 
   return (
-    <Shell title="New tag" busy={busy} onClose={onClose} testId="tag-new-dialog">
+    <>
       <p className="cloud-hint">
         A tag is a name and the values a note can have, one at a time. Everyone in the workspace sees the same tags.
       </p>
@@ -137,6 +170,7 @@ export function NewTagDialog({
           onChange={(e) => setValuesText(e.target.value)}
         />
       </div>
+      <DescField value={desc} busy={busy} onChange={setDesc} testId="tag-new-desc" />
       {forNote && values.length > 0 && (
         <div className="modal-field">
           <div className="modal-field-label">This note gets</div>
@@ -157,45 +191,68 @@ export function NewTagDialog({
       )}
       {((tried && problem) || error) && <div className="modal-error">{error ?? problem}</div>}
       <div className="modal-buttons">
-        <button className="modal-btn" onClick={onClose} disabled={busy}>
+        <button className="modal-btn" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
         <button className="modal-btn is-primary" data-testid="tag-new-create" onClick={() => void submit()} disabled={busy}>
           {busy ? "Making it…" : "Create"}
         </button>
       </div>
-    </Shell>
+    </>
+  );
+}
+
+export function NewTagDialog({
+  list,
+  forNote,
+  onSubmit,
+  onClose,
+}: {
+  list: TagDef[];
+  forNote: boolean;
+  onSubmit: (def: TagDef, value: string | null) => Promise<string | null>;
+  onClose: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <TagShell title="New tag" busy={busy} onClose={onClose} testId="tag-new-dialog">
+      <NewTagForm list={list} forNote={forNote} onSubmit={onSubmit} onCancel={onClose} onBusy={setBusy} />
+    </TagShell>
   );
 }
 
 type Row = { key: number; from: string | null; value: string };
 
-export function EditTagDialog({
+export function EditTagForm({
   def,
   list,
   onSave,
   onDelete,
-  onClose,
+  onCancel,
+  onBusy,
 }: {
   def: TagDef;
   list: TagDef[];
   onSave: (edit: TagEdit) => Promise<string | null>;
   onDelete: () => Promise<string | null>;
-  onClose: () => void;
+  onCancel: () => void;
+  onBusy?: (busy: boolean) => void;
 }) {
   const [name, setName] = useState(def.name);
   const seq = useRef(0);
   const [rows, setRows] = useState<Row[]>(() => def.values.map((v) => ({ key: seq.current++, from: v, value: v })));
   const [adding, setAdding] = useState("");
+  const [desc, setDesc] = useState(def.desc ?? "");
   const [deleting, setDeleting] = useState(false);
   const [tried, setTried] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useBusy(onBusy);
   const listRef = useRef<HTMLUListElement>(null);
   const [dragging, setDragging] = useState<number | null>(null);
 
   const values = rows.map((r) => r.value.trim());
-  const problem = tagProblem(name.trim(), values, list, def.name);
+  const next = typed(name, values, desc);
+  const problem = tagProblem(next, list, def.name);
   const renames = rows
     .filter((r) => r.from !== null && r.from !== r.value.trim())
     .map((r): [string, string] => [r.from!, r.value.trim()]);
@@ -257,7 +314,7 @@ export function EditTagDialog({
     if (problem || busy) return;
     setBusy(true);
     setError(null);
-    const failed = await onSave({ from: def.name, def: { name: name.trim(), values }, renames });
+    const failed = await onSave({ from: def.name, def: next, renames });
     setBusy(false);
     if (failed) setError(failed);
   };
@@ -271,7 +328,7 @@ export function EditTagDialog({
   };
 
   return (
-    <Shell title={`Edit ${def.name}`} busy={busy} onClose={onClose} testId="tag-edit-dialog">
+    <>
       <div className="modal-field">
         <div className="modal-field-label">Name</div>
         <input
@@ -352,6 +409,7 @@ export function EditTagDialog({
           onBlur={add}
         />
       </div>
+      <DescField value={desc} busy={busy} onChange={setDesc} testId="tag-edit-desc" />
       {(renames.length > 0 || renamedTag) && (
         <p className="cloud-hint" data-testid="tag-edit-effect">
           Every note you can open with {renamedTag ? `a ${def.name} tag` : renames.map(([o]) => o).join(" or ")} is
@@ -384,7 +442,7 @@ export function EditTagDialog({
             Delete tag
           </button>
           <span className="tag-edit-gap" />
-          <button className="modal-btn" onClick={onClose} disabled={busy}>
+          <button className="modal-btn" onClick={onCancel} disabled={busy}>
             Cancel
           </button>
           <button className="modal-btn is-primary" data-testid="tag-edit-save" onClick={() => void save()} disabled={busy}>
@@ -392,6 +450,27 @@ export function EditTagDialog({
           </button>
         </div>
       )}
-    </Shell>
+    </>
+  );
+}
+
+export function EditTagDialog({
+  def,
+  list,
+  onSave,
+  onDelete,
+  onClose,
+}: {
+  def: TagDef;
+  list: TagDef[];
+  onSave: (edit: TagEdit) => Promise<string | null>;
+  onDelete: () => Promise<string | null>;
+  onClose: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <TagShell title={`Edit ${def.name}`} busy={busy} onClose={onClose} testId="tag-edit-dialog">
+      <EditTagForm def={def} list={list} onSave={onSave} onDelete={onDelete} onCancel={onClose} onBusy={setBusy} />
+    </TagShell>
   );
 }

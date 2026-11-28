@@ -352,21 +352,25 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
 ## Tags
 
 - **A note's tag is an unindented `key: value` line of its frontmatter**,
-  and the workspace's tag list says which keys are tags and which values each
-  takes. The rules (what a pair is, how a line is written and quoted, the
-  list's format, names and values, the search's tokens) are `src/tags.ts`'s,
-  ported for the iPhone (`Markdown/Tags.swift`) and read in Rust for the
-  Mac's search (`src-tauri/src/tags.rs`), all held to
-  `verify-harness/tags-fixture.json`: **change all three**.
+  and the workspace's tag list says which keys are tags, which values each
+  takes and what they mean. The rules (what a pair is, how a line is written
+  and quoted, names and values, how the list changes, the search's tokens)
+  are `src/tags.ts`'s, ported for the iPhone (`Markdown/Tags.swift`, but for
+  how the list changes, which the engine does there), read in
+  Rust for the Mac's search (`src-tauri/src/tags.rs`) and checked by the sync
+  engine (`engine/src/cloud/tags.rs`), all held to
+  `verify-harness/tags-fixture.json`: **change all four**.
 - **A tag's line is the first line keyed by its name**, whatever the case. A
   later line for the same name is plain frontmatter. A line that isn't a pair
   (a list, a map, an empty value, a line with an indented run) gives the note
   no value, and setting the tag replaces it.
-- **The list is a note**: `Tags.md` in the sidebar's first list (Library, when
-  connected), found whatever its case. Its block holds one flow list per tag,
-  in menu order; its body says what the values mean. Lines that don't parse
-  are skipped and stay. It is read again whenever the tree is, and is the
-  open note's own block while it is open (shown as the list: `TagListView`).
+- **The list is a connected workspace's, never a file**: the shared
+  manifest's `tags` ([cloud.md](cloud.md)), read from the status
+  (`CloudStatus.tags`). A folder that isn't connected has no tags: no chips,
+  no *+ Tag*, and Settings' *Tags* says why. People change it in Settings'
+  *Tags* (`TagsSettings.tsx`) or a note's own dialogs (`TagDialogs.tsx`),
+  through `Cloud.setTag` and `removeTag`; the status is read again before
+  anything goes on, so what shows next is the list with the change.
 - **The writers hold notes to the list; readers never do.** A value the list
   doesn't have stays the note's, shown marked. Only the chip's menu sets a
   tag here.
@@ -381,8 +385,9 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
 - **A tag change on any other note** (a rename) reads it and writes over the
   rev it read, once more on a conflict. A note in the other pane takes the
   new block and rev: a write of the window's own is never reported back.
-- **A rename writes the list twice**: the new name or value beside the old,
-  then the notes, then the old leaves. Notes are found with the search
+- **A rename changes the list twice**: the new name or value in place, the
+  old kept beside it (an old name at the end, while the list has room), then
+  the notes, then the old leaves. Notes are found with the search
   (`name:value`, or a name with any value), asked again until it finds none
   it hasn't tried. Removing a value or a tag rewrites nothing.
 - **Search splits its tokens off** (`searchQuery`) and sends them beside the
