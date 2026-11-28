@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use super::scan::now_ms;
 
 pub enum MergeOutcome {
-    Clean(String),
+    Clean(Vec<u8>),
     Conflicted,
 }
 
@@ -25,7 +25,7 @@ pub fn merge_texts(base: Option<&[u8]>, ours: &[u8], theirs: &[u8]) -> MergeOutc
         return MergeOutcome::Conflicted;
     };
     match diffy::merge(base, ours, theirs) {
-        Ok(merged) => MergeOutcome::Clean(merged),
+        Ok(merged) => MergeOutcome::Clean(merged.into_bytes()),
         Err(_) => MergeOutcome::Conflicted,
     }
 }

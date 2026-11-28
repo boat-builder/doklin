@@ -40,7 +40,8 @@ use crate::versions::store::{
 /// content-addressed blobs (each with the time it landed, so a grace period
 /// is testable), presence and the polls that carry it. `racer` lets a test
 /// inject "another device won the CAS between your fetch and your put";
-/// `reject_schema` plays a worker a release behind the app's manifest.
+/// `schema` is the manifest version the worker takes, as `MANIFEST_VERSION`
+/// is the real one's: a write of any other is its `426`.
 #[derive(Default)]
 struct FakeWorker {
     bound: Option<WorkspaceRecord>,
@@ -61,7 +62,7 @@ struct FakeWorker {
     /// no presence and `leases: null`.
     d1_down: bool,
     offline: bool,
-    reject_schema: bool,
+    schema: u32,
     /// The worker's sentence for an app older than its minimum: every route
     /// answers `410` with it.
     too_old: Option<String>,
@@ -339,7 +340,12 @@ type SharedWorker = Arc<Mutex<FakeWorker>>;
 /// A worker set up the way every domain is: Ada traded the domain's key for
 /// her first device's sign-in (`OWNER_TOKEN`), which made her the superadmin.
 fn fake_worker() -> SharedWorker {
-    let be = Arc::new(Mutex::new(FakeWorker { worker_version: 1, limits: Some(free_limits()), ..Default::default() }));
+    let be = Arc::new(Mutex::new(FakeWorker {
+        worker_version: 1,
+        schema: MANIFEST_VERSION,
+        limits: Some(free_limits()),
+        ..Default::default()
+    }));
     trade_key(&be, OWNER_TOKEN, "ada@example.com", "Ada");
     be
 }
@@ -977,10 +983,10 @@ impl Remote for FakeRemote {
             if this.space.is_some() && !manifest.tags.is_empty() {
                 return Err(RemoteError::Other("The tags are the workspace's, kept with Library.".into()));
             }
-            if b.reject_schema {
+            if manifest.version != b.schema {
                 return Err(RemoteError::Outdated(format!(
-                    "manifest version {} is newer than this worker understands",
-                    manifest.version
+                    "manifest version {} is not the {} this worker understands",
+                    manifest.version, b.schema
                 )));
             }
             // The address registry: a slug is one section's for the whole
@@ -2104,6 +2110,98 @@ async fn a_notes_conflict_copy_gets_its_sidecar() {
     b.cycle().await;
     a.cycle().await;
     assert_eq!(a.read(&sidecar).as_deref(), Some(THREAD), "and it syncs like any sidecar");
+}
+
+/// A folder's `boards.json` as the apps write it (src/boards.ts): `cards`
+/// given in code-point order of their names.
+fn board(tag: &str, cards: &[(&str, &str)]) -> String {
+    let lines: Vec<String> = cards.iter().map(|(name, rank)| format!("    \"{name}\": {{ \"rank\": \"{rank}\" }}")).collect();
+    let cards = if lines.is_empty() { "{}".to_string() } else { format!("{{\n{}\n  }}", lines.join(",\n")) };
+    format!("{{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"{tag}\",\n  \"cards\": {cards}\n}}\n")
+}
+
+/// A folder's board syncs like a document. Changed on two devices at once it
+/// merges by its records, whichever syncs first: each side's moves are kept,
+/// a card one side dropped stays dropped, and no conflict copy is made — one
+/// called `boards (conflict …).json` would sync nowhere.
+#[tokio::test]
+async fn a_folders_board_syncs_and_merges_by_record_both_ways_round() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("Work/a.md", "a\n");
+    a.write("Work/b.md", "b\n");
+    a.write("Work/boards.json", &board("Status", &[("a.md", "a0"), ("b.md", "a1")]));
+    a.cycle().await;
+    assert_eq!(paths(&manifest_of(&be)), ["Work/a.md", "Work/b.md", "Work/boards.json"]);
+    b.cycle().await;
+    assert_eq!(b.read("Work/boards.json"), Some(board("Status", &[("a.md", "a0"), ("b.md", "a1")])));
+
+    // Alice moves a card and syncs first; Bob regroups and moves the other.
+    a.write("Work/boards.json", &board("Status", &[("a.md", "a0V"), ("b.md", "a1")]));
+    a.cycle().await;
+    b.write("Work/boards.json", &board("Priority", &[("a.md", "a0"), ("b.md", "Zz")]));
+    b.cycle().await;
+    let merged = board("Priority", &[("a.md", "a0V"), ("b.md", "Zz")]);
+    assert_eq!(b.read("Work/boards.json").as_deref(), Some(merged.as_str()));
+    a.cycle().await;
+    assert_eq!(a.read("Work/boards.json").as_deref(), Some(merged.as_str()));
+
+    // The other way round: Bob moves a card and syncs first; Alice drops the other.
+    b.write("Work/boards.json", &board("Priority", &[("a.md", "a0l"), ("b.md", "Zz")]));
+    b.cycle().await;
+    a.write("Work/boards.json", &board("Priority", &[("a.md", "a0V")]));
+    a.cycle().await;
+    let again = board("Priority", &[("a.md", "a0l")]);
+    assert_eq!(a.read("Work/boards.json").as_deref(), Some(again.as_str()));
+    b.cycle().await;
+    assert_eq!(b.read("Work/boards.json").as_deref(), Some(again.as_str()));
+
+    for d in [&a, &b] {
+        assert_eq!(d.files(), ["Work/a.md", "Work/b.md", "Work/boards.json"], "no conflict copy");
+        assert!(d.events.of(EV_CONFLICT).is_empty());
+    }
+}
+
+/// Made on two devices before either synced, a board is still one file:
+/// both sides' records, and on a tag both chose, this side's.
+#[tokio::test]
+async fn a_board_two_devices_made_at_once_is_one_board() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("Work/boards.json", &board("Status", &[("a.md", "a0")]));
+    b.write("Work/boards.json", &board("Priority", &[("b.md", "a0")]));
+    a.cycle().await;
+    b.cycle().await;
+    a.cycle().await;
+    let both = board("Priority", &[("a.md", "a0"), ("b.md", "a0")]);
+    assert_eq!(b.read("Work/boards.json").as_deref(), Some(both.as_str()));
+    assert_eq!(a.read("Work/boards.json").as_deref(), Some(both.as_str()));
+    assert_eq!(paths(&manifest_of(&be)), ["Work/boards.json"]);
+    assert!(a.events.of(EV_CONFLICT).is_empty() && b.events.of(EV_CONFLICT).is_empty());
+}
+
+/// A board a newer app wrote, or a file this app doesn't read as one, is
+/// never rewritten: changed on both sides, theirs is kept as it is.
+#[tokio::test]
+async fn a_board_this_app_does_not_read_is_kept_as_it_came() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("Work/boards.json", &board("Status", &[("a.md", "a0")]));
+    a.cycle().await;
+    b.cycle().await;
+
+    let newer = "{\"doklin\":\"boards\",\"v\":2,\"views\":[]}\n";
+    a.write("Work/boards.json", newer);
+    a.cycle().await;
+    b.write("Work/boards.json", &board("Status", &[("a.md", "a0V")]));
+    b.cycle().await;
+    assert_eq!(b.read("Work/boards.json").as_deref(), Some(newer));
+    a.cycle().await;
+    assert_eq!(a.read("Work/boards.json").as_deref(), Some(newer));
+    assert_eq!(b.files(), ["Work/boards.json"], "no conflict copy");
 }
 
 #[tokio::test]
@@ -4060,7 +4158,7 @@ async fn a_426_pauses_with_the_right_phase() {
     let be = fake_worker();
     let mut a = device("Alice", &be);
     a.engine.probe_worker().await;
-    be.lock().unwrap().reject_schema = true;
+    be.lock().unwrap().schema = MANIFEST_VERSION - 1;
     a.write("doc.md", "# doc\n");
     a.cycle().await;
     assert_eq!(a.phase(), Phase::WorkerOutdated);
@@ -4083,7 +4181,7 @@ async fn a_426_pauses_with_the_right_phase() {
     // …an updated one resumes the sync.
     {
         let mut be2 = be.lock().unwrap();
-        be2.reject_schema = false;
+        be2.schema = MANIFEST_VERSION;
         be2.worker_version = 2;
     }
     a.engine.probe_worker().await;
@@ -4138,7 +4236,7 @@ async fn a_probe_command_resumes_an_outdated_engine() {
     let statuses = a.statuses.clone();
     let key = root.to_string_lossy().to_string();
     std::fs::write(root.join("Library/doc.md"), "# doc\n").unwrap();
-    be.lock().unwrap().reject_schema = true;
+    be.lock().unwrap().schema = MANIFEST_VERSION - 1;
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_fs_tx, fs_rx) = tokio::sync::mpsc::unbounded_channel();
     let Device { engine, root: root_dir, _state, .. } = a;
@@ -4163,7 +4261,7 @@ async fn a_probe_command_resumes_an_outdated_engine() {
     // The updated worker: the probe clears the pause and the cycle runs.
     {
         let mut be2 = be.lock().unwrap();
-        be2.reject_schema = false;
+        be2.schema = MANIFEST_VERSION;
         be2.worker_version = 2;
     }
     cmd_tx.send(EngineCmd::Probe).unwrap();
@@ -7011,6 +7109,143 @@ async fn a_share_moved_to_another_section_ends_or_sits_there() {
     assert!(space::read_space_marker(&alice.abs("Drafts")).is_none(), "an ordinary folder of Library's");
 }
 
+/// A folder's board is a file of the folder: it goes where the folder goes.
+/// Renamed in Library, moved into My files, shared — a shared folder's top
+/// is the folder, so its board is the share's — and moved back into
+/// Library, it is the folder's board each time, under the id it always had,
+/// and synced for whoever has the folder.
+#[tokio::test]
+async fn a_folders_board_goes_where_its_folder_goes() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    alice.sync().await;
+    let status = board("Status", &[("a.md", "a0")]);
+    alice.write("Work/a.md", "a\n");
+    alice.write("Work/boards.json", &status);
+    alice.sync().await;
+    bob.sync().await;
+    let fid = fid_at(&be, "Work/boards.json");
+
+    // Renamed in Library.
+    alice.rename("Work", "Team");
+    alice.sync().await;
+    assert_eq!(paths(&manifest_of(&be)), ["Team/a.md", "Team/boards.json"]);
+    assert_eq!(fid_at(&be, "Team/boards.json"), fid);
+    bob.sync().await;
+    assert_eq!(bob.read("Team/boards.json").as_deref(), Some(status.as_str()));
+    assert_eq!(bob.read("Work/boards.json"), None);
+
+    // Into My files: hers alone now.
+    alice.rename("Team", "My files/Team");
+    alice.sync().await;
+    let hers = manifest_in(&be, &private_of(&alice));
+    assert_eq!(paths(&hers), ["Team/a.md", "Team/boards.json"]);
+    assert!(hers.files.contains_key(&fid), "under the id it had");
+    assert_eq!(manifest_of(&be).tombstones[&fid].to.as_deref(), Some(private_of(&alice).as_str()));
+    bob.sync().await;
+    bob.sync().await;
+    assert_eq!(bob.read("Team/boards.json"), None, "it left Bob's Library");
+
+    // Shared with Bob: the board is at the share's top, with the folder's notes.
+    let team = share(&mut alice, "My files/Team", &[&bob]).await.id;
+    alice.cycle().await;
+    assert_eq!(paths(&manifest_in(&be, &team)), ["a.md", "boards.json"]);
+    assert!(paths(&manifest_in(&be, &private_of(&alice))).is_empty());
+    bob.sync().await;
+    assert_eq!(bob.read("Shared with me/Team/boards.json").as_deref(), Some(status.as_str()));
+    let moved = board("Status", &[("a.md", "a0V")]);
+    bob.write("Shared with me/Team/boards.json", &moved);
+    bob.cycle().await;
+    alice.sync().await;
+    assert_eq!(alice.read("My files/Team/boards.json").as_deref(), Some(moved.as_str()), "it syncs there");
+
+    // Back into Library: the share ends, and the board is everyone's again.
+    alice.move_in_app("My files/Team", "Team");
+    alice.cycle().await;
+    alice.cycle().await;
+    assert_eq!(paths(&manifest_of(&be)), ["Team/a.md", "Team/boards.json"]);
+    assert_eq!(fid_at(&be, "Team/boards.json"), fid);
+    bob.sync().await;
+    bob.sync().await;
+    assert_eq!(bob.read("Team/boards.json").as_deref(), Some(moved.as_str()));
+}
+
+/// A document called `boards` is shared with its own files — its markdown,
+/// its html, its comments — and never with the board of the folder it is
+/// in. The board is shared with its folder, or not at all.
+#[tokio::test]
+async fn a_document_called_boards_is_shared_without_its_folders_board() {
+    let be = fake_worker();
+    let mut alice = person(&be, "Alice").await;
+    let mut bob = person(&be, "Bob").await;
+    alice.sync().await;
+    let status = board("Status", &[("a.md", "a0"), ("boards.md", "a1")]);
+    alice.write("My files/Work/a.md", "a\n");
+    alice.write("My files/Work/boards.md", "a note called boards\n");
+    alice.write("My files/Work/boards.meta.jsonl", "{\"doklin\":\"meta\",\"v\":1}\n");
+    alice.write("My files/Work/boards.json", &status);
+    alice.sync().await;
+
+    let made = share(&mut alice, "My files/Work/boards.md", &[&bob]).await;
+    assert_eq!(made.name, "boards");
+    alice.cycle().await;
+    assert_eq!(paths(&manifest_in(&be, &made.id)), ["boards.md", "boards.meta.jsonl"]);
+    assert_eq!(paths(&manifest_in(&be, &private_of(&alice))), ["Work/a.md", "Work/boards.json"], "the board stays its folder's");
+    bob.sync().await;
+    assert_eq!(bob.read("Shared with me/boards.md").as_deref(), Some("a note called boards\n"));
+    assert!(!bob.abs("Shared with me/boards.json").exists());
+
+    // Edited where each has it, the board stays where it is.
+    alice.write("My files/Work/boards.json", &board("Status", &[("a.md", "a0V"), ("boards.md", "a1")]));
+    alice.cycle().await;
+    bob.sync().await;
+    assert!(!bob.abs("Shared with me/boards.json").exists());
+    assert_eq!(paths(&manifest_in(&be, &made.id)), ["boards.md", "boards.meta.jsonl"]);
+
+    // By itself a board is no document: it is not shared, published or linked to.
+    let refused = alice.engine.share(&alice.abs("My files/Work/boards.json"), &[]).await.unwrap_err();
+    assert_eq!(refused, "Only a folder, or a markdown or html document, can be shared.");
+    let refused = alice.publish("My files/Work/boards.json", PublicKind::File, None).unwrap_err();
+    assert_eq!(refused, "Only markdown and html documents can be published.");
+}
+
+/// The manifest version before this one is refused both ways with the
+/// worker's `426`. An app from before boards keeps only what it syncs in a
+/// manifest it writes, so it would delete every folder's board for
+/// everyone; a worker from before them refuses the file. This app talks to
+/// no such worker, and no such app to this one's.
+#[tokio::test]
+async fn a_manifest_of_the_version_before_boards_is_refused_both_ways() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("Work/a.md", "a\n");
+    a.write("Work/boards.json", &board("Status", &[("a.md", "a0")]));
+
+    // A worker from before: nothing goes, the board with the rest, until it is updated.
+    be.lock().unwrap().schema = MANIFEST_VERSION - 1;
+    a.cycle().await;
+    assert_eq!(a.phase(), Phase::WorkerOutdated);
+    assert!(manifest_of(&be).files.is_empty());
+    {
+        let mut worker = be.lock().unwrap();
+        worker.schema = MANIFEST_VERSION;
+        worker.worker_version = 2;
+    }
+    a.engine.probe_worker().await;
+    a.cycle().await;
+    assert_eq!(a.phase(), Phase::Idle);
+    assert_eq!(paths(&manifest_of(&be)), ["Work/a.md", "Work/boards.json"]);
+
+    // An app from before writes what it would: its version, without the board.
+    let old = FakeRemote::new(&be, "d-old");
+    let (mut m, etag) = old.fetch_manifest(None).await.unwrap().expect("a manifest");
+    m.version = MANIFEST_VERSION - 1;
+    m.files.retain(|_, f| f.path != "Work/boards.json");
+    assert!(matches!(old.put_manifest(&m, &etag).await, Err(RemoteError::Outdated(_))));
+    assert_eq!(paths(&manifest_of(&be)), ["Work/a.md", "Work/boards.json"], "and every board is still there");
+}
+
 /// On the Mac of somebody who can open the folder a file moves to, their
 /// copy moves with it: nothing is downloaded again, and an edit they had
 /// not synced yet carries on in the moved file.
@@ -7735,6 +7970,16 @@ fn a_space_is_a_folder_that_says_so_and_is_only_deleted_while_it_does() {
     let free = |name: &str, document: bool| space::free_name(name, "Dave", |cand| space::name_taken(&shared, cand, document));
     assert_eq!((free("Budget", false), free("Budget", true)), ("Budget (Dave)".to_string(), "Budget".to_string()));
     assert_eq!((free("Plan", true), free("Plan", false)), ("Plan (Dave)".to_string(), "Plan".to_string()));
+    // Only markdown and html take a document's name: a folder's board, or a
+    // sidecar left alone, does not.
+    std::fs::write(shared.join("boards.json"), "{}").unwrap();
+    std::fs::write(shared.join("Notes.meta.jsonl"), "{}").unwrap();
+    assert_eq!((free("boards", true), free("Notes", true)), ("boards".to_string(), "Notes".to_string()));
+    std::fs::write(shared.join("boards.md"), "x").unwrap();
+    assert_eq!(free("boards", true), "boards (Dave)");
+    std::fs::write(shared.join("boards.meta.jsonl"), "x").unwrap();
+    let files: Vec<String> = space::document_files(&shared, "BOARDS").iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+    assert_eq!(files, ["boards.md", "boards.meta.jsonl"], "a document's files are it and its comments, never its folder's board");
     assert!(space::names_item("Finance (Bob)", "Finance", "Bob") && space::names_item("Finance 2", "Finance", "Bob"));
     assert!(!space::names_item("Money", "Finance", "Bob"));
     assert!(space::valid_item_name("Q3 plans") && !space::valid_item_name(".hidden") && !space::valid_item_name("a/b") && !space::valid_item_name("a:b"));
@@ -7748,8 +7993,13 @@ fn a_space_is_a_folder_that_says_so_and_is_only_deleted_while_it_does() {
     let reach = Reach { dirs: vec!["Work/Finance".into()], docs: vec!["Work/Plan".into()], only: None };
     assert!(reach.holds("Work/other.md") && reach.holds("Work/Planning.md") && reach.holds("Work"));
     assert!(!reach.holds("Work/Finance") && !reach.holds("work/finance/q1.md") && !reach.holds("Work/Plan.md") && !reach.holds("Work/plan.META.jsonl"));
+    let boards = Reach { dirs: Vec::new(), docs: vec!["Work/boards".into()], only: None };
+    assert!(!boards.holds("Work/boards.md") && boards.holds("Work/boards.json"), "a document called boards leaves its folder's board");
     let doc = Reach::document("Plan (Dave)", "Plan");
     assert!(doc.holds("Plan.md") && !doc.holds("Planning.md") && !doc.holds("Sub/Plan.md"));
+    let named_boards = Reach::document("boards", "boards");
+    assert!(named_boards.holds("boards.md") && named_boards.holds("boards.meta.jsonl") && !named_boards.holds("boards.json"));
+    assert_eq!(named_boards.local("boards.json"), "boards.json", "a board is never a document's file, renamed or not");
     assert_eq!((doc.local("Plan.html"), doc.stored("Plan (Dave).meta.jsonl")), ("Plan (Dave).html".to_string(), "Plan.meta.jsonl".to_string()));
 
     // Deleted only inside the workspace, never one of its three folders, and only while it still says it is that space.
@@ -7968,12 +8218,19 @@ fn restart(a: Device, be: &SharedWorker) -> Device {
 }
 
 #[test]
-fn only_markdown_html_and_comments_sync() {
-    for yes in ["a.md", "A/B.MD", "x.markdown", "x.mdown", "x.mkd", "page.html", "notes.meta.jsonl"] {
+fn only_documents_their_comments_and_a_folders_board_sync() {
+    for yes in ["a.md", "A/B.MD", "x.markdown", "x.mdown", "x.mkd", "page.html", "notes.meta.jsonl", "boards.json", "Work/BOARDS.json"] {
         assert!(crate::syncs(yes), "{yes} syncs");
     }
-    for no in ["a.py", "pic.png", "doc.pdf", "data.csv", ".md", "x.htm", "notes.jsonl", "md", "readme"] {
+    for no in ["a.py", "pic.png", "doc.pdf", "data.csv", ".md", "x.htm", "notes.jsonl", "md", "readme", "board.json", "x.json", "boards.json.bak"] {
         assert!(!crate::syncs(no), "{no} stays on its device");
+    }
+    // Of those, only markdown and html are documents.
+    for yes in ["a.md", "A/B.MD", "x.markdown", "x.mdown", "x.mkd", "page.html", "boards.md"] {
+        assert!(crate::is_document(yes), "{yes} is a document");
+    }
+    for no in ["notes.meta.jsonl", "boards.json", "Work/Boards.json", "pic.png"] {
+        assert!(!crate::is_document(no), "{no} is no document");
     }
 }
 

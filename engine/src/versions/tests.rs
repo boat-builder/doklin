@@ -1136,6 +1136,32 @@ fn what_was_shared_from_inside_a_section_is_not_deleted_from_it() {
     assert_eq!(f.on_disk("Work/Finance/q1.md").as_deref(), Some("quarter 1, as the share has it now\n"));
 }
 
+/// A folder's board is versioned as everything that syncs is, and comes back
+/// with its folder. A document called `boards` there that is another
+/// section's leaves the board this one's.
+#[test]
+fn a_folders_board_is_versioned_and_comes_back_with_its_folder() {
+    const BOARD: &str = "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {}\n}\n";
+    let mut f = fixture(T0);
+    f.write("Work/a.md", "a\n");
+    f.write("Work/boards.json", BOARD);
+    f.write("Work/boards.md", "a note called boards\n");
+    f.write("Work/pic.png", "stays on its device\n");
+    f.capture(Reason::Seed);
+    let snap = f.store().read_snapshot(T0).unwrap();
+    assert_eq!(snap.files.keys().collect::<Vec<_>>(), ["Work/a.md", "Work/boards.json", "Work/boards.md"]);
+
+    // boards.md is shared now; the folder is deleted, and that moment put back.
+    f.versioner.store.reach = Reach { dirs: Vec::new(), docs: vec!["Work/boards".into()], only: None };
+    std::fs::remove_dir_all(f.root.path().join("Work")).unwrap();
+    f.at(T0 + 60_000);
+    let report = f.restore_all(T0, None);
+    assert_eq!((report.written, report.trashed), (2, 0));
+    assert_eq!(f.on_disk("Work/boards.json").as_deref(), Some(BOARD));
+    assert_eq!(f.on_disk("Work/a.md").as_deref(), Some("a\n"));
+    assert_eq!(f.on_disk("Work/boards.md"), None, "the share's own history has it");
+}
+
 /// A shared document's own store starts when it is shared. For somebody who
 /// has the store of the section it was shared from, its history reads on
 /// into that one: one list, and the moment of sharing is one row.

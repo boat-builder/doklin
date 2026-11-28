@@ -30,6 +30,7 @@ import {
   validPath,
 } from "./layout";
 import { MANIFEST_VERSION } from "./version";
+import { isBoardsFile } from "../../src/boards";
 import { listProblem, type TagDef } from "../../src/tags";
 
 export type ManifestFile = {
@@ -164,8 +165,9 @@ function validateFiles(files: unknown, of: ManifestOf): string | null {
     if (!isAuthor(f.by)) return `invalid by for ${id}`;
   }
   if (of === "document") {
+    // A board is a folder's, and nothing in a shared document's section is a folder.
     const paths = [...seenPaths];
-    if (paths.some((p) => p.includes("/")) || new Set(paths.map(documentStem)).size > 1) return ONE_DOCUMENT_SENTENCE;
+    if (paths.some((p) => p.includes("/") || isBoardsFile(p)) || new Set(paths.map(documentStem)).size > 1) return ONE_DOCUMENT_SENTENCE;
   }
   return null;
 }
@@ -212,6 +214,7 @@ function validatePublic(map: unknown, of: ManifestOf): string | null {
       if (typeof e.file !== "string" || !ID_RE.test(e.file)) return `invalid file for ${slug}`;
       if (!validPath(e.path)) return `invalid path for ${slug}`;
       if (!syncs(e.path)) return unsynced(e.path);
+      if (isBoardsFile(e.path)) return `a page shows a document or a folder, and "${e.path}" is neither`;
     } else if (e.kind === "dir") {
       if (typeof e.path !== "string" || (e.path !== "" && !validPath(e.path))) {
         return `invalid path for ${slug}`;

@@ -192,8 +192,10 @@ function linkResolver(linked: Linked, fromDir: string, dirSlug: string | null, r
     }
     const target = relativeTarget(href, fromDir);
     if (!target) return { kind: "keep" };
-    // A note linked without its extension, the way a wiki does.
-    const file = ws.fileAt(target.path) ?? ws.noteAt(target.path);
+    // A note linked without its extension, the way a wiki does. Only a
+    // document has a page: a link to a sidecar or a board's file is words.
+    const exact = ws.fileAt(target.path);
+    const file = (exact && documentOf(ws, exact.fid)) ?? ws.noteAt(target.path);
     if (file) {
       const url = pub.urlFor(file.file.path, dirSlug);
       return url ? { kind: "rewrite", href: `${url}${target.fragment}` } : { kind: "text" };

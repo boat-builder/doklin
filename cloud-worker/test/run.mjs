@@ -94,7 +94,6 @@ const MANIFEST_VERSION = Number(
 
 /** What a fully migrated database reports, and the tables it then holds. */
 const D1_SCHEMA = 13;
-/** The manifest schema the worker takes (cloud-worker/src/version.ts). */
 const D1_TABLES = [
   "addresses",
   "agent_codes",
@@ -1305,12 +1304,12 @@ await test("manifest: validation rejects traversal, duplicate paths, bad revs an
   assert.equal(await currentEtag(), etag, "nothing invalid landed");
 });
 
-await test("manifest: only documents sync — a file, a tombstone or a page of anything but markdown, html or a document's comments is refused with a sentence", async () => {
+await test("manifest: only documents sync, and a folder's boards.json — a file, a tombstone or a page of anything else is refused with a sentence, and a board's file has no page", async () => {
   const etag = await currentEtag();
   const doc = { "f-doc1": fileEntry("Projects/plan.md", 1, "v1") };
   const tomb = (p) => ({ "f-old01": { path: p, rev: 2, ts: 1700000000000, by: "m-1a2b3c4d" } });
   const page = (p) => ({ pic: { kind: "file", file: "f-pic01", path: p, by: "m-1a2b3c4d", at: 1757000000000 } });
-  for (const p of ["Projects/chart.png", "deck.PDF", "tools/run.py", "notes.txt", "Projects/plan.md.bak", "Projects/.md", "data.jsonl", "README"]) {
+  for (const p of ["Projects/chart.png", "deck.PDF", "tools/run.py", "notes.txt", "Projects/plan.md.bak", "Projects/.md", "data.jsonl", "README", "board.json", "Work/my boards.json", "boards.json.bak", "Work/boards.jsonl"]) {
     for (const body of [
       manifest(3, { ...doc, "f-pic01": fileEntry(p, 1, "pic") }),
       manifest(3, doc, { tombstones: tomb(p) }),
@@ -1344,7 +1343,13 @@ await test("manifest: only documents sync — a file, a tombstone or a page of a
     "f-ht0001": fileEntry("e.HTML", 1, "e"),
     "f-me0001": fileEntry("a.meta.jsonl", 1, "f"),
     "f-me0002": fileEntry("Old/B.META.JSONL", 1, "g"),
-  }, { tombstones: tomb("gone.md"), public: { assets: { kind: "dir", path: "Projects/v1.2", by: "m-1a2b3c4d", at: 1757000000000 } } });
+    "f-bo0001": fileEntry("Work/boards.json", 1, "h"),
+    "f-bo0002": fileEntry("BOARDS.JSON", 1, "i"),
+  }, { tombstones: { ...tomb("gone.md"), "f-bo0003": { path: "Old/Boards.Json", rev: 2, ts: 1700000000000, by: "m-1a2b3c4d" } }, public: { assets: { kind: "dir", path: "Projects/v1.2", by: "m-1a2b3c4d", at: 1757000000000 } } });
+  // A board's file syncs, and is no page: a page shows a document or a folder.
+  const boardPage = await putManifest({ ...synced, public: page("Work/boards.json") }, etag);
+  assert.equal(boardPage.status, 400);
+  assert.equal(boardPage.json.error, 'a page shows a document or a folder, and "Work/boards.json" is neither');
   const ok = await putManifest(synced, etag);
   assert.equal(ok.status, 200, ok.text);
   assert.equal((await putManifest(manifest(4, {}))).status, 200);
@@ -1417,6 +1422,7 @@ await test("manifest: Library names its folders what it likes and holds no share
   for (const [body, what] of [
     [manifest(2, { ...one, "f-ot0001": fileEntry("Other.md", 1, "o") }), "a second document"],
     [manifest(2, { "f-pl0001": fileEntry("Work/Plan.md", 1, "p") }), "a folder"],
+    [manifest(2, { "f-bo0001": fileEntry("Boards.md", 1, "p"), "f-bo0002": fileEntry("boards.json", 1, "b") }), "a board, which is a folder's, even beside a document of its name"],
     [manifest(2, one, { mounts: { "s-0a1b2c3d": mount } }), "a share inside it"],
     [manifest(2, one, { public: { plans: { kind: "dir", path: "", by: "m-1a2b3c4d", at: 1757000000000 } } }), "a published folder"],
   ]) {
@@ -8051,6 +8057,360 @@ await test("web: publishing from a browser is the same entry in the public map �
   if (wasHome) assert.equal((await home(wasHome)).status, 200);
   assert.equal((await browser("/api/web/folder?path=published", { method: "DELETE", cookie: WEB })).status, 200);
   assert.equal((await browser(`/api/web/doc?path=Mine.md&space=${space}`, { method: "DELETE", cookie: WEB })).status, 200);
+});
+
+/* ---------- Boards ---------- */
+
+// A folder's `boards.json` (src/boards.ts) says how the apps show the folder
+// as a board. It syncs as a document does, goes wherever its folder goes,
+// and is nothing an agent ever sees.
+
+/** A board's file as the app writes one; `extra` is a key a newer app wrote. */
+const boardText = (tag, extra = "") =>
+  `{\n  "doklin": "boards",\n  "v": 1,\n  "tag": "${tag}",\n  "cards": {\n    "Fix.md": { "rank": "a0" }\n  }${extra}\n}\n`;
+/** Ask again while the answer is a 202: the index is catching up. */
+const caughtUp = async (ask) => {
+  for (let round = 0; round < 60; round += 1) {
+    const res = await ask();
+    if (res.status !== 202) return res;
+    assert.equal(res.json.indexing, true, "the index is catching up: ask again");
+  }
+  throw new Error("the index never caught up");
+};
+/** An agent of the owner's that may do everything. */
+let BOARD_BOT;
+
+await test("boards: a folder's boards.json syncs as a document does — a Mac's manifest, its bytes, a browser's reads, an agent's writes beside it — and no agent sees it: not tree, read, info, find, search, the tags index, comments, links, mv, or a published folder", async () => {
+  const KEPT = `,\n  "kumquat": "kumquat"`;
+  await freshWorkspace({
+    "Board/Fix.md": "---\nstatus: Doing\n---\n# Fix\n",
+    "Board/Write.md": "---\nstatus: Todo\n---\nWrite it.\n",
+    "Board/Plain.md": "Nothing tagged here.\n",
+    "Board/Sub/Deep.md": "---\nstatus: Done\n---\nDeep.\n",
+    "Board/boards.json": boardText("status", KEPT),
+    "Empty/BOARDS.JSON": boardText("status"),
+  });
+  await macTags(TAGS);
+  const m = storedManifest();
+  const [boardFid, board] = entryAt(m, "Board/boards.json");
+  assert.ok(entryAt(m, "Empty/BOARDS.JSON"), "named exactly that, in any case, a Mac's manifest names it");
+
+  // Everything a device reads carries it: the manifest, its bytes, a browser's reads of both.
+  assert.deepEqual((await call("/api/manifest", { token: OWNER })).json.files[boardFid], board);
+  assert.deepEqual((await browser("/api/manifest", { cookie: WEB })).json.files[boardFid], board);
+  assert.equal((await browser(`/api/blobs/${boardFid}/${board.hash}`, { cookie: WEB })).text, boardText("status", KEPT));
+
+  BOARD_BOT = await addAgent("Board bot", ["read", "edit", "comment", "publish"]);
+  const api = as(BOARD_BOT);
+
+  // To an agent the folder is notes with tags.
+  const listed = await api(treeUrl("Library/Board"));
+  assert.equal(listed.status, 200, listed.text);
+  assert.deepEqual(
+    [listed.json.folders, pathsIn(listed.json)],
+    [["Library/Board/Sub"], ["Library/Board/Fix", "Library/Board/Plain", "Library/Board/Write"]],
+    "its notes and its folders, and nothing else",
+  );
+  const deep = (await api(treeUrl("Library", "&deep=1"))).json;
+  assert.ok(!deep.folders.includes("Library/Empty"), "a folder that holds only its board holds nothing an agent can see");
+  assert.ok(pathsIn(deep).every((p) => !/boards/i.test(p)), JSON.stringify(pathsIn(deep)));
+  assert.equal((await api(treeUrl("Library/Empty"))).status, 404, "there is no such folder, as with any empty one");
+  assert.ok(pathsIn((await api(treeUrl("", "&deep=1"))).json).every((p) => !/boards/i.test(p)), "nor in the workspace itself");
+  assert.deepEqual(pathsIn((await caughtUp(() => api(treeUrl("Library/Board", where("status:Doing")))) ).json), ["Library/Board/Fix"]);
+
+  // It has no document's name, so no route that reads or writes one takes it.
+  for (const p of ["Library/Board/boards.json", "Library/Empty/BOARDS.JSON"]) {
+    for (const res of [
+      await api(docUrl(p)),
+      await api(docUrl(p, "", "&info=1")),
+      await api(commentsUrl(p)),
+      await api(`/api/agent/links?path=${encodeURIComponent(p)}`),
+      await api("/api/agent/comments", { method: "POST", body: { path: p, on: "boards", body: "?" } }),
+      await api("/api/agent/tag", { method: "POST", body: { path: p, set: { status: "Done" } } }),
+      await api("/api/agent/move", { method: "POST", body: { from: p, to: "Library/elsewhere.json" } }),
+      await api("/api/agent/pages", { method: "PUT", body: { path: p } }),
+      await put(api, p, "{}"),
+      await api(docUrl(p), { method: "DELETE" }),
+    ]) {
+      assert.equal(res.status, 400, `${p}: ${res.text}`);
+      assert.match(res.json.error, /Doklin syncs markdown and html documents only/);
+    }
+  }
+  assert.equal((await api(docUrl("Library/Board/boards"))).status, 404, "and it is no document called boards");
+  assert.deepEqual(storedManifest().files[boardFid], board, "none of it touched the file");
+
+  // A link's ids never lead to it.
+  const workspace = (await call("/api/meta", { token: OWNER })).json.workspace.id;
+  const findUrl = (fid) => `/api/agent/find?workspace=${workspace}&space=&file=${fid}`;
+  assert.equal((await api(findUrl(boardFid))).status, 404);
+  assert.deepEqual((await api(findUrl(entryAt(m, "Board/Fix.md")[0]))).json, { path: "Library/Board/Fix" });
+
+  // Search, and the indexes its catch-up keeps, never read it.
+  const kept = await caughtUp(() => api(searchUrl("kumquat")));
+  assert.deepEqual([kept.status, kept.json.results, kept.json.total], [200, [], 0], "its text is no document's");
+  assert.deepEqual((await caughtUp(() => api(searchUrl("boards")))).json.results, [], "nor its name");
+  assert.equal(db.value("SELECT COUNT(*) FROM search_text WHERE fid = ?", boardFid), 0);
+  assert.equal(db.value("SELECT COUNT(*) FROM tags WHERE fid = ?", boardFid), 0, "the tags index holds nothing of it");
+  assert.equal(db.value("SELECT COUNT(*) FROM links WHERE target = ?", boardFid), 0);
+
+  // A published folder lists its notes, not how it is shown.
+  const page = await api("/api/agent/pages", { method: "PUT", body: { path: "Library/Board/", slug: "the-board" } });
+  assert.equal(page.status, 201, page.text);
+  assert.deepEqual(page.json.documents, ["Library/Board/Fix", "Library/Board/Plain", "Library/Board/Sub/Deep", "Library/Board/Write"]);
+  const toc = await pub("/the-board");
+  assert.equal(toc.status, 200);
+  assert.ok(!toc.text.includes("boards.json") && !toc.text.includes("kumquat"), "the table of contents leaves it out");
+  assert.equal((await pub("/the-board/boards.json")).status, 404, "and the folder's address never serves it");
+  assert.equal((await pub("/the-board/Fix")).status, 200);
+  assert.equal((await api("/api/agent/pages?slug=the-board", { method: "DELETE" })).status, 200);
+
+  // An agent's write beside it keeps it as it was.
+  assert.equal((await put(api, "Library/Board/Fix", "---\nstatus: Done\n---\n# Fix\n", "&force=1")).status, 200);
+  assert.deepEqual(storedManifest().files[boardFid], board);
+});
+
+await test("boards: a folder moved, copied or deleted takes its boards.json along — an agent's mv within a section and to another, a browser's move, copy and folder delete, and a move between sections in parts of 16", async () => {
+  const api = as(BOARD_BOT);
+  const mv = (body) => api("/api/agent/move", { method: "POST", body });
+  const web = (route, body) => browser(`/api/web/${route}`, { method: "POST", cookie: WEB, body });
+  const removeFolder = (path, space = "") => browser(`/api/web/folder?space=${space}&path=${encodeURIComponent(path)}`, { method: "DELETE", cookie: WEB });
+  const mine = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  const [boardFid, board] = entryAt(storedManifest(), "Board/boards.json");
+  const text = textAt("Board/boards.json");
+
+  // An agent's mv inside Library: every file under the folder.
+  const within = await mv({ from: "Library/Board", to: "Library/Kanban" });
+  assert.equal(within.status, 200, within.text);
+  assert.equal(within.json.files, 5, "its four notes and its board");
+  let m = storedManifest();
+  assert.deepEqual([m.files[boardFid].path, m.files[boardFid].rev, m.files[boardFid].hash], ["Kanban/boards.json", board.rev + 1, board.hash]);
+
+  // …and to another section: written there under the id it had, then out of here with a tombstone that says where.
+  const across = await mv({ from: "Library/Kanban", to: "My files/Kanban" });
+  assert.equal(across.status, 200, across.text);
+  assert.equal(across.json.files, 5);
+  m = storedManifest();
+  assert.equal(m.files[boardFid], undefined);
+  assert.equal(m.tombstones[boardFid].to, mine);
+  assert.equal(spaceManifest(mine).files[boardFid].path, "Kanban/boards.json");
+  assert.equal(spaceText(mine, "Kanban/boards.json"), text, "the same bytes");
+  assert.deepEqual(pathsIn((await api(treeUrl("My files/Kanban"))).json), ["My files/Kanban/Fix", "My files/Kanban/Plain", "My files/Kanban/Write"], "still nothing an agent sees");
+
+  // A browser's move inside a section.
+  const renamed = await web("move", { from: { space: mine, path: "Kanban" }, to: { space: mine, path: "Board" }, kind: "folder" });
+  assert.deepEqual([renamed.status, renamed.json.files], [200, 5], renamed.text);
+  assert.equal(spaceManifest(mine).files[boardFid].path, "Board/boards.json");
+
+  // A copy: a file of its own, in the section and in another.
+  const copied = await web("copy", { from: { space: mine, path: "Board" }, to: { space: mine, path: "Board copy" }, kind: "folder" });
+  assert.deepEqual([copied.status, copied.json.files], [200, 5], copied.text);
+  const [copyFid, copy] = entryAt(spaceManifest(mine), "Board copy/boards.json");
+  assert.ok(copyFid && copyFid !== boardFid, "a new file");
+  assert.equal(copy.rev, 1);
+  assert.equal(spaceText(mine, "Board copy/boards.json"), text);
+  assert.equal(fake.store.get(`spaces/${mine}/blobs/${copyFid}/${copy.hash}`).httpMetadata.contentType, "application/json", "stored as what it is");
+  const copiedAcross = await web("copy", { from: { space: mine, path: "Board copy" }, to: { path: "Copied" }, kind: "folder" });
+  assert.deepEqual([copiedAcross.status, copiedAcross.json.files], [200, 5], copiedAcross.text);
+  assert.equal(textAt("Copied/boards.json"), text);
+
+  // A folder deleted: the board with the rest, each with the tombstone a Mac honours.
+  const removed = await removeFolder("Board copy", mine);
+  assert.deepEqual([removed.status, removed.json.files], [200, 5]);
+  assert.equal(spaceManifest(mine).files[copyFid], undefined);
+  assert.equal(spaceManifest(mine).tombstones[copyFid].to, undefined, "deleted, not moved");
+  const [copiedFid] = entryAt(storedManifest(), "Copied/boards.json");
+  assert.deepEqual([(await removeFolder("Copied")).json.files], [5]);
+  assert.ok(storedManifest().tombstones[copiedFid]);
+
+  // Between sections in parts: the board goes in a part of its own like any file.
+  for (let i = 0; i < 20; i += 1) {
+    const name = `Board/n${String(i).padStart(2, "0")}.md`;
+    const saved = await browser(`/api/web/doc?space=${mine}&path=${encodeURIComponent(name)}`, { method: "PUT", cookie: WEB, body: { md: { text: `# ${i}\n`, ifRev: null } } });
+    assert.equal(saved.status, 200);
+  }
+  const ask = { from: { space: mine, path: "Board" }, to: { path: "Board" }, kind: "folder" };
+  const parts = [];
+  for (let round = 0; round < 5; round += 1) {
+    const part = await web("move", ask);
+    assert.equal(part.status, 200, part.text);
+    parts.push(part.json.files);
+    if (!part.json.remaining) break;
+  }
+  assert.deepEqual(parts, [16, 9], "sixteen files a request, by path");
+  m = storedManifest();
+  assert.equal(m.files[boardFid].path, "Board/boards.json", "back in Library, under the id it had");
+  assert.equal(spaceManifest(mine).tombstones[boardFid].to, "");
+  assert.deepEqual(pathsOf(spaceManifest(mine)).filter((p) => p.startsWith("Board/")), []);
+  assert.equal((await removeFolder("Board")).json.files, 25);
+  assert.ok(storedManifest().tombstones[boardFid]);
+});
+
+await test("boards: a browser shows a folder as a board through one route — its boards.json written over the revision read, 409 with the revision when it moved on; a text that is no board, a section's own top and a folder that isn't there refused — and as a folder again, with a tombstone", async () => {
+  const board = (path, body, space = "", as = { cookie: WEB }) =>
+    browser(`/api/web/board?space=${space}&path=${encodeURIComponent(path)}`, { method: "PUT", ...as, body });
+  const unboard = (path, space = "") => browser(`/api/web/board?space=${space}&path=${encodeURIComponent(path)}`, { method: "DELETE", cookie: WEB });
+  await freshWorkspace({
+    "Team/Fix.md": "# Fix\n",
+    "Team/Sub/Deep.md": "# Deep\n",
+    "Cased/Note.md": "# Note\n",
+    "Cased/BOARDS.JSON": boardText("status"),
+  });
+  await macTags(TAGS);
+  const me = (await browser("/api/meta", { cookie: WEB })).json.you.memberId;
+
+  // Made: in the folder as it is spelled, by the person, as JSON.
+  const held = await currentEtag();
+  const made = await board("team", { text: boardText("status"), ifRev: null });
+  assert.equal(made.status, 200, made.text);
+  const [fid, entry] = entryAt(storedManifest(), "Team/boards.json");
+  assert.deepEqual(made.json, { file: { fid, ...entry }, etag: await currentEtag(), over: held }, "the file as the manifest now has it, and the two etags");
+  assert.deepEqual([entry.rev, entry.by], [1, me]);
+  assert.equal(textAt("Team/boards.json"), boardText("status"));
+  assert.equal(fake.store.get(`blobs/${fid}/${entry.hash}`).httpMetadata.contentType, "application/json");
+
+  // Changed over the revision read; refused, and nothing written, when it moved on.
+  const next = boardText("priority");
+  const changed = await board("Team", { text: next, ifRev: 1 });
+  assert.deepEqual([changed.status, changed.json.file.fid, changed.json.file.rev], [200, fid, 2]);
+  const now = await currentEtag();
+  const stale = await board("Team", { text: boardText("status"), ifRev: 1 });
+  assert.deepEqual([stale.status, stale.json.rev], [409, 2], "where it is now, for the browser to merge over");
+  assert.match(stale.json.error, /changed somewhere else/);
+  const taken = await board("Team", { text: boardText("status"), ifRev: null });
+  assert.deepEqual([taken.status, taken.json.rev], [409, 2], "one that must not exist yet, and does");
+  const gone = await board("Team/Sub", { text: boardText("status"), ifRev: 4 });
+  assert.deepEqual([gone.status, gone.json.rev], [409, null], "one that was read, and is gone");
+  assert.equal(await currentEtag(), now, "nothing was written by any of them");
+  const same = await board("Team", { text: next, ifRev: 2 });
+  assert.deepEqual([same.status, same.json.file.rev, same.json.etag, same.json.over], [200, 2, now, now], "the same bytes are no revision");
+
+  // One there under another case keeps its name.
+  const cased = await board("cased", { text: boardText("priority"), ifRev: 1 });
+  assert.deepEqual([cased.status, cased.json.file.path, cased.json.file.rev], [200, "Cased/BOARDS.JSON", 2]);
+
+  // What is no board, and where none can be.
+  const before = await currentEtag();
+  for (const [path, body, why] of [
+    ["Team", { text: "not json", ifRev: 2 }, /that is not a board/],
+    ["Team", { text: '{"tag": "status"}', ifRev: 2 }, /that is not a board/],
+    ["Team", { text: '{"doklin": "boards", "v": 2, "tag": "status"}', ifRev: 2 }, /newer Doklin/],
+    ["", { text: boardText("status"), ifRev: null }, /a section's own folder is never a board/],
+    ["Nope", { text: boardText("status"), ifRev: null }, /there is no folder "Nope"/],
+    ["Team/Fix.md", { text: boardText("status"), ifRev: null }, /there is no folder/],
+    [".hidden", { text: boardText("status"), ifRev: null }, /hidden/],
+    ["Team", { text: boardText("status") }, /\{text, ifRev\}/],
+    ["Team", { text: boardText("status"), ifRev: 0 }, /\{text, ifRev\}/],
+  ]) {
+    const res = await board(path, body);
+    assert.equal(res.status, 400, `${path}: ${res.text}`);
+    assert.match(res.json.error, why);
+  }
+  assert.equal(await currentEtag(), before);
+
+  // A section's top: never Library's or a My files', nor a shared document's — a shared folder's is a folder where it sits.
+  const mine = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  assert.equal((await board("", { text: boardText("status"), ifRev: null }, mine)).status, 400);
+  const sprint = (await browser("/api/spaces", { method: "POST", cookie: WEB, body: { id: shareId(), kind: "folder", name: "Sprint", parent: mine } })).json.space;
+  assert.equal((await browser(`/api/web/doc?space=${sprint.id}&path=Card.md`, { method: "PUT", cookie: WEB, body: { md: { text: "# Card\n", ifRev: null } } })).status, 200);
+  const top = await board("", { text: boardText("status"), ifRev: null }, sprint.id);
+  assert.deepEqual([top.status, top.json.file?.path], [200, "boards.json"], top.text);
+  const memo = (await browser("/api/spaces", { method: "POST", cookie: WEB, body: { id: shareId(), kind: "document", name: "Memo", parent: mine } })).json.space;
+  assert.equal((await board("", { text: boardText("status"), ifRev: null }, memo.id)).status, 400, "a shared document holds no folder");
+
+  // Whoever writes in the section; to anyone else it is not there. A browser's route, and nobody else's.
+  const alice = await codeFor("WEB00000000000000005", MEMBER);
+  const hers = { cookie: cookieOf(await browser("/api/web/session", { method: "POST", body: { code: alice, deviceId: "d-alice-board", deviceName: "Safari" } })), device: "d-alice-board" };
+  assert.equal((await board("", { text: boardText("status"), ifRev: 1 }, sprint.id, hers)).status, 404);
+  const theirs = await board("Team", { text: boardText("status"), ifRev: 2 }, "", hers);
+  assert.deepEqual([theirs.status, theirs.json.file.rev, theirs.json.file.by], [200, 3, (await call("/api/meta", { token: MEMBER })).json.you.memberId]);
+  assert.equal((await browser("/api/auth/session", { method: "DELETE", ...hers })).status, 204);
+  for (const token of [OWNER, BOARD_BOT.token]) {
+    assert.equal((await call("/api/web/board?path=Team", { method: "PUT", token, device: null, body: { text: boardText("status"), ifRev: 3 } })).status, 403);
+  }
+
+  // Show as Folder: the file goes as a deleted document does.
+  const was = storedManifest().files[fid];
+  const over = await currentEtag();
+  const shown = await unboard("TEAM");
+  assert.equal(shown.status, 200, shown.text);
+  const m = storedManifest();
+  assert.equal(m.files[fid], undefined);
+  assert.deepEqual(shown.json, { tombstone: { fid, ...m.tombstones[fid] }, etag: await currentEtag(), over }, "what the browser drops from the manifest it holds");
+  assert.deepEqual([m.tombstones[fid].path, m.tombstones[fid].rev, m.tombstones[fid].by, m.tombstones[fid].to], ["Team/boards.json", was.rev + 1, me, undefined]);
+  assert.ok(entryAt(m, "Team/Fix.md") && entryAt(m, "Team/Sub/Deep.md"), "the folder is as it was");
+  assert.equal((await unboard("Team")).status, 404);
+  assert.equal((await unboard("")).status, 400);
+  const again = await board("Team", { text: boardText("status"), ifRev: null });
+  assert.equal(again.status, 200);
+  assert.notEqual(again.json.file.fid, fid, "a board again is a new file");
+  assert.deepEqual((await unboard("", sprint.id)).status, 200);
+  assert.equal((await browser(`/api/spaces/${memo.id}`, { method: "DELETE", cookie: WEB })).json.kept, false);
+  assert.equal((await browser(`/api/spaces/${sprint.id}`, { method: "DELETE", cookie: WEB })).json.kept, true);
+});
+
+await test("boards: a browser reads the tags of a whole folder in one request — every note directly in it, from the tags index caught up first (202 while it reads), never a note beneath it, an html page or the board itself", async () => {
+  const tags = (dir, space = "") => browser(`/api/web/tags?space=${space}&dir=${encodeURIComponent(dir)}`, { cookie: WEB });
+  const files = {
+    "Cards/a.md": "---\nstatus: Doing\npriority: p1\nowner: Sam\n---\n# A\n",
+    "Cards/b.md": "---\nStatus: doing\n---\nB.\n",
+    "Cards/c.md": "No block.\n",
+    "Cards/d.md": "---\nstatus: Blocked\n---\nD.\n",
+    "Cards/page.html": "<p>A page.</p>\n",
+    "Cards/boards.json": boardText("status"),
+    "Cards/Sub/e.md": "---\nstatus: Done\n---\nE.\n",
+  };
+  for (let i = 0; i < 30; i += 1) files[`Cards/n${String(i).padStart(2, "0")}.md`] = `---\nstatus: Todo\n---\nCard ${i}.\n`;
+  await freshWorkspace(files);
+  await macTags(TAGS);
+  const m = storedManifest();
+  const fid = (p) => entryAt(m, p)[0];
+  const cards = Object.keys(files).filter((p) => /^Cards\/[^/]+\.md$/.test(p));
+
+  const first = await tags("Cards");
+  assert.deepEqual([first.status, first.json.indexing], [202, true], "what changed is read first, and the browser asks again");
+  const answered = await caughtUp(() => tags("Cards"));
+  assert.equal(answered.status, 200, answered.text);
+  const { notes } = answered.json;
+  assert.deepEqual(Object.keys(notes).sort(), cards.map(fid).sort(), "every note directly in the folder — not the html page, the board or a note beneath it");
+  assert.deepEqual(notes[fid("Cards/a.md")], [{ name: "status", value: "Doing" }, { name: "priority", value: "p1" }], "the listed tags, in the list's order");
+  assert.deepEqual(notes[fid("Cards/b.md")], [{ name: "status", value: "doing" }], "named as the list spells it, valued as the note does");
+  assert.deepEqual(notes[fid("Cards/c.md")], []);
+  assert.deepEqual(notes[fid("Cards/d.md")], [{ name: "status", value: "Blocked" }], "a value the list lacks is still the note's");
+  assert.deepEqual(notes[fid("Cards/n29.md")], [{ name: "status", value: "Todo" }]);
+
+  // Whole: one request for the folder, reading no note (the list is the manifest's).
+  const whole = await countingBlobReads(() => tags("Cards"));
+  assert.deepEqual([whole.res.status, whole.reads], [200, 0]);
+  assert.deepEqual(whole.res.json, answered.json);
+
+  // A Mac's change is read in the request that asks, when it is a few.
+  await macWrite((mm, put) => {
+    put("Cards/a.md", "---\nstatus: Done\n---\n# A\n");
+  });
+  const after = await tags("Cards");
+  assert.equal(after.status, 200, after.text);
+  assert.deepEqual(after.json.notes[fid("Cards/a.md")], [{ name: "status", value: "Done" }]);
+
+  // A folder's own notes, named in any case; a folder with none; what is no folder.
+  assert.deepEqual((await tags("cards/sub")).json.notes, { [fid("Cards/Sub/e.md")]: [{ name: "status", value: "Done" }] });
+  assert.deepEqual((await tags("Nowhere")).json, { notes: {} });
+  assert.equal((await tags(".hidden")).status, 400);
+  assert.equal((await tags("Cards", "nope")).status, 400);
+  assert.equal((await tags("Cards", "s-00000000")).status, 404);
+  assert.equal((await call("/api/web/tags?dir=Cards", { token: BOARD_BOT.token, device: null })).status, 403, "a browser's route");
+
+  // In a section of the person's own.
+  const mine = (await browser("/api/spaces/private", { method: "PUT", cookie: WEB })).json.space.id;
+  const saved = await browser(`/api/web/doc?space=${mine}&path=${encodeURIComponent("Desk/One.md")}`, { method: "PUT", cookie: WEB, body: { md: { text: "---\npriority: p2\n---\nOne.\n", ifRev: null } } });
+  assert.equal(saved.status, 200);
+  assert.deepEqual((await caughtUp(() => tags("Desk", mine))).json.notes, { [saved.json.md.fid]: [{ name: "priority", value: "p2" }] });
+  assert.equal((await browser(`/api/web/folder?space=${mine}&path=Desk`, { method: "DELETE", cookie: WEB })).status, 200);
+
+  // No list: every note is there, with nothing.
+  await macTags([]);
+  const unlisted = (await tags("Cards")).json.notes;
+  assert.deepEqual(Object.keys(unlisted).sort(), cards.map(fid).sort());
+  assert.ok(Object.values(unlisted).every((pairs) => pairs.length === 0));
 });
 
 await test("web: a browser that signs out, or is signed out, is told to drop its cookie and what it kept; one whose cookie is nobody's, only the cookie", async () => {

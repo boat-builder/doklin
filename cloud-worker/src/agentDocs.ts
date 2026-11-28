@@ -11,8 +11,9 @@
 //
 // Every path names a document (documents.ts, `locate`) — by its stem or by a
 // version's full name — or, for a move, a folder: the CLI sends what was
-// typed and is told what it turned out to be. Nothing else syncs, so nothing
-// else is here (`syncs`, layout.ts).
+// typed and is told what it turned out to be. Nothing else is here: the one
+// other file that syncs, a folder's `boards.json`, is the apps' alone
+// (documents.ts).
 //
 // Every change goes through `commit` (commit.ts), so a document's files land
 // in one manifest write or not at all, and the public map is kept true in
@@ -87,6 +88,7 @@ import { askOf, catchUpOpen, mirrorAfter, pairsIn, searchIn, type OpenSection } 
 import { renameSpace, sharedEnv, spaceOf } from "./spaces";
 import { filtersOf, listedFilters, readTagList, tagsKept } from "./tagList";
 import { isHtmlPath, isMarkdownPath } from "./workspace";
+import { isBoardsFile } from "../../src/boards";
 import { CRITIC_BLOCK_RE, parseSpans, stripComments } from "../../src/criticMarkup";
 import { META_SUFFIX, emptyMeta, metaFileOf, metaIsEmpty, parseEntityMeta, serializeEntityMeta, type LinkRecord } from "../../src/metaFile";
 import { keyedLines, noteTags, type NoteTag, type TagDef, type TagFilter } from "../../src/tags";
@@ -273,8 +275,9 @@ async function withTags(
  * Where a link to a page leads, as this agent's person names the path. A
  * link (engine/src/cloud/link.rs) names its workspace, the space its file is
  * in ("" the shared workspace) and the file's id — never a path, so that a
- * rename or a move keeps it and no folder's name is in it. Only documents sync, so a
- * file found is one: it comes back as the tree names it, by its stem.
+ * rename or a move keeps it and no folder's name is in it. A document found
+ * comes back as the tree names it, by its stem; a sidecar or a board's file
+ * leads nowhere.
  *
  * A space this person is not in, a file deleted, one that never was and a
  * link from another workspace on this domain are all one answer, the same
@@ -325,7 +328,7 @@ export async function getFind(c: Call): Promise<Response> {
       if (there > i) order.splice(i + 1, 0, ...order.splice(there, 1));
       continue;
     }
-    if (file.path.toLowerCase().endsWith(META_SUFFIX)) continue;
+    if (file.path.toLowerCase().endsWith(META_SUFFIX) || isBoardsFile(file.path)) continue;
     const files = mounted(ws.manifest, section).files;
     const { stem } = nameOf(files[fid].path);
     const alone = new Index(files).doc(stem).mds.length <= 1;

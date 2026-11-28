@@ -32,6 +32,8 @@ mod external_open;
 mod links;
 // A note's tags, read for the search (src/tags.ts has the rules).
 mod tags;
+// A folder's boards.json, and what its board shows of each note.
+mod boards;
 #[cfg(target_os = "macos")]
 mod cli_install;
 
@@ -61,14 +63,15 @@ struct WindowGeometry {
     height: f64,
 }
 
-/// What a tab shows: a file, or an `Untitled` note — its path is the buffer
-/// of a note not saved to a file yet (see `untitled.rs`). Mirrors `TabKind`
-/// in the renderer's src/tabs.ts.
+/// What a tab shows: a file, an `Untitled` note — its path is the buffer
+/// of a note not saved to a file yet (see `untitled.rs`) — or a folder shown
+/// as a `Board`. Mirrors `TabKind` in the renderer's src/tabs.ts.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum TabKind {
     File,
     Untitled,
+    Board,
 }
 
 /// One tab, as the renderer describes it. The id is the renderer's own, kept
@@ -467,9 +470,9 @@ pub(crate) struct FileSnapshot {
 }
 
 #[derive(Clone, Serialize)]
-struct ReadFileResult {
-    contents: String,
-    snapshot: FileSnapshot,
+pub(crate) struct ReadFileResult {
+    pub(crate) contents: String,
+    pub(crate) snapshot: FileSnapshot,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -507,6 +510,10 @@ enum TreeNode {
         name: String,
         path: String,
         children: Vec<TreeNode>,
+        // True when the folder holds a boards.json (src/boards.ts): the
+        // sidebar opens it as a board.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        board: bool,
     },
 }
 
@@ -589,6 +596,7 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize, all: bool) -> Option<TreeN
     // Non-document files, gathered only in `all` mode.
     let mut others: Vec<PathBuf> = Vec::new();
 
+    let mut board = false;
     for entry in entries.flatten() {
         if *budget == 0 {
             break;
@@ -604,6 +612,9 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize, all: bool) -> Option<TreeN
             Ok(ft) => ft,
             Err(_) => continue,
         };
+        if ft.is_file() && boards::is_boards_file(&name_str) {
+            board = true;
+        }
         if ft.is_dir() {
             subdirs.push(path);
         } else if ft.is_file() && is_markdown(&path) {
@@ -658,6 +669,7 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize, all: bool) -> Option<TreeN
         name: dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| dir.to_string_lossy().to_string()),
         path: dir.to_string_lossy().to_string(),
         children,
+        board,
     })
 }
 
@@ -1099,6 +1111,7 @@ fn list_md_tree(path: String, all: Option<bool>) -> Result<TreeNode, String> {
             name: root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root.to_string_lossy().to_string()),
             path: root.to_string_lossy().to_string(),
             children: Vec::new(),
+            board: false,
         })
     }
 }
@@ -1778,6 +1791,10 @@ pub fn run() {
             pdf_export::export_pdf,
             read_file,
             write_file,
+            boards::board_read,
+            boards::board_write,
+            boards::board_folders,
+            boards::board_cards,
             watch_file,
             unwatch_file,
             list_md_tree,

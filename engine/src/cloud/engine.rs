@@ -1424,7 +1424,7 @@ impl<R: Remote> Engine<R> {
             let renamed: HashSet<&str> = survey.vanished.iter().map(|(_, hash, _)| hash.as_str()).collect();
             for (path, hash) in &survey.news {
                 let arriving = moves.iter().any(|m| &m.to == id && &m.path == path);
-                if arriving || renamed.contains(hash.as_str()) || path.to_lowercase().ends_with(".meta.jsonl") {
+                if arriving || renamed.contains(hash.as_str()) || !crate::is_document(path) {
                     continue;
                 }
                 news.push(unit.ws_rel(&counted_under(path)));
@@ -2304,7 +2304,7 @@ impl<R: Remote> Engine<R> {
                     Some(name) => {
                         let stem = format!("{}/{}", u.prefix, name.local);
                         let (dir, file) = from.rsplit_once('/')?;
-                        let own = dir.eq_ignore_ascii_case(&u.prefix) && split_name(file).0.eq_ignore_ascii_case(&name.local);
+                        let own = dir.eq_ignore_ascii_case(&u.prefix) && space::of_document(file, &name.local);
                         let now = if own { to.clone() } else { rebased(&stem, &from, &to)? };
                         Some((u.id.clone(), now))
                     }
@@ -2550,8 +2550,8 @@ impl<R: Remote> Engine<R> {
         let not_shareable = || "Only a folder or a document in My files, or in a folder shared with you, can be shared. Nothing in Library is shared separately: it is everyone's.".to_string();
         let folder = space::is_real_dir(path);
         let Some(ws_rel) = rel_path(&root, path) else { return Err(not_shareable()) };
-        if !folder && !crate::syncs(&ws_rel) {
-            return Err("Only markdown and html documents sync, so only they can be shared.".to_string());
+        if !folder && !crate::is_document(&ws_rel) {
+            return Err("Only a folder, or a markdown or html document, can be shared.".to_string());
         }
         self.set_reaches();
         let Some((at, rel)) = self.place(&ws_rel) else { return Err(not_shareable()) };
@@ -3439,8 +3439,8 @@ impl<R: Remote> Engine<R> {
                         let _ = reply.send(restored);
                     }
                     Some(EngineCmd::LinkTo { rel, reply }) => {
-                        let linked = if !crate::syncs(&rel) {
-                            Err("only a markdown or html document has a link: other files stay on this device".to_string())
+                        let linked = if !crate::is_document(&rel) {
+                            Err("only a markdown or html document has a link".to_string())
                         } else if self.place(&rel).is_none() {
                             Err("that file is in no section, so it syncs nowhere and has no link".to_string())
                         } else {

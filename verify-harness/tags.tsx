@@ -289,6 +289,16 @@ const cloud = new Proxy({} as Cloud, {
 
 const backend: Backend = {
   documents,
+  // No folder here is shown as a board.
+  boards: {
+    read: async () => null,
+    write: async () => {
+      throw new Error("This page has no boards.");
+    },
+    remove: async () => {},
+    folders: async () => [],
+    cards: async () => ({}),
+  },
   cloud,
   fileClipboard: {
     get: async () => clip,

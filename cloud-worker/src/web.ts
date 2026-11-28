@@ -46,6 +46,15 @@
 //   PUT    /api/web/mount?space=&id=   {dir, was?} → {etag, over}: where the share `id` sits in
 //                                      the section `space` it is in (the manifest's `mounts`):
 //                                      the folder its item is in, "" the top
+//   PUT    /api/web/board?space=&path= {text, ifRev} → {file, etag, over}: the folder `path`
+//                                      shown as a board — its `boards.json` (webBoards.ts), over
+//                                      the revision that was read, null when there is none yet.
+//                                      409 {rev} when it moved on, and nothing was written. `file`
+//                                      is {fid, …its entry in the manifest}. `path` "" only in a
+//                                      shared folder, whose top is a folder where it sits
+//   DELETE /api/web/board?space=&path= → {tombstone, etag, over}: shown as a folder again — the
+//                                      file goes with a tombstone; `tombstone` is {fid, …its
+//                                      tombstone in the manifest}
 //   GET    /api/web/search?q=&limit=&tag=&after=   every section the person can open
 //                                      (search.ts), as many as a request opens: `next` is where
 //                                      the next request starts (`after`). 202 {indexing, pending}
@@ -55,6 +64,9 @@
 //   PUT    /api/web/pages              {space, path, kind, slug?, title?, desc?} → {slug, url, …}
 //   DELETE /api/web/pages?slug=        stop a page, in whichever section of theirs holds it
 //   PUT    /api/web/home               {slug: string | null}: the page at `/`, or none
+//   GET    /api/web/tags?space=&dir=   {notes: {<fid>: [{name, value}]}}: every note directly in
+//                                      the folder, with its pairs for the listed tags, in one
+//                                      request. 202 {indexing, pending} while the index catches up
 //   PUT    /api/web/tags               {at, tag: {name, values, desc?}} → {tags, etag}: the tag
 //                                      that was `at`, or a new one, is now `tag` (webTags.ts)
 //   DELETE /api/web/tags?name=         the tag leaves the list → {tags, etag}
@@ -101,6 +113,7 @@ import { json, readJsonObject } from "./http";
 import { ID_RE, normalizeCode } from "./layout";
 import { redeemInvite } from "./members";
 import type { WebCall } from "./webCall";
+import { deleteBoard, getTags, putBoard } from "./webBoards";
 import { deleteDoc, deleteFolder, getSearch, postCopy, postMove, putDoc, putMount } from "./webDocs";
 import { deletePage, putHome, putPage } from "./webPages";
 import { deleteTags, putTags } from "./webTags";
@@ -194,10 +207,11 @@ const ROUTES: Record<string, Partial<Record<string, Handler>>> = {
   move: { POST: postMove },
   copy: { POST: postCopy },
   mount: { PUT: putMount },
+  board: { PUT: putBoard, DELETE: deleteBoard },
   search: { GET: getSearch },
   pages: { PUT: putPage, DELETE: deletePage },
   home: { PUT: putHome },
-  tags: { PUT: putTags, DELETE: deleteTags },
+  tags: { GET: getTags, PUT: putTags, DELETE: deleteTags },
   // POST is answered above the gate (api.ts); nothing else is asked of it.
   session: {},
 };

@@ -11,8 +11,11 @@
 //             belongs to its tab, is unsaved for as long as it has text, and
 //             is gone when the tab closes. Saving it turns the tab into a
 //             `file` tab, in place.
+//   board     a folder shown as a board (src/Board.tsx), at the folder's
+//             path. It holds no document: nothing is read into an editor,
+//             watched or autosaved for it.
 
-export type TabKind = "file" | "untitled";
+export type TabKind = "file" | "untitled" | "board";
 
 /** What is persisted of a tab — in the window session, and in the backend's
  *  window registry. Everything else about one is found again when it loads. */
@@ -50,11 +53,26 @@ export type UntitledTab = StoredTab & {
   steps?: never;
 };
 
-export type Tab = DocTab | UntitledTab;
+/** `missing`: the folder is gone, or no longer shown as a board. */
+export type BoardTab = StoredTab & {
+  kind: "board";
+  missing?: boolean;
+  steps?: never;
+  title?: never;
+  unsaved?: never;
+};
+
+export type Tab = DocTab | UntitledTab | BoardTab;
 
 export const toStoredTab = ({ id, kind, path }: Tab): StoredTab => ({ id, kind, path });
 
 export const isUntitled = (t: Tab): t is UntitledTab => t.kind === "untitled";
+
+export const isBoardTab = (t: Pick<Tab, "kind">): boolean => t.kind === "board";
+
+/** Whether a tab holds no document the editor reads: a board, or a file
+ *  that is not a document (`isUnsupportedTab`). */
+export const holdsNoDocument = (t: Pick<Tab, "kind" | "path">): boolean => isBoardTab(t) || isUnsupportedTab(t);
 
 /** How many steps each way a tab keeps. */
 const STEPS_KEPT = 100;
@@ -91,10 +109,10 @@ const DOC_EXT_RE = /\.(md|markdown|mdown|mkd|html)$/i;
 export const isUnsupportedTab = (t: Pick<Tab, "kind" | "path">): boolean =>
   t.kind === "file" && !DOC_EXT_RE.test(t.path);
 
-/** What a document is called: its file's name without the extension, or an
- *  untitled note's title ("" for none). */
+/** What a document is called: its file's name without the extension, an
+ *  untitled note's title ("" for none), or a board's folder's name. */
 export const docName = (t: Tab): string =>
-  t.kind === "untitled" ? t.title : basename(t.path).replace(DOC_EXT_RE, "");
+  t.kind === "untitled" ? t.title : t.kind === "board" ? basename(t.path) : basename(t.path).replace(DOC_EXT_RE, "");
 
 /** The name a tab goes by: the document's, or the title being typed over it. */
 export const tabLabel = (t: Tab): string => t.title || docName(t) || "Untitled";

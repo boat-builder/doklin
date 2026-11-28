@@ -6834,3 +6834,290 @@ button.published-row-name:hover {
   width: 100%;
   margin: 0;
 }
+
+/* ---------- A folder shown as a board (src/Board.tsx) ----------
+   The board fills its pane and scrolls sideways on its own (.editor-wrap
+   never scrolls horizontally), each column scrolling down on its own.
+   Columns are washed alike: a value has no colour of its own. */
+.board {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--sheet);
+}
+.board.is-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+.board-head {
+  flex: 0 0 auto;
+  padding: 24px 28px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.board-title {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.board-spacer {
+  flex: 1 1 auto;
+}
+.board-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.board-bar-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text-1);
+}
+.board-said {
+  padding: 32px 28px;
+  max-width: 52ch;
+  color: var(--text-2);
+  font-size: var(--fs-md);
+  line-height: 1.6;
+}
+.board-said p {
+  margin: 0 0 12px;
+}
+.board-cols {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 28px 28px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-height: 0;
+}
+.board-col {
+  flex: 0 0 264px;
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+  min-height: 0;
+  border-radius: var(--r-lg);
+  padding: 4px 6px 6px;
+  background: var(--sunken);
+}
+.board-col.is-target {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+/* A value that isn't one of the tag's: its notes are shown, never dropped. */
+.board-col.is-unlisted {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.board-col.is-unlisted.is-target {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+.board-col-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 8px;
+  min-width: 0;
+}
+.board-col-name {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.board-col.is-unlisted .board-col-name {
+  color: var(--text-2);
+}
+.board-col-count {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.board-col-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  min-height: 4px;
+  padding: 1px 1px 2px;
+}
+/* A card: raised off its column, and lifted a pixel under the pointer. The
+   lift is a translate: a scale would blur in WKWebView. */
+.board-card {
+  border-radius: var(--r-md);
+  background: var(--raised);
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--border);
+  padding: 10px 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  touch-action: none;
+  transition:
+    box-shadow var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+.board-card:hover {
+  box-shadow: var(--shadow-card-hover), 0 0 0 1px var(--border-strong);
+  transform: translateY(-1px);
+}
+.board-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.board.is-dragging .board-card:hover {
+  transform: none;
+}
+.board-card.is-lifted {
+  opacity: 0.4;
+}
+.board-card-title {
+  font-size: var(--fs-md);
+  font-weight: 500;
+  line-height: 1.38;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+.board-card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.board-chip {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 20px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: var(--r-xs);
+  background: var(--hover);
+  color: var(--text-2);
+}
+.board-chip.is-unlisted {
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+}
+/* Where the card in flight would land. */
+.board-drop-line {
+  height: 2px;
+  margin: 0 0 6px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.board-col-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 4px;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: 5px 6px;
+  border-radius: var(--r-xs);
+  cursor: pointer;
+}
+.board-col-add:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text-1);
+}
+.board-ghost {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  background: var(--raised);
+  color: var(--text-1);
+  box-shadow: var(--shadow-pop), 0 0 0 1px var(--border-strong);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-board {
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-left: 6px;
+  color: var(--text-3);
+}
+.board-tag-picks {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.board-tag-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.board-tag-pick:hover:not(:disabled) {
+  background: var(--hover);
+}
+.board-tag-pick-name {
+  font-weight: 600;
+}
+.board-tag-pick-values {
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

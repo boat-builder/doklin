@@ -2,13 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
 import ContextMenu from "./ContextMenu";
 import { backend } from "./backend";
+import { BoardIcon } from "./Board";
 import { keys } from "./keys";
 import { dragWindowFromGap } from "./windowDrag";
 import { isUnsaved, isUnsupportedTab, tabLabel, type Tab } from "./tabs";
 
 // What hovering a tab says: where a file is, or that a note isn't one yet.
 const tabHint = (t: Tab) =>
-  t.kind === "file" ? t.path : t.kind === "untitled" ? "Not saved to a file yet" : tabLabel(t);
+  t.kind === "untitled" ? "Not saved to a file yet" : t.kind === "board" ? `${t.path}, shown as a board` : t.path;
 
 type Props = {
   tabs: Tab[];
@@ -271,9 +272,7 @@ export default function TabBar({
                   setTabMenu({ x: e.clientX, y: e.clientY, path: t.path });
                 }}
               >
-                <span className="tab-icon">
-                  <NoteIcon />
-                </span>
+                <span className="tab-icon">{t.kind === "board" ? <BoardIcon /> : <NoteIcon />}</span>
                 <span className="tab-label">{tabLabel(t)}</span>
                 {t.kind !== "untitled" && live.has(t.path) && (
                   <span className="tab-live" title="Live on the web" data-testid="tab-live">

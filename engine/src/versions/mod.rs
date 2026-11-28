@@ -488,9 +488,9 @@ impl Versioner {
 
     /// The sidecar of the document at `rel` in the snapshot taken at `ts`,
     /// when that snapshot holds the document at `hash`: the comments and
-    /// links its text had then. None for a file that is a sidecar itself.
+    /// links its text had then. None for a file that is no document.
     fn sidecar_then(&self, rel: &str, ts: u64, hash: &str) -> Option<String> {
-        if crate::sidecar::is_sidecar(rel) || !crate::syncs(rel) {
+        if !crate::is_document(rel) {
             return None;
         }
         let snap = self.store.read_snapshot(ts)?;

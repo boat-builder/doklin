@@ -46,7 +46,7 @@ import { splitName } from "./mount";
 import { withDb } from "./schema";
 import { ensurePrivate, listOpenSpaces, sharedEnv, spaceEnv, type Where } from "./spaces";
 import type { Space } from "./wire";
-import { openWorkspace, type Workspace } from "./workspace";
+import { isHtmlPath, isMarkdownPath, openWorkspace, type Workspace } from "./workspace";
 
 /** Where a share's item is, as its person names paths. */
 export type Shared = {
@@ -95,7 +95,10 @@ function fileName(name: string): string {
  *  documents by their names without an extension. Lower-cased. */
 export type Taken = { folders: Set<string>; documents: Set<string> };
 
-/** What a section's own files take in the folder `dir` of it ("" its top). */
+/** What a section's own files take in the folder `dir` of it ("" its top).
+ *  A document's name is taken by its markdown or its html, never by a
+ *  sidecar or a board's `boards.json` (`name_taken`,
+ *  engine/src/cloud/space.rs — change both). */
 export function takenIn(m: Pick<Manifest, "files">, dir: string): Taken {
   const taken: Taken = { folders: new Set(), documents: new Set() };
   const prefix = dir === "" ? "" : `${dir.toLowerCase()}/`;
@@ -105,7 +108,7 @@ export function takenIn(m: Pick<Manifest, "files">, dir: string): Taken {
     const rest = lower.slice(prefix.length);
     const slash = rest.indexOf("/");
     if (slash >= 0) taken.folders.add(rest.slice(0, slash));
-    else taken.documents.add(splitName(rest)[0]);
+    else if (isMarkdownPath(rest) || isHtmlPath(rest)) taken.documents.add(splitName(rest)[0]);
   }
   return taken;
 }

@@ -257,7 +257,7 @@ impl Store {
     pub fn rel_of(&self, abs: &Path) -> Option<String> {
         let rel = crate::cloud::scan::rel_for_touch(&self.root, abs)?;
         if let Some(name) = &self.reach.only {
-            let mine = !rel.contains('/') && crate::cloud::space::split_name(&rel).0.eq_ignore_ascii_case(&name.local);
+            let mine = !rel.contains('/') && crate::cloud::space::of_document(&rel, &name.local);
             return mine.then(|| self.reach.stored(&rel));
         }
         self.reach.holds(&rel).then_some(rel)

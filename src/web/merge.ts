@@ -7,8 +7,10 @@
 //
 // A sidecar is merged by its records instead of its lines: it is a list of
 // threads, and two replies to one thread are both kept where a line merge
-// would call them an overlap.
+// would call them an overlap. So is a folder's `boards.json`: its conflict
+// copy would be a name that doesn't sync.
 
+import { canonicalJson, newBoard, parseBoards, serializeBoards, type Board } from "../boards";
 import { mergeHtmlThreads, type HtmlThread } from "../htmlComments";
 import { parseEntityMeta, serializeEntityMeta, type LinkRecord, type MdThread } from "../metaFile";
 
@@ -211,6 +213,63 @@ export function mergeMeta(base: string | null, ours: string, theirs: string, exi
     links: mergeLinks(b.links, o.links, t.links, exists),
     foreign: mergeKeyed(b.foreign, o.foreign, t.foreign, (f) => f.raw),
   });
+}
+
+/* ---------- A board ---------- */
+
+/** A board's records: `tag`, each key a newer app wrote, and each card
+ *  (keyed by its name whatever its case). `text` is the record as
+ *  canonical JSON: what two sides compare, and what the board is built
+ *  back from. */
+type BoardRecord = { key: string; text: string };
+
+function boardRecords(board: Board): BoardRecord[] {
+  return [
+    { key: "tag", text: canonicalJson(board.tag) },
+    ...Object.entries(board.extra).map(([k, v]) => ({ key: `extra:${k}`, text: canonicalJson([k, v]) })),
+    ...Object.entries(board.cards).map(([name, c]) => ({
+      key: `card:${name.toLowerCase()}`,
+      text: canonicalJson([name, c.rank, c.extra]),
+    })),
+  ];
+}
+
+function fromRecords(records: BoardRecord[]): Board {
+  const board = newBoard("");
+  for (const r of records) {
+    const v = JSON.parse(r.text) as unknown;
+    if (r.key === "tag") board.tag = v as string;
+    else if (r.key.startsWith("extra:")) {
+      const [k, value] = v as [string, unknown];
+      board.extra[k] = value;
+    } else {
+      const [name, rank, extra] = v as [string, string | null, Record<string, unknown>];
+      board.cards[name] = { rank, extra };
+    }
+  }
+  return board;
+}
+
+/**
+ * Two versions of a folder's `boards.json` in one, against the one both
+ * started from (null: there was none), by its records as a sidecar is: a
+ * record changed on one side is that side's, one changed on both is ours,
+ * and a deletion sticks unless the other side changed what was deleted.
+ * Never a conflict. When either side isn't a board this app reads (a newer
+ * app's, or not one at all), theirs is kept as it is: the app never
+ * rewrites a file it can't read. The engine merges alike
+ * (`engine/src/boards.rs`): change both; `verify-harness/boards-fixture.json`
+ * holds the two to one answer.
+ */
+export function mergeBoards(base: string | null, ours: string, theirs: string): string {
+  if (ours === theirs) return ours;
+  const o = parseBoards(ours);
+  const t = parseBoards(theirs);
+  if (o === null || o === "newer" || t === null || t === "newer") return theirs;
+  const read = base === null ? null : parseBoards(base);
+  const b = read === null || read === "newer" ? newBoard("") : read;
+  const sameKey = (r: BoardRecord) => r.key;
+  return serializeBoards(fromRecords(mergeKeyed(boardRecords(b), boardRecords(o), boardRecords(t), sameKey)));
 }
 
 /* ---------- Conflict copies ---------- */
