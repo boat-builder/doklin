@@ -23,11 +23,12 @@ export function linkTo(ws: Workspace, path: string): CloudPageLink | null {
   if (!file) return null;
   const url = pageLinkUrl({ domain: location.host, workspace: ws.wsId, space: file.space, file: file.fid });
   const space = ws.status().spaces.find((s) => s.id === file.space);
+  const alone = space ? [...space.members, ...space.above].every((person) => person === ws.me) : false;
   const who = !space
     ? `Everyone in ${ws.name} can open it.`
-    : space.kind === "private"
+    : space.kind === "private" || alone
       ? "Only you can open it, on any device of yours."
-      : `Only the people in “${space.name}” can open it.`;
+      : `Only the people “${space.name}” is shared with can open it.`;
   return { url, who };
 }
 

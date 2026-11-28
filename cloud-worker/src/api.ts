@@ -87,7 +87,7 @@
 //   PATCH  /api/auth/members/<id>    owner; {role: "owner" | "member"} → {member}. Never your own
 //                                    row, never the superadmin's (409)
 //   DELETE /api/auth/members/<id>    owner; remove the person: every credential they hold, and
-//                                    the restricted folders they were in (204). Their row stays,
+//                                    what was shared with them (204). Their row stays,
 //                                    out of the People list. Never your own, never the
 //                                    superadmin's (409)
 //   POST   /api/auth/devices/code    anyone; {codeHash, expiresAt} → 201 {code}: a one-time code
@@ -108,18 +108,32 @@
 //   of the workspace, so it is only ever said of a token `removed_tokens` remembers. A
 //   browser is told the same, with the headers that end its sign-in there (auth.ts).
 //
-//   Spaces — a restricted folder, or the caller's Private (spaces.ts). Anyone here may make
-//   one; a space answers the people in it and is a 404 to everybody else, owners included.
+//   Spaces — the caller's My files, and what is shared (spaces.ts): a tree, in which whoever
+//   can open a section can open what sits in it. Anyone here shares; a space answers the
+//   people who can open it and is a 404 to everybody else, owners included.
 //
-//   GET    /api/spaces               {spaces} — the ones the caller is in
-//   POST   /api/spaces               {name, members?: [memberId]} → 201 {space}: a restricted
-//                                    folder holding the caller and whoever they named
-//   PUT    /api/spaces/private       {space} — the caller's own Private, made on first asking
-//   PATCH  /api/spaces/<id>          {name} → {space}; a restricted folder only
-//   DELETE /api/spaces/<id>          everything it stored, batched; repeat until remaining:false
-//   PUT    /api/spaces/<id>/members/<memberId>     add a person here → {space}
-//   DELETE /api/spaces/<id>/members/<memberId>     take one out, yourself included (204);
-//                                    409 for the last one — delete the folder instead
+//   GET    /api/spaces               {spaces} — the ones the caller can open, and the deleted
+//                                    shares they can restore (`deletedAt`)
+//   POST   /api/spaces               {id, kind: "folder" | "document", name, parent, dir?, was?,
+//                                    members?: [memberId]} → 201 {space}: a share in the section
+//                                    `parent`, which the caller can open and is never Library —
+//                                    in its folder `dir` ("" its top), which that section's
+//                                    manifest says from then on (`mounts`), with `was`, where the
+//                                    item was before. The device mints `id`; the same one from
+//                                    its maker again answers the same share. 409 when it is taken
+//   PUT    /api/spaces/private       {space} — the caller's own My files, made on first asking
+//   PATCH  /api/spaces/<id>          {name} → {space}, a shared folder only (a shared document
+//                                    is renamed by renaming its file); or {parent, dir?} →
+//                                    {space}, by somebody who can open both the section it sits
+//                                    in and the one it goes to
+//   DELETE /api/spaces/<id>          by somebody who can open the section it sits in. One that
+//                                    holds something is kept thirty days: {deleted, kept: true}.
+//                                    One that holds nothing is erased, batched: repeat until
+//                                    remaining:false
+//   POST   /api/spaces/<id>/restore  a deleted share back, by the same people → {space}
+//   PUT    /api/spaces/<id>/members/<memberId>     share it with a person here → {space}
+//   DELETE /api/spaces/<id>/members/<memberId>     stop, yourself included (204); 409 for
+//                                    somebody who opens it through the folder it sits in
 //   *      /api/spaces/<id>/manifest · blobs/… · versions/…   the sync routes above, on that space
 //
 //   Every public address (everyPage.ts) — an owner's, whichever section published the page.
@@ -139,7 +153,7 @@
 //
 //   The browser version. A browser's sign-in is answered under /api/web and on the
 //   routes above that web.ts lists — the reads it is built from, people, devices and
-//   agents, and restricted folders — and on nothing else (403); nobody else's credential
+//   agents, and sharing — and on nothing else (403); nobody else's credential
 //   is answered under /api/web.
 //
 //   POST   /api/web/session          NO CREDENTIAL — the third route above the gate
@@ -161,12 +175,13 @@ import {
   MAX_FILE_BYTES,
   MAX_MANIFEST_BYTES,
   MEMBER_ID_RE,
+  SHARE_ID_RE,
   SLUG_RE,
   SPACE_ID_RE,
   WORKSPACE_KEY,
   blobKey,
   normalizeCode,
-  validFolderName,
+  validItemName,
   validName,
   validPath,
 } from "./layout";
@@ -202,19 +217,26 @@ import {
   createSpace,
   deleteSpace,
   ensurePrivate,
+  isInside,
+  kindOf,
   listSpaces,
+  moveSpace,
   noteEtag,
+  openDeleted,
   openSpace,
   removeFromSpace,
   renameSpace,
+  restoreSpace,
   spaceEnv,
-  spaceOf,
 } from "./spaces";
+import { NOT_YOURS_TO_TAKE, Refusal, takesShared } from "./commit";
+import { dropMount, setMount, type Placing } from "./mounts";
 import { turnedAway } from "./clients";
 import { WORKER_VERSION } from "./version";
-import type { MetaAnswer, PollAnswer, Who, WorkspaceRecord } from "./wire";
+import type { MetaAnswer, PollAnswer, Space, Who, WorkspaceRecord } from "./wire";
 import { browserMay, handleWeb, signIn } from "./web";
 import { handleVersions } from "./versions";
+import { openWorkspace } from "./workspace";
 
 const JSON_OBJECT = { httpMetadata: { contentType: "application/json" } };
 
@@ -647,8 +669,8 @@ async function createInvite(request: Request, env: Env, auth: Auth): Promise<Res
   // A code is a way in as the person it is for, and the address is never
   // verified. So once somebody has signed in as a person — here now, or
   // removed since — a code for them is theirs to make, or the superadmin's
-  // (`people.recover`): another owner's would open that person's Private and
-  // the folders they are in. A row nobody has signed in as is still only an
+  // (`people.recover`): another owner's would open that person's My files
+  // and what is shared with them. A row nobody has signed in as is still only an
   // invitation, and any owner may replace its code. The apps ask the same
   // before offering a new code (`mayInviteAgain`, src/cloud.ts and
   // ios/DoklinKit) — change all three.
@@ -805,8 +827,13 @@ async function sync(request: Request, env: Env, url: URL, rest: string[]): Promi
 
 /* ---------- Spaces ---------- */
 
-/** How many people a folder can be made with in one request. */
+/** How many people something can be shared with in one request. */
 const MAX_SPACE_INVITEES = 100;
+
+const NAME_RULE = "a shared folder or document needs a name a file can carry: no slashes or colons, and not starting with a dot";
+/** What somebody a share is shared with is told when they would place it. */
+const NOT_YOURS_TO_PLACE = "This is shared with you: only the people of the folder it sits in can move or delete it. You can leave it instead.";
+const MY_FILES_STAY = "My files is its person's for as long as they are here: it is not renamed, moved, shared or deleted. Share a folder or a document in it instead.";
 
 async function handleSpaces(request: Request, env: Env, url: URL, parts: string[], auth: Auth): Promise<Response> {
   const method = request.method;
@@ -826,26 +853,45 @@ async function handleSpaces(request: Request, env: Env, url: URL, parts: string[
     const mine = await ensurePrivate(env, auth);
     return mine === null ? noDatabase() : json({ space: mine });
   }
-
-  // The gate: one read, before anything under the space. Not being in it and
-  // its not existing are one answer.
   if (!SPACE_ID_RE.test(id)) return json({ error: "invalid space id" }, 400);
+
+  // A deleted share answers one route, and only the people who can restore it.
+  if (parts[3] === "restore" && parts.length === 4) {
+    if (method !== "POST") return methodNotAllowed();
+    const gone = await openDeleted(env, auth, id);
+    if (gone === null) return noDatabase();
+    if (gone === "none") return json({ error: "not found" }, 404);
+    const back = await restoreSpace(env, auth, gone);
+    if (back === null) return noDatabase();
+    return back === "orphan"
+      ? json({ error: "The folder this was in is deleted too. Restore that folder, and this comes back with it." }, 409)
+      : json({ space: back });
+  }
+
+  // The gate: one read, before anything under the space. Not being able to
+  // open it and its not existing are one answer.
   const space = await openSpace(env, auth, id);
   if (space === null) return noDatabase();
   if (space === "none") return json({ error: "not found" }, 404);
 
   if (parts.length === 3) {
     if (method !== "PATCH" && method !== "DELETE") return methodNotAllowed();
-    if (space.kind !== "restricted") {
-      return json({ error: "a Private section is its person's for as long as they are here — it is not renamed or deleted" }, 409);
-    }
+    if (space.kind === "private") return json({ error: MY_FILES_STAY }, 409);
     if (method === "DELETE") {
+      if (space.parent === null) return json({ error: NOT_YOURS_TO_PLACE }, 403);
       const gone = await deleteSpace(env, space);
-      return gone === null ? noDatabase() : json({ deleted: true, ...gone });
+      if (gone === null) return noDatabase();
+      // Erased, it sits nowhere: the section it sat in stops saying where.
+      if (!gone.kept && !gone.remaining) await dropMount(env, space.parent, space.id);
+      return json({ deleted: true, ...gone });
     }
     const body = await readJsonObject(request);
     if (!body) return json({ error: "invalid json body" }, 400);
-    const name = validFolderName(body.name);
+    if (body.parent !== undefined) return placeSpace(env, auth, space, body);
+    if (space.kind === "document") {
+      return json({ error: "A shared document is called what its file is called: rename the document." }, 409);
+    }
+    const name = validItemName(body.name);
     if (!name) return json({ error: NAME_RULE }, 400);
     const renamed = await renameSpace(env, auth, space, name);
     return renamed === null ? noDatabase() : json({ space: renamed });
@@ -855,9 +901,7 @@ async function handleSpaces(request: Request, env: Env, url: URL, parts: string[
     if (method !== "PUT" && method !== "DELETE") return methodNotAllowed();
     const person = parts[4];
     if (!MEMBER_ID_RE.test(person)) return json({ error: "invalid member id" }, 400);
-    if (space.kind !== "restricted") {
-      return json({ error: "a Private section is one person's — to share something, move it to a restricted folder" }, 409);
-    }
+    if (space.kind === "private") return json({ error: MY_FILES_STAY }, 409);
     if (method === "PUT") {
       const now = await addToSpace(env, auth, space, person);
       if (now === null) return noDatabase();
@@ -865,23 +909,139 @@ async function handleSpaces(request: Request, env: Env, url: URL, parts: string[
     }
     const out = await removeFromSpace(env, space, person);
     if (out === null) return noDatabase();
-    if (out === "missing") return json({ error: "they are not in this folder" }, 404);
-    if (out === "last") {
-      return json({ error: "they are the last person in this folder — delete it, or add somebody first" }, 409);
+    if (out === "missing") return json({ error: "it is not shared with them" }, 404);
+    if (out === "above") {
+      return json({ error: "They can open the folder this sits in, and nothing in a folder is kept from that folder's people." }, 409);
     }
     return new Response(null, { status: 204 });
   }
 
   // Everything else is the sync API again, on this space's part of the bucket.
-  const scoped = spaceEnv(env, space.id);
+  const scoped = spaceEnv(env, space);
   const res = await sync(request, scoped, url, parts.slice(3));
   if (!res) return json({ error: "not found" }, 404);
   // Every answer about the manifest says where it is; when that is not where
-  // the poll thinks it is, the poll is put right — after a write, and after
-  // any read that finds an earlier write's note did not land.
-  const etag = parts[3] === "manifest" ? res.headers.get("x-manifest-etag") : null;
+  // the poll thinks it is, the poll is put right — after any read that finds
+  // an earlier write's note did not land. A write notes its own.
+  const etag = parts[3] === "manifest" && method === "GET" ? res.headers.get("x-manifest-etag") : null;
   if (etag && etag !== space.etag) await noteEtag(scoped, etag);
   return res;
+}
+
+/** Where a share is to sit, as a request says it: `dir` the folder of the
+ *  section its item is in ("" its top, and when unsaid), `was` where the
+ *  item was before it was shared. */
+function placingOf(body: Record<string, unknown>): Placing | Response {
+  const trim = (raw: unknown): string => (typeof raw === "string" ? raw.replace(/^\/+|\/+$/g, "") : "");
+  const dir = trim(body.dir);
+  const was = body.was === undefined ? undefined : trim(body.was);
+  if ((body.dir !== undefined && typeof body.dir !== "string") || (dir !== "" && !validPath(dir)) || (was !== undefined && !validPath(was))) {
+    return json({ error: "dir is the folder it sits in, and was where it was before it was shared" }, 400);
+  }
+  return { dir, ...(was === undefined ? {} : { was }) };
+}
+
+/** Put a share in another section (`PATCH {parent, dir?}`): its rows say who
+ *  can open it now, and the two sections' manifests where it sits. */
+async function placeSpace(env: Env, auth: Auth, space: Space, body: Record<string, unknown>): Promise<Response> {
+  if (space.parent === null) return json({ error: NOT_YOURS_TO_PLACE }, 403);
+  const at = placingOf(body);
+  if (at instanceof Response) return at;
+  const to = await parentOf(env, auth, body.parent);
+  if (to instanceof Response) return to;
+  if (to.id === space.parent) return json({ space });
+  const inside = await isInside(env, to.id, space.id);
+  if (inside === null) return noDatabase();
+  if (inside) return json({ error: "A folder cannot be moved inside itself." }, 400);
+  // Where it will sit is said before anybody is told it sits there.
+  const placed = await setMount(spaceEnv(env, to), auth.memberId, space.id, at);
+  if (placed instanceof Refusal) return json({ error: placed.error }, placed.status);
+  const moved = await moveSpace(env, auth, space, to);
+  if (moved === null) return noDatabase();
+  await dropMount(env, space.parent, space.id);
+  return json({ space: moved });
+}
+
+/** The section a share is to sit in, as a request names it: one the caller
+ *  can open, and one that holds folders. */
+async function parentOf(env: Env, auth: Auth, raw: unknown): Promise<Space | Response> {
+  if (raw === "") return json({ error: "Nothing in Library is shared separately: it is everyone's." }, 400);
+  if (typeof raw !== "string" || !SPACE_ID_RE.test(raw)) return json({ error: "parent is the id of the section it sits in" }, 400);
+  const parent = await openSpace(env, auth, raw);
+  if (parent === null) return noDatabase();
+  if (parent === "none") return json({ error: "That folder is gone, or you can no longer open it." }, 404);
+  if (parent.kind === "document") return json({ error: "Nothing sits inside a shared document." }, 400);
+  return parent;
+}
+
+/**
+ * The share already made of the item a request would share: one that sits
+ * in the same section, where the item was and is, under its name. "none"
+ * when there is none; null when the database cannot say.
+ */
+async function sharedAlready(
+  env: Env,
+  auth: Auth,
+  parent: Space,
+  asked: { id: string; kind: string; name: string },
+  at: Placing,
+): Promise<Space | "none" | null> {
+  if (at.was === undefined) return "none";
+  const mounts = (await openWorkspace(spaceEnv(env, parent)))?.manifest.mounts ?? {};
+  for (const [other, mount] of Object.entries(mounts)) {
+    if (other === asked.id || mount.was !== at.was || mount.dir !== at.dir) continue;
+    const space = await openSpace(env, auth, other);
+    if (space === null) return null;
+    if (space !== "none" && space.parent === parent.id && space.kind === asked.kind && space.name === asked.name) return space;
+  }
+  return "none";
+}
+
+async function makeSpace(request: Request, env: Env, auth: Auth): Promise<Response> {
+  const body = await readJsonObject(request);
+  if (!body) return json({ error: "invalid json body" }, 400);
+  const { id, kind } = body;
+  if (typeof id !== "string" || !SHARE_ID_RE.test(id)) return json({ error: "id is the share's own: s- and eight hex characters" }, 400);
+  if (kind !== "folder" && kind !== "document") return json({ error: 'kind is "folder" or "document"' }, 400);
+  const name = validItemName(body.name);
+  if (!name) return json({ error: NAME_RULE }, 400);
+  const people: unknown = body.members ?? [];
+  if (
+    !Array.isArray(people) ||
+    people.length > MAX_SPACE_INVITEES ||
+    !people.every((p): p is string => typeof p === "string" && MEMBER_ID_RE.test(p))
+  ) {
+    return json({ error: `members must be a list of at most ${MAX_SPACE_INVITEES} member ids` }, 400);
+  }
+  const at = placingOf(body);
+  if (at instanceof Response) return at;
+  const parent = await parentOf(env, auth, body.parent);
+  if (parent instanceof Response) return parent;
+  // The same item shared from two of its owner's devices at once is one
+  // share: the one already made, with these people as well.
+  const twin = await sharedAlready(env, auth, parent, { id, kind, name }, at);
+  if (twin === null) return noDatabase();
+  if (twin !== "none") {
+    let now: Space = twin;
+    for (const person of people.filter((p) => p !== auth.memberId && !twin.members.includes(p))) {
+      const added = await addToSpace(env, auth, now, person);
+      if (added === null) return noDatabase();
+      if (added === "missing") return json({ error: "only people in this workspace can be added", unknown: [person] }, 400);
+      now = added;
+    }
+    return json({ space: now }, 201);
+  }
+  // Where it sits is in its section's manifest before its rows are there:
+  // nobody hears of a share before its place can be read.
+  const first = async (): Promise<void> => {
+    const placed = await setMount(spaceEnv(env, parent), auth.memberId, id, at);
+    if (placed instanceof Refusal) throw new Error(placed.error);
+  };
+  const made = await createSpace(env, auth, { id, kind, name, parent, people, first });
+  if (made === null) return noDatabase();
+  if (made === "taken") return json({ error: "that id is taken — mint another", code: "id_taken" }, 409);
+  if ("unknown" in made) return json({ error: "only people in this workspace can be added", unknown: made.unknown }, 400);
+  return json({ space: made }, 201);
 }
 
 /* ---------- Every public address ---------- */
@@ -899,27 +1059,6 @@ async function handlePages(request: Request, env: Env, parts: string[], auth: Au
   const done = await takeDownPage(env, auth.memberId, slug);
   if (done !== true) return json({ error: done.error, ...done.extra }, done.status);
   return new Response(null, { status: 204 });
-}
-
-const NAME_RULE = "a folder needs a name that can be a folder's: no slashes, and not starting with a dot";
-
-async function makeSpace(request: Request, env: Env, auth: Auth): Promise<Response> {
-  const body = await readJsonObject(request);
-  if (!body) return json({ error: "invalid json body" }, 400);
-  const name = validFolderName(body.name);
-  if (!name) return json({ error: NAME_RULE }, 400);
-  const people: unknown = body.members ?? [];
-  if (
-    !Array.isArray(people) ||
-    people.length > MAX_SPACE_INVITEES ||
-    !people.every((p): p is string => typeof p === "string" && MEMBER_ID_RE.test(p))
-  ) {
-    return json({ error: `members must be a list of at most ${MAX_SPACE_INVITEES} member ids` }, 400);
-  }
-  const made = await createSpace(env, auth, name, people);
-  if (made === null) return noDatabase();
-  if ("unknown" in made) return json({ error: "only people in this workspace can be added", unknown: made.unknown }, 400);
-  return json({ space: made }, 201);
 }
 
 /* ---------- The manifest ---------- */
@@ -951,9 +1090,11 @@ async function putManifest(request: Request, env: Env): Promise<Response> {
   } catch {
     return json({ error: "invalid json body" }, 400);
   }
-  const inSpace = spaceOf(env) !== "";
-  const problem = validateManifest(data, inSpace);
+  const of = kindOf(env);
+  const inSpace = of !== "library";
+  const problem = validateManifest(data, of);
   if (problem) return json({ error: problem.error }, problem.status);
+  if (takesShared(env, data as Manifest)) return json({ error: NOT_YOURS_TO_TAKE }, 409);
 
   // Its addresses are claimed before it is stored (addresses.ts). A database
   // that cannot answer does not hold up the shared workspace; a space is its
@@ -971,6 +1112,7 @@ async function putManifest(request: Request, env: Env): Promise<Response> {
     return json({ error: "manifest changed", etag: current.etag }, 412, { "x-manifest-etag": current.etag });
   }
   if (claim) await releaseAddresses(env, claim.stale);
+  await noteEtag(env, put.etag, data as Manifest);
   return json({ etag: put.etag, seq: (data as Manifest).seq }, 200, { "x-manifest-etag": put.etag });
 }
 

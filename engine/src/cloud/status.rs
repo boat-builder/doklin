@@ -30,6 +30,12 @@ pub const EV_PENDING_ADDS: &str = "cloud-pending-adds";
 /// taken out of it, or it was deleted. `path` is where it was,
 /// workspace-relative.
 pub const EV_SPACE_LEFT: &str = "cloud-space-left";
+/// `{root, moves: [{from, to, dir}]}` — something shared is somewhere else
+/// on this device now, or called something else: sync moved it where it
+/// sits, renamed it as somebody renamed it, or followed it where it was
+/// moved by hand. Workspace-relative; `dir` for a folder, else one file. What
+/// the app has open from `from` is at `to`.
+pub const EV_SPACE_MOVED: &str = "cloud-space-moved";
 /// `{root, kind: "upload" | "download", done, total}`.
 pub const EV_PROGRESS: &str = "cloud-progress";
 /// A `Removed` — an owner took this Mac's access away, and the workspace's
@@ -145,21 +151,57 @@ pub struct UsageStatus {
     pub lifted: bool,
 }
 
-/// One section of the workspace that only some people have.
+/// One section of the workspace beside Library, as this device has it: this
+/// person's My files, or something shared — with them, or by them.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpaceStatus {
     pub id: String,
     pub kind: SpaceKind,
     pub name: String,
-    /// Its folder on this Mac, workspace-relative: `Private`,
-    /// `Restricted/Finance`.
+    /// Where its item is on this device, workspace-relative: a folder, or a
+    /// document without its extension — `My files`, `My files/Work/Plans`,
+    /// `Shared with me/Budget`. Empty for one that is not here: a share just
+    /// heard of, and a deleted one.
     pub path: String,
     /// Who made it, in words — resolved like every other `by`.
     pub by: String,
-    /// Everyone in it, by member id.
+    /// Whose My files it is in, in the end, by member id.
+    pub owner: String,
+    /// The section it sits in; None for My files, and for a share this
+    /// person cannot open the folder of.
+    pub parent: Option<String>,
+    /// Whether this person places it — moves it, deletes it, restores it:
+    /// they can open the folder it sits in.
+    pub placed: bool,
+    /// The people it is shared with, by member id.
     pub members: Vec<String>,
+    /// Everyone else who can open it, through the folder it sits in.
+    pub above: Vec<String>,
+    /// When it was deleted, for one that can still be restored.
+    pub deleted_at: Option<u64>,
 }
+
+/// Where one section of a connected workspace is on this device, and what
+/// of that folder it is — for whatever walks a section without the engine:
+/// each section's version store is its own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SectionAt {
+    /// The workspace, and the section in it: `""` Library.
+    pub ws_id: String,
+    pub id: String,
+    /// Its folder — for a shared document, the one the document sits in.
+    pub root: std::path::PathBuf,
+    pub reach: super::space::Reach,
+    /// For something shared, when this person can open the section it sits
+    /// in: that section, and the path its item had there when it was shared
+    /// (`Mount::was`) — where its history from before that is.
+    pub from: Option<(String, String)>,
+}
+
+/// Every connected workspace's sections, keyed by the workspace's root: each
+/// engine keeps its own row.
+pub type SectionTable = Arc<Mutex<BTreeMap<String, Vec<SectionAt>>>>;
 
 /// How much of this device's version history is in the bucket, and how much
 /// is up there in total.

@@ -2,7 +2,7 @@
 
 Not built. Delete this file once it is built; the rules move to `cloud.md`, `cloud-people-agents.md`, `ios.md` and `cloud-worker/README.md`.
 
-Built on the sharing plan (`docs/sharing-plan.md`, not built either): its shares, "Shared with me" and its rights are the ones named here. Each release moves `WORKER_VERSION` and the D1 step once, from what `main` has when it is built.
+Built on sharing in place (`docs/cloud-people-agents.md`, *Spaces*): its shares, "Shared with me" and its rights are the ones named here. Each release moves `WORKER_VERSION` and the D1 step once, from what `main` has when it is built.
 
 How a person is mentioned in a note (people in `@`) is piece 4 of [`links-phase2-plan.md`](links-phase2-plan.md); release 2 here builds it together with the notification a mention sends.
 

@@ -247,7 +247,7 @@ final class TreeTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("doklin-tree-\(UUID().uuidString)")
         for path in [
             "Library/Product/Plans/beta.md", "Library/Product/roadmap.md", "Library/Team/handbook.md", "Library/welcome.md",
-            "Restricted/Finance/budget.md", "Private/diary.md", "Scratch/loose.md", ".doklin/cloud.json",
+            "Shared with me/Finance/budget.md", "My files/diary.md", "Scratch/loose.md", ".doklin/cloud.json",
         ] {
             let url = root.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -262,13 +262,13 @@ final class TreeTests: XCTestCase {
         let workspace = Workspaces(remembered: defaults).workspace(root.path)
         let tree = TreeModel(workspace: workspace, defaults: defaults)
         tree.load()
-        // The sections as the Mac's sidebar heads them, each its folder's
-        // insides; what is in none after them.
-        XCTAssertEqual(tree.groups.map(\.section), [.library, .restricted, .personal, .nowhere])
-        XCTAssertEqual(tree.groups.map(\.folder), ["Library", "Restricted", "Private", ""])
+        // The three headings as the Mac's sidebar has them, each its
+        // folder's insides; what is in none after them.
+        XCTAssertEqual(tree.groups.map(\.section), [.library, .mine, .shared, .nowhere])
+        XCTAssertEqual(tree.groups.map(\.folder), ["Library", "My files", "Shared with me", ""])
         XCTAssertEqual(tree.groups[0].rows.map(\.entry.path), ["Library/Product", "Library/Team", "Library/welcome.md"])
-        XCTAssertEqual(tree.groups[1].rows.map(\.entry.path), ["Restricted/Finance"])
-        XCTAssertEqual(tree.groups[2].rows.map(\.entry.path), ["Private/diary.md"])
+        XCTAssertEqual(tree.groups[1].rows.map(\.entry.path), ["My files/diary.md"])
+        XCTAssertEqual(tree.groups[2].rows.map(\.entry.path), ["Shared with me/Finance"])
         XCTAssertEqual(tree.groups[3].rows.map(\.entry.path), ["Scratch"])
 
         tree.toggle("Library/Product")
@@ -288,15 +288,21 @@ final class TreeTests: XCTestCase {
         XCTAssertTrue(again.groups[0].rows.contains { $0.entry.path == "Library/Product/Plans/beta.md" })
     }
 
-    func testLibraryIsThereEvenWhenItsFolderIsNotAndStraysOnlyWhenThereAreAny() async throws {
+    func testTheThreeHeadingsAreThereEvenWhenTheirFoldersAreNotAndStraysOnlyWhenThereAreAny() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("doklin-tree-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root.appendingPathComponent("Private"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("my files"), withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "tree-\(UUID().uuidString)"))
         let tree = TreeModel(workspace: Workspaces(remembered: defaults).workspace(root.path), defaults: defaults)
         tree.load()
-        XCTAssertEqual(tree.groups.map(\.section), [.library, .personal])
-        XCTAssertEqual(tree.groups[0].rows, [])
+        XCTAssertEqual(tree.groups.map(\.section), [.library, .mine, .shared])
+        XCTAssertEqual(tree.groups.map(\.folder), ["Library", "my files", "Shared with me"], "a folder as the disk spells it, else as doklin does")
+        XCTAssertEqual(tree.groups.map(\.rows), [[], [], []])
+        XCTAssertEqual(tree.groups.map(\.section.emptyHint), [
+            "No documents yet. Make one with the plus above.",
+            "Only you can open what you put here, until you share it.",
+            "What other people share with you shows here.",
+        ])
     }
 
     func testTheFilterNarrowsTheTreeToNamesAndTheirFolders() async throws {
@@ -308,7 +314,7 @@ final class TreeTests: XCTestCase {
         XCTAssertEqual(tree.groups[0].rows.map(\.entry.path), ["Library/Product", "Library/Product/Plans", "Library/Product/Plans/beta.md"])
         XCTAssertFalse(tree.isOpen("Library/Product"), "a filter opens nothing for good")
         tree.filter = "budget"
-        XCTAssertEqual(tree.groups.map(\.section), [.restricted])
+        XCTAssertEqual(tree.groups.map(\.section), [.shared])
         tree.filter = "loose"
         XCTAssertEqual(tree.groups.map(\.section), [.nowhere])
         XCTAssertEqual(tree.groups[0].rows.map(\.entry.path), ["Scratch", "Scratch/loose.md"])

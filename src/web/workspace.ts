@@ -2,8 +2,8 @@
 // held in memory, and what the UI is told of it.
 //
 // A browser keeps no copy of the workspace. It holds the manifest of every
-// section its person is in — the shared workspace, their Private, the
-// restricted folders they are in — and reads a document's stored copy when
+// section its person can open — Library, their My files, and everything
+// shared by them or with them — and reads a document's stored copy when
 // the document is opened. From those and the poll it tells the UI what the
 // engine tells it on a Mac: one `CloudStatus` (src/cloud.ts), the tree, and
 // what changed somewhere else. What is here is what the worker holds; what
@@ -15,16 +15,19 @@
 //
 // Paths. The UI names a document by an absolute path, as on a disk. Here
 // that is the workspace's name as a root, then the path the Mac app would
-// give the same file under its folder: every section's files are under its
-// own folder there — `Library` (`LIBRARY_FOLDER`, layout.ts), `Private` or
-// `Restricted/<name>` (`PRIVATE_DIR`, `RESTRICTED_DIR`,
-// engine/src/cloud/space.rs — change both). A path under none of them is in
-// no section, and neither is one under `Library/Private` or
-// `Library/Restricted`: the shared manifest holds nothing there. What is sent
-// to the worker is the section's id and the path inside the section.
+// give the same file under its folder (`Engine::reconcile_spaces`,
+// engine/src/cloud/engine.rs — change both): Library's files are under
+// `Library`, this person's own under `My files`, and something shared is
+// where it sits — in the folder of the section it is in that that section's
+// manifest names (`mounts`), when this person can open that section, and
+// under `Shared with me` when they cannot. A shared folder's files are under
+// that folder; a shared document's are in the folder it sits in, under the
+// name it wears there. A path in none of those is in no section. What is
+// sent to the worker is the section's id and the path inside the section.
 
-import { LIBRARY_FOLDER, reservedTop, syncs, validPath } from "../../cloud-worker/src/layout";
+import { LIBRARY_FOLDER, MY_FILES_FOLDER, SHARED_FOLDER, syncs, validPath } from "../../cloud-worker/src/layout";
 import type { Manifest, ManifestFile } from "../../cloud-worker/src/manifest";
+import { shownPath, splitName, storedPath, type At } from "../../cloud-worker/src/mount";
 import type { Limits, MetaAnswer, PollAnswer, Space } from "../../cloud-worker/src/wire";
 import type { DocumentChange, TreeNode, WatchedDocument } from "../backend";
 import type {
@@ -32,6 +35,7 @@ import type {
   CloudConflictEvent,
   CloudSpace,
   CloudSpaceLeftEvent,
+  CloudSpaceMovedEvent,
   CloudStatus,
   CloudUsage,
   LeaseHolder,
@@ -42,9 +46,6 @@ import { documentsOf, type WorkspaceDocument } from "../docLinks";
 import { HTML_EXT_RE, MD_EXT_RE, META_SUFFIX, htmlSiblingOf, metaFileOf } from "../metaFile";
 import { Refused, Unreachable, ask, askJson, deviceId, deviceName, nextDay, send, usedToday } from "./http";
 import { tabs, type Tabs } from "./tabs";
-
-const PRIVATE_DIR = "Private";
-const RESTRICTED_DIR = "Restricted";
 
 /** How often the worker is asked whether anything moved, by attention: the
  *  engine's numbers (`poll_gap`, engine/src/cloud/engine.rs — change both).
@@ -76,11 +77,14 @@ type Entry = { fid: string; file: ManifestFile };
 
 /** One section as this browser holds it. */
 type Section = {
-  /** The space's id; "" is the shared workspace. */
+  /** The space's id; "" is Library. */
   id: string;
   space: Space | null;
-  /** Where its files are in the tree: `Library`, `Private`, `Restricted/<name>`. */
-  mount: string;
+  /** Where its files are in the tree (`At`, cloud-worker/src/mount.ts): the
+   *  folder they are under and, for a shared document, the name it wears
+   *  there. Said by `settle`; `placed` is false until it has. */
+  at: At;
+  placed: boolean;
   etag: string;
   manifest: Manifest;
   /** Its files by the path the section stores them under. */
@@ -108,16 +112,20 @@ const nameIn = (path: string): string => path.slice(path.lastIndexOf("/") + 1);
 const dirIn = (path: string): string => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
 const byName = <T extends { name: string }>(a: T, b: T): number => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 
-function indexOf(manifest: Manifest, shared: boolean): Map<string, Entry> {
+function indexOf(manifest: Manifest): Map<string, Entry> {
   const files = new Map<string, Entry>();
   for (const [fid, file] of Object.entries(manifest.files ?? {})) {
     if (typeof file?.path !== "string" || !syncs(file.path)) continue;
-    // Nothing in the shared workspace is under a section's own name.
-    if (shared && reservedTop(file.path)) continue;
     files.set(file.path, { fid, file });
   }
   return files;
 }
+
+/** A new share's id (`share_id`, engine/src/cloud/engine.rs; `SHARE_ID_RE`,
+ *  cloud-worker/src/layout.ts): the device mints it, so asking twice for one
+ *  share makes one. */
+const shareId = (): string =>
+  `s-${[...crypto.getRandomValues(new Uint8Array(4))].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
 
 type Listeners<T> = Set<(value: T) => void>;
 const hear = <T>(set: Listeners<T>, cb: (value: T) => void) => {
@@ -135,13 +143,16 @@ export class Workspace {
   readonly name: string;
   private readonly people = new Map<string, string>();
   private readonly sections = new Map<string, Section>();
-  /** Each space's folder, kept for as long as the page is: a folder never
-   *  changes its name under an open document. */
-  private readonly mounts = new Map<string, string>();
-  /** Restricted folders made on this page that no poll has listed yet: an
-   *  answer asked for before one was made says nothing of it, which would
-   *  otherwise read as this person having been taken out of it. */
+  /** The name each share's item wears where it sits, kept while it sits
+   *  there and is called the same: a name never changes under an open
+   *  document for anything another share does. */
+  private readonly worn = new Map<string, { home: string; name: string; shown: string }>();
+  /** Shares made on this page that no poll has listed yet: an answer asked
+   *  for before one was made says nothing of it, which would otherwise read
+   *  as it no longer being shared with this person. */
   private readonly entering = new Map<string, Space>();
+  /** Deleted shares this person can still restore, as the last poll listed them. */
+  private deleted: Space[] = [];
   private poll: PollAnswer | null = null;
   private limits: Limits;
   private phase: CloudStatus["phase"] = "idle";
@@ -157,12 +168,15 @@ export class Workspace {
   /** What this page has yet to send (saving.ts): whether anything waits,
    *  and why something could not be sent. */
   private outbox: () => { waiting: boolean; error: string | null } = () => ({ waiting: false, error: null });
+  /** Told each time an answer of the domain's has been taken in. */
+  private taken: () => void = () => {};
 
   private readonly statusHeard: Listeners<CloudStatus[]> = new Set();
   private readonly changeHeard: Listeners<DocumentChange> = new Set();
   private readonly appliedHeard: Listeners<CloudAppliedEvent> = new Set();
   private readonly conflictHeard: Listeners<CloudConflictEvent> = new Set();
   private readonly spaceLeftHeard: Listeners<CloudSpaceLeftEvent> = new Set();
+  private readonly spaceMovedHeard: Listeners<CloudSpaceMovedEvent> = new Set();
 
   private tabs: Tabs | null = null;
   private timer: number | null = null;
@@ -199,7 +213,7 @@ export class Workspace {
     if (!meta.workspace) throw new Error("This domain holds no workspace yet. It is set up from the Doklin app.");
     const ws = new Workspace(meta, meta.workspace);
     let poll = await askJson<PollAnswer>("GET", "/api/poll");
-    // A person who has only ever signed in from a browser has no Private
+    // A person who has only ever signed in from a browser has no My files
     // yet: a Mac makes it when it joins, and so does this.
     if (poll.spaces && !poll.spaces.some((s) => s.kind === "private")) {
       await ask("PUT", "/api/spaces/private");
@@ -233,25 +247,105 @@ export class Workspace {
     return meta;
   }
 
-  /** The folder a space is shown as: its own for a Private; under
-   *  `Restricted`, its name, then its name and who made it when that name is
-   *  taken, then a number (`candidates`, engine/src/cloud/space.rs). */
-  private mountOf(space: Space): string {
-    const kept = this.mounts.get(space.id);
-    if (kept !== undefined) return kept;
-    let mount = PRIVATE_DIR;
-    if (space.kind !== "private") {
-      const taken = new Set([...this.mounts.values()].map((m) => m.toLowerCase()));
-      const base = folderName(space.name);
-      const maker = this.people.get(space.by);
-      const names = [base, ...(maker ? [`${base} (${folderName(maker)})`] : [])];
-      for (let n = 2; names.every((name) => taken.has(`${RESTRICTED_DIR}/${name}`.toLowerCase())); n += 1) {
-        names.push(`${base} ${n}`);
+  /** Where a section's item is in the tree: a folder — Library, My files, a
+   *  shared folder — by its path; a shared document by its path without an
+   *  extension. */
+  private itemOf(section: Section): string {
+    return section.at.named ? join(section.at.mount, section.at.named.shown) : section.at.mount;
+  }
+
+  /** What a shared document is called: as its manifest names its files, and
+   *  as its space is named until it holds one. */
+  private documentName(section: Section): string {
+    const paths = Object.values(section.manifest.files ?? {}).map((f) => f.path);
+    const named = paths.find((path) => !path.toLowerCase().endsWith(META_SUFFIX)) ?? paths[0];
+    return named === undefined ? folderName(section.space?.name ?? "") : splitName(nameIn(named))[0];
+  }
+
+  /**
+   * Say where every section is in the tree, the sections things sit in
+   * before what sits in them. Something shared wears its own name where it
+   * sits; where that is taken there, its name and its owner's; then a number
+   * (`free_name`, engine/src/cloud/space.rs — change both).
+   *
+   * Answers what is somewhere else than it was, for the documents open from
+   * it to follow.
+   */
+  private settle(): CloudSpaceMovedEvent["moves"] {
+    const moves: CloudSpaceMovedEvent["moves"] = [];
+    const done: Section[] = [];
+    /** The names taken straight in the folder `home`: by what the sections
+     *  placed so far hold there, less `own` — the item being placed, where
+     *  the section it sits in still holds files of it. */
+    const takenIn = (home: string, own: string | null): Set<string> => {
+      const taken = new Set<string>();
+      for (const s of done) {
+        if (s.at.named) {
+          if (s.at.mount === home) taken.add(s.at.named.shown.toLowerCase());
+          continue;
+        }
+        if (s.space && s.space.kind !== "private" && dirIn(s.at.mount) === home) taken.add(nameIn(s.at.mount).toLowerCase());
+        const inside = s.at.mount === home ? "" : home.startsWith(`${s.at.mount}/`) ? home.slice(s.at.mount.length + 1) : null;
+        if (inside === null) continue;
+        for (const path of s.files.keys()) {
+          const rest = inside === "" ? path : path.startsWith(`${inside}/`) ? path.slice(inside.length + 1) : null;
+          if (rest === null) continue;
+          const first = rest.split("/", 1)[0];
+          const name = rest.includes("/") ? first : splitName(first)[0];
+          if (own !== null && join(s.at.mount, join(inside, name)).toLowerCase() === own) continue;
+          taken.add(name.toLowerCase());
+        }
       }
-      mount = `${RESTRICTED_DIR}/${names.find((name) => !taken.has(`${RESTRICTED_DIR}/${name}`.toLowerCase()))}`;
+      return taken;
+    };
+    const put = (section: Section, at: At) => {
+      const was = section.placed ? { at: section.at, item: this.itemOf(section) } : null;
+      section.at = at;
+      section.placed = true;
+      done.push(section);
+      if (!was || was.item === this.itemOf(section)) return;
+      if (!at.named) {
+        moves.push({ from: was.item, to: at.mount, dir: true });
+        return;
+      }
+      for (const path of section.files.keys()) {
+        moves.push({ from: shownPath(was.at, path), to: shownPath(at, path), dir: false });
+      }
+    };
+
+    const rest: Section[] = [];
+    for (const section of this.sections.values()) {
+      if (!section.space) put(section, { mount: LIBRARY_FOLDER });
+      else if (section.space.kind === "private") put(section, { mount: MY_FILES_FOLDER });
+      else rest.push(section);
     }
-    this.mounts.set(space.id, mount);
-    return mount;
+    rest.sort((a, b) => (a.space?.createdAt ?? 0) - (b.space?.createdAt ?? 0) || (a.id < b.id ? -1 : 1));
+    while (rest.length > 0) {
+      // One whose section is not placed yet waits for it; one whose section
+      // this person does not hold has none to wait for.
+      const at = rest.findIndex((s) => {
+        const parent = s.space?.parent ?? null;
+        return parent === null || !this.sections.has(parent) || done.some((d) => d.id === parent);
+      });
+      const [section] = rest.splice(Math.max(at, 0), 1);
+      const space = section.space as Space;
+      const around = space.parent === null ? undefined : done.find((d) => d.id === space.parent && !d.at.named);
+      const mount = around?.manifest.mounts?.[space.id];
+      const home = around ? join(around.at.mount, mount?.dir ?? "") : SHARED_FOLDER;
+      const name = space.kind === "document" ? this.documentName(section) : folderName(space.name);
+      const kept = this.worn.get(space.id);
+      let shown = kept?.shown ?? name;
+      if (!kept || kept.home !== home || kept.name !== name) {
+        const taken = takenIn(home, around && mount?.was ? join(around.at.mount, mount.was).toLowerCase() : null);
+        const owner = this.people.get(space.owner);
+        const names = [name, ...(owner ? [`${name} (${folderName(owner)})`] : [])];
+        for (let n = 2; names.every((candidate) => taken.has(candidate.toLowerCase())); n += 1) names.push(`${name} ${n}`);
+        shown = names.find((candidate) => !taken.has(candidate.toLowerCase())) as string;
+        this.worn.set(space.id, { home, name, shown });
+      }
+      put(section, space.kind === "document" ? { mount: home, named: { stored: name, shown } } : { mount: join(home, shown) });
+    }
+    return moves;
   }
 
   /** A path under the root, relative to it ("" is the root); null outside it. */
@@ -261,15 +355,24 @@ export class Workspace {
   }
 
   /** The section a workspace-relative path is in, and the path as that
-   *  section stores it; null for a path in no section. */
+   *  section stores it; null for a path in no section. The deepest section
+   *  that holds it: a shared document's before the folder it sits in, a
+   *  shared folder's before the section around it. */
   private placeOf(rel: string): { section: Section; path: string } | null {
+    let best: { section: Section; path: string } | null = null;
     for (const section of this.sections.values()) {
-      const path = rel === section.mount ? "" : rel.startsWith(`${section.mount}/`) ? rel.slice(section.mount.length + 1) : null;
-      if (path === null) continue;
-      // Nothing in the shared section is under another section's own name.
-      return section.id === "" && reservedTop(path) ? null : { section, path };
+      const { at } = section;
+      if (at.named) {
+        // Of the folder a shared document sits in, only its own files.
+        const own = dirIn(rel).toLowerCase() === at.mount.toLowerCase() && splitName(nameIn(rel))[0].toLowerCase() === at.named.shown.toLowerCase();
+        const path = own ? storedPath(at, rel, false) : null;
+        if (path !== null) return { section, path };
+        continue;
+      }
+      const path = storedPath(at, rel, true);
+      if (path !== null && (!best || at.mount.length > best.section.at.mount.length)) best = { section, path };
     }
-    return null;
+    return best;
   }
 
   /** The stored file at an absolute path, with its section. */
@@ -293,19 +396,78 @@ export class Workspace {
     return this.relOf(abs);
   }
 
-  /** What a folder put at an absolute path would be as a restricted folder:
-   *  its name, and whether one is there already. Null for a path that is
-   *  not straight under `Restricted`, where the restricted folders are. */
-  restrictedSlot(abs: string): { name: string; taken: boolean } | null {
+  /** The share whose own item is at an absolute path: a shared folder at
+   *  that folder, a shared document at any of its files. */
+  shareAt(abs: string, kind: "file" | "dir"): Space | null {
     const rel = this.relOf(abs);
-    if (rel === null || dirIn(rel) !== RESTRICTED_DIR) return null;
-    return { name: nameIn(rel), taken: [...this.mounts.values()].some((mount) => mount.toLowerCase() === rel.toLowerCase()) };
+    if (rel === null) return null;
+    const at = (kind === "dir" ? rel : join(dirIn(rel), splitName(nameIn(rel))[0])).toLowerCase();
+    for (const section of this.sections.values()) {
+      const wanted = kind === "dir" ? "folder" : "document";
+      if (section.space?.kind === wanted && this.itemOf(section).toLowerCase() === at) return section.space;
+    }
+    return null;
   }
 
-  /** A section's own folder, by the section's id; null for one not held. */
-  folderOf(space: string): string | null {
+  /** The shares that sit inside a folder, at any depth, by their ids. */
+  sharesUnder(abs: string): string[] {
+    const rel = this.relOf(abs);
+    if (rel === null) return [];
+    return [...this.sections.values()]
+      .filter((s) => s.space && s.space.kind !== "private" && this.itemOf(s).toLowerCase().startsWith(`${rel.toLowerCase()}/`))
+      .map((s) => s.id);
+  }
+
+  /** A held section's space, by its id. */
+  spaceOf(id: string): Space | null {
+    return this.sections.get(id)?.space ?? null;
+  }
+
+  /** What is at the top of a section: each folder by its name, each
+   *  document by one file of it — its markdown, where it has one. */
+  topOf(id: string): { name: string; dir: boolean }[] {
+    const paths = [...(this.sections.get(id)?.files.keys() ?? [])];
+    const dirs = new Set(paths.filter((p) => p.includes("/")).map((p) => p.split("/", 1)[0]));
+    const flat = paths.filter((p) => !p.includes("/"));
+    const documents = flat.filter(
+      (p) => !p.toLowerCase().endsWith(META_SUFFIX) && !(HTML_EXT_RE.test(p) && flat.some((q) => MD_EXT_RE.test(q) && q.replace(MD_EXT_RE, "") === p.replace(HTML_EXT_RE, ""))),
+    );
+    return [...[...dirs].map((name) => ({ name, dir: true })), ...documents.map((name) => ({ name, dir: false }))];
+  }
+
+  /** Every share with files a carry left behind (`leftOf`): its id, whether
+   *  it is a folder, where its item is, and where those files are. */
+  leftovers(): { id: string; dir: boolean; item: string; from: { space: string; path: string } }[] {
+    return [...this.sections.values()].flatMap((section) => {
+      const from = section.space && section.space.kind !== "private" ? this.leftOf(section.id) : null;
+      if (!from) return [];
+      const dir = !section.at.named;
+      const item = dir ? join(this.root, section.at.mount) : join(this.root, shownPath(section.at, nameIn(from.path)));
+      return [{ id: section.id, dir, item, from }];
+    });
+  }
+
+  /** Where the files of a share still are in the section it sits in, when a
+   *  carry left some behind: the item as that section stores it — a
+   *  folder's path, a document's file. Null when none are. */
+  leftOf(id: string): { space: string; path: string } | null {
+    const section = this.sections.get(id);
+    const around = section?.space?.parent ? this.sections.get(section.space.parent) : undefined;
+    const was = around?.manifest.mounts?.[id]?.was;
+    if (!section || !around || was === undefined) return null;
+    if (!section.at.named) {
+      return [...around.files.keys()].some((p) => p.startsWith(`${was}/`)) ? { space: around.id, path: was } : null;
+    }
+    const files = [...around.files.keys()].filter((p) => join(dirIn(p), splitName(nameIn(p))[0]) === was);
+    const file = files.find((p) => MD_EXT_RE.test(p)) ?? files.find((p) => !p.toLowerCase().endsWith(META_SUFFIX));
+    return file === undefined ? null : { space: around.id, path: file };
+  }
+
+  /** Where a section's item is, by the section's id: a folder's absolute
+   *  path, a shared document's without an extension. Null for one not held. */
+  itemAt(space: string): string | null {
     const section = this.sections.get(space);
-    return section ? join(this.root, section.mount) : null;
+    return section ? join(this.root, this.itemOf(section)) : null;
   }
 
   /** The file stored at an absolute path, or null. */
@@ -315,20 +477,20 @@ export class Workspace {
   }
 
   /** The document a file id names, by its absolute path; null when no
-   *  section this person is in holds it. `space` is the section's id, ""
-   *  the shared workspace.
+   *  section this person can open holds it. `space` is the section's id, ""
+   *  Library.
    *
    *  A file keeps its id when it moves to another section, so the id is
    *  looked for in every section, `space` first. While a move is half done
    *  one id is in two sections: then `space` wins, else the lowest section
-   *  id, which is the shared workspace's. The engine looks the same way
+   *  id, which is Library's. The engine looks the same way
    *  (`follow`, engine/src/cloud/engine.rs): change both. */
   pathOfFile(space: string, fid: string): string | null {
     const ids = [...this.sections.keys()].sort();
     for (const id of [space, ...ids.filter((id) => id !== space)]) {
       const section = this.sections.get(id);
       const file = section?.manifest.files?.[fid];
-      if (section && file && section.files.has(file.path)) return `${this.root}/${join(section.mount, file.path)}`;
+      if (section && file && section.files.has(file.path)) return `${this.root}/${shownPath(section.at, file.path)}`;
     }
     return null;
   }
@@ -398,7 +560,7 @@ export class Workspace {
   /** Every file as the tree places it: its workspace-relative path. */
   private *placed(): Generator<string> {
     for (const section of this.sections.values()) {
-      for (const path of section.files.keys()) yield join(section.mount, path);
+      for (const path of section.files.keys()) yield shownPath(section.at, path);
     }
   }
 
@@ -409,19 +571,19 @@ export class Workspace {
     const add = (dir: string) => {
       for (let d = dir; d !== "" && !dirs.has(d); d = dirIn(d)) dirs.add(d);
     };
-    for (const section of this.sections.values()) add(section.mount);
+    for (const section of this.sections.values()) add(section.at.mount);
     for (const path of this.placed()) add(dirIn(path));
     for (const dir of this.made) add(dir);
     return dirs;
   }
 
-  /** Every document of the workspace, in every section this person is in,
+  /** Every document of the workspace, in every section this person can open,
    *  by workspace-relative path, with its file id (`Documents.documents`). */
   documents(): WorkspaceDocument[] {
     const all: WorkspaceDocument[] = [];
     for (const section of this.sections.values()) {
       for (const [path, entry] of section.files) {
-        all.push({ path: join(section.mount, path), fileId: entry.fid, section: section.id === "" ? null : section.id });
+        all.push({ path: shownPath(section.at, path), fileId: entry.fid, section: section.id === "" ? null : section.id });
       }
     }
     return documentsOf(all);
@@ -490,10 +652,18 @@ export class Workspace {
   onSpaceLeft(cb: (e: CloudSpaceLeftEvent) => void) {
     return hear(this.spaceLeftHeard, cb);
   }
+  onSpaceMoved(cb: (e: CloudSpaceMovedEvent) => void) {
+    return hear(this.spaceMovedHeard, cb);
+  }
 
   /** What this page has yet to send, asked each time the status is said. */
   setOutbox(probe: () => { waiting: boolean; error: string | null }): void {
     this.outbox = probe;
+  }
+
+  /** Have `cb` called after each answer of the domain's is taken in. */
+  onTaken(cb: () => void): void {
+    this.taken = cb;
   }
 
   /** Two changes to one document overlapped, and both versions were kept. */
@@ -555,7 +725,7 @@ export class Workspace {
         pages.push({
           slug,
           kind: e.kind,
-          path: join(section.mount, e.path),
+          path: shownPath(section.at, e.path),
           title: e.title ?? null,
           desc: e.desc ?? null,
           by: this.nameOf(e.by),
@@ -590,7 +760,7 @@ export class Workspace {
         memberId: e.memberId,
         name: (e.memberId === me ? undefined : this.people.get(e.memberId)) ?? e.name,
         device: e.name,
-        path: section && e.path !== undefined ? join(section.mount, e.path) : null,
+        path: section && e.path !== undefined ? shownPath(section.at, e.path) : null,
         ts: e.ts,
       });
     }
@@ -610,7 +780,7 @@ export class Workspace {
       if (l.deviceId === mine || !section) continue;
       const own = l.memberId === me;
       held.push({
-        path: join(section.mount, l.path).toLowerCase(),
+        path: shownPath(section.at, l.path).toLowerCase(),
         deviceId: l.deviceId,
         memberId: l.memberId,
         name: (own ? undefined : this.people.get(l.memberId)) ?? l.name,
@@ -623,11 +793,25 @@ export class Workspace {
   }
 
   private spaces(): CloudSpace[] {
+    const told = (space: Space, path: string): CloudSpace => ({
+      id: space.id,
+      kind: space.kind,
+      name: space.name,
+      path,
+      by: this.nameOf(space.by),
+      owner: space.owner,
+      parent: space.parent,
+      placed: space.kind === "private" || space.parent !== null,
+      members: space.members,
+      above: space.above,
+      deletedAt: space.deletedAt ?? null,
+    });
     const spaces: CloudSpace[] = [];
-    for (const { space, mount } of this.sections.values()) {
-      if (!space) continue;
-      spaces.push({ id: space.id, kind: space.kind, name: space.name, path: mount, by: this.nameOf(space.by), members: space.members });
+    for (const section of this.sections.values()) {
+      if (section.space) spaces.push(told(section.space, this.itemOf(section)));
     }
+    // What was deleted and can still be restored is nowhere in the tree.
+    for (const space of this.deleted) spaces.push(told(space, ""));
     return spaces;
   }
 
@@ -701,11 +885,13 @@ export class Workspace {
 
   /** Put the sections that were read in place of the ones held, and say what
    *  changed. With `only`, the sections not read are left as they are;
-   *  without, they are ones this person is no longer in. */
+   *  without, they are ones this person can no longer open. */
   private adopt(read: ReadSection[], only: boolean): void {
     const before = new Map(this.sections);
+    const first = before.size === 0;
     const changed: string[] = [];
     const kept = new Set<string>();
+    const fresh: { section: Section; old: Map<string, Entry>; was: At | null }[] = [];
     for (const r of read) {
       if ("gone" in r) continue;
       kept.add(r.id);
@@ -714,49 +900,61 @@ export class Workspace {
       const section: Section = {
         id: r.id,
         space: r.space,
-        mount: r.space ? this.mountOf(r.space) : LIBRARY_FOLDER,
+        at: r.held?.at ?? { mount: "" },
+        placed: r.held?.placed ?? false,
         etag: r.etag,
         manifest,
-        files: r.fresh ? indexOf(r.fresh, r.id === "") : (r.held as Section).files,
+        files: r.fresh ? indexOf(r.fresh) : (r.held as Section).files,
       };
       this.sections.set(r.id, section);
-      if (!r.fresh) continue;
-      const old = r.held?.files ?? new Map<string, Entry>();
-      for (const [path, e] of section.files) {
-        if (old.get(path)?.file.hash !== e.file.hash) changed.push(join(section.mount, path));
-      }
-      for (const path of old.keys()) if (!section.files.has(path)) changed.push(join(section.mount, path));
+      if (r.fresh) fresh.push({ section, old: r.held?.files ?? new Map<string, Entry>(), was: r.held?.placed ? r.held.at : null });
     }
     for (const [id, section] of before) {
       if (kept.has(id) || (only && !read.some((r) => r.id === id))) continue;
       changed.push(...this.drop(section, true));
     }
+    // Where each is, now that what says so was read; then what changed, by
+    // where it is now — and, for what is gone, by where it was.
+    const moves = this.settle();
+    for (const { section, old, was } of fresh) {
+      for (const [path, e] of section.files) {
+        if (old.get(path)?.file.hash !== e.file.hash) changed.push(shownPath(section.at, path));
+      }
+      for (const path of old.keys()) if (!section.files.has(path)) changed.push(shownPath(was ?? section.at, path));
+    }
     // A folder made here that a document now sits in is a folder like any other.
     for (const dir of [...this.made]) if (this.holdsFiles(join(this.root, dir))) this.made.delete(dir);
     // Nothing is said of the first reading: it is what the app opens on.
-    if (before.size > 0 && changed.length > 0) this.changed(changed.map((rel) => `${this.root}/${rel}`));
+    if (first) return;
+    if (moves.length > 0) tell(this.spaceMovedHeard, { root: this.root, moves });
+    if (changed.length > 0 || moves.length > 0) {
+      this.changed([...changed, ...moves.flatMap((m) => [m.from, m.to])].map((rel) => `${this.root}/${rel}`));
+    }
   }
 
-  /** Let go of a section this person is no longer in, and answer what was
-   *  in it, as the tree placed it. `said`: the app is told the folder left
-   *  (it is not, of one made a moment ago and taken back). */
+  /** Let go of a section this person can no longer open, and answer what was
+   *  in it, as the tree placed it. `said`: the app is told it left (it is
+   *  not, of one made a moment ago and taken back). */
   private drop(section: Section, said: boolean): string[] {
     this.sections.delete(section.id);
-    this.mounts.delete(section.id);
+    this.worn.delete(section.id);
     this.entering.delete(section.id);
-    if (said && section.space?.kind === "restricted") {
-      tell(this.spaceLeftHeard, { root: this.root, name: section.space.name, path: section.mount });
+    if (said && section.space && section.space.kind !== "private") {
+      tell(this.spaceLeftHeard, { root: this.root, name: section.space.name, path: this.itemOf(section) });
     }
-    return [...section.files.keys()].map((path) => join(section.mount, path));
+    return [...section.files.keys()].map((path) => shownPath(section.at, path));
   }
 
   /** Take in what a poll says: read every manifest that moved, drop the
-   *  sections this person is no longer in, and say what changed. */
+   *  sections this person can no longer open, and say what changed. */
   private async take(poll: PollAnswer): Promise<void> {
     this.limits = poll.limits;
     for (const space of poll.spaces ?? []) this.entering.delete(space.id);
+    // A deleted share holds no manifest to read: it is only listed, for
+    // whoever can restore it.
+    if (poll.spaces) this.deleted = poll.spaces.filter((s) => s.deletedAt !== undefined);
     // Null: the database could not say. What is held stays as it is.
-    const listed = poll.spaces ?? [...this.sections.values()].flatMap((s) => (s.space ? [s.space] : []));
+    const listed = poll.spaces?.filter((s) => s.deletedAt === undefined) ?? [...this.sections.values()].flatMap((s) => (s.space ? [s.space] : []));
     const spaces = [...listed, ...[...this.entering.values()].filter((made) => !listed.some((s) => s.id === made.id))];
     const read = await Promise.all([
       this.readSection("", null, poll.manifestEtag),
@@ -768,6 +966,7 @@ export class Workspace {
     this.error = null;
     this.lastSyncMs = Date.now();
     this.restate();
+    this.taken();
   }
 
   /** Read sections again now, by their ids: after a change this page made
@@ -783,10 +982,10 @@ export class Workspace {
     this.restate();
   }
 
-  /* ---------- Restricted folders ---------- */
+  /* ---------- Sharing ---------- */
 
-  /** A call about a restricted folder; `gone` is what is said when the
-   *  domain knows nothing of what it named. */
+  /** A call about a share; `gone` is what is said when the domain knows
+   *  nothing of what it named. */
   private async aboutSpace<T>(asked: Promise<T>, gone: string): Promise<T> {
     try {
       return await asked;
@@ -796,56 +995,126 @@ export class Workspace {
     }
   }
 
-  /** Make a restricted folder holding this person and `members`, and hold
-   *  it from now on rather than from the next poll. `at`: where it is shown
-   *  on this page, for one made by putting a folder there. */
-  async makeSpace(name: string, members: string[], at?: string): Promise<CloudSpace> {
-    const { space } = await askJson<{ space: Space }>("POST", "/api/spaces", { body: { name, members } });
-    const mount = at === undefined ? null : this.relOf(at);
-    if (mount) this.mounts.set(space.id, mount);
-    this.entering.set(space.id, space);
-    this.adopt([await this.readSection(space.id, space, null)], true);
+  /** Ask the domain what this person can open now, and take it in: after
+   *  something done here that changes it more than this page can work out. */
+  private async asked(): Promise<void> {
+    await this.take(await askJson<PollAnswer>("GET", "/api/poll"));
+  }
+
+  /**
+   * Make a share of the folder or the document at `was` in the section
+   * `parent` — as that section stores it: a folder's path, a document's
+   * without its extension — with `members`, and hold it from now on rather
+   * than from the next poll. The domain writes where it sits into that
+   * section's manifest; its files are still that section's until they are
+   * carried (saving.ts).
+   */
+  async makeShare(kind: "folder" | "document", name: string, parent: string, was: string, members: string[]): Promise<Space> {
+    const body = { kind, name, parent, dir: dirIn(was), was, members };
+    let made: Space | null = null;
+    // An id somebody else holds is not this share: another is minted.
+    for (let tries = 0; made === null; tries += 1) {
+      try {
+        ({ space: made } = await askJson<{ space: Space }>("POST", "/api/spaces", { body: { id: shareId(), ...body } }));
+      } catch (e) {
+        if (!(e instanceof Refused && e.body.code === "id_taken") || tries >= 2) throw e;
+      }
+    }
+    this.entering.set(made.id, made);
+    const around = this.sections.get(parent);
+    this.adopt(
+      await Promise.all([
+        ...(around ? [this.readSection(parent, around.space, null)] : []),
+        this.readSection(made.id, made, null),
+      ]),
+      true,
+    );
     this.restate();
-    const made = this.spaces().find((s) => s.id === space.id);
-    if (!made) throw new Error("The folder was made, and will be here in a moment.");
     return made;
   }
 
-  /** Add a person to a restricted folder, or take one out. Taking this
-   *  person out is leaving it: it goes from this page with them. */
-  async spaceMember(id: string, member: string, add: boolean): Promise<void> {
+  /** Share something with one more person, or stop. Stopping with this
+   *  person is leaving it: unless they open it through the folder it sits
+   *  in, it goes from this page with them. */
+  async shareMember(id: string, member: string, add: boolean): Promise<void> {
     const at = `/api/spaces/${encodeURIComponent(id)}/members/${encodeURIComponent(member)}`;
     const section = this.sections.get(id);
     if (add) {
       const { space } = await this.aboutSpace(
         askJson<{ space: Space }>("PUT", at),
-        "That person is not in this workspace any more, or the folder is gone.",
+        "That person is not in this workspace any more, or what you are sharing is gone.",
       );
       if (section) section.space = space;
     } else {
-      await this.aboutSpace(ask("DELETE", at), "That folder is not there any more, or you are no longer in it.");
-      if (member === this.me) this.leave(id, true);
+      await this.aboutSpace(ask("DELETE", at), "That is not there any more, or it is no longer shared with you.");
+      if (member === this.me && section?.space?.parent === null) this.leave(id, true);
       else if (section?.space) section.space = { ...section.space, members: section.space.members.filter((m) => m !== member) };
     }
     this.restate();
   }
 
-  /** Delete a restricted folder for everyone in it: the domain erases what
-   *  it stored a request's worth at a time. `quiet`: nothing is said of its
-   *  going, for one made a moment ago that is being taken back. */
-  async deleteSpace(id: string, quiet = false): Promise<void> {
-    for (let remaining = true; remaining; ) {
-      ({ remaining } = await this.aboutSpace(
-        askJson<{ remaining: boolean }>("DELETE", `/api/spaces/${encodeURIComponent(id)}`),
-        "That folder is not there any more, or you are no longer in it.",
-      ));
-    }
-    this.leave(id, !quiet);
+  /** Rename a shared folder, for everyone it is shared with. */
+  async renameShare(id: string, name: string): Promise<void> {
+    const { space } = await this.aboutSpace(
+      askJson<{ space: Space }>("PATCH", `/api/spaces/${encodeURIComponent(id)}`, { body: { name } }),
+      "That is not there any more, or it is no longer shared with you.",
+    );
+    const section = this.sections.get(id);
+    if (section) section.space = space;
+    this.adopt([], true);
     this.restate();
   }
 
-  /** This person is out of a restricted folder by something done on this
-   *  page: it goes now rather than at the next poll. */
+  /** Say where a share sits from now on: the folder `dir` of the section
+   *  `parent` — the one it is in already, or another, whose people then open
+   *  it too. */
+  async placeShare(id: string, parent: string, dir: string): Promise<void> {
+    const section = this.sections.get(id);
+    const gone = "That is not there any more, or it is no longer shared with you.";
+    if (section?.space?.parent === parent) {
+      await this.aboutSpace(
+        ask("PUT", `/api/web/mount?space=${encodeURIComponent(parent)}&id=${encodeURIComponent(id)}`, { body: { dir } }),
+        gone,
+      );
+      await this.reread([parent]);
+      return;
+    }
+    await this.aboutSpace(ask("PATCH", `/api/spaces/${encodeURIComponent(id)}`, { body: { parent, dir } }), gone);
+    await this.asked();
+  }
+
+  /** Delete something shared for everyone it is shared with. The domain
+   *  keeps it thirty days, unless it holds nothing: then it is erased, a
+   *  request's worth at a time. `quiet`: nothing is said of its going, for
+   *  one made a moment ago that is being taken back. */
+  async deleteShare(id: string, quiet = false): Promise<void> {
+    for (let remaining = true; remaining; ) {
+      const round = await this.aboutSpace(
+        askJson<{ kept?: boolean; remaining?: boolean }>("DELETE", `/api/spaces/${encodeURIComponent(id)}`),
+        "That is not there any more, or it is no longer shared with you.",
+      );
+      remaining = round.kept !== true && round.remaining === true;
+    }
+    // What is shared from inside it went with it.
+    const inside = (around: string): string[] =>
+      [...this.sections.values()].filter((s) => s.space?.parent === around).flatMap((s) => [...inside(s.id), s.id]);
+    for (const child of inside(id)) this.leave(child, false);
+    this.leave(id, !quiet);
+    if (quiet) this.restate();
+    else await this.asked().catch(() => this.restate());
+  }
+
+  /** Bring a deleted share back, as it was. */
+  async restoreShare(id: string): Promise<void> {
+    await this.aboutSpace(
+      ask("POST", `/api/spaces/${encodeURIComponent(id)}/restore`),
+      "That can't be restored any more: its thirty days are up, or it was restored already.",
+    );
+    await this.asked();
+  }
+
+  /** Something shared is gone from this page by something done on it: now
+   *  rather than at the next poll. */
   private leave(id: string, said: boolean): void {
     const section = this.sections.get(id);
     if (!section) return;
@@ -867,7 +1136,7 @@ export class Workspace {
       if (old && old.path !== file.path) section.files.delete(old.path);
       section.manifest.files[fid] = file;
       delete section.manifest.tombstones?.[fid];
-      if (syncs(file.path) && !(space === "" && reservedTop(file.path))) section.files.set(file.path, { fid, file });
+      if (syncs(file.path)) section.files.set(file.path, { fid, file });
     }
     if (section.etag === over) section.etag = etag;
     for (const dir of [...this.made]) if (this.holdsFiles(join(this.root, dir))) this.made.delete(dir);

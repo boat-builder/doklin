@@ -45,7 +45,7 @@ import type { Env } from "./env";
 import { MAX_PRESENCE_TTL_MS, PRESENCE_TTL_MS } from "./layout";
 import { limitsFrom, limitsReads } from "./limits";
 import { withDb } from "./schema";
-import { spacesStatement, toSpace, type SpaceRow } from "./spaces";
+import { OPEN_CTE, spacesStatement, toSpace, type SpaceRow } from "./spaces";
 import type { LeaseEntry, Limits, PresenceMap, Space } from "./wire";
 
 /** What the poll answers beside the etag. When the database cannot say, the
@@ -93,16 +93,20 @@ type LeaseRow = {
   until: number;
 };
 
-/** The spaces the caller (?1) is in — what they may be told about. */
-const MINE = "(SELECT space_id FROM space_members WHERE member_id = ?1)";
+/** The spaces the caller (?1) can open — what they may be told about — for
+ *  a statement that begins with `OPEN`. */
+const OPEN = `WITH RECURSIVE ${OPEN_CTE}`;
+const MINE = "(SELECT id FROM open)";
 const SEEN = `space_id = '' OR space_id IN ${MINE}`;
 
 // Both bind the caller's member id as ?1 and the clock as ?2.
-const PRESENCE_SQL = `SELECT device_id, member_id, device_name, ts,
+const PRESENCE_SQL = `${OPEN}
+SELECT device_id, member_id, device_name, ts,
        CASE WHEN ${SEEN} THEN space_id END AS space_id,
        CASE WHEN ${SEEN} THEN path END AS path
   FROM presence WHERE until > ?2`;
-const LEASES_SQL = `SELECT space_id, path, device_id, member_id, device_name, until
+const LEASES_SQL = `${OPEN}
+SELECT space_id, path, device_id, member_id, device_name, until
   FROM leases WHERE until > ?2 AND (${SEEN}) ORDER BY space_id, path`;
 
 function toHere(presenceRows: PresenceRow[], leaseRows: LeaseRow[], spaces: Space[], limits: Limits): Here {
@@ -145,7 +149,7 @@ const answer = (results: D1Result[]): Here => {
 };
 
 /** Everyone whose last beat still holds, what they hold, the spaces the
- *  caller is in, and the domain's limits. Reads only — the idle poll. */
+ *  caller can open, and the domain's limits. Reads only — the idle poll. */
 export async function readHere(env: Env, auth: Auth, now = Date.now()): Promise<Here | null> {
   return withDb(env, async (db) => answer(await db.batch(reads(db, auth, now))));
 }
@@ -163,7 +167,7 @@ export async function readHere(env: Env, auth: Auth, now = Date.now()): Promise<
  * per beat, one more while a document is open, one an hour per person, plus
  * whatever lapsed.
  *
- * A beat that names a space the caller is not in is a beat with no path: the
+ * A beat that names a space the caller cannot open is a beat with no path: the
  * presence row is written without one, so nothing is claimed.
  */
 export async function recordBeat(
@@ -212,7 +216,8 @@ export async function recordBeat(
         : [
             db
               .prepare(
-                `INSERT INTO presence (device_id, member_id, device_name, space_id, path, ts, until)
+                `${OPEN}
+                 INSERT INTO presence (device_id, member_id, device_name, space_id, path, ts, until)
                  SELECT ?2, ?1, ?3,
                         CASE WHEN ?4 = '' OR ?4 IN ${MINE} THEN ?4 ELSE '' END,
                         CASE WHEN ?4 = '' OR ?4 IN ${MINE} THEN ?5 END,

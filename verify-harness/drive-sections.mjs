@@ -1,21 +1,24 @@
 // Drives a workspace in sections in Chromium (cloud.html?sections boots the
-// REAL <App/> connected to a scripted engine whose workspace is in the
-// Library layout, with a Private, a restricted folder and things at its top
-// in no section). What this proves: where a document is decides who can
-// open it, and every way of changing that says so first.
+// REAL <App/> connected to a scripted engine whose workspace has a My files
+// with a folder shared from it, a folder and a document somebody else
+// shared, and things in no section). What this proves: where a document is
+// and who it is shared with decide who can open it, and every way of
+// changing that says so first.
 //
-// The walk: the three lists and what is not a row in them; a note in no
-// folder marked as not synced; what is at the workspace's top, in no
-// section; Library's heading with its history and publishing; new notes
-// landing in Library; the top never a drop target, and a move into no
-// section asking first; a section's own history and deleted files;
-// making a restricted folder with people; restricting a folder everyone has
-// — and an open tab following it; sharing a private note; a move that lets
-// more people see a note asking first, and one that narrows asking nothing;
-// who is in a folder — adding, removing, the last person handing it on;
-// a folder taken away elsewhere saying so; deleting one for everyone; an
-// owner taking down a page published from a section they are not in; empty
-// space being the list it is in, and each heading making in its own list.
+// The walk: the three lists and what is not a row in them; what is shared
+// marked as shared, and what nobody shared marked as not synced; what is at
+// the workspace's top, in no section; Library's heading with its history and
+// publishing; new notes landing in Library; a folder in Library called what
+// a section is called; the top never a drop target, and a move into no
+// section asking first; Copy link and Copy path; sharing a folder where it
+// is, and a document; who it is shared with — adding, stopping; the Share
+// button above a document; what is shared with you — copied, never moved,
+// and left; deleting a share for everyone and bringing it back; a move that
+// lets more people open a note asking first, and one that takes a share
+// into Library; a share taken away elsewhere saying so, and one moved
+// elsewhere taking its open tab with it; an owner taking down a page
+// published from a section they cannot open; empty space being the list it
+// is in, and each heading making in its own list.
 import { chromium } from "playwright";
 import { existsSync, mkdirSync } from "node:fs";
 
@@ -60,6 +63,8 @@ page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
 
 await page.goto(`http://localhost:${PORT}/verify-harness/cloud.html?sections`);
 
+const MINE = "/docs/My files";
+const SHARED = "/docs/Shared with me";
 const tid = (name) => page.locator(`[data-testid="${name}"]`);
 const row = (path) => page.locator(`[data-tree-path="${path}"]`);
 const dialog = (label) => page.locator(`[role="dialog"][aria-label="${label}"]`);
@@ -67,6 +72,7 @@ const calls = (cmd) => page.evaluate((c) => window.__cloud.calls.filter((k) => k
 const lastCall = async (cmd) => (await calls(cmd)).at(-1);
 const versionCalls = (cmd) => page.evaluate((c) => window.__versions.calls.filter((k) => k.cmd === c), cmd);
 const moves = () => page.evaluate(() => window.__moves ?? []);
+const spaces = () => page.evaluate(() => window.__cloud.statuses[0].spaces);
 const openTabs = () =>
   page.evaluate(() => JSON.parse(localStorage.getItem("doklin:session")).sessions["/docs"].tabs.map((t) => t.path));
 const menuOn = async (locator) => {
@@ -74,10 +80,14 @@ const menuOn = async (locator) => {
   await poll(async () => (await page.locator(".sidebar-menu-item").count()) > 0);
   return page.locator(".sidebar-menu-item").allTextContents();
 };
-const pick = (label) => page.locator(".sidebar-menu-item", { hasText: label }).click();
+const pick = (label) => page.locator(".sidebar-menu-item", { hasText: label }).first().click();
 const closeMenu = async () => {
   await page.keyboard.press("Escape");
   await poll(async () => (await page.locator(".context-menu, .sidebar-menu").count()) === 0).catch(() => {});
+};
+const noToast = async () => {
+  for (const close of await page.locator(".toast-close").all()) await close.click().catch(() => {});
+  await poll(async () => (await page.locator(".toast").count()) === 0);
 };
 // A pointer drag of one tree row onto another element: the tree's own
 // drag-to-move, which is built on pointer capture.
@@ -91,6 +101,14 @@ const drag = async (from, to) => {
   await settle(120);
   await page.mouse.up();
 };
+const asked = async () => {
+  await poll(async () => (await tid("question-prompt").count()) === 1);
+  return (await tid("question-prompt").innerText()).replace(/\n/g, " ");
+};
+const answer = async (yes) => {
+  await tid(yes ? "question-yes" : "question-no").click();
+  await poll(async () => (await tid("question-prompt").count()) === 0);
+};
 
 // A folder row's open state, and opening one (a click on its row).
 const isOpen = async (path) => (await row(path).locator("xpath=..").getAttribute("aria-expanded")) === "true";
@@ -100,17 +118,17 @@ const openFolder = async (path) => {
 };
 
 await poll(async () => (await page.locator(".sidebar").count()) === 1);
-await poll(async () => (await row("/docs/Restricted/Finance").count()) === 1);
+await poll(async () => (await row(`${MINE}/Finance`).count()) === 1);
 
 /* 0 — folders start closed, and stay as they were left: the ones opened are
       kept for the workspace, and still open when the tree is drawn again
       (here: off to Search and back, which unmounts it). */
 const closedAtStart =
-  !(await isOpen("/docs/Restricted/Finance")) &&
+  !(await isOpen(`${MINE}/Finance`)) &&
   !(await isOpen("/docs/Library/Projects")) &&
-  (await row("/docs/Restricted/Finance/budget.md").count()) === 0 &&
+  (await row(`${MINE}/Finance/budget.md`).count()) === 0 &&
   (await row("/docs/Library/Projects/plan.md").count()) === 0;
-await openFolder("/docs/Restricted/Finance");
+await openFolder(`${MINE}/Finance`);
 await openFolder("/docs/Library/Projects");
 const storedTree = () => page.evaluate(() => localStorage.getItem("doklin:sidebar-tree"));
 const storedOpen = await storedTree();
@@ -118,15 +136,15 @@ await page.locator(".sidebar-search").click();
 await poll(async () => (await page.locator(".ws-search-input").count()) === 1);
 const treeGone = (await page.locator('aside[aria-label="File browser"]').count()) === 0;
 await page.locator('[title="Back to files"]').click();
-await poll(async () => (await row("/docs/Restricted/Finance").count()) === 1);
+await poll(async () => (await row(`${MINE}/Finance`).count()) === 1);
 step(
   "folders start closed; the ones opened are kept for the workspace and are still open when the tree is drawn again",
   closedAtStart &&
-    storedOpen === '{"/docs":{"open":["Restricted/Finance","Library/Projects"],"folded":[]}}' &&
+    storedOpen === '{"/docs":{"open":["My files/Finance","Library/Projects"],"folded":[]}}' &&
     treeGone &&
-    (await isOpen("/docs/Restricted/Finance")) &&
+    (await isOpen(`${MINE}/Finance`)) &&
     (await isOpen("/docs/Library/Projects")) &&
-    (await row("/docs/Restricted/Finance/budget.md").count()) === 1 &&
+    (await row(`${MINE}/Finance/budget.md`).count()) === 1 &&
     (await row("/docs/Library/Projects/plan.md").count()) === 1,
   storedOpen,
 );
@@ -134,7 +152,7 @@ step(
 /* 0b — a list's heading folds it away: its rows go, how many it holds
       shows, and it stays folded when the tree is drawn again. The headings
       pin to the top of the tree while their rows scroll under them. */
-const sharedRows = await tid("section-library").locator("ul.tree > li").count();
+const libraryRows = await tid("section-library").locator("ul.tree > li").count();
 await tid("section-library-toggle").click();
 await poll(async () => (await row("/docs/Library/notes.md").count()) === 0);
 const foldedCount = (await tid("section-library-count").textContent()).trim();
@@ -142,106 +160,113 @@ const foldedStored = await storedTree();
 await page.locator(".sidebar-search").click();
 await poll(async () => (await page.locator(".ws-search-input").count()) === 1);
 await page.locator('[title="Back to files"]').click();
-await poll(async () => (await row("/docs/Restricted/Finance").count()) === 1);
+await poll(async () => (await row(`${MINE}/Finance`).count()) === 1);
 const stillFolded =
   (await row("/docs/Library/notes.md").count()) === 0 &&
   (await tid("section-library-toggle").getAttribute("aria-expanded")) === "false";
 await tid("section-library-toggle").click();
 await poll(async () => (await row("/docs/Library/notes.md").count()) === 1);
-const pinned = await tid("section-private")
+const pinned = await tid("section-mine")
   .locator(".tree-section-head")
   .evaluate((el) => getComputedStyle(el).position);
 step(
   "a heading folds its list away, shows how many rows it holds, and stays folded when the tree is drawn again; headings pin while scrolling",
-  sharedRows > 0 &&
-    foldedCount === String(sharedRows) &&
-    foldedStored === '{"/docs":{"open":["Restricted/Finance","Library/Projects"],"folded":["library"]}}' &&
+  libraryRows > 0 &&
+    foldedCount === String(libraryRows) &&
+    foldedStored === '{"/docs":{"open":["My files/Finance","Library/Projects"],"folded":["library"]}}' &&
     stillFolded &&
     (await row("/docs/Library/Projects/plan.md").count()) === 1 &&
     pinned === "sticky",
   `${foldedCount} rows folded · ${pinned}`,
 );
 
-/* 1 — three lists. On disk Library, Private and Restricted are three folders
-      at the top of the workspace; here they are headings, with no row of
-      their own, and nothing in the tree says "Workspace". */
+/* 1 — three lists. On disk Library, My files and Shared with me are three
+      folders at the top of the workspace; here they are headings, with no
+      row of their own, and nothing in the tree says "Workspace". */
 const headings = [
   (await tid("section-library").locator(".sidebar-section-label").textContent()).trim(),
-  (await tid("section-restricted").locator(".sidebar-section-label").textContent()).trim(),
-  (await tid("section-private").locator(".sidebar-section-label").textContent()).trim(),
+  (await tid("section-mine").locator(".sidebar-section-label").textContent()).trim(),
+  (await tid("section-shared").locator(".sidebar-section-label").textContent()).trim(),
 ];
 const inLibrary = await tid("section-library").locator("[data-tree-path]").evaluateAll((els) => els.map((e) => e.dataset.treePath));
 const treeWords = await page.locator('aside[aria-label="File browser"] .sidebar-body').innerText();
-const libraryTip = await tid("section-library-toggle").getAttribute("title");
 step(
-  "three lists — Library, Restricted, Private — and the three folders behind them are headings, not rows; the tree never says Workspace",
-  headings.join("|") === "Library|Restricted|Private" &&
-    libraryTip === "Hide Library" &&
-    !/workspace/i.test(treeWords) &&
+  "three lists — Library, My files, Shared with me — and the three folders behind them are headings, not rows; the tree never says Workspace, Private or Restricted",
+  headings.join("|") === "Library|My files|Shared with me" &&
+    (await tid("section-library-toggle").getAttribute("title")) === "Hide Library" &&
+    !/workspace|private|restricted/i.test(treeWords) &&
     inLibrary.includes("/docs/Library/notes.md") &&
-    inLibrary.includes("/docs/Library/Projects") &&
     inLibrary.every((p) => p.startsWith("/docs/Library/")) &&
     (await row("/docs/Library").count()) === 0 &&
-    (await row("/docs/Private").count()) === 0 &&
-    (await row("/docs/Restricted").count()) === 0 &&
-    (await tid("section-restricted").locator('[data-tree-path="/docs/Restricted/Finance"]').count()) === 1 &&
-    (await tid("section-private").locator('[data-tree-path="/docs/Private/journal.md"]').count()) === 1,
+    (await row(MINE).count()) === 0 &&
+    (await row(SHARED).count()) === 0 &&
+    (await tid("section-mine").locator(`[data-tree-path="${MINE}/journal.md"]`).count()) === 1 &&
+    (await tid("section-mine").locator(`[data-tree-path="${MINE}/Finance"]`).count()) === 1 &&
+    (await tid("section-shared").locator(`[data-tree-path="${SHARED}/Board"]`).count()) === 1 &&
+    (await tid("section-shared").locator(`[data-tree-path="${SHARED}/Roadmap.md"]`).count()) === 1,
   headings.join(" | "),
 );
 
-/* 2 — a restricted folder says how many people are in it; a note straight
-      under Restricted is in no folder, and says it goes nowhere. */
-const financeCount = (await row("/docs/Restricted/Finance").locator('[data-testid="space-count"]').textContent()).trim();
-const stray = await row("/docs/Restricted/stray.md").locator('[data-testid="tree-nowhere"]').textContent();
+/* 2 — what is shared says so on its row, where it is: a folder this person
+      shares, with how many people; what was shared with them. What sits
+      under Shared with me and nobody shared goes nowhere, and says that. */
+const mark = (path) => row(path).locator('[data-testid="tree-shared"]');
+const financeMark = { text: (await mark(`${MINE}/Finance`).textContent()).trim(), title: await mark(`${MINE}/Finance`).getAttribute("title") };
+const boardTitle = await mark(`${SHARED}/Board`).getAttribute("title");
+const roadmapTitle = await mark(`${SHARED}/Roadmap.md`).getAttribute("title");
+const strayMark = row(`${SHARED}/stray.md`).locator('[data-testid="tree-nowhere"]');
 step(
-  "a restricted folder shows how many people it holds; a note in no folder is marked not synced",
-  financeCount === "· 2" &&
-    stray.trim() === "not synced" &&
-    (await row("/docs/Restricted/Finance/budget.md").locator('[data-testid="tree-nowhere"]').count()) === 0,
-  `${financeCount} / ${stray}`,
+  "what is shared is marked where it is — a folder of your own with how many people, what others shared as shared with you; a note nobody shared, under Shared with me, is marked not synced; nothing else is marked",
+  financeMark.text === "1" &&
+    financeMark.title === "Shared with 1 person" &&
+    boardTitle === "Shared with you" &&
+    roadmapTitle === "Shared with you" &&
+    (await strayMark.textContent()).trim() === "not synced" &&
+    (await strayMark.getAttribute("title")) === "Nobody shared this with you, so it stays on this Mac — move it into Library or My files" &&
+    (await mark(`${MINE}/Work`).count()) === 0 &&
+    (await mark(`${MINE}/journal.md`).count()) === 0 &&
+    (await row(`${MINE}/Finance/budget.md`).locator('[data-testid="tree-nowhere"]').count()) === 0,
+  `${financeMark.title} / ${boardTitle}`,
 );
 await page.screenshot({ path: SHOTS + "sections-01-sidebar.png" });
 
 /* 2b — what Finder or an agent put at the workspace's top is in no section:
        listed after the three lists, every row marked not synced and saying
-       why, with no link, no way to restrict it and no Live chip. */
+       why, with no link, no way to share it and no Live chip. */
 const sectionOrder = await page
   .locator(".sidebar-body > .tree-section")
   .evaluateAll((els) => els.map((e) => e.dataset.testid));
-const strayLabel = (await tid("section-strays").locator(".sidebar-section-label").textContent()).trim();
 const strayRows = await tid("section-strays")
   .locator("[data-tree-path]")
   .evaluateAll((els) => els.map((e) => e.dataset.treePath).sort());
 const todoMark = row("/docs/todo.md").locator('[data-testid="tree-nowhere"]');
-const todoMarkText = (await todoMark.textContent()).trim();
-const todoMarkTitle = await todoMark.getAttribute("title");
-const scratchMarked = await row("/docs/Scratch").locator('[data-testid="tree-nowhere"]').count();
 const todoMenu = await menuOn(row("/docs/todo.md"));
 await closeMenu();
 const scratchMenu = await menuOn(row("/docs/Scratch"));
 await closeMenu();
 await row("/docs/todo.md").click();
 await poll(async () => (await page.locator(".tab.is-active .tab-label").textContent()) === "todo");
-const strayChip = await tid("live-chip").count();
+const strayChips = (await tid("live-chip").count()) + (await tid("share-chip").count());
 await row("/docs/Library/notes.md").click();
 await poll(async () => (await page.locator(".tab.is-active .tab-label").textContent()) === "notes");
 await poll(async () => (await tid("live-chip").count()) === 1);
 step(
-  "in no section: what is at the workspace's top is listed after the three lists, each row not synced and saying why — no Copy link, no Restrict access…, no Live chip",
-  sectionOrder.join(",") === "section-library,section-restricted,section-private,section-strays" &&
-    strayLabel === "In no section" &&
+  "in no section: what is at the workspace's top is listed after the three lists, each row not synced and saying why — no Copy link, no Share…, no chips above it",
+  sectionOrder.join(",") === "section-library,section-mine,section-shared,section-strays" &&
+    (await tid("section-strays").locator(".sidebar-section-label").textContent()).trim() === "In no section" &&
     strayRows.join(",") === "/docs/Scratch,/docs/todo.md" &&
-    todoMarkText === "not synced" &&
-    todoMarkTitle === "In no section, so it stays on this Mac — move it into Library or Private" &&
-    scratchMarked === 1 &&
+    (await todoMark.getAttribute("title")) === "In no section, so it stays on this Mac — move it into Library or My files" &&
+    (await row("/docs/Scratch").locator('[data-testid="tree-nowhere"]').count()) === 1 &&
     !todoMenu.includes("Copy link") &&
-    !scratchMenu.includes("Restrict access…") &&
-    strayChip === 0,
+    !todoMenu.includes("Share…") &&
+    !scratchMenu.includes("Share…") &&
+    strayChips === 0,
   `${strayRows.join(", ")} · ${todoMenu.join(" · ")}`,
 );
 
-/* 2c — Library's heading carries what the whole shared section has: its
-       history (Library's own store), and publishing it. */
+/* 2c — Library's heading carries what all of Library has: its history
+       (Library's own store), and publishing it. Nothing in Library is shared
+       on its own: it is everyone's. */
 const libraryMenu = await menuOn(tid("section-library-toggle"));
 await pick("Library history");
 await poll(async () => (await tid("workspace-history").count()) === 1);
@@ -249,30 +274,30 @@ const libraryHistoryRoot = (await versionCalls("versions_snapshots")).at(-1).arg
 const libraryHistoryTitle = (await tid("workspace-history").locator(".modal-title").textContent()).trim();
 await page.keyboard.press("Escape");
 await poll(async () => (await tid("workspace-history").count()) === 0);
-const libraryDeleted = (await versionCalls("versions_deleted")).at(-1).args.root;
 await menuOn(tid("section-library-toggle"));
 await pick("Publish Library");
 await poll(async () => (await dialog("Publish folder").count()) === 1);
 await poll(async () => /\d/.test(await tid("folder-count").textContent()));
 const libraryCount = await tid("folder-count").textContent();
-const libraryTitle = await tid("folder-title").inputValue();
 await tid("folder-publish").click();
 await poll(async () => (await dialog("Publish folder").count()) === 0);
 const libraryPublish = (await lastCall("cloud_publish")).args;
-const publishedMenu = await menuOn(tid("section-library-toggle"));
+const libraryNoteMenu = await menuOn(row("/docs/Library/notes.md"));
+await closeMenu();
+const libraryFolderMenu = await menuOn(row("/docs/Library/Projects"));
 await closeMenu();
 step(
-  "Library's heading: Library history… over Library's own store, Publish Library… with Library's notes counted and the workspace's name",
+  "Library's heading: Library history… over Library's own store, Publish Library… with its notes counted; a note or a folder in Library has no Share…",
   libraryMenu.includes("Library history…") &&
     libraryMenu.includes("Publish Library…") &&
     !libraryMenu.some((t) => /workspace/i.test(t)) &&
     libraryHistoryRoot === "/docs/Library" &&
     libraryHistoryTitle === "Library history" &&
-    libraryDeleted === "/docs/Library" &&
     libraryCount.startsWith("Library — 4 notes will be public") &&
-    libraryTitle === "Notes" &&
     libraryPublish.path === "/docs/Library" &&
-    publishedMenu.includes("Edit publishing…"),
+    !libraryNoteMenu.includes("Share…") &&
+    !libraryFolderMenu.includes("Share…") &&
+    (await tid("share-chip").count()) === 0,
   `${libraryMenu.join(" · ")} // ${libraryCount.slice(0, 40)}`,
 );
 await page.evaluate(() => {
@@ -289,11 +314,10 @@ await page.locator(".sidebar-body").dispatchEvent("click");
 await page.locator(".sidebar-new").click();
 await poll(async () => (await tid("section-library").locator('[data-tree-path="/docs/Library/Untitled.md"]').count()) === 1);
 await poll(async () => (await activeTab()) === "Untitled" && (await docTitle().evaluate((el) => el === document.activeElement)));
-const untitledInLibrary = await page.evaluate(() => window.__fs.has("/docs/Library/Untitled.md") && !window.__fs.has("/docs/Untitled.md"));
 await page.keyboard.type("Fresh");
 await page.keyboard.press("Enter");
 await poll(async () => (await tid("section-library").locator('[data-tree-path="/docs/Library/Fresh.md"]').count()) === 1);
-const madeInLibrary = await page.evaluate(() => window.__fs.has("/docs/Library/Fresh.md") && !window.__fs.has("/docs/Library/Untitled.md"));
+const madeInLibrary = await page.evaluate(() => window.__fs.has("/docs/Library/Fresh.md") && !window.__fs.has("/docs/Fresh.md"));
 await row("/docs/todo.md").click();
 await poll(async () => (await activeTab()) === "todo");
 await page.locator(".sidebar-new").click();
@@ -301,433 +325,399 @@ await poll(async () => (await activeTab()) === "Untitled");
 const fromStrayInLibrary = await page.evaluate(() => window.__fs.has("/docs/Library/Untitled.md") && !window.__fs.has("/docs/Untitled.md"));
 step(
   "a new note with nothing selected, or with a stray at the top selected, is made in Library as Untitled, with the caret in its title; typing there names it",
-  untitledInLibrary && madeInLibrary && fromStrayInLibrary,
+  madeInLibrary && fromStrayInLibrary,
 );
 
-/* 2d′ — no folder at the top of Library has a section's name: making one
-        is refused in a sentence, and one Finder made says it is not synced. */
+/* 2d′ — inside Library a folder is called what its people like: a section's
+        name is its own only at the top of the workspace. */
 await tid("section-library").locator('[aria-label="New folder"]').click();
 await poll(async () => (await tid("section-library").locator(".tree-create-input").count()) === 1);
-await tid("section-library").locator(".tree-create-input").fill("private");
+await tid("section-library").locator(".tree-create-input").fill("My files");
 await page.keyboard.press("Enter");
-await poll(async () => (await page.locator(".tree-create-error").count()) === 1);
-const sectionNameRefused = (await page.locator(".tree-create-error").textContent()).trim();
-const sectionNameNotMade = await page.evaluate(() => !window.__dirs.has("/docs/Library/private"));
-await page.keyboard.press("Escape");
 await poll(async () => (await page.locator(".tree-create-input").count()) === 0);
 await page.evaluate(() => {
-  window.__finderDirs = ["Restricted"];
+  window.__finderDirs = ["Shared with me"];
   window.__emit("cloud-applied", { root: "/docs", paths: [] });
 });
-await poll(async () => (await row("/docs/Library/Restricted").count()) === 1);
-const sectionNamedMark = await row("/docs/Library/Restricted").locator('[data-testid="tree-nowhere"]').getAttribute("title");
-const ordinaryUnmarked = (await row("/docs/Library/Projects").locator('[data-testid="tree-nowhere"]').count()) === 0;
+await poll(async () => (await row("/docs/Library/Shared with me").count()) === 1);
+const namedLikeASection = (await row("/docs/Library/Shared with me").locator('[data-testid="tree-nowhere"]').count()) === 0;
 await page.evaluate(() => {
   window.__finderDirs = [];
   window.__emit("cloud-applied", { root: "/docs", paths: [] });
 });
-await poll(async () => (await row("/docs/Library/Restricted").count()) === 0);
+await poll(async () => (await row("/docs/Library/Shared with me").count()) === 0);
 step(
-  "a folder in Library is not called Library, Private or Restricted: making one is refused, and one Finder made is marked not synced",
-  sectionNameRefused === "A folder in Library can't be called Library, Private or Restricted." &&
-    sectionNameNotMade &&
-    sectionNamedMark === "A folder in Library with a section's name stays on this Mac — rename it" &&
-    ordinaryUnmarked,
-  `${sectionNameRefused} // ${sectionNamedMark}`,
+  "a folder in Library may be called what a section is called: it is made, and one that is there is an ordinary folder",
+  (await page.evaluate(() => window.__dirs.has("/docs/Library/My files"))) && namedLikeASection,
 );
 
-/* 2e — nothing is dropped at the workspace's top; a note dropped into a
-       folder in no section is asked about first: it would stop syncing and
-       leave every other device. */
+/* 2e — nothing is dropped at the workspace's top, or straight under Shared
+       with me; a note dropped into a folder in no section is asked about
+       first: it would stop syncing and leave every other device. */
 const movesAtTop = (await moves()).length;
 await drag(row("/docs/Library/Fresh.md"), tid("section-strays").locator(".sidebar-section-label"));
 await settle();
-const noDropAtTop = (await moves()).length === movesAtTop && (await tid("question-prompt").count()) === 0;
+await drag(row("/docs/Library/Fresh.md"), tid("section-shared").locator(".sidebar-section-label"));
+await settle();
+const noDropThere = (await moves()).length === movesAtTop && (await tid("question-prompt").count()) === 0;
 await drag(row("/docs/Library/Fresh.md"), row("/docs/Scratch"));
-await poll(async () => (await tid("question-prompt").count()) === 1);
-const nowhereAsk = await tid("question-prompt").innerText();
-await tid("question-no").click();
-await poll(async () => (await tid("question-prompt").count()) === 0);
+const nowhereAsk = await asked();
+await answer(false);
 step(
-  "the top is never a drop target; a move into a folder in no section asks first, and Cancel moves nothing",
-  noDropAtTop &&
+  "the top and Shared with me are never drop targets; a move into a folder in no section asks first, and Cancel moves nothing",
+  noDropThere &&
     nowhereAsk.includes("Move “Fresh” to “Scratch”?") &&
     nowhereAsk.includes("Nothing there syncs: it stays on this Mac and is removed from every other device.") &&
     (await moves()).length === movesAtTop &&
     (await row("/docs/Library/Fresh.md").count()) === 1,
-  nowhereAsk.replace(/\n/g, " "),
+  nowhereAsk,
 );
 
-/* 3 — a restricted folder is not cut or trashed like the rows beside it, and
-      it has a history and a deleted list of its own. */
-const folderMenu = await menuOn(row("/docs/Restricted/Finance"));
-await pick("Folder history");
-await poll(async () => (await tid("workspace-history").count()) === 1);
-const historyRoot = (await versionCalls("versions_snapshots")).at(-1).args.root;
-await page.keyboard.press("Escape");
-await poll(async () => (await tid("workspace-history").count()) === 0);
-await menuOn(row("/docs/Restricted/Finance"));
-await pick("Recently deleted");
-await poll(async () => (await tid("recently-deleted").count()) === 1);
-const deletedRoot = (await versionCalls("versions_deleted")).at(-1).args.root;
-await page.locator('.ws-deleted [title="Back to files"]').click();
-await poll(async () => (await row("/docs/Restricted/Finance").count()) === 1);
-step(
-  "a restricted folder's menu: Manage access…, its own history and deleted files, Rename — and no Cut, no Delete",
-  folderMenu.includes("Manage access…") &&
-    folderMenu.includes("Folder history…") &&
-    folderMenu.includes("Rename…") &&
-    folderMenu.includes("Copy") &&
-    !folderMenu.includes("Cut") &&
-    !folderMenu.includes("Delete") &&
-    !folderMenu.includes("Restrict access…") &&
-    historyRoot === "/docs/Restricted/Finance" &&
-    deletedRoot === "/docs/Restricted/Finance",
-  folderMenu.join(" · "),
-);
-
-/* 3b — Copy link: a note in a section copies the link that opens it in
-       Doklin, and says who can open it; a note in no section has none. */
-const copied = async (path) => {
+/* 3 — Copy link: a note in a section copies the link that opens it in
+      Doklin, and says who can open it; a note in no section has none.
+      Copy path: what an agent's `doklin` names it by. */
+const copied = async (path, item) => {
   await menuOn(row(path));
-  await pick("Copy link");
+  await pick(item);
   await poll(async () => (await page.locator(".toast").count()) === 1);
   const toast = (await page.locator(".toast").textContent()).trim();
   const clip = await page.evaluate(() => navigator.clipboard.readText());
-  await page.locator(".toast-close").click();
-  await poll(async () => (await page.locator(".toast").count()) === 0);
-  return { toast, clip, asked: (await lastCall("cloud_link")).args.path };
-};
-const sharedLink = await copied("/docs/Library/notes.md");
-const financeLink = await copied("/docs/Restricted/Finance/budget.md");
-const privateLink = await copied("/docs/Private/journal.md");
-const strayMenu = await menuOn(row("/docs/Restricted/stray.md"));
-await closeMenu();
-step(
-  "Copy link on a note: the link goes on the clipboard and the toast says who can open it — everyone, a folder's people, only you; a note in no folder has none",
-  sharedLink.asked === "/docs/Library/notes.md" &&
-    sharedLink.clip.startsWith("https://doklin.cc/open#d=notes.example.com&w=w-1&f=f-") &&
-    sharedLink.toast.includes("Link copied. Everyone in Notes can open it.") &&
-    financeLink.clip.includes("&s=s-finance0&") &&
-    financeLink.toast.includes("Only the people in “Finance” can open it.") &&
-    privateLink.toast.includes("Only you can open it") &&
-    !strayMenu.includes("Copy link"),
-  [sharedLink.toast, financeLink.toast, privateLink.toast].join(" / "),
-);
-
-/* 3c — Copy path: what an agent's `doklin` names a note or a folder by —
-       its section first, no domain, a note without its extension, a folder
-       ending in "/". Nothing in no section has one. Settings copies the
-       note an agent saves into the file it reads every session. */
-const pathCopied = async (path) => {
-  await menuOn(row(path));
-  await pick("Copy path");
-  await poll(async () => (await page.locator(".toast").count()) === 1);
-  const toast = (await page.locator(".toast").textContent()).trim();
-  const clip = await page.evaluate(() => navigator.clipboard.readText());
-  await page.locator(".toast-close").click();
-  await poll(async () => (await page.locator(".toast").count()) === 0);
+  await noToast();
   return { toast, clip };
 };
-const notePath = await pathCopied("/docs/Library/notes.md");
-const budgetPath = await pathCopied("/docs/Restricted/Finance/budget.md");
-const journalPath = await pathCopied("/docs/Private/journal.md");
-const projectsPath = await pathCopied("/docs/Library/Projects");
-const financePath = await pathCopied("/docs/Restricted/Finance");
-const strayPathMenu = await menuOn(row("/docs/Restricted/stray.md"));
+const libraryLink = await copied("/docs/Library/notes.md", "Copy link");
+const financeLink = await copied(`${MINE}/Finance/budget.md`, "Copy link");
+const journalLink = await copied(`${MINE}/journal.md`, "Copy link");
+const roadmapLink = await copied(`${SHARED}/Roadmap.md`, "Copy link");
+const strayMenu = await menuOn(row(`${SHARED}/stray.md`));
 await closeMenu();
-const todoPathMenu = await menuOn(row("/docs/todo.md"));
+const paths = [];
+for (const p of ["/docs/Library/notes.md", `${MINE}/Finance/budget.md`, `${MINE}/Finance`, `${SHARED}/Board`, `${SHARED}/Roadmap.md`]) {
+  paths.push((await copied(p, "Copy path")).clip);
+}
+step(
+  "Copy link says who can open it — everyone, the people a folder or a document is shared with, only you; Copy path names it as doklin does, in the new sections; what nobody shared has neither",
+  libraryLink.toast.includes("Link copied. Everyone in Notes can open it.") &&
+    financeLink.clip.includes("&s=s-finance0&") &&
+    financeLink.toast.includes("Only the people “Finance” is shared with can open it.") &&
+    journalLink.toast.includes("Only you can open it") &&
+    roadmapLink.clip.includes("&s=s-roadmap0&") &&
+    roadmapLink.toast.includes("Only the people “Roadmap” is shared with can open it.") &&
+    !strayMenu.includes("Copy link") &&
+    !strayMenu.includes("Copy path") &&
+    paths.join("|") === "Library/notes|My files/Finance/budget|My files/Finance/|Shared with me/Board/|Shared with me/Roadmap",
+  `${paths.join(" · ")} // ${financeLink.toast}`,
+);
+
+/* 4 — Share… on a folder in My files: it stays where it is, nobody picked
+      is nothing to share, and shared it is marked where it sits. */
+const workMenu = await menuOn(row(`${MINE}/Work`));
+await pick("Share…");
+await poll(async () => (await dialog("Share “Work”").count()) === 1);
+await poll(async () => (await tid("share-people").count()) === 1);
+const shareHint = (await tid("share-hint").textContent()).trim();
+const nobodyPicked = await tid("share-submit").isDisabled();
+await tid("share-pick-m-bob").check();
+await tid("share-submit").click();
+await poll(async () => (await tid("share-members").count()) === 1);
+const sharedWork = (await lastCall("cloud_share")).args;
+const workMembers = await tid("share-members").innerText();
+step(
+  "Share… on a folder of your own: it stays where it is; nothing without somebody picked; shared, the dialog lists who can open it — you, its owner, and who it is shared with",
+  workMenu.includes("Share…") &&
+    shareHint.includes("It stays where it is.") &&
+    shareHint.includes("Shared with me") &&
+    nobodyPicked &&
+    sharedWork.path === `${MINE}/Work` &&
+    JSON.stringify(sharedWork.members) === '["m-bob"]' &&
+    (await moves()).length === movesAtTop &&
+    workMembers.includes("Sherin") &&
+    /owner/i.test(workMembers) &&
+    workMembers.includes("Bob") &&
+    (await row(`${MINE}/Work`).count()) === 1 &&
+    (await mark(`${MINE}/Work`).getAttribute("title")) === "Shared with 1 person",
+  `${shareHint.slice(0, 60)} // ${workMembers.replace(/\n/g, " ")}`,
+);
+await page.screenshot({ path: SHOTS + "sections-04-share.png" });
+
+/* 5 — who it is shared with: one more person, and stopping with one —
+      asked first, since their devices delete their copy. */
+await tid("share-add-m-carol").click();
+await poll(async () => (await tid("share-member-m-carol").count()) === 1);
+const addedCarol = (await lastCall("cloud_share_member")).args;
+await tid("share-out-m-bob").click();
+await poll(async () => (await tid("share-out-yes-m-bob").count()) === 1);
+const outAsk = await tid("share-member-m-bob").innerText();
+await tid("share-out-yes-m-bob").click();
+await poll(async () => (await tid("share-member-m-bob").count()) === 0);
+const outBob = (await lastCall("cloud_share_member")).args;
+const noLeaveForOwner = (await tid("share-leave").count()) === 0 && (await tid("share-delete").count()) === 1;
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("Share “Work”").count()) === 0);
+step(
+  "the Share dialog adds a person at once, and stops sharing with one after saying their devices delete their copy; its owner has Delete it for everyone and no Leave",
+  addedCarol.memberId === "m-carol" &&
+    addedCarol.add === true &&
+    outAsk.includes("Their devices delete their copy of it.") &&
+    outBob.memberId === "m-bob" &&
+    outBob.add === false &&
+    noLeaveForOwner &&
+    (await mark(`${MINE}/Work`).getAttribute("title")) === "Shared with 1 person",
+);
+
+/* 6 — a document is shared on its own, from its row or from the Share
+      button above it, which says who can open it. */
+await row(`${MINE}/plan.md`).click();
+await poll(async () => (await activeTab()) === "plan");
+await poll(async () => (await tid("share-chip").count()) === 1);
+const chipAlone = (await tid("share-chip").textContent()).trim();
+await tid("share-chip").click();
+await poll(async () => (await dialog("Share “plan”").count()) === 1);
+await poll(async () => (await tid("share-people").count()) === 1);
+await tid("share-pick-m-bob").check();
+await tid("share-pick-m-carol").check();
+await tid("share-submit").click();
+await poll(async () => (await tid("share-members").count()) === 1);
+const sharedPlan = (await lastCall("cloud_share")).args;
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("Share “plan”").count()) === 0);
+const chipShared = (await tid("share-chip").textContent()).trim();
+const planSpace = (await spaces()).find((sp) => sp.path === "My files/plan");
+await row(`${MINE}/Finance/budget.md`).click();
+await poll(async () => (await activeTab()) === "budget");
+const chipInFolder = (await tid("share-chip").textContent()).trim();
+await tid("share-chip").click();
+await poll(async () => (await dialog("Share “budget”").count()) === 1);
+const nestedHint = (await tid("share-hint").textContent()).trim();
+await page.keyboard.press("Escape");
+await poll(async () => (await dialog("Share “budget”").count()) === 0);
+step(
+  "a document is shared on its own: the button above it says Share, then who can open it; one inside a shared folder says that folder's people can open it already",
+  chipAlone === "Share" &&
+    sharedPlan.path === `${MINE}/plan.md` &&
+    JSON.stringify(sharedPlan.members) === '["m-bob","m-carol"]' &&
+    planSpace?.kind === "document" &&
+    chipShared === "You and 2 others" &&
+    (await mark(`${MINE}/plan.md`).getAttribute("title")) === "Shared with 2 people" &&
+    chipInFolder === "You and 1 other" &&
+    nestedHint.includes("Everyone who can open “Finance” can open it already."),
+  `${chipAlone} → ${chipShared} // ${chipInFolder}`,
+);
+
+/* 7 — what is shared with you sits where its owner keeps it: it is not
+      dragged or cut, it is copied into your own files, and it is left —
+      asked first — not deleted. */
+const boardMenu = await menuOn(row(`${SHARED}/Board`));
 await closeMenu();
-const scratchPathMenu = await menuOn(row("/docs/Scratch"));
-await closeMenu();
-step(
-  "Copy path: a note's or a folder's path as doklin takes it — section first, no domain, no extension, a folder ending in /; none in no section",
-  notePath.clip === "Library/notes" &&
-    notePath.toast.includes("Path copied: Library/notes") &&
-    budgetPath.clip === "Restricted/Finance/budget" &&
-    journalPath.clip === "Private/journal" &&
-    projectsPath.clip === "Library/Projects/" &&
-    financePath.clip === "Restricted/Finance/" &&
-    !strayPathMenu.includes("Copy path") &&
-    !todoPathMenu.includes("Copy path") &&
-    !scratchPathMenu.includes("Copy path"),
-  [notePath.clip, budgetPath.clip, journalPath.clip, projectsPath.clip, financePath.clip].join(" · "),
-);
-await page.locator(".settings-fab").click();
-await poll(async () => (await tid("settings-agent-instructions").count()) === 1);
-await tid("settings-agent-instructions").click();
-await poll(async () => (await page.locator(".toast").count()) === 1);
-const instructionsToast = (await page.locator(".toast").textContent()).trim();
-const instructions = await page.evaluate(() => navigator.clipboard.readText());
-await page.locator(".toast-close").click();
-await poll(async () => (await page.locator(".toast").count()) === 0);
-const [ask, note = ""] = instructions.split("## Doklin\n");
-step(
-  "Settings → Copy instructions for agents: the agent's own instructions file, with known ones for reference, global or local as its person says; then a note of a few lines that teaches dok and doklin",
-  ["~/.claude/CLAUDE.md", "~/.codex/AGENTS.md", "~/.grok/AGENTS.md", "OpenClaw"].every((s) => ask.includes(s)) &&
-    ask.includes("Use whichever file you use") &&
-    ask.includes("ask me whether it should be global") &&
-    ask.includes("or local") &&
-    note.includes("doks (one dok)") &&
-    note.includes("`doklin help agent`") &&
-    note.split("\n").length <= 3 &&
-    instructionsToast.includes("Instructions copied."),
-  `${note.length} characters in the note`,
-);
-
-/* 4 — New restricted folder…: a name, and who is in it. */
-await tid("section-restricted").hover();
-await tid("new-restricted").click();
-await poll(async () => (await dialog("New restricted folder").count()) === 1);
-await poll(async () => (await tid("restricted-people").count()) === 1);
-const createDisabledEmpty = await tid("restricted-create").isDisabled();
-await tid("restricted-name").fill("Plans");
-await tid("restricted-pick-m-bob").check();
-await tid("restricted-create").click();
-await poll(async () => (await row("/docs/Restricted/Plans").count()) === 1);
-const made = (await lastCall("cloud_space_create")).args;
-step(
-  "New restricted folder…: nothing without a name; made with the people picked, it is in the list at once with its count",
-  createDisabledEmpty &&
-    made.name === "Plans" &&
-    JSON.stringify(made.members) === '["m-bob"]' &&
-    made.from == null &&
-    (await dialog("New restricted folder").count()) === 0 &&
-    (await row("/docs/Restricted/Plans").locator('[data-testid="space-count"]').textContent()).trim() === "· 2",
-);
-
-/* 5 — dragging a folder everyone has onto Restricted restricts it, and says
-      what that means before anything moves. */
-const movesBeforeRestrict = (await moves()).length;
-await drag(row("/docs/Library/Projects"), tid("section-restricted").locator(".sidebar-section-label"));
-await poll(async () => (await tid("question-prompt").count()) === 1);
-const restrictAsk = await tid("question-prompt").innerText();
-await tid("question-no").click();
-await poll(async () => (await tid("question-prompt").count()) === 0);
-step(
-  "a folder dropped on Restricted: asked first, in words — and Cancel moves nothing",
-  restrictAsk.includes("Restrict “Projects”?") &&
-    restrictAsk.includes("removed from everyone else’s devices") &&
-    (await moves()).length === movesBeforeRestrict &&
-    (await row("/docs/Library/Projects").count()) === 1,
-  restrictAsk.replace(/\n/g, " "),
-);
-
-/* 6 — Restrict access… on the same folder: it becomes a restricted folder
-      holding the people picked, and a tab open inside it follows it there. */
-await row("/docs/Library/Projects/plan.md").click();
-await poll(async () => (await openTabs()).includes("/docs/Library/Projects/plan.md"));
-const sharedMenu = await menuOn(row("/docs/Library/Projects"));
-await pick("Restrict access");
-await poll(async () => (await dialog("Restrict access to “Projects”").count()) === 1);
-await poll(async () => (await tid("restricted-people").count()) === 1);
-const prefilled = await tid("restricted-name").inputValue();
-const alone = (await tid("restricted-effect").textContent()).trim();
-await tid("restricted-pick-m-carol").check();
-const withCarol = (await tid("restricted-effect").textContent()).trim();
-await tid("restricted-create").click();
-await poll(async () => (await row("/docs/Restricted/Projects").count()) === 1);
-const restricted = (await lastCall("cloud_space_create")).args;
-await poll(async () => (await openTabs()).includes("/docs/Restricted/Projects/plan.md"));
-step(
-  "Restrict access…: the folder's own name, who will have it said as they are picked; the folder leaves the workspace list for Restricted, and the tab open in it follows",
-  sharedMenu.includes("Restrict access…") &&
-    prefilled === "Projects" &&
-    alone.startsWith("Only you will have it.") &&
-    withCarol.startsWith("You and Carol will have it.") &&
-    restricted.from === "/docs/Library/Projects" &&
-    JSON.stringify(restricted.members) === '["m-carol"]' &&
-    (await row("/docs/Library/Projects").count()) === 0 &&
-    !(await openTabs()).includes("/docs/Library/Projects/plan.md"),
-  `${alone} → ${withCarol}`,
-);
-
-/* 7 — Share with… on a private note: it goes into a new restricted folder
-      with somebody — there are no per-note permissions. */
-const privateMenu = await menuOn(row("/docs/Private/journal.md"));
-await pick("Share with");
-await poll(async () => (await dialog("Share “journal”").count()) === 1);
-await poll(async () => (await tid("restricted-people").count()) === 1);
-const shareNeedsSomebody = await tid("restricted-create").isDisabled();
-await tid("restricted-pick-m-bob").check();
-await tid("restricted-create").click();
-await poll(async () => (await row("/docs/Restricted/journal").count()) === 1);
-await openFolder("/docs/Restricted/journal");
-await poll(async () => (await row("/docs/Restricted/journal/journal.md").count()) === 1);
-const shared = (await lastCall("cloud_space_create")).args;
-const sharedMove = (await moves()).at(-1);
-step(
-  "Share with…: nobody picked, nothing to share; with somebody, the note moves into a new folder that holds the two of you",
-  privateMenu.includes("Share with…") &&
-    shareNeedsSomebody &&
-    shared.name === "journal" &&
-    JSON.stringify(shared.members) === '["m-bob"]' &&
-    shared.from == null &&
-    sharedMove.from === "/docs/Private/journal.md" &&
-    sharedMove.to === "/docs/Restricted/journal/journal.md" &&
-    (await row("/docs/Private/journal.md").count()) === 0 &&
-    !(await menuOn(row("/docs/Library/notes.md"))).includes("Share with…"),
-);
-await closeMenu();
-
-/* 8 — a move that lets more people see a note asks first; one that narrows
-      who sees it just happens. */
-const movesBefore = (await moves()).length;
-await poll(async () => (await row("/docs/Restricted/Finance/budget.md").count()) === 1);
-await drag(row("/docs/Restricted/Finance/budget.md"), row("/docs/Library/other.md"));
-await poll(async () => (await tid("question-prompt").count()) === 1);
-const widerAsk = await tid("question-prompt").innerText();
-await tid("question-no").click();
-await poll(async () => (await tid("question-prompt").count()) === 0);
-const cancelledMoved = (await moves()).length - movesBefore;
-await drag(row("/docs/Restricted/Finance/budget.md"), row("/docs/Library/other.md"));
-await poll(async () => (await tid("question-prompt").count()) === 1);
-await tid("question-yes").click();
-await poll(async () => (await row("/docs/Library/budget.md").count()) === 1);
-// Into Private: fewer people, no question.
-await drag(row("/docs/Library/third.md"), tid("section-private").locator(".sidebar-section-label"));
-await poll(async () => (await row("/docs/Private/third.md").count()) === 1);
-// Into a folder with other people in it, from Private: asked.
-await drag(row("/docs/Private/third.md"), row("/docs/Restricted/Plans"));
-await poll(async () => (await tid("question-prompt").count()) === 1);
-const intoFolderAsk = await tid("question-prompt").innerText();
-await tid("question-yes").click();
-await poll(async () => (await row("/docs/Restricted/Plans/third.md").count()) === 1);
-step(
-  "moving a note where more people can see it asks first, naming them; Cancel moves nothing; narrowing who sees it asks nothing",
-  widerAsk.includes("Move “budget” to Library?") &&
-    widerAsk.includes("Everyone in Notes will be able to see it.") &&
-    cancelledMoved === 0 &&
-    intoFolderAsk.includes("Move “third” to “Plans”?") &&
-    intoFolderAsk.includes("Both people in “Plans” will be able to see it."),
-  `${widerAsk.replace(/\n/g, " ")} // ${intoFolderAsk.replace(/\n/g, " ")}`,
-);
-
-/* 9 — a note cannot be dropped straight under Restricted: it would be in no
-      folder. */
-await drag(row("/docs/Library/other.md"), tid("section-restricted").locator(".sidebar-section-label"));
+const movesBeforeBoard = (await moves()).length;
+await drag(row(`${SHARED}/Board`), tid("section-mine").locator(".sidebar-section-label"));
 await settle();
+const boardStayed = (await moves()).length === movesBeforeBoard && (await row(`${SHARED}/Board`).count()) === 1;
+await menuOn(row(`${SHARED}/Roadmap.md`));
+await pick("Copy to My files");
+await poll(async () => (await row(`${MINE}/Roadmap.md`).count()) === 1);
+const copiedTo = await page.evaluate(() => (window.__copies ?? []).at(-1));
+await noToast();
+await menuOn(row(`${SHARED}/Board`));
+await pick("Leave…");
+const leaveAsk = await asked();
+await answer(false);
+const stillThere = (await row(`${SHARED}/Board`).count()) === 1 && (await calls("cloud_share_member")).length === 2;
+await menuOn(row(`${SHARED}/Board`));
+await pick("Leave…");
+await asked();
+await answer(true);
+await poll(async () => (await row(`${SHARED}/Board`).count()) === 0);
+const left = (await lastCall("cloud_share_member")).args;
 step(
-  "a note dropped on the Restricted heading goes nowhere: there is no folder for it to be in",
-  (await row("/docs/Library/other.md").count()) === 1 &&
-    (await row("/docs/Restricted/other.md").count()) === 0 &&
-    (await tid("question-prompt").count()) === 0,
-);
-
-/* 10 — Manage access…: who is in the folder, by name; anyone in it adds and
-       removes people. */
-await menuOn(row("/docs/Restricted/Finance"));
-await pick("Manage access");
-await poll(async () => (await dialog("Who can open “Finance”").count()) === 1);
-await poll(async () => (await tid("space-addable").count()) === 1);
-const membersBefore = await tid("space-members").innerText();
-await tid("space-add-m-carol").click();
-await poll(async () => (await tid("space-member-m-carol").count()) === 1);
-const added = (await lastCall("cloud_space_member")).args;
-const everyoneIn = await tid("space-everyone-in").count();
-await tid("space-out-m-bob").click();
-await tid("space-out-yes-m-bob").click();
-await poll(async () => (await tid("space-member-m-bob").count()) === 0);
-const removed = (await lastCall("cloud_space_member")).args;
-step(
-  "Manage access…: the people in it by name, you marked; adding one and removing one each change the list, and the count on the folder's row",
-  membersBefore.includes("Sherin") &&
-    membersBefore.includes("YOU") &&
-    membersBefore.includes("Bob") &&
-    added.memberId === "m-carol" &&
-    added.add === true &&
-    everyoneIn === 1 &&
-    removed.memberId === "m-bob" &&
-    removed.add === false &&
-    (await tid("space-out-m-sherin").count()) === 0 &&
-    (await row("/docs/Restricted/Finance").locator('[data-testid="space-count"]').textContent()).trim() === "· 2",
-  membersBefore.replace(/\n/g, " "),
-);
-await page.screenshot({ path: SHOTS + "sections-02-access.png" });
-
-/* 11 — the last person cannot just leave: the folder is handed to someone,
-       or deleted. Handing it on leaves, and its going is not news here. */
-await tid("space-out-m-carol").click();
-await tid("space-out-yes-m-carol").click();
-await poll(async () => (await tid("space-member-m-carol").count()) === 0);
-await tid("space-leave").click();
-await poll(async () => (await tid("space-last").count()) === 1);
-const lastCard = await tid("space-last").innerText();
-await tid("space-hand-m-bob").click();
-await poll(async () => (await row("/docs/Restricted/Finance").count()) === 0);
-await poll(async () => (await dialog("Who can open “Finance”").count()) === 0);
-const handCalls = (await calls("cloud_space_member")).slice(-2).map((c) => [c.args.memberId, c.args.add]);
-step(
-  "the last person in a folder is asked — hand it to someone, or delete it; handed on, the folder leaves this Mac with no notice, because leaving was done here",
-  lastCard.includes("You are the last person in “Finance”") &&
-    JSON.stringify(handCalls) === '[["m-bob",true],["m-sherin",false]]' &&
+  "what is shared with you: Share…, Copy to My files and Leave… — no Cut, no Delete, and it is not dragged away; the copy is an ordinary note of your own; leaving asks first, and then it goes quietly",
+  boardMenu.includes("Share…") &&
+    boardMenu.includes("Copy to My files") &&
+    boardMenu.includes("Leave…") &&
+    boardMenu.includes("Rename…") &&
+    !boardMenu.includes("Cut") &&
+    !boardMenu.includes("Delete") &&
+    !boardMenu.includes("Delete for everyone…") &&
+    boardStayed &&
+    copiedTo.from === `${SHARED}/Roadmap.md` &&
+    copiedTo.to === `${MINE}/Roadmap.md` &&
+    (await mark(`${MINE}/Roadmap.md`).count()) === 0 &&
+    leaveAsk.includes("Leave “Board”?") &&
+    leaveAsk.includes("The others keep theirs.") &&
+    stillThere &&
+    left.id === "s-board000" &&
+    left.memberId === "m-sherin" &&
+    left.add === false &&
     (await page.locator(".toast").count()) === 0,
-  lastCard.replace(/\n/g, " "),
+  `${boardMenu.join(" · ")} // ${leaveAsk}`,
 );
 
-/* 12 — taken out of a folder by somebody else: its tabs close and a line
-       says why it is gone. */
-await poll(async () => (await openTabs()).includes("/docs/Restricted/Projects/plan.md"));
+/* 8 — deleting something you share is for everyone, and says who loses it;
+      it is kept thirty days, and comes back from My files' deleted list. */
+const financeMenu = await menuOn(row(`${MINE}/Finance`));
+await pick("Delete for everyone…");
+const deleteAsk = await asked();
+await answer(true);
+await poll(async () => (await row(`${MINE}/Finance`).count()) === 0);
+const deleted = (await lastCall("cloud_share_delete")).args;
+// The one delete with no Trash behind it offers the way back at once, and
+// says nothing of it having been taken away.
+await poll(async () => (await page.locator(".toast").count()) === 1);
+const deletedToast = await page.locator(".toast").innerText();
+const quiet = deletedToast.includes("“Finance” is deleted for everyone, and kept for 30 days.") && /Restore/.test(deletedToast);
+await noToast();
+await menuOn(tid("section-mine-toggle"));
+await pick("Recently deleted");
+await poll(async () => (await tid("recently-deleted").count()) === 1);
+await poll(async () => (await tid("deleted-share").count()) === 1);
+const deletedRow = await tid("deleted-share").innerText();
+const deletedRoots = (await versionCalls("versions_deleted")).map((c) => c.args.root);
+await tid("deleted-share-restore").click();
+await poll(async () => (await tid("deleted-share").count()) === 0);
+const restored = (await lastCall("cloud_share_restore")).args;
+await noToast();
+await page.locator('.ws-deleted [title="Back to files"]').click();
+await poll(async () => (await row(`${MINE}/Finance`).count()) === 1);
+step(
+  "Delete for everyone… on a folder you share: asked first, naming who loses it and that it is kept 30 days; a notice offers Restore; then it is in My files' Recently deleted — with the files of the shared folders inside My files — and Restore brings it back",
+  financeMenu.includes("Delete for everyone…") &&
+    financeMenu.includes("Cut") &&
+    financeMenu.includes("Folder history…") &&
+    !financeMenu.includes("Delete") &&
+    deleteAsk.includes("Delete “Finance” for everyone?") &&
+    deleteAsk.includes("the other person who can open it") &&
+    deleteAsk.includes("Recently deleted for 30 days") &&
+    deleted.id === "s-finance0" &&
+    quiet &&
+    deletedRow.includes("Finance") &&
+    deletedRow.includes("shared folder") &&
+    deletedRoots.includes(MINE) &&
+    deletedRoots.includes(`${MINE}/Work`) &&
+    restored.id === "s-finance0" &&
+    (await mark(`${MINE}/Finance`).getAttribute("title")) === "Shared with 1 person",
+  `${deleteAsk} // ${deletedRow.replace(/\n/g, " ")}`,
+);
+
+/* 9 — a move that lets more people open a note asks first, naming them;
+      one that narrows who can asks nothing. */
+await openFolder(`${MINE}/Finance`);
+const movesBefore = (await moves()).length;
+await drag(row(`${MINE}/journal.md`), row(`${MINE}/Finance`));
+const intoShareAsk = await asked();
+await answer(false);
+const cancelledMoved = (await moves()).length - movesBefore;
+await drag(row(`${MINE}/journal.md`), row("/docs/Library/other.md"));
+const intoLibraryAsk = await asked();
+await answer(true);
+await poll(async () => (await row("/docs/Library/journal.md").count()) === 1);
+// Into My files: fewer people, no question.
+await drag(row("/docs/Library/third.md"), tid("section-mine").locator(".sidebar-section-label"));
+await poll(async () => (await row(`${MINE}/third.md`).count()) === 1);
+const narrowedQuietly = (await tid("question-prompt").count()) === 0;
+// Out of a shared folder into My files: fewer people too.
+await drag(row(`${MINE}/Finance/budget.md`), tid("section-mine").locator(".sidebar-section-label"));
+await poll(async () => (await row(`${MINE}/budget.md`).count()) === 1);
+step(
+  "moving a note where more people can open it asks first, naming them; Cancel moves nothing; narrowing who can open it asks nothing",
+  intoShareAsk.includes("Move “journal” to “Finance”?") &&
+    intoShareAsk.includes("Both people who can open “Finance” will be able to open it.") &&
+    cancelledMoved === 0 &&
+    intoLibraryAsk.includes("Move “journal” to Library?") &&
+    intoLibraryAsk.includes("Everyone in Notes will be able to open it.") &&
+    narrowedQuietly &&
+    (await tid("question-prompt").count()) === 0,
+  `${intoShareAsk} // ${intoLibraryAsk}`,
+);
+
+/* 10 — something shared moved into Library is everyone's, and stops being
+       shared on its own: said first. Moved inside My files it is the same
+       share, and nothing is asked. */
 await page.evaluate(() => {
+  (window.__madeDirs ??= []).push("/docs/My files/Archive");
+  window.__sections.lists["/docs/My files/Archive"] = [];
+  window.__dirs.add("/docs/My files/Archive");
+  window.__emit("cloud-applied", { root: "/docs", paths: [] });
+});
+await poll(async () => (await row(`${MINE}/Archive`).count()) === 1);
+await drag(row(`${MINE}/Work`), row(`${MINE}/Archive`));
+await poll(async () => (await row(`${MINE}/Archive/Work`).count()) === 1);
+const movedInside = (await tid("question-prompt").count()) === 0 && (await spaces()).some((sp) => sp.path === "My files/Archive/Work");
+const stillMarked = (await mark(`${MINE}/Archive/Work`).getAttribute("title")) === "Shared with 1 person";
+await drag(row(`${MINE}/Archive`), row("/docs/Library/other.md"));
+const endAsk = await asked();
+await answer(true);
+await poll(async () => (await row(`${MINE}/Archive`).count()) === 0);
+step(
+  "a shared folder moved inside My files is the same share, and nothing is asked; a folder that holds one, moved into Library, says everyone can open it and that the share inside stops being shared on its own",
+  movedInside &&
+    stillMarked &&
+    endAsk.includes("Move “Archive” to Library?") &&
+    endAsk.includes("Everyone in Notes will be able to open it.") &&
+    endAsk.includes("“Work” stops being shared on its own.") &&
+    !(await spaces()).some((sp) => sp.name === "Work"),
+  endAsk,
+);
+
+/* 11 — something shared taken away elsewhere says so and closes its tabs;
+       something shared that sync moved takes its open tab with it. */
+await row(`${MINE}/plan.md`).click();
+await poll(async () => (await activeTab()) === "plan");
+await page.evaluate(() => {
+  const sec = window.__sections;
+  sec.lists["/docs/My files/Archive 2"] = ["plan.md"];
+  sec.lists["/docs/My files"].splice(sec.lists["/docs/My files"].indexOf("plan.md"), 1);
+  window.__fs.set("/docs/My files/Archive 2/plan.md", window.__fs.get("/docs/My files/plan.md"));
+  window.__fs.delete("/docs/My files/plan.md");
   const s = window.__cloud.statuses[0];
-  delete window.__sections.restricted.Projects;
-  window.__setStatuses([{ ...s, spaces: s.spaces.filter((sp) => sp.path !== "Restricted/Projects") }]);
-  window.__emit("cloud-space-left", { root: "/docs", name: "Projects", path: "Restricted/Projects" });
+  window.__setStatuses([{ ...s, spaces: s.spaces.map((sp) => (sp.path === "My files/plan" ? { ...sp, path: "My files/Archive 2/plan" } : sp)) }]);
+  window.__emit("cloud-space-moved", { root: "/docs", moves: [{ from: "My files/plan.md", to: "My files/Archive 2/plan.md", dir: false }] });
+});
+await poll(async () => (await openTabs()).includes(`${MINE}/Archive 2/plan.md`));
+const followed = !(await openTabs()).includes(`${MINE}/plan.md`) && (await activeTab()) === "plan";
+await row(`${SHARED}/Roadmap.md`).click();
+await poll(async () => (await activeTab()) === "Roadmap");
+await page.evaluate(() => {
+  const sec = window.__sections;
+  sec.lists["/docs/Shared with me"].splice(sec.lists["/docs/Shared with me"].indexOf("Roadmap.md"), 1);
+  const s = window.__cloud.statuses[0];
+  window.__setStatuses([{ ...s, spaces: s.spaces.filter((sp) => sp.id !== "s-roadmap0") }]);
+  window.__emit("cloud-space-left", { root: "/docs", name: "Roadmap", path: "Shared with me/Roadmap" });
 });
 await poll(async () => (await page.locator(".toast").count()) === 1);
-const leftToast = await page.locator(".toast").textContent();
-await poll(async () => (await row("/docs/Restricted/Projects").count()) === 0);
-await poll(async () => !(await openTabs()).includes("/docs/Restricted/Projects/plan.md"));
-await page.locator(".toast-close").click();
+const goneToast = (await page.locator(".toast").textContent()).trim();
+await poll(async () => !(await openTabs()).includes(`${SHARED}/Roadmap.md`));
+await noToast();
 step(
-  "a folder that left because of somebody else: a line names it and says why, and the tab of a note in it closes",
-  leftToast.includes("“Projects” is no longer on this Mac") &&
-    leftToast.includes("you were taken out of it, or it was deleted"),
-  leftToast,
+  "a shared document that sync moved takes its open tab with it; one no longer shared with you closes its tab and says why",
+  followed &&
+    goneToast.includes("“Roadmap” is no longer on this Mac — it is no longer shared with you, or it was deleted.") &&
+    (await row(`${SHARED}/Roadmap.md`).count()) === 0,
+  goneToast,
 );
 
-/* 13 — Delete it for everyone: said in full before it happens. */
-await menuOn(row("/docs/Restricted/Plans"));
-await pick("Manage access");
-await poll(async () => (await dialog("Who can open “Plans”").count()) === 1);
-await tid("space-delete").click();
-await poll(async () => (await tid("space-delete-confirm").count()) === 1);
-const deleteAsk = await tid("space-delete-confirm").innerText();
-await tid("space-delete-yes").click();
-await poll(async () => (await row("/docs/Restricted/Plans").count()) === 0);
-await poll(async () => (await dialog("Who can open “Plans”").count()) === 0);
-step(
-  "Delete it for everyone: what goes, and from where, is said first; then the folder is gone here, quietly",
-  deleteAsk.includes("Delete “Plans” for everyone in it?") &&
-    deleteAsk.includes("erased from the cloud") &&
-    deleteAsk.includes("cannot be undone") &&
-    (await calls("cloud_space_delete")).length === 1 &&
-    (await page.locator(".toast").count()) === 0,
-  deleteAsk.replace(/\n/g, " "),
-);
-
-/* 14 — an owner sees every public address: the pages they can open, and —
+/* 12 — an owner sees every public address: the pages they can open, and —
        told only what the address tells anyone — the ones they cannot, each
-       of which they can take down. The home page is one of the shared ones. */
+       of which they can take down. The home page is one of Library's. */
 await page.evaluate(() => {
   const s = window.__cloud.statuses[0];
   const page = (slug, path) => ({ slug, kind: "file", path, title: null, desc: null, by: "Sherin", at: Date.now(), alive: true, root: false });
-  window.__setStatuses([{ ...s, public: [page("notes", "Library/notes.md"), page("journal", "Restricted/journal/journal.md")] }]);
+  window.__setStatuses([{ ...s, public: [page("notes", "Library/notes.md"), page("third", "My files/third.md")] }]);
 });
 await tid("sync-status").click();
 await poll(async () => (await tid("published-pages").count()) === 1);
 await tid("published-pages").click();
 await poll(async () => (await tid("published-elsewhere-row").count()) === 1);
 const elsewhere = await tid("published-elsewhere-row").innerText();
+const elsewhereNote = await dialog("Published pages").innerText();
 const homeButtons = await tid("published-home").count();
 await tid("published-takedown").click();
 await tid("published-takedown-yes").click();
 await poll(async () => (await tid("published-elsewhere-row").count()) === 0);
 step(
-  "Published pages, for an owner: the ones they can open (only a shared one can be the home page), and one from a section they are not in — its title, its address, who — taken down",
+  "Published pages, for an owner: the ones they can open (only one in Library can be the home page), and one from somebody's My files — its title, its address, who — taken down",
   (await tid("published-row").count()) === 2 &&
     homeButtons === 1 &&
-    elsewhere.includes("Private") &&
+    elsewhereNote.includes("Published from somebody’s My files or something shared.") &&
     elsewhere.includes("/carols-notes") &&
     elsewhere.includes("Carol") &&
     (await lastCall("cloud_page_take_down")).args.slug === "carols-notes",
@@ -736,10 +726,9 @@ step(
 await page.keyboard.press("Escape");
 await poll(async () => (await dialog("Published pages").count()) === 0);
 
-/* 15 — empty space is the list it is in: beside its rows, down to the next
-       heading's line, and under the last list. A right-click there makes
-       things in that list; under what is in no section nothing is made, so
-       there is no menu. */
+/* 13 — empty space is the list it is in. A right-click in My files' makes
+       things there and offers its history; under Shared with me nothing is
+       made, so there is no menu; each heading makes in its own list. */
 const menuAt = async (x, y) => {
   await page.mouse.click(x, y, { button: "right" });
   await settle(150);
@@ -748,95 +737,41 @@ const menuAt = async (x, y) => {
   return items;
 };
 const bodyBox = await page.locator(".sidebar-body").boundingBox();
-const spaceX = bodyBox.x + 60;
-let privateBox = await tid("section-private").boundingBox();
-const straysBox = await tid("section-strays").boundingBox();
-const bodyBottom = bodyBox.y + bodyBox.height - 4;
-const beforePrivateLine = await menuAt(spaceX, privateBox.y - 4);
-const besidePrivateRows = await menuAt(bodyBox.x + 1, privateBox.y + privateBox.height - 8);
-const beforeStraysLine = await menuAt(spaceX, straysBox.y - 4);
-const underStrays = await menuAt(spaceX, bodyBottom);
-await page.mouse.click(spaceX, straysBox.y - 4, { button: "right" });
-await poll(async () => (await page.locator(".sidebar-menu-item").count()) > 0);
-await pick("New Folder");
-await poll(async () => (await tid("section-private").locator(".tree-create-input").count()) === 1);
+const mineBox = await tid("section-mine").boundingBox();
+const sharedBox = await tid("section-shared").boundingBox();
+const inMine = await menuAt(bodyBox.x + 1, mineBox.y + mineBox.height - 6);
+const inShared = await menuAt(bodyBox.x + 1, sharedBox.y + sharedBox.height - 6);
+const sharedRowMenu = await menuOn(row(`${SHARED}/stray.md`));
+await closeMenu();
+await row("/docs/Library/notes.md").click();
+await tid("new-mine-folder").click();
+const mineFromLibrary =
+  (await tid("section-mine").locator(".tree-create-input").count()) === 1 &&
+  (await tid("section-library").locator(".tree-create-input").count()) === 0;
 await page.keyboard.type("Ideas");
 await page.keyboard.press("Enter");
-await poll(async () => (await page.locator(".tree-create-input").count()) === 0);
-const madeDirs = () => page.evaluate(() => window.__madeDirs ?? []);
-const isPrivateMenu = (items) => items.includes("New Folder…") && items.includes("Private history…") && !items.includes("Library history…");
+await poll(async () => (await row(`${MINE}/Ideas`).count()) === 1);
+// The new folder is selected, so My files' + makes a note in it.
+await tid("new-mine").click();
+await poll(async () => (await row(`${MINE}/Ideas/Untitled.md`).count()) === 1);
+const madeDirs = await page.evaluate(() => window.__madeDirs ?? []);
 step(
-  "empty space is the list it is in: before Private's line is Restricted's, beside and under Private's rows is Private's — New Folder… there makes it in Private — and under what is in no section there is no menu",
-  beforePrivateLine.join("|") === "New restricted folder…" &&
-    isPrivateMenu(besidePrivateRows) &&
-    isPrivateMenu(beforeStraysLine) &&
-    underStrays.length === 0 &&
-    straysBox.y + straysBox.height < bodyBottom &&
-    (await madeDirs()).includes("/docs/Private/Ideas"),
-  `${beforePrivateLine.join(" · ")} // ${beforeStraysLine.slice(0, 3).join(" · ")} // ${(await madeDirs()).join(", ")}`,
+  "empty space is the list it is in: My files' makes things there and has My files history…; Shared with me has no menu, and a row there offers no New Document, New Folder or Paste; My files' heading makes a folder and a note in My files",
+  inMine.includes("New Folder…") &&
+    inMine.includes("My files history…") &&
+    inMine.includes("Recently deleted…") &&
+    !inMine.includes("Library history…") &&
+    inShared.length === 0 &&
+    !sharedRowMenu.includes("New Document") &&
+    !sharedRowMenu.includes("New Folder…") &&
+    !sharedRowMenu.includes("Paste") &&
+    (await tid("new-mine-folder").getAttribute("title")) === "New folder in My files" &&
+    mineFromLibrary &&
+    madeDirs.includes(`${MINE}/Ideas`) &&
+    (await tid("section-shared").locator(".sidebar-section-btn").count()) === 0,
+  `${inMine.slice(0, 4).join(" · ")} // ${sharedRowMenu.join(" · ")}`,
 );
-
-/* 15b — a list's heading makes in that list, whatever is selected in
-        another: Private's makes a folder as well as a note. */
-await row("/docs/Library/notes.md").click();
-await tid("new-private-folder").click();
-const privateFromLibrary =
-  (await tid("section-private").locator(".tree-create-input").count()) === 1 &&
-  (await tid("section-library").locator(".tree-create-input").count()) === 0;
-await page.keyboard.press("Escape");
-await poll(async () => (await page.locator(".tree-create-input").count()) === 0);
-// Private's + makes a note there, and selects it.
-await tid("new-private").click();
-await poll(async () => (await row("/docs/Private/Untitled.md").count()) === 1);
-await poll(async () => (await row("/docs/Private/Untitled.md").locator("xpath=..").getAttribute("aria-selected")) === "true");
-await tid("section-library").locator('[aria-label="New folder"]').click();
-const libraryFromPrivate =
-  (await tid("section-library").locator(".tree-create-input").count()) === 1 &&
-  (await tid("section-private").locator(".tree-create-input").count()) === 0;
-await page.keyboard.type("Drafts");
-await page.keyboard.press("Enter");
-await poll(async () => (await page.locator(".tree-create-input").count()) === 0);
-step(
-  "a heading makes in its own list: Private's New folder with a Library note selected, Library's with a private note selected",
-  (await tid("new-private-folder").getAttribute("title")) === "New private folder" &&
-    privateFromLibrary &&
-    libraryFromPrivate &&
-    (await madeDirs()).includes("/docs/Library/Drafts"),
-  (await madeDirs()).join(", "),
-);
-
-/* 15c — with nothing in no section, Private is the last list: the space
-        under it is Private's, for a right-click and for a drop. */
-await page.evaluate(() => {
-  window.__strays.length = 0;
-  for (const name of Object.keys(window.__strayDirs)) delete window.__strayDirs[name];
-  window.__emit("cloud-applied", { root: "/docs", paths: [] });
-});
-await poll(async () => (await tid("section-strays").count()) === 0);
-privateBox = await tid("section-private").boundingBox();
-const underPrivate = await menuAt(spaceX, bodyBottom);
-const dragged = await tid("section-library").locator('[data-tree-path$=".md"]').first().getAttribute("data-tree-path");
-const movesUnder = (await moves()).length;
-{
-  const a = await row(dragged).boundingBox();
-  await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(a.x + a.width / 2 + 9, a.y + a.height / 2 + 9, { steps: 3 });
-  await page.mouse.move(spaceX, bodyBottom, { steps: 8 });
-  await settle(120);
-  await page.mouse.up();
-}
-await poll(async () => (await moves()).length > movesUnder);
-const droppedUnder = (await moves()).at(-1);
-await page.screenshot({ path: SHOTS + "sections-15-under-private.png" });
-step(
-  "with nothing in no section, the space under Private is Private's: its menu, and a note dropped there moves into Private",
-  privateBox.y + privateBox.height < bodyBottom &&
-    isPrivateMenu(underPrivate) &&
-    droppedUnder.from === dragged &&
-    droppedUnder.to === `/docs/Private/${dragged.split("/").at(-1)}`,
-  `${underPrivate.slice(0, 3).join(" · ")} // ${droppedUnder.from} → ${droppedUnder.to}`,
-);
+await page.screenshot({ path: SHOTS + "sections-13-end.png" });
 
 await settle();
 const failed = results.filter((r) => !r.ok).length;

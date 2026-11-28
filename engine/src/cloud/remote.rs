@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::manifest::{Beat, Manifest, PollResponse, PublicKind, SpaceEntry};
+use super::manifest::{Beat, Manifest, PollResponse, PublicKind, SpaceEntry, SpaceKind};
 use super::pace::{Limits, Usage};
 use super::versions::VersionsIndex;
 
@@ -284,6 +284,36 @@ pub struct WipeRound {
     pub remaining: bool,
 }
 
+/// What a share is made from (`POST /api/spaces`).
+#[derive(Clone, Debug)]
+pub struct NewShare {
+    /// Minted by this device: the same id again is the same share.
+    pub id: String,
+    /// `Folder` or `Document`.
+    pub kind: SpaceKind,
+    pub name: String,
+    /// The section its item sits in.
+    pub parent: String,
+    /// The folder of that section the item is in, `""` its top.
+    pub dir: String,
+    /// Where the item is in that section now: a folder's path, a document's
+    /// without its extension.
+    pub was: String,
+    /// The people to share it with, by member id.
+    pub members: Vec<String>,
+}
+
+/// `DELETE /api/spaces/<id>`: a share that held something is kept, to be
+/// restored; one that held nothing is erased, in rounds — repeat while
+/// `remaining`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DeleteRound {
+    #[serde(default)]
+    pub kept: bool,
+    #[serde(default)]
+    pub remaining: bool,
+}
+
 /* ---------- Errors ---------- */
 
 #[derive(Debug)]
@@ -316,6 +346,9 @@ pub enum RemoteError {
     /// `409 {taken}` on a manifest: these public addresses are another
     /// section's on this domain, so the manifest naming them was not stored.
     Taken(Vec<String>),
+    /// `409 {code: "id_taken"}` on a share: the id this device minted is
+    /// somebody else's. Mint another.
+    IdTaken,
     /// `429`: the worker's loop catcher says this device is sending too
     /// much. The number is how many seconds it asked for (`Retry-After`).
     Slowed(u64),
@@ -338,6 +371,7 @@ impl std::fmt::Display for RemoteError {
             RemoteError::TooOld(m) => write!(f, "{}", m),
             RemoteError::AlreadyBound(w) => write!(f, "already bound to \"{}\"", w.name),
             RemoteError::Taken(slugs) => write!(f, "already taken on this domain: {}", slugs.join(", ")),
+            RemoteError::IdTaken => write!(f, "that id is taken"),
             RemoteError::Slowed(_) => write!(f, "the domain asked this device to slow down"),
             RemoteError::DailyLimit => write!(f, "today's Cloudflare requests are used up"),
             RemoteError::Other(m) => write!(f, "{}", m),
@@ -370,48 +404,55 @@ pub trait Remote: Send + Sync + 'static {
 
     /// This credential again, with every sync call — the manifest, the
     /// blobs, the version store — aimed at one space: `/api/spaces/<id>/…`,
-    /// the same routes behind the domain's membership check. A `NotFound`
-    /// from one means this person is not in it, or it is gone; the two are
-    /// one answer.
+    /// the same routes behind the domain's check of who can open it. A
+    /// `NotFound` from one means this person cannot open it any more, or it
+    /// is gone; the two are one answer.
     fn space(&self, id: &str) -> Self
     where
         Self: Sized;
 
-    /// `PUT /api/spaces/private`: this person's Private, made if it was not
+    /// `PUT /api/spaces/private`: this person's My files, made if it was not
     /// there. Answers the same space every time.
     fn ensure_private(&self) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
 
-    /// `POST /api/spaces`: a restricted folder holding its maker and whoever
-    /// else is named, by member id — people already in the workspace.
-    fn create_space(
-        &self,
-        name: &str,
-        members: &[String],
-    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
+    /// `POST /api/spaces`: share a folder or a document with the people
+    /// named — people already in the workspace. Its maker is not one of
+    /// them: they open it because they open the section it sits in.
+    fn create_space(&self, share: &NewShare) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
 
-    /// `PATCH /api/spaces/<id>`: rename a restricted folder, for everyone
-    /// in it.
+    /// `PATCH /api/spaces/<id> {name}`: rename a shared folder, for everyone.
     fn rename_space(&self, id: &str, name: &str) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 
-    /// `PUT /api/spaces/<id>/members/<member>`: add a person to a restricted
-    /// folder. Answers the folder as it now is.
+    /// `PATCH /api/spaces/<id> {parent, dir}`: the share sits in another
+    /// section now, in that folder of it.
+    fn move_space(
+        &self,
+        id: &str,
+        parent: &str,
+        dir: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
+
+    /// `PUT /api/spaces/<id>/members/<member>`: share it with one more
+    /// person. Answers the share as it now is.
     fn add_space_member(
         &self,
         id: &str,
         member: &str,
     ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
 
-    /// `DELETE /api/spaces/<id>/members/<member>`: take a person out, the
-    /// caller included. Refused for the last one in it.
+    /// `DELETE /api/spaces/<id>/members/<member>`: stop sharing it with a
+    /// person, the caller included.
     fn remove_space_member(
         &self,
         id: &str,
         member: &str,
     ) -> impl std::future::Future<Output = RemoteResult<()>> + Send;
 
-    /// `DELETE /api/spaces/<id>`: one round of deleting a restricted folder
-    /// and everything it stored; repeat while `remaining`.
-    fn delete_space(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send;
+    /// `DELETE /api/spaces/<id>`: delete a share for everyone.
+    fn delete_space(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<DeleteRound>> + Send;
+
+    /// `POST /api/spaces/<id>/restore`: a deleted share back, as it was.
+    fn restore_space(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send;
     fn fetch_manifest(
         &self,
         since: Option<&str>,
@@ -845,6 +886,7 @@ async fn expect_status(res: reqwest::Response) -> RemoteResult<reqwest::Response
                 Some(record) => RemoteError::AlreadyBound(record),
                 None => match taken.filter(|slugs| !slugs.is_empty()) {
                     Some(slugs) => RemoteError::Taken(slugs),
+                    None if v.get("code").and_then(|c| c.as_str()) == Some("id_taken") => RemoteError::IdTaken,
                     None => RemoteError::Other(said("conflict")),
                 },
             }
@@ -952,13 +994,42 @@ impl Remote for HttpRemote {
         }
     }
 
-    fn create_space(
-        &self,
-        name: &str,
-        members: &[String],
-    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
-        let body = json!({ "name": name, "members": members });
+    fn create_space(&self, share: &NewShare) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        let body = json!({
+            "id": share.id,
+            "kind": share.kind,
+            "name": share.name,
+            "parent": share.parent,
+            "dir": share.dir,
+            "was": share.was,
+            "members": share.members,
+        });
         async move { read_space_value(self.post_json("spaces", &body).await?) }
+    }
+
+    fn move_space(
+        &self,
+        id: &str,
+        parent: &str,
+        dir: &str,
+    ) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        let url = self.url(&format!("spaces/{}", id));
+        let body = serde_json::to_vec(&json!({ "parent": parent, "dir": dir })).unwrap_or_default();
+        async move {
+            let res = self
+                .auth(self.client.patch(url))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .map_err(transport_err)?;
+            read_space(expect_status(res).await?).await
+        }
+    }
+
+    fn restore_space(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<SpaceEntry>> + Send {
+        let tail = format!("spaces/{}/restore", id);
+        async move { read_space_value(self.post_json(&tail, &json!({})).await?) }
     }
 
     fn add_space_member(
@@ -985,12 +1056,12 @@ impl Remote for HttpRemote {
         }
     }
 
-    fn delete_space(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<WipeRound>> + Send {
+    fn delete_space(&self, id: &str) -> impl std::future::Future<Output = RemoteResult<DeleteRound>> + Send {
         let url = self.url(&format!("spaces/{}", id));
         async move {
             let res = self.auth(self.client.delete(url)).send().await.map_err(transport_err)?;
             let res = expect_status(res).await?;
-            res.json::<WipeRound>().await.map_err(transport_err)
+            res.json::<DeleteRound>().await.map_err(transport_err)
         }
     }
 

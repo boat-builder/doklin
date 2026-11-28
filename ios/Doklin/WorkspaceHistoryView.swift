@@ -2,8 +2,8 @@ import DoklinKit
 import SwiftUI
 
 /// The workspace as it was: every moment this iPhone kept of it, by day,
-/// with what each changed. Each section (Library, Private, a restricted
-/// folder) keeps moments of its own, picked from the bar; Library's first.
+/// with what each changed. Library, My files and each shared folder keep
+/// moments of their own, picked from the bar; Library's first.
 struct WorkspaceHistoryView: View {
     @Environment(Workspaces.self) private var device
     @State private var timeline: WorkspaceTimeline
@@ -17,7 +17,7 @@ struct WorkspaceHistoryView: View {
 
     var body: some View {
         let dates = HistoryDates()
-        let stores = device.stores(of: workspace)
+        let stores = device.folderStores(of: workspace)
         List {
             Section {
                 if stores.count > 1 {
@@ -59,6 +59,12 @@ struct WorkspaceHistoryView: View {
             // The section shown left this iPhone, its history with it.
             if let left, workspace.relative(timeline.store).map(left.holds) == true {
                 Task { await timeline.show(workspace.libraryStore) }
+            }
+        }
+        .onChange(of: workspace.relocated) { _, moved in
+            // Sync moved the folder shown: its history is called by where it is.
+            if let moved, let now = workspace.store(timeline.store, after: moved) {
+                Task { await timeline.show(now) }
             }
         }
     }

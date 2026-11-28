@@ -72,7 +72,7 @@ const said = (id, which = "md") =>
       JSON.stringify([
         "launch-plan-v2→../GTM/launch-plan-v2.md",
         "the budget→../Money/budget.md",
-        "board-plan-final→../../Restricted/Board/board-plan-final.md",
+        "board-plan-final→../../Shared with me/Board/board-plan-final.md",
         "old-note→old-note.md (closed)",
         "notes→notes.md",
         "the web→https://example.com",
@@ -84,7 +84,7 @@ const said = (id, which = "md") =>
     "what it hands back is what a save writes: current links, a narrower section's written back",
     first.md.includes("[launch-plan-v2](../GTM/launch-plan-v2.md)") &&
       first.md.includes("[the budget](../Money/budget.md)") &&
-      first.md.includes("[board-plan](../../Restricted/Board/board-plan.md)") &&
+      first.md.includes("[board-plan](<../../Shared with me/Board/board-plan.md>)") &&
       first.md.includes("[old-note](old-note.md)") &&
       first.md.includes("[notes](notes.md)") &&
       !first.md.includes("doklin-links"),
@@ -96,7 +96,7 @@ const said = (id, which = "md") =>
       JSON.stringify({
         "../GTM/launch-plan-v2.md": "f-launch",
         "../Money/budget.md": "f-budget",
-        "../../Restricted/Board/board-plan.md": "f-board",
+        "../../Shared with me/Board/board-plan.md": "f-board",
         "old-note.md": "f-gone",
         "notes.md": "f-notes",
       }),
@@ -127,11 +127,11 @@ const said = (id, which = "md") =>
     const docs = [
       { path: "Library/GTM/launch-final.md", fileId: "f-launch", section: null },
       { path: "Library/Money/budget.md", fileId: "f-budget", section: null },
-      { path: "Restricted/Board/board-plan-final.md", fileId: "f-board", section: "s-board" },
+      { path: "Shared with me/Board/board-plan-final.md", fileId: "f-board", section: "s-board" },
       { path: "Library/Roadmap/notes.md", fileId: "f-notes", section: null },
       { path: "Library/Roadmap/q1.md", fileId: "f-q1", section: null },
       { path: "Library/Deep/Down/other.md", fileId: "f-other", section: null },
-      { path: "Private/todo.md", fileId: "f-todo", section: "p-me" },
+      { path: "My files/todo.md", fileId: "f-todo", section: "p-me" },
     ];
     window.__setDocs(docs);
   });
@@ -196,7 +196,7 @@ const menu = () =>
     "a document in a narrower section says which and who can open it",
     board?.[0]?.name === "board-plan-final" &&
       board[0].section === "Board" &&
-      board[0].who === "Only the people in “Board” can open it.",
+      board[0].who === "Only the people “Board” is shared with can open it.",
     JSON.stringify(board),
   );
   await page.keyboard.press("Tab");
@@ -206,7 +206,7 @@ const menu = () =>
     "picking it tells the author what everyone who reads the note will see",
     notices.length === 1 &&
       notices[0] ===
-        "Everyone who can read this note can see “board-plan-final” and its folder “Board”, but only the people in “Board” can open it.",
+        "Everyone who can read this note can see “board-plan-final”, but only the people it is shared with can open it.",
     JSON.stringify(notices),
   );
   // Report now: the editor hands its markdown on after a short pause.
@@ -214,9 +214,9 @@ const menu = () =>
   const now = await said("q1");
   step(
     "a picked link is written where its file is now, with its record, even in a narrower section",
-    now.md.includes("[launch-final](../GTM/launch-final.md) [board-plan-final](../../Restricted/Board/board-plan-final.md)") &&
-      now.records["../../Restricted/Board/board-plan-final.md"] === "f-board" &&
-      now.records["../../Restricted/Board/board-plan.md"] === "f-board",
+    now.md.includes("[launch-final](../GTM/launch-final.md) [board-plan-final](<../../Shared with me/Board/board-plan-final.md>)") &&
+      now.records["../../Shared with me/Board/board-plan-final.md"] === "f-board" &&
+      now.records["../../Shared with me/Board/board-plan.md"] === "f-board",
     now.md.split("\n").filter((l) => l.startsWith("Last")).join(" "),
   );
 

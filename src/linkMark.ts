@@ -48,6 +48,7 @@ import {
   type DocumentIndex,
   type NoteLink,
   type WorkspaceDocument,
+  type ShareNamed,
 } from "./docLinks";
 import type { LinkRecord } from "./metaFile";
 
@@ -76,6 +77,9 @@ export type LinkContext = {
   recent: string[];
   /** The workspace's name, for who can open a document. */
   workspace: string;
+  /** What is shared, by its section's id, where the app knows: what the
+   *  `@` list names when it says who can open a document. */
+  shares?: ReadonlyMap<string, ShareNamed>;
   /** Where the `@` list shows: under the caret, or above an on-screen
    *  keyboard (the iPhone). */
   placement: "caret" | "keyboard";

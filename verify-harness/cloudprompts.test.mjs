@@ -429,11 +429,14 @@ eq(
   ok(p.includes("You see what the person who gave you this sees."), "says whose eyes it has");
   ok(
     p.includes(
-      "Every path starts with its section: `Library/` is what everyone sees, `Private/` only them, `Restricted/<folder>/` that folder's people.",
+      "Every path starts with its section: `Library/` is what everyone sees, `My files/` is theirs, `Shared with me/` is what others shared with them.",
     ),
     "…that every path starts with its section, and what each one is",
   );
-  ok(p.includes("Put anything new under `Private/` unless they tell you where it goes."), "…and that new work is private unless told otherwise");
+  ok(
+    p.includes("Put anything new under `My files/` unless they tell you where it goes, and put a path with a space in quotes."),
+    "…that new work is its person's own unless told otherwise, and how a path with a space is typed",
+  );
   eq(lines.filter((l) => l.trim()).length, 6, "short: four paragraphs and two commands");
   ok(p.length < 950, "…and under 950 characters");
   ok(!/wrangler|Cloudflare|token/i.test(p), "nothing about how the domain is run");

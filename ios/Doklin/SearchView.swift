@@ -158,7 +158,7 @@ struct SearchView: View {
                 }
                 Menu {
                     Button("Anywhere") { model.scope = .all }
-                    ForEach(workspace.files.everyFolder().filter { workspace.audience(of: $0) != .nowhere }, id: \.self) { folder in
+                    ForEach(workspace.files.everyFolder().filter { workspace.place(of: $0) != .nowhere }, id: \.self) { folder in
                         Button(folder) { model.scope = .folder(folder) }
                     }
                 } label: {

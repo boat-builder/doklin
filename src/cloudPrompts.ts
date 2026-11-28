@@ -327,8 +327,8 @@ export type AgentLoginPromptInput = {
  *  chat, or read by whoever sets its machine up. Short on purpose: what
  *  Doklin is, the two commands, what the address in the second one is, that
  *  every path starts with its section, and where its work goes when nobody
- *  says: the agent sees everything its person sees, so "under Private/" is an
- *  instruction here and nowhere a setting.
+ *  says: the agent sees everything its person sees, so "under My files/" is
+ *  an instruction here and nowhere a setting.
  *  `doklin help agent` is the briefing; this only gets the agent that far.
  *  It carries the login code, which works once — the one prompt here with a
  *  secret in it besides setup's and recovery's. The iPhone hands out the same
@@ -343,7 +343,7 @@ The first command below installs \`doklin\` (skip it if it is already installed)
 ${CLI_INSTALL_LINE}
 ${i.line}
 
-You see what the person who gave you this sees. Every path starts with its section: \`Library/\` is what everyone sees, \`Private/\` only them, \`Restricted/<folder>/\` that folder's people. Put anything new under \`Private/\` unless they tell you where it goes.
+You see what the person who gave you this sees. Every path starts with its section: \`Library/\` is what everyone sees, \`My files/\` is theirs, \`Shared with me/\` is what others shared with them. Put anything new under \`My files/\` unless they tell you where it goes, and put a path with a space in quotes.
 
 Then run \`doklin help agent\` to see what you can do.`;
 }
@@ -365,7 +365,7 @@ export const AGENT_INSTRUCTIONS = `Add the Doklin note below to the instructions
 First ask me whether it should be global, for every project, or local, in this project's own file. If you cannot write the file yourself, tell me where to paste the note. Add the note as it is, and leave the rest of the file alone.
 
 ## Doklin
-Doklin is my knowledge base. Its documents are doks (one dok), named by paths that start with Library/, Private/ or Restricted/<folder>/. Use the \`doklin\` command for them (run \`doklin help agent\` once to learn it), and search Doklin when I mention a dok or ask about something it may hold.`;
+Doklin is my knowledge base. Its documents are doks (one dok), named by paths that start with Library/, "My files/" or "Shared with me/". Use the \`doklin\` command for them (run \`doklin help agent\` once to learn it), and search Doklin when I mention a dok or ask about something it may hold.`;
 
 export type TeardownPromptInput = { endpoint: string };
 

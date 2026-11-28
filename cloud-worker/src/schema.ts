@@ -42,6 +42,9 @@ type Step = {
   tables: readonly string[];
   /** Idempotent statements, run in order before the version is bumped. */
   sql: readonly string[];
+  /** Columns a table that holds something gains: each added only after the
+   *  runner has looked and found it missing, then `sql` runs. */
+  columns?: readonly { table: string; name: string; type: string }[];
 };
 
 /** Where a database starts once `meta` exists: Doklin's, and empty. */
@@ -99,7 +102,7 @@ const STEPS: readonly Step[] = [
     // Derived data, all of it: a wipe empties it and the next search fills
     // it again.
     //
-    // Spaces: a restricted folder, or one person's Private, is a small
+    // Spaces: a person's My files, or something shared, is a small
     // workspace of its own stored under `spaces/<id>/` in the bucket, with
     // its own people. The shared workspace is not a row here — it is
     // everything outside that prefix, and everybody's. `spaces.etag` is the
@@ -222,8 +225,8 @@ const STEPS: readonly Step[] = [
          held     TEXT NOT NULL                 -- {"<fid>": "<text hash>.<sidecar hash>"} for every row above
        )`,
       `CREATE TABLE IF NOT EXISTS spaces (
-         id         TEXT PRIMARY KEY,           -- s-xxxxxxxx a restricted folder; p-xxxxxxxx a Private, after its member's id
-         kind       TEXT NOT NULL,              -- 'restricted' | 'private'
+         id         TEXT PRIMARY KEY,           -- s-xxxxxxxx a share; p-xxxxxxxx a My files, after its member's id
+         kind       TEXT NOT NULL,              -- 'private' | 'folder' | 'document'
          name       TEXT NOT NULL,
          created_by TEXT NOT NULL,              -- m-xxxxxxxx
          created_at INTEGER NOT NULL,
@@ -323,6 +326,22 @@ const STEPS: readonly Step[] = [
       `CREATE INDEX IF NOT EXISTS tags_by_value ON tags(space_id, name, folded)`,
     ],
   },
+  {
+    // Sections are a tree (spaces.ts). `parent` is the section a share sits
+    // in — a My files, or another share — and NULL for a My files: whoever
+    // can open a section can open everything beneath it, so `space_members`
+    // holds only the people a share itself is shared with. `deleted_at` is
+    // when a share was deleted, on it and on every share beneath it: the
+    // rows and what they stored stay for thirty days (sweep.ts), so it can
+    // be restored whole.
+    to: 13,
+    tables: [],
+    columns: [
+      { table: "spaces", name: "parent", type: "TEXT" },
+      { table: "spaces", name: "deleted_at", type: "INTEGER" },
+    ],
+    sql: [`CREATE INDEX IF NOT EXISTS spaces_by_parent ON spaces(parent)`],
+  },
 ];
 
 /** What a fully migrated database reports. */
@@ -351,6 +370,12 @@ export async function ensureSchema(env: Env): Promise<number | null> {
     let version = await bootstrap(db);
     for (const step of STEPS) {
       if (version >= step.to) continue;
+      for (const column of step.columns ?? []) {
+        // The names come from STEPS, never from a request.
+        const { results } = await db.prepare(`PRAGMA table_info(${column.table})`).all<{ name: string }>();
+        if (results.some((c) => c.name === column.name)) continue;
+        await db.prepare(`ALTER TABLE ${column.table} ADD COLUMN ${column.name} ${column.type}`).run();
+      }
       for (const sql of step.sql) await db.prepare(sql).run();
       const bump = await db
         .prepare("UPDATE meta SET schema_version = ? WHERE key = 'schema' AND schema_version = ?")

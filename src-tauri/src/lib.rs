@@ -974,6 +974,12 @@ fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
         std::fs::create_dir(to)?;
         for entry in std::fs::read_dir(from)? {
             let entry = entry?;
+            // What says a folder is shared stays with that folder: a copy of
+            // it is an ordinary folder, shared with nobody. The iPhone's copy
+            // leaves it out too (`WorkspaceFiles.copy`): change both.
+            if entry.file_name() == doklin_engine::cloud::config::MARKER_DIR {
+                continue;
+            }
             copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
         }
         Ok(())
@@ -1843,9 +1849,11 @@ pub fn run() {
             cloud::cloud_set_root,
             cloud::cloud_set_tag,
             cloud::cloud_remove_tag,
-            cloud::cloud_space_create,
-            cloud::cloud_space_member,
-            cloud::cloud_space_delete,
+            cloud::cloud_layout_moved,
+            cloud::cloud_share,
+            cloud::cloud_share_member,
+            cloud::cloud_share_delete,
+            cloud::cloud_share_restore,
             cloud::cloud_pages,
             cloud::cloud_page_take_down,
             cloud::cloud_wipe,

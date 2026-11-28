@@ -169,7 +169,7 @@ final class TaggingTests: XCTestCase {
 
     override func setUp() async throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("doklin-tags-\(UUID().uuidString)")
-        for folder in ["Library", "Private", "Elsewhere"] {
+        for folder in ["Library", "My files", "Elsewhere"] {
             try FileManager.default.createDirectory(at: root.appendingPathComponent(folder), withIntermediateDirectories: true)
         }
         let device = Workspaces(remembered: UserDefaults(suiteName: "doklin-test-\(UUID().uuidString)")!)

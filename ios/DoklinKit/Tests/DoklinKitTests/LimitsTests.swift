@@ -86,7 +86,7 @@ final class LimitsTests: XCTestCase {
             "212 new documents appeared in Library. Sync them?",
             "those directly in Library"
         )
-        let three = [AddedFolder(path: "Library/a", count: 200), AddedFolder(path: "Library/b", count: 10), AddedFolder(path: "Private/c", count: 2)]
+        let three = [AddedFolder(path: "Library/a", count: 200), AddedFolder(path: "Library/b", count: 10), AddedFolder(path: "My files/c", count: 2)]
         XCTAssertEqual(LimitWords.adds(212, in: three, locale: english), "212 new documents appeared in 3 folders. Sync them?")
         // The event lists only the first few: more went elsewhere.
         XCTAssertEqual(LimitWords.adds(400, in: three, locale: english), "400 new documents appeared in more than 3 folders. Sync them?")

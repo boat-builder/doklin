@@ -9,7 +9,7 @@
 import { readWorkspace } from "./bucket";
 import type { Env } from "./env";
 import { MANIFEST_KEY, blobKey, syncs, validPath } from "./layout";
-import type { Manifest, ManifestFile, PublicEntry } from "./manifest";
+import type { Manifest, ManifestFile, Mount, PublicEntry } from "./manifest";
 import { spaceOf } from "./spaces";
 import { MANIFEST_VERSION } from "./version";
 import type { WorkspaceRecord } from "./wire";
@@ -89,6 +89,19 @@ function readManifest(v: unknown): Manifest {
   // Checked whole on the way in (manifest.ts): a list that reads at all is
   // the workspace's.
   if (Array.isArray(v.tags) && v.tags.every(isTag)) manifest.tags = v.tags;
+  if (isObject(v.mounts)) {
+    const mounts: Record<string, Mount> = {};
+    for (const [id, m] of Object.entries(v.mounts)) {
+      if (!isObject(m) || typeof m.dir !== "string" || (m.dir !== "" && !validPath(m.dir))) continue;
+      mounts[id] = {
+        dir: m.dir,
+        rev: num(m.rev, 1),
+        by: typeof m.by === "string" ? m.by : "",
+        ...(validPath(m.was) ? { was: m.was } : {}),
+      };
+    }
+    manifest.mounts = mounts;
+  }
   return manifest;
 }
 

@@ -69,6 +69,20 @@ pub struct FileHistory {
     pub versions: Vec<FileVersion>,
 }
 
+/// Read `history` on into what the same document was before it was shared:
+/// `earlier` is its versions in the section it was shared from, newest
+/// first. The moment of sharing is one row, not two.
+pub fn carry_on(history: &mut FileHistory, earlier: FileHistory) {
+    let marked = history.versions.iter().any(|v| v.current);
+    for mut version in earlier.versions {
+        if history.versions.last().is_some_and(|newer| newer.hash == version.hash) {
+            continue;
+        }
+        version.current = !marked && history.current_hash.as_deref() == Some(version.hash.as_str());
+        history.versions.push(version);
+    }
+}
+
 /* ---------- The retained set ---------- */
 
 /// One snapshot the walk may look inside: this Mac's, or one another device

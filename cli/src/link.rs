@@ -123,7 +123,7 @@ mod tests {
     fn a_path_or_another_address_is_no_link() {
         for text in [
             "Library/Projects/plan",
-            "Restricted/Deals/q3.md",
+            "Shared with me/Deals/q3.md",
             "https://doklin.cc/open",
             "https://doklin.cc/#d=notes.example.com&w=w-0a1b2c3d4e5f&f=f-9c8b7a6d5e4f",
             "https://notes.example.com/open#d=notes.example.com&w=w-0a1b2c3d4e5f&f=f-9c8b7a6d5e4f",

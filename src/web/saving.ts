@@ -26,11 +26,12 @@
 // of the worker when they are made, after anything waiting for what they
 // touch has gone. One of them is more than one request: a folder too large
 // for the worker to carry between sections at once, which it moves in parts
-// and this page asks for until none is left. A folder that becomes a
-// restricted one is that move, to the top of the folder just made for it.
+// and this page asks for until none is left. Sharing a folder is that move,
+// to the top of the share just made for it.
 
 import type { ManifestFile } from "../../cloud-worker/src/manifest";
-import type { CloudSpace } from "../cloud";
+import type { Space } from "../../cloud-worker/src/wire";
+import { documentStem, type CloudSpace } from "../cloud";
 import {
   SaveConflict,
   type DocumentText,
@@ -70,7 +71,13 @@ const DRAFTS_LOCK = "doklin:web:drafts";
 /** What is said of a place the browser version does not change: a section itself… */
 const IN_THE_APP = "That is done in the Doklin app, not in a browser.";
 /** …and of one that is in no section, which nothing syncs. */
-const IN_NO_SECTION = "That would be in no section: a browser keeps only what is in Library, Private or a restricted folder.";
+const IN_NO_SECTION = "That would be in no section: a browser keeps only what is in Library, in My files or shared.";
+/** What can be shared, said of anything else. */
+const NOT_SHAREABLE =
+  "Only a folder or a document in My files, or in a folder shared with you, can be shared. Nothing in Library is shared separately: it is everyone's.";
+/** What somebody a share is shared with is told when they would move it. */
+const NOT_YOURS_TO_MOVE =
+  "This is shared with you, and sits where its owner keeps it: only they move it. Copy it to My files to have one of your own.";
 
 /** Why something failed, as a sentence that ends. */
 const whyOf = (e: unknown): string => (e instanceof Error ? e.message : String(e)).replace(/[.]?$/, ".");
@@ -87,6 +94,10 @@ class Partway extends Error {
     this.name = "Partway";
   }
 }
+
+/** A share was made and only some of its files reached it: said as it is,
+ *  and the share stays. */
+class Carried extends Error {}
 
 /** Where something is: a section, and the path as that section stores it —
  *  "" the section's own top. */
@@ -139,6 +150,13 @@ type Draft = { text?: string; over?: Copy | null; meta?: string; metaOver?: Copy
 
 const basename = (path: string): string => path.slice(path.lastIndexOf("/") + 1);
 const dirname = (path: string): string => path.slice(0, path.lastIndexOf("/"));
+/** Whether a file is of the item at `item`: a folder's own path and what
+ *  is under it, or a document's files — `item` is then its path without an
+ *  extension. */
+const under =
+  (item: string) =>
+  (file: string): boolean =>
+    file === item || file.startsWith(`${item}/`) || documentStem(file) === item;
 const bytesOf = (body: unknown): number => new TextEncoder().encode(JSON.stringify(body)).length;
 const markOf = (rev: Rev): number => (rev as unknown as { mark: number }).mark;
 const isCopy = (c: unknown): c is Copy => {
@@ -169,6 +187,8 @@ export class Saving {
   private reloading = false;
   /** Hands over what the app still holds: the text typed since its last save. */
   private handOver: () => unknown = () => {};
+  /** A share's files are being carried into it: one carry at a time. */
+  private carrying = false;
 
   constructor(private readonly ws: Workspace) {
     ws.setOutbox(() => {
@@ -176,10 +196,37 @@ export class Saving {
       for (const doc of this.docs.values()) error ??= doc.error;
       return { waiting: this.docs.size > 0, error };
     });
-    // A restricted folder this person was taken out of, or that was deleted:
-    // what waited for a document in it has nowhere to go, as a Mac's copy of
-    // the folder is deleted with what was in it.
-    ws.onSpaceLeft((e) => this.forget((file) => file.startsWith(`${e.root}/${e.path}/`)));
+    // A share whose files were not all carried into it — the page closed, or
+    // the domain stopped answering — has the rest carried as soon as an
+    // answer shows some left: nobody has to ask twice.
+    ws.onTaken(() => void this.carryLeft());
+    // Something no longer shared with this person, or deleted: what waited
+    // for a document in it has nowhere to go, as a Mac's copy of it is
+    // deleted with what was in it.
+    ws.onSpaceLeft((e) => this.forget(under(`${e.root}/${e.path}`)));
+    // Something shared is somewhere else in the tree: what is held for its
+    // documents, and what waits for them, is theirs where they are now.
+    ws.onSpaceMoved((e) => {
+      for (const move of e.moves) {
+        const [from, to] = [`${e.root}/${move.from}`, `${e.root}/${move.to}`];
+        const there = (path: string) =>
+          path === from ? to : move.dir && path.startsWith(`${from}/`) ? `${to}${path.slice(from.length)}` : null;
+        for (const [path, doc] of [...this.docs]) {
+          const now = there(path);
+          if (now === null) continue;
+          this.docs.delete(path);
+          this.dropDraft(path);
+          this.docs.set(now, doc);
+        }
+        for (const [file, h] of [...this.held]) {
+          const now = there(file);
+          if (now === null) continue;
+          this.held.delete(file);
+          this.held.set(now, h);
+        }
+        for (const path of this.docs.keys()) if (there(path) === null && path.startsWith(`${to}`)) this.keepDraft(path);
+      }
+    });
     // A document with something waiting changed somewhere else: the two are
     // put together now, rather than when its turn to be sent comes.
     ws.onApplied(({ paths }) => {
@@ -521,7 +568,7 @@ export class Saving {
    *  first. Rejects when something could not be sent. */
   async flush(path?: string): Promise<void> {
     await this.handOver();
-    await this.land((waiting) => path === undefined || waiting === path || waiting.startsWith(`${path}/`));
+    await this.land(path === undefined ? () => true : under(path));
   }
 
   /** Let go of everything that waits, drafts and all: the sign-in has
@@ -732,20 +779,55 @@ export class Saving {
   }
 
   async move(from: string, to: string, kind: EntryKind): Promise<LeftBehind[]> {
-    const a = this.placed(from);
-    // Straight under Restricted is where the restricted folders are: a
-    // folder put there becomes one, of its own name, with nobody else in it
-    // yet — what the engine makes of a folder it finds there on a Mac
-    // (`reconcile_spaces`, engine/src/cloud/engine.rs).
-    const slot = this.ws.restrictedSlot(to);
-    if (slot) {
-      if (kind !== "dir") throw new Error("Only a folder goes straight under Restricted, where it becomes a restricted folder.");
-      if (slot.taken) throw new Error(`${slot.name} is already there.`);
-      await this.restrict(slot.name, [], from, to);
-      return [];
-    }
-    await this.carry(from, a, to, this.placed(to), kind);
+    // Something shared is still that share wherever it goes (`moveShare`).
+    const own = this.ws.shareAt(from, kind === "dir" ? "dir" : "file");
+    if (own) await this.moveShare(own, from, to, kind);
+    else await this.carry(from, this.placed(from), to, this.placed(to), kind);
     return [];
+  }
+
+  /**
+   * Rename or move something shared — what a Mac's engine makes of the same
+   * rename or move on its disk (`moved_share`, engine/src/cloud/engine.rs).
+   * A new name is its name for everyone. Moved inside the section it sits
+   * in, that section says where it sits now. Moved into another folder of
+   * its owner's, or another shared folder, it sits there from now on, and
+   * that folder's people open it too. Moved into Library it is everyone's:
+   * its files become Library's, and the share ends.
+   */
+  private async moveShare(space: Space, from: string, to: string, kind: EntryKind): Promise<void> {
+    await this.land(under(kind === "dir" ? from : documentStem(from)));
+    const renamed = basename(to) !== basename(from);
+    if (dirname(to) !== dirname(from)) {
+      const dest = this.ws.place(dirname(to));
+      if (!dest) throw new Error(IN_NO_SECTION);
+      if (space.parent === null) throw new Error(NOT_YOURS_TO_MOVE);
+      if (dest.space === "") return this.endShare(space, from, to, kind);
+      await this.ws.placeShare(space.id, dest.space, dest.path);
+    }
+    if (!renamed) return;
+    if (kind === "dir") return this.ws.renameShare(space.id, basename(to));
+    // A document's name is its files': renamed in its own section, where
+    // the tree shows it under the name it now has.
+    const a = this.placed(this.ws.itemAt(space.id) + basename(from).slice(basename(documentStem(from)).length));
+    await this.carry(from, a, to, { space: space.id, path: basename(to) }, kind, false);
+  }
+
+  /** A share moved into Library: everything in it is carried there, to
+   *  `to`, and the share — which then holds nothing — is erased. */
+  private async endShare(space: Space, from: string, to: string, kind: EntryKind): Promise<void> {
+    const dest = this.placed(to);
+    if (kind !== "dir") {
+      await this.carry(from, this.placed(from), to, dest, kind);
+    } else {
+      for (const top of this.ws.topOf(space.id)) {
+        const a = { space: space.id, path: top.name };
+        const b = { space: dest.space, path: `${dest.path}/${top.name}` };
+        await this.carry(`${from}/${top.name}`, a, `${to}/${top.name}`, b, top.dir ? "dir" : "file");
+      }
+      this.ws.movedFolder(from, to);
+    }
+    await this.ws.deleteShare(space.id, true);
   }
 
   /** Move what is at `from` (`a`) to `to` (`b`), once anything waiting for
@@ -753,9 +835,9 @@ export class Saving {
    *  worker carries between sections in one request is asked for until none
    *  of it is left (`remaining`, cloud-worker/src/changes.ts), and rejects
    *  with `Partway` when it stops after some of it went. */
-  private async carry(from: string, a: Place, to: string, b: Place, kind: EntryKind): Promise<void> {
+  private async carry(from: string, a: Place, to: string, b: Place, kind: EntryKind, empty = true): Promise<void> {
     const under = (path: string) => path === from || (kind === "dir" && path.startsWith(`${from}/`));
-    if (kind === "dir" && !this.ws.holdsFiles(from)) {
+    if (empty && kind === "dir" && !this.ws.holdsFiles(from)) {
       this.ws.movedFolder(from, to);
       return;
     }
@@ -789,44 +871,99 @@ export class Saving {
   }
 
   /**
-   * Make a restricted folder holding this person and `members`. With `from`,
-   * a folder that is there becomes it: what was in it is moved to the top
-   * of the new folder. `at`: where the folder is shown, for one made by
-   * putting a folder there.
+   * Share the folder or the document at `path` with `members`. It stays
+   * where it is in the tree: a share is made that sits there, and its files
+   * are carried out of the section around it into the share's own — what a
+   * Mac's engine does by syncing (`Engine::share`, engine/src/cloud/engine.rs).
+   * Something shared already gets those people as well. What is shared from
+   * inside a folder stays its own share, and sits in the new one.
    *
-   * The folder is made first and filled after, so a move that fails leaves
-   * something behind, and the sentence says what: nothing (the empty folder
-   * is taken back), or how many files reached it and where the rest still
-   * are — open to whoever could open them before.
+   * The share is made first and filled after, and until a file is carried
+   * it is where it was: open to the people who could open it before, and to
+   * nobody it is being shared with. A carry that stops says how far it got;
+   * sharing it again carries the rest.
    */
-  async restrict(name: string, members: string[], from: string | null, at?: string): Promise<CloudSpace> {
-    const a = from === null ? null : this.placed(from);
-    if (from !== null && (this.ws.stored(from) || !this.ws.exists(from))) {
-      throw new Error("That is not a folder of this workspace that can be restricted.");
+  async share(path: string, members: string[]): Promise<CloudSpace> {
+    const kind: EntryKind = this.ws.stored(path) ? "file" : "dir";
+    const item = kind === "dir" ? path : documentStem(path);
+    const told = (id: string) => {
+      const space = this.ws.status().spaces.find((s) => s.id === id);
+      if (!space) throw new Error("It is shared, and will show as shared in a moment.");
+      return space;
+    };
+    const own = this.ws.shareAt(path, kind);
+    if (own) {
+      for (const member of members) await this.ws.shareMember(own.id, member, true);
+      return told(own.id);
     }
-    const made = await this.ws.makeSpace(name, members, at);
-    if (from === null || a === null) return made;
+    if (!this.ws.exists(path)) throw new Error(NOT_SHAREABLE);
+    const a = this.placed(path);
+    const around = this.ws.spaceOf(a.space);
+    if (!around || around.kind === "document") throw new Error(NOT_SHAREABLE);
+    await this.land(under(item));
+    // What is shared from inside it, and the folder of it each is in.
+    const inside = (kind === "dir" ? this.ws.sharesUnder(path) : []).flatMap((id) => {
+      const at = this.ws.itemAt(id);
+      return at === null ? [] : [{ id, dir: dirname(at).slice(path.length + 1) }];
+    });
+    const name = basename(item);
+    const was = kind === "dir" ? a.path : a.path.slice(0, a.path.length - (basename(path).length - name.length));
+    this.carrying = true;
+    let made: Space;
     try {
-      await this.carry(from, a, `${this.ws.root}/${made.path}`, { space: made.id, path: "" }, "dir");
+      made = await this.ws.makeShare(kind === "dir" ? "folder" : "document", name, a.space, was, members);
     } catch (e) {
-      if (e instanceof Partway) {
-        throw new Error(
-          `“${made.name}” was made, but only ${e.moved} of ${e.moved + e.left} files reached it: ${e.why} The rest are still in “${basename(from)}”, open to whoever could open them before. Move them into “${made.name}” to finish.`,
-        );
-      }
+      this.carrying = false;
+      throw e;
+    }
+    try {
+      await this.fill(made.id, kind, path, { space: a.space, path: a.path });
+    } catch (e) {
+      if (e instanceof Carried) throw e;
       // Nothing went into it: it is taken back, so asking again does not
       // make a second one beside it.
-      const takenBack = await this.ws.deleteSpace(made.id, true).then(
+      const takenBack = await this.ws.deleteShare(made.id, true).then(
         () => true,
         () => false,
       );
-      throw takenBack ? e : new Error(`“${made.name}” was made, but nothing could be moved into it: ${whyOf(e)}`);
+      throw takenBack
+        ? e
+        : new Error(`“${name}” is shared, but nothing could be moved into it yet: ${whyOf(e)} It is carried as soon as the domain answers.`);
+    } finally {
+      this.carrying = false;
     }
-    return made;
+    for (const child of inside) await this.ws.placeShare(child.id, made.id, child.dir);
+    return told(made.id);
+  }
+
+  /** Carry what earlier carries left behind (`Workspace.leftovers`). One
+   *  that fails waits for the next answer of the domain's. */
+  private async carryLeft(): Promise<void> {
+    if (this.carrying) return;
+    this.carrying = true;
+    try {
+      for (const left of this.ws.leftovers()) await this.fill(left.id, left.dir ? "dir" : "file", left.item, left.from);
+    } catch {
+      // Still where they were, open to whoever could open them before.
+    } finally {
+      this.carrying = false;
+    }
+  }
+
+  /** Carry the files of what was shared at `path` out of the section it
+   *  sits in (`from`, as that section stores it) into the share `id`. */
+  private async fill(id: string, kind: EntryKind, path: string, from: Place): Promise<void> {
+    try {
+      await this.carry(path, from, path, { space: id, path: kind === "dir" ? "" : basename(from.path) }, kind, false);
+    } catch (e) {
+      if (!(e instanceof Partway)) throw e;
+      throw new Carried(
+        `“${basename(kind === "dir" ? path : documentStem(path))}” is shared, but only ${e.moved} of ${e.moved + e.left} files reached it: ${e.why} The rest are where they were, open only to whoever could open them before, and are carried as soon as the domain answers.`,
+      );
+    }
   }
 
   async copy(from: string, to: string, kind: EntryKind): Promise<LeftBehind[]> {
-    const a = this.placed(from);
     const b = this.placed(to);
     if (kind === "dir" && !this.ws.holdsFiles(from)) {
       this.ws.makeFolder(to);
@@ -834,7 +971,18 @@ export class Saving {
     }
     // The copy is of the document as it is here, typed text and all.
     await this.land((path) => path === from || (kind === "dir" && path.startsWith(`${from}/`)));
-    await ask("POST", "/api/web/copy", { body: { from: a, to: b, kind: kind === "dir" ? "folder" : "document" } });
+    const copy = (a: Place, to: Place, kind: EntryKind) =>
+      ask("POST", "/api/web/copy", { body: { from: a, to, kind: kind === "dir" ? "folder" : "document" } });
+    const own = kind === "dir" ? this.ws.shareAt(from, "dir") : null;
+    if (own) {
+      // A shared folder is a section of its own, copied by what is in it:
+      // the copy is an ordinary folder, shared with nobody.
+      for (const top of this.ws.topOf(own.id)) {
+        await copy({ space: own.id, path: top.name }, { space: b.space, path: `${b.path}/${top.name}` }, top.dir ? "dir" : "file");
+      }
+    } else {
+      await copy(this.placed(from), b, kind);
+    }
     await this.ws.reread([b.space]);
     return [];
   }

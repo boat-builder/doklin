@@ -85,8 +85,8 @@
   "relativePath": [
     {
       "from": "Library/Roadmap/q1.md",
-      "to": "Restricted/Board/board-plan.md",
-      "path": "../../Restricted/Board/board-plan.md"
+      "to": "Shared with me/Board/board-plan.md",
+      "path": "../../Shared with me/Board/board-plan.md"
     },
     {
       "from": "Library/Roadmap/q1.md",
@@ -109,7 +109,7 @@
       "path": "Roadmap/x.md"
     },
     {
-      "from": "Private/a/b/c.md",
+      "from": "My files/a/b/c.md",
       "to": "Library/x.md",
       "path": "../../../Library/x.md"
     }
@@ -131,17 +131,17 @@
       "section": null
     },
     {
-      "path": "Private/todo.md",
+      "path": "My files/todo.md",
       "fileId": "f-todo",
       "section": "p-me"
     },
     {
-      "path": "Restricted/Board/board-plan.md",
+      "path": "Shared with me/Board/board-plan.md",
       "fileId": "f-board",
       "section": "s-board"
     },
     {
-      "path": "Restricted/Board/moving.md",
+      "path": "Shared with me/Board/moving.md",
       "fileId": "f-moving",
       "section": "s-board"
     },
@@ -169,7 +169,7 @@
           "file": "f-moving"
         },
         {
-          "id": "../../Restricted/Board/board-plan.md",
+          "id": "../../Shared with me/Board/board-plan.md",
           "file": "f-board"
         }
       ],
@@ -196,7 +196,7 @@
           "file": "f-moving"
         },
         {
-          "id": "../../Restricted/Board/board-plan.md",
+          "id": "../../Shared with me/Board/board-plan.md",
           "file": "f-board"
         }
       ],
@@ -223,7 +223,7 @@
           "file": "f-moving"
         },
         {
-          "id": "../../Restricted/Board/board-plan.md",
+          "id": "../../Shared with me/Board/board-plan.md",
           "file": "f-board"
         }
       ],
@@ -250,7 +250,7 @@
           "file": "f-moving"
         },
         {
-          "id": "../../Restricted/Board/board-plan.md",
+          "id": "../../Shared with me/Board/board-plan.md",
           "file": "f-board"
         }
       ],
@@ -261,7 +261,7 @@
       "shown": "moving"
     },
     {
-      "about": "into a restricted folder, by its record",
+      "about": "into something shared, by its record",
       "note": "Library/Roadmap/q1.md",
       "records": [
         {
@@ -277,14 +277,14 @@
           "file": "f-moving"
         },
         {
-          "id": "../../Restricted/Board/board-plan.md",
+          "id": "../../Shared with me/Board/board-plan.md",
           "file": "f-board"
         }
       ],
-      "href": "../../Restricted/Board/board-plan.md",
+      "href": "../../Shared with me/Board/board-plan.md",
       "words": "board-plan",
       "by": "record",
-      "opens": "Restricted/Board/board-plan.md",
+      "opens": "Shared with me/Board/board-plan.md",
       "shown": "board-plan"
     },
     {
@@ -304,7 +304,7 @@
           "file": "f-moving"
         },
         {
-          "id": "../../Restricted/Board/board-plan.md",
+          "id": "../../Shared with me/Board/board-plan.md",
           "file": "f-board"
         }
       ],
@@ -331,7 +331,7 @@
           "file": "f-moving"
         },
         {
-          "id": "../../Restricted/Board/board-plan.md",
+          "id": "../../Shared with me/Board/board-plan.md",
           "file": "f-board"
         }
       ],
@@ -358,7 +358,7 @@
           "file": "f-moving"
         },
         {
-          "id": "../../Restricted/Board/board-plan.md",
+          "id": "../../Shared with me/Board/board-plan.md",
           "file": "f-board"
         }
       ],
@@ -385,7 +385,7 @@
           "file": "f-moving"
         },
         {
-          "id": "../../Restricted/Board/board-plan.md",
+          "id": "../../Shared with me/Board/board-plan.md",
           "file": "f-board"
         }
       ],

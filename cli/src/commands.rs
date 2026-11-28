@@ -1,17 +1,19 @@
-//! What each command does: one or two requests to the document API, and
-//! then either the worker's answer as JSON or a sentence about it.
+//! What each command does: one or two requests to the document API — more
+//! where an answer comes a page of sections at a time (`Pages`) — and then
+//! either the worker's answer as JSON or a sentence about it.
 //!
 //! Nothing here knows Doklin's rules — which files make a document, where a
 //! comment's marker goes, what a public page is. Those run in the worker, so
 //! that this program stays a thin way of asking.
 
+use std::cell::Cell;
 use std::io::{IsTerminal, Read, Write};
 
 use serde_json::{json, Value};
 
 use crate::args::Args;
 use crate::creds::{self, Workspace};
-use crate::http::{too_old, Body, Client, Reply};
+use crate::http::{not_a_worker, too_old, Body, Client, Reply};
 use crate::link::PageLink;
 use crate::text::{ago, list, plural, size, stamp, version_word};
 use crate::{usage, Failure};
@@ -26,7 +28,8 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    /// The worker's answer as it came, or the sentence a person reads.
+    /// The worker's answer — as it came, or its pages as one (`Pages`) — or
+    /// the sentence a person reads.
     pub(crate) fn answer(&self, v: &Value, words: impl FnOnce() -> String) {
         if self.json {
             println!("{}", v);
@@ -160,7 +163,7 @@ pub fn login(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let shown = json!({ "workspace": v["workspace"], "agent": v["agent"], "scopes": v["scopes"], "endpoint": endpoint });
     ctx.answer(&shown, || {
         format!(
-            "Logged in to {} ({}) as {}. It may {}.\nEvery path starts with its section: Library/, Private/ or Restricted/<folder>/.\nPut new work under Private/ unless you are told where it goes.\nRun `doklin help agent` for what to do next.",
+            "Logged in to {} ({}) as {}. It may {}.\nEvery path starts with its section: Library/, My files/ or Shared with me/.\nPut new work under My files/ unless you are told where it goes, and put a path with a space in quotes.\nRun `doklin help agent` for what to do next.",
             text(&v["workspace"], "name"),
             domain,
             text(&v["agent"], "name"),
@@ -307,19 +310,126 @@ fn tags_of(row: &Value) -> Option<String> {
 const INDEX_ROUNDS: usize = 200;
 
 /// A GET that the domain answers `202` while its `index` catches up, asked
-/// again until it answers — said once, on a terminal.
-fn indexed(s: &Session, ctx: &Ctx, route: &str, query: &[(&str, &str)], index: &str) -> Result<Value, Failure> {
-    for round in 0..INDEX_ROUNDS {
+/// again until it answers — said once a command, on a terminal: `said` is
+/// whether it has been.
+fn indexed(s: &Session, ctx: &Ctx, route: &str, query: &[(&str, &str)], index: &str, said: &Cell<bool>) -> Result<Value, Failure> {
+    for _ in 0..INDEX_ROUNDS {
         let reply = s.client.send("GET", route, query, &[], None)?;
         let v = reply.json()?;
         if reply.status != 202 {
             return Ok(v);
         }
-        if round == 0 && !ctx.json {
+        if !said.replace(true) && !ctx.json {
             eprintln!("Reading the workspace into its {} — this happens after documents change…", index);
         }
     }
     Err(Failure::other(format!("the {} is still being built — try again in a moment", index)))
+}
+
+/* ---------- Answers that come a page of sections at a time ---------- */
+
+/// What the pages of one route's answer add up to.
+///
+/// A listing or a search across sections opens as many as one request can —
+/// and everything shared is a section of its own — and answers `next` when
+/// there are more: it is asked again with `after` set to that, until an
+/// answer has none (`cursorOf`, cloud-worker/src/agentCall.ts). The pages are
+/// then one answer: each list joined and put in one order, each count added
+/// up, a flag any page raised kept, and the rest as the first page said it.
+/// An answer that came whole is left exactly as it came.
+struct Pages {
+    /// Each list, and what its rows are in order by — "" for a list of names.
+    lists: &'static [(&'static str, &'static str)],
+    counts: &'static [&'static str],
+    flags: &'static [&'static str],
+}
+
+/// `GET tree`: folders by name, documents by path.
+const LISTING: Pages = Pages { lists: &[("folders", ""), ("documents", "path")], counts: &[], flags: &["tagsBehind"] };
+/// `GET search`: documents by path, the named ones first.
+const FOUND: Pages = Pages { lists: &[("results", "path"), ("notSearched", "")], counts: &["total"], flags: &["truncated"] };
+/// `GET links`: the documents that link to one. What it links to is the same on every page.
+const LINKED: Pages = Pages { lists: &[("to", "path")], counts: &[], flags: &[] };
+/// `GET pages`: by address.
+const PUBLIC: Pages = Pages { lists: &[("pages", "slug")], counts: &[], flags: &[] };
+
+/// The cursor an answer carries when there are sections it did not reach,
+/// taken out of it: the answer a command gives has none.
+fn next_of(answer: &mut Value) -> Option<Value> {
+    answer.as_object_mut()?.remove("next")
+}
+
+impl Pages {
+    /// The whole answer to `query`: `ask` sends it, and is asked again for
+    /// each page after the first.
+    fn all(&self, query: &[(&str, &str)], ask: impl Fn(&[(&str, &str)]) -> Result<Value, Failure>) -> Result<Value, Failure> {
+        let mut whole = ask(query)?;
+        let mut next = next_of(&mut whole);
+        let mut after = 0;
+        let paged = next.is_some();
+        while let Some(cursor) = next {
+            // A cursor that does not move on would be asked for ever.
+            after = cursor.as_u64().filter(|n| *n > after).ok_or_else(not_a_worker)?;
+            let from = after.to_string();
+            let mut asked = query.to_vec();
+            asked.push(("after", from.as_str()));
+            let mut page = ask(&asked)?;
+            next = next_of(&mut page);
+            self.join(&mut whole, page);
+        }
+        if paged {
+            self.order(&mut whole);
+        }
+        Ok(whole)
+    }
+
+    /// Add a later page to the answer so far.
+    fn join(&self, whole: &mut Value, page: Value) {
+        let (Some(whole), Value::Object(mut page)) = (whole.as_object_mut(), page) else { return };
+        for (list, _) in self.lists {
+            let Some(Value::Array(more)) = page.remove(*list) else { continue };
+            if let Value::Array(rows) = whole.entry(*list).or_insert_with(|| json!([])) {
+                rows.extend(more);
+            }
+        }
+        for count in self.counts {
+            let sum = whole.get(*count).and_then(Value::as_u64).unwrap_or(0) + page.get(*count).and_then(Value::as_u64).unwrap_or(0);
+            whole.insert(count.to_string(), json!(sum));
+        }
+        for flag in self.flags {
+            if let Some(raised) = page.remove(*flag) {
+                whole.insert(flag.to_string(), raised);
+            }
+        }
+    }
+
+    /// One order for the joined lists, as the domain orders a page: whatever
+    /// the case, a search's named documents first — and a folder that two
+    /// pages named, once.
+    fn order(&self, whole: &mut Value) {
+        for (list, by) in self.lists {
+            let Some(Value::Array(rows)) = whole.get_mut(*list) else { continue };
+            let key = |row: &Value| {
+                let name = if by.is_empty() { row.as_str() } else { row.get(*by).and_then(Value::as_str) };
+                (row.get("inName").is_none(), name.unwrap_or("").to_lowercase())
+            };
+            rows.sort_by_cached_key(key);
+            if by.is_empty() {
+                rows.dedup_by_key(|row| key(row));
+            }
+        }
+    }
+}
+
+/// A listing's line for a document: its versions and tags — or, for one
+/// shared right there, only that it is: a listing that is not deep does not
+/// open what is shared, so `--deep` and `info` are what show its versions.
+fn row_words(doc: &Value) -> String {
+    if doc.get("shared").is_some() {
+        return format!("{}  (shared)", text(doc, "path"));
+    }
+    let tags = tags_of(doc).map(|t| format!("  {}", t)).unwrap_or_default();
+    format!("{}  {}{}", text(doc, "path"), versions_of(doc), tags)
 }
 
 pub fn ls(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
@@ -332,11 +442,14 @@ pub fn ls(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         query.push(("deep", "1"));
     }
     query.extend(wheres.iter().map(|w| ("where", w.as_str())));
-    let v = if wheres.is_empty() {
-        s.client.send("GET", "tree", &query, &[], None)?.json()?
-    } else {
-        indexed(&s, ctx, "tree", &query, "search index")?
-    };
+    let said = Cell::new(false);
+    let v = LISTING.all(&query, |q| {
+        if wheres.is_empty() {
+            s.client.send("GET", "tree", q, &[], None)?.json()
+        } else {
+            indexed(&s, ctx, "tree", q, "search index", &said)
+        }
+    })?;
     // A worker from before tags lists everything, and says nothing of them.
     if !wheres.is_empty() && v.get("where").is_none() {
         return Err(too_old(s.ws.domain()));
@@ -347,12 +460,7 @@ pub fn ls(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
             lines.push(format!("{}/", folder));
         }
         for doc in v["documents"].as_array().into_iter().flatten() {
-            let tags = tags_of(doc).map(|t| format!("  {}", t)).unwrap_or_default();
-            lines.push(format!("{}  {}{}", text(doc, "path"), versions_of(doc), tags));
-        }
-        let unlisted = strings(&v["notListed"]);
-        if !unlisted.is_empty() {
-            lines.push(format!("Not listed here — list each on its own: {}.", unlisted.join(", ")));
+            lines.push(row_words(doc));
         }
         if lines.is_empty() {
             lines.push(if wheres.is_empty() { "Nothing here yet.".to_string() } else { format!("No document here has {}.", where_words(&v)) });
@@ -610,23 +718,30 @@ pub fn mv(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     let s = session(ctx)?;
     let body = json!({ "from": from, "to": to, "dryRun": ctx.dry_run });
     let v = s.client.send("POST", "move", &[], &[], Some(Body::Json(&body)))?.json()?;
-    ctx.answer(&v, || {
-        let kind = if text(&v, "kind") == "folder" { "the folder" } else { "the document" };
-        let mut out = format!(
-            "{} {} {} to {} ({}).",
-            if ctx.dry_run { "Would move" } else { "Moved" },
-            kind,
-            text(&v, "from"),
-            text(&v, "to"),
-            plural(v["files"].as_u64().unwrap_or(0) as usize, "file", "files")
-        );
-        let unpublished = strings(&v["unpublished"]);
-        if !unpublished.is_empty() {
-            out.push_str(&format!(" It is no longer public at {} — publish it again.", list(&unpublished)));
-        }
-        out
-    });
+    ctx.answer(&v, || moved_words(&v, ctx.dry_run));
     Ok(())
+}
+
+/// The sentence for what a move did, from the worker's answer. Something
+/// shared is said to be: it goes on being shared with the same people, and
+/// its files stay in the section that is its own, so none are counted.
+fn moved_words(v: &Value, dry: bool) -> String {
+    let kind = if text(v, "kind") == "folder" { "folder" } else { "document" };
+    let what = format!("the {}{} {}", if v.get("shared").is_some() { "shared " } else { "" }, kind, text(v, "from"));
+    // Asked to move it to where it is.
+    if !dry && v["moved"].as_bool() == Some(false) {
+        return format!("{} is already there — nothing was moved.", capitalize(&what));
+    }
+    let files = match v.get("files").and_then(Value::as_u64) {
+        Some(n) => format!(" ({})", plural(n as usize, "file", "files")),
+        None => String::new(),
+    };
+    let mut out = format!("{} {} to {}{}.", if dry { "Would move" } else { "Moved" }, what, text(v, "to"), files);
+    let unpublished = strings(&v["unpublished"]);
+    if !unpublished.is_empty() {
+        out.push_str(&format!(" It is no longer public at {} — publish it again.", list(&unpublished)));
+    }
+    out
 }
 
 pub fn rm(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
@@ -736,18 +851,12 @@ pub fn unpublish(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
 pub fn published(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     args.at_most(0)?;
     let s = session(ctx)?;
-    let v = s.client.send("GET", "pages", &[], &[], None)?.json()?;
+    let v = PUBLIC.all(&[], |q| s.client.send("GET", "pages", q, &[], None)?.json())?;
     ctx.answer(&v, || {
         let pages = v["pages"].as_array().cloned().unwrap_or_default();
         if pages.is_empty() {
             return "Nothing this agent can see is public.".to_string();
         }
-        let unlisted = strings(&v["notListed"]);
-        let rest = if unlisted.is_empty() {
-            String::new()
-        } else {
-            format!("\nNot listed: what is public from {}.", list(&unlisted))
-        };
         pages
             .iter()
             .map(|p| {
@@ -770,7 +879,6 @@ pub fn published(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
             })
             .collect::<Vec<_>>()
             .join("\n")
-            + &rest
     });
     Ok(())
 }
@@ -903,7 +1011,8 @@ pub fn links(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
     if args.has("to") {
         query.push(("to", "1"));
     }
-    let v = indexed(&s, ctx, "links", &query, "index of links")?;
+    let said = Cell::new(false);
+    let v = LINKED.all(&query, |q| indexed(&s, ctx, "links", q, "index of links", &said))?;
 
     ctx.answer(&v, || {
         let doc = text(&v, "path");
@@ -927,10 +1036,6 @@ pub fn links(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
                 for l in to {
                     lines.push(format!("  {}", text(l, "path")));
                 }
-            }
-            let unsearched = strings(&v["sectionsNotSearched"]);
-            if !unsearched.is_empty() {
-                lines.push(format!("Not looked in: {}.", unsearched.join(", ")));
             }
         }
         lines.join("\n")
@@ -960,7 +1065,8 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         query.push(("limit", limit));
     }
     query.extend(wheres.iter().map(|w| ("where", w.as_str())));
-    let v = indexed(&s, ctx, "search", &query, "search index")?;
+    let said = Cell::new(false);
+    let v = FOUND.all(&query, |q| indexed(&s, ctx, "search", q, "search index", &said))?;
     // A worker from before tags searches the text alone, and says nothing of them.
     if !wheres.is_empty() && v.get("where").is_none() {
         return Err(too_old(s.ws.domain()));
@@ -997,8 +1103,9 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         } else if total == 0 {
             format!("Nothing has \"{}\" in its name or its text.", query_text)
         } else if v.get("truncated").is_some() {
+            // Not "the first": where much is shared, these are the first of each request's.
             format!(
-                "{} match; these are the first {} — narrow it with --in <folder>, or raise --limit.",
+                "{} match; {} of them are shown — narrow it with --in <folder>, or raise --limit.",
                 plural(total, "document", "documents"),
                 results.len()
             )
@@ -1008,10 +1115,6 @@ pub fn search(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         let skipped = strings(&v["notSearched"]);
         if !skipped.is_empty() {
             lines.push(format!("Too large to search: {}.", skipped.join(", ")));
-        }
-        let unsearched = strings(&v["sectionsNotSearched"]);
-        if !unsearched.is_empty() {
-            lines.push(format!("Not searched — search each with --in: {}.", unsearched.join(", ")));
         }
         lines.join("\n")
     });
@@ -1114,4 +1217,148 @@ pub fn tag(args: &Args, ctx: &Ctx) -> Result<(), Failure> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    use super::*;
+
+    /// A domain that answers one page after another, and keeps what it was asked.
+    struct Scripted {
+        pages: RefCell<VecDeque<Value>>,
+        asked: RefCell<Vec<String>>,
+    }
+
+    impl Scripted {
+        fn new(pages: &[Value]) -> Scripted {
+            Scripted { pages: RefCell::new(pages.iter().cloned().collect()), asked: RefCell::new(Vec::new()) }
+        }
+
+        fn ask(&self, query: &[(&str, &str)]) -> Result<Value, Failure> {
+            self.asked.borrow_mut().push(query.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join("&"));
+            Ok(self.pages.borrow_mut().pop_front().expect("asked for a page the domain never promised"))
+        }
+    }
+
+    #[test]
+    fn an_answer_that_came_whole_is_left_as_it_came() {
+        let whole = json!({ "dir": "Library", "folders": ["Library/b", "Library/A"], "documents": [{ "path": "Library/z" }, { "path": "Library/a" }] });
+        let domain = Scripted::new(std::slice::from_ref(&whole));
+        assert_eq!(LISTING.all(&[("dir", "Library")], |q| domain.ask(q)).unwrap(), whole);
+        assert_eq!(*domain.asked.borrow(), ["dir=Library"]);
+    }
+
+    #[test]
+    fn a_listing_is_asked_for_page_after_page_and_joined_into_one() {
+        let domain = Scripted::new(&[
+            json!({
+                "dir": "",
+                "folders": ["Library", "My files", "Shared with me", "My files/work"],
+                "documents": [{ "path": "Library/Home", "md": { "rev": 1 } }, { "path": "My files/work/plan", "md": { "rev": 2 } }],
+                "next": 9
+            }),
+            json!({ "dir": "", "folders": ["Library", "My files", "Shared with me"], "documents": [{ "path": "My files/Budget", "md": { "rev": 1 } }], "tagsBehind": true, "next": 18 }),
+            json!({ "dir": "", "folders": ["library", "Shared with me/Deals"], "documents": [{ "path": "Shared with me/Deals/q3", "html": { "rev": 4 } }] }),
+        ]);
+        let v = LISTING.all(&[("dir", ""), ("deep", "1")], |q| domain.ask(q)).unwrap();
+        assert_eq!(*domain.asked.borrow(), ["dir=&deep=1", "dir=&deep=1&after=9", "dir=&deep=1&after=18"]);
+        assert_eq!(
+            v,
+            json!({
+                "dir": "",
+                // Each once, however many pages named it, spelled as the first did.
+                "folders": ["Library", "My files", "My files/work", "Shared with me", "Shared with me/Deals"],
+                "documents": [
+                    { "path": "Library/Home", "md": { "rev": 1 } },
+                    { "path": "My files/Budget", "md": { "rev": 1 } },
+                    { "path": "My files/work/plan", "md": { "rev": 2 } },
+                    { "path": "Shared with me/Deals/q3", "html": { "rev": 4 } }
+                ],
+                "tagsBehind": true
+            }),
+            "one listing, in one order, with no cursor left in it"
+        );
+    }
+
+    #[test]
+    fn a_search_adds_its_pages_up_and_keeps_the_named_documents_first() {
+        let hit = |path: &str| json!({ "path": path, "version": "md", "matches": [{ "line": 1, "text": "boat" }] });
+        let named = json!({ "path": "Shared with me/Boat", "version": "md", "matches": [], "inName": true });
+        let domain = Scripted::new(&[
+            json!({ "query": "boat", "dir": "", "where": [{ "name": "status", "value": null }], "results": [hit("My files/b"), hit("Library/a")], "total": 7, "truncated": true, "next": 9 }),
+            json!({ "query": "boat", "dir": "", "where": [{ "name": "status", "value": null }], "results": [named.clone(), hit("My files/a")], "total": 2, "notSearched": ["Shared with me/Atlas"] }),
+        ]);
+        let v = FOUND.all(&[("q", "boat"), ("limit", "2")], |q| domain.ask(q)).unwrap();
+        assert_eq!(*domain.asked.borrow(), ["q=boat&limit=2", "q=boat&limit=2&after=9"]);
+        assert_eq!(
+            v,
+            json!({
+                "query": "boat",
+                "dir": "",
+                "where": [{ "name": "status", "value": null }],
+                "results": [named, hit("Library/a"), hit("My files/a"), hit("My files/b")],
+                "total": 9,
+                "truncated": true,
+                "notSearched": ["Shared with me/Atlas"]
+            })
+        );
+    }
+
+    #[test]
+    fn what_a_document_links_to_is_said_once_and_its_linkers_and_the_pages_are_joined() {
+        let from = json!([{ "words": "c", "path": "Library/c" }]);
+        let domain = Scripted::new(&[
+            json!({ "path": "Library/a", "to": [{ "path": "My files/z" }], "from": from, "next": 9 }),
+            json!({ "path": "Library/a", "to": [{ "path": "Library/b" }], "from": from }),
+        ]);
+        let v = LINKED.all(&[("path", "Library/a")], |q| domain.ask(q)).unwrap();
+        assert_eq!(v, json!({ "path": "Library/a", "to": [{ "path": "Library/b" }, { "path": "My files/z" }], "from": from }));
+
+        let page = |slug: &str| json!({ "slug": slug, "url": format!("https://notes.example.com/{}", slug), "kind": "document", "path": "Library/Zed" });
+        let domain = Scripted::new(&[json!({ "pages": [page("plan")], "next": 9 }), json!({ "pages": [page("home")] })]);
+        let v = PUBLIC.all(&[], |q| domain.ask(q)).unwrap();
+        assert_eq!(*domain.asked.borrow(), ["", "after=9"]);
+        assert_eq!(v, json!({ "pages": [page("home"), page("plan")] }), "by address, as the domain orders a page");
+    }
+
+    #[test]
+    fn a_cursor_that_leads_nowhere_is_refused_rather_than_followed_for_ever() {
+        for stuck in [json!(0), json!("9"), json!(-3), json!(null)] {
+            let domain = Scripted::new(&[json!({ "pages": [], "next": stuck })]);
+            let failure = PUBLIC.all(&[], |q| domain.ask(q)).unwrap_err();
+            assert_eq!((failure.exit, failure.message.as_str()), (1, "the domain's answer was not what a Doklin worker sends"), "{}", stuck);
+            assert_eq!(domain.asked.borrow().len(), 1, "nothing more was asked");
+        }
+        // The same cursor twice is as stuck as none.
+        let domain = Scripted::new(&[json!({ "pages": [], "next": 9 }), json!({ "pages": [], "next": 9 })]);
+        assert_eq!(PUBLIC.all(&[], |q| domain.ask(q)).unwrap_err().exit, 1);
+        assert_eq!(*domain.asked.borrow(), ["", "after=9"]);
+    }
+
+    #[test]
+    fn a_shared_document_is_listed_as_shared_and_any_other_with_its_versions_and_tags() {
+        assert_eq!(row_words(&json!({ "path": "Shared with me/Forecast", "shared": true })), "Shared with me/Forecast  (shared)");
+        let row = json!({ "path": "My files/plan", "md": { "rev": 1 }, "html": { "rev": 1 }, "htmlBehind": true, "tags": [{ "name": "status", "value": "Doing", "known": true }] });
+        assert_eq!(row_words(&row), "My files/plan  [md · html, html is behind]  status: Doing");
+    }
+
+    #[test]
+    fn a_move_says_what_moved_and_that_something_shared_is() {
+        let plain = json!({ "kind": "document", "from": "Library/a", "to": "My files/a", "files": 3, "unpublished": ["https://notes.example.com/a"] });
+        assert_eq!(
+            moved_words(&plain, false),
+            "Moved the document Library/a to My files/a (3 files). It is no longer public at https://notes.example.com/a — publish it again."
+        );
+        let folder = json!({ "kind": "folder", "from": "Library/old", "to": "Library/new", "files": 1, "moved": false });
+        assert_eq!(moved_words(&folder, true), "Would move the folder Library/old to Library/new (1 file).");
+        let shared = json!({ "kind": "folder", "from": "My files/Deals", "to": "My files/attic/Deals 2026", "shared": true });
+        assert_eq!(moved_words(&shared, false), "Moved the shared folder My files/Deals to My files/attic/Deals 2026.");
+        let dry = json!({ "kind": "document", "from": "Shared with me/Forecast", "to": "Shared with me/Outlook", "shared": true, "moved": false });
+        assert_eq!(moved_words(&dry, true), "Would move the shared document Shared with me/Forecast to Shared with me/Outlook.");
+        let nowhere = json!({ "kind": "document", "from": "Shared with me/Outlook", "to": "Shared with me/Outlook", "files": 0, "moved": false });
+        assert_eq!(moved_words(&nowhere, false), "The document Shared with me/Outlook is already there — nothing was moved.");
+    }
 }

@@ -694,7 +694,7 @@ await poll(async () =>
   (await page.locator(".ProseMirror h1").first().textContent())?.includes("Conflict copy"),
 );
 /* 14b — an address another section holds: said once, in words */
-await emit("cloud-address-taken", { root: "/docs", slug: "roadmap", path: "Private/plan.md" });
+await emit("cloud-address-taken", { root: "/docs", slug: "roadmap", path: "My files/plan.md" });
 await poll(async () => (await page.locator(".toast").count()) === 1);
 const takenToast = await page.locator(".toast").textContent();
 await page.locator(".toast-close").click();
@@ -1519,9 +1519,9 @@ step(
   "Agents: their own tab, the door above the list; the list is your own agents, naming what each may do and where it is logged in, and an owner is shown other people's under it — whose each is, to log out or remove and nothing else; a new one starts without publishing, reading fixed; what is handed over is one short prompt — what Doklin is, install, login, what the address is, that every path starts with its section and that new work goes under Private/ — copied by one button, shown once, and kept through a look at the other tab",
   agentsTab &&
     bobsHelperIsHis &&
-    (await tid("agents-intro").textContent()).includes("it sees what you see — Library, your Private, the restricted folders you are in") &&
+    (await tid("agents-intro").textContent()).includes("it sees what you see — Library, your My files, what is shared with you") &&
     prompt.includes(
-      "Every path starts with its section: `Library/` is what everyone sees, `Private/` only them, `Restricted/<folder>/` that folder's people. Put anything new under `Private/` unless they tell you where it goes.",
+      "Every path starts with its section: `Library/` is what everyone sees, `My files/` is theirs, `Shared with me/` is what others shared with them. Put anything new under `My files/` unless they tell you where it goes, and put a path with a space in quotes.",
     ) &&
     reviewBot.includes("Review bot") &&
     reviewBot.includes("read · comment") &&

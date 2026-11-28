@@ -33,8 +33,9 @@
 // as the shared manifest stores it, Home.md.
 //
 // Two things are not the real worker, and say so where they are made: the
-// "Mac" (the superadmin's device token on the sync API, as an engine would
-// use it) and
+// "Macs" (a person's device token on the sync API, as an engine would use
+// it: the superadmin's, and that of somebody she invites — a Mac is what
+// shares a folder or a document, never an agent) and
 // the worker that is behind (a stand-in that lacks the later routes —
 // exit 7 cannot be had from a worker that is current). The terminal steps
 // are skipped, out loud, where there is no script(1).
@@ -145,26 +146,28 @@ await new Promise((resolve, reject) => {
   setTimeout(() => reject(new Error(`the harness worker did not start within three minutes:\n${said}`)), 180_000).unref();
 });
 
-/** The owner's own calls — what the app's engine would make. Straight to the worker, never through the CLI. */
-const owner = (path, { json, ...init } = {}) =>
+/** A device's own calls — what the app's engine would make. Straight to the worker, never through the CLI. */
+const deviceCalls = (token, device) => (path, { json, ...init } = {}) =>
   fetch(`${WORKER}${path}`, {
     ...init,
     ...(json === undefined ? {} : { body: JSON.stringify(json) }),
     headers: {
-      authorization: `Bearer ${OWNER}`,
-      "x-doklin-device": "d-drive",
+      authorization: `Bearer ${token}`,
+      "x-doklin-device": device,
       "x-doklin-client": "0.0.0-drive",
       ...(json === undefined ? {} : { "content-type": "application/json" }),
       ...(init.headers ?? {}),
     },
   });
+/** The owner's: Sherin, the superadmin, on her Mac. */
+const owner = deviceCalls(OWNER, "d-drive");
 
 /** The owner's member id: what a Mac signs its changes with. */
 const OWNER_ID = (await (await owner("/api/meta")).json()).you.memberId;
 
 /* ---------- The relay the CLI talks through ---------- */
 
-/** Every request the CLI made, in order: {method, url, status, headers, body}. */
+/** Every request the CLI made, in order: {method, url, status, headers, body, answer}. */
 const calls = [];
 const HOP = new Set(["host", "connection", "content-length", "transfer-encoding", "accept-encoding"]);
 /** Run once, just before the relay forwards the next request `match` accepts — a change that lands between two requests of one command. */
@@ -184,7 +187,7 @@ const RELAY_PORT = await serve(async (req, body) => {
     ...(body.length > 0 ? { body } : {}),
   });
   const bytes = Buffer.from(await upstream.arrayBuffer());
-  calls.push({ method: req.method, url: req.url, status: upstream.status, headers: req.headers, body: body.toString("utf8") });
+  calls.push({ method: req.method, url: req.url, status: upstream.status, headers: req.headers, body: body.toString("utf8"), answer: bytes.toString("utf8") });
   const out = {};
   upstream.headers.forEach((v, k) => {
     if (!HOP.has(k) && k !== "content-encoding") out[k] = v;
@@ -196,21 +199,39 @@ const BASE = `http://localhost:${RELAY_PORT}`;
 const DOMAIN = `localhost:${RELAY_PORT}`;
 /** What the CLI asked since `from` (an index into `calls`), as "METHOD route → status". */
 const asked = (from) => calls.slice(from).map((c) => `${c.method} ${c.url.replace(/^\/api\/agent\//, "").replace(/\?.*$/, "")} → ${c.status}`);
+/**
+ * How many pages the CLI read since `from`, following the cursor: the first
+ * request names none, each one after it asks `after` the `next` of the answer
+ * before, and the last answer has none. 0 when that is not what happened. (A
+ * 202 is no page: the same one is asked for again.)
+ */
+const pagesRead = (from) => {
+  const pages = calls.slice(from).filter((c) => c.status === 200);
+  let next;
+  for (const c of pages) {
+    const after = new URL(c.url, "http://x").searchParams.get("after");
+    if (after !== (next === undefined ? null : String(next))) return 0;
+    next = JSON.parse(c.answer).next;
+  }
+  return next === undefined ? pages.length : 0;
+};
 
 /* ---------- Agents, as the owner's app makes them ---------- */
 
 // The app mints the code, shows it once and sends only its sha256
 // (engine/src/cloud/invite.rs): twenty Crockford characters, hashed in
-// their canonical form, shown as dkla-XXXXX-XXXXX-XXXXX-XXXXX.
+// their canonical form, shown as dkla-XXXXX-XXXXX-XXXXX-XXXXX — an agent's
+// login code — or dkln-…, a person's invite.
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-function mintCode() {
+function mintCode(prefix = "dkla") {
   const canonical = [...randomBytes(20)].map((b) => CROCKFORD[b % 32]).join("");
-  return { shown: `dkla-${canonical.match(/.{5}/g).join("-")}`, canonical, hash: sha256(canonical) };
+  return { shown: `${prefix}-${canonical.match(/.{5}/g).join("-")}`, canonical, hash: sha256(canonical) };
 }
 
-async function addAgent(name, scopes, { codeLife = 3_600_000 } = {}) {
+/** An agent of the owner's — or of the person whose device `as` is. */
+async function addAgent(name, scopes, { codeLife = 3_600_000, as = owner } = {}) {
   const code = mintCode();
-  const res = await owner("/api/auth/agents", { method: "POST", json: { name, scopes, codeHash: code.hash, expiresAt: Date.now() + codeLife } });
+  const res = await as("/api/auth/agents", { method: "POST", json: { name, scopes, codeHash: code.hash, expiresAt: Date.now() + codeLife } });
   if (res.status !== 201) throw new Error(`could not add the agent ${name}: ${res.status} ${await res.text()}`);
   const { agent } = await res.json();
   return { id: agent.id, name, code: code.shown, canonical: code.canonical };
@@ -226,6 +247,61 @@ async function newCode(agent) {
 
 /** The owner's list: every agent with the machines it is logged in on. */
 const listed = async (agent) => (await (await owner("/api/auth/agents")).json()).agents.find((a) => a.id === agent.id);
+
+/** Somebody the owner invites, signed in on a Mac of their own: {id, mac} — their member id, and that Mac's calls. */
+async function joins(email, name, device) {
+  const code = mintCode("dkln");
+  const invited = await owner("/api/auth/invites", { method: "POST", json: { email, name, codeHash: code.hash, expiresAt: Date.now() + 3_600_000 } });
+  if (invited.status !== 201) throw new Error(`could not invite ${name}: ${invited.status} ${await invited.text()}`);
+  const joined = await fetch(`${WORKER}/api/auth/join`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-doklin-client": "0.0.0-drive" },
+    body: JSON.stringify({ code: code.shown, deviceId: device, deviceName: `${name}'s Mac` }),
+  });
+  if (joined.status !== 201) throw new Error(`${name} could not join: ${joined.status} ${await joined.text()}`);
+  const { token, member } = await joined.json();
+  return { id: member.id, mac: deviceCalls(token, device) };
+}
+
+/**
+ * Share what is at `at` in a person's My files, the way their Mac does: the
+ * share is made where its item is, and the item's files leave My files'
+ * manifest for the share's own, under the ids they had. A document is named
+ * without its extension. `person` is {id, mac}; answers the share.
+ */
+async function macShares(person, at, { kind = "folder", members = [] } = {}) {
+  const sure = async (res, what) => {
+    if (res.status !== 200 && res.status !== 201) throw new Error(`sharing ${at}: ${what} failed: ${res.status} ${await res.text()}`);
+    return res;
+  };
+  const mine = (await (await sure(await person.mac("/api/spaces/private", { method: "PUT" }), "My files")).json()).space.id;
+  const name = at.slice(at.lastIndexOf("/") + 1);
+  const dir = at.includes("/") ? at.slice(0, at.lastIndexOf("/")) : "";
+  const id = `s-${randomBytes(4).toString("hex")}`;
+  const made = await sure(await person.mac("/api/spaces", { method: "POST", json: { id, kind, name, members, parent: mine, dir, was: at } }), "the share");
+  const { space } = await made.json();
+  const got = await sure(await person.mac(`/api/spaces/${mine}/manifest`), "reading My files");
+  const parent = await got.json();
+  const prefix = (kind === "folder" ? `${at}/` : `${at}.`).toLowerCase();
+  const files = {};
+  parent.tombstones ??= {};
+  for (const [fid, f] of Object.entries(parent.files)) {
+    if (!f.path.toLowerCase().startsWith(prefix)) continue;
+    const blob = await sure(await person.mac(`/api/spaces/${mine}/blobs/${fid}/${f.hash}`), `reading ${f.path}`);
+    const bytes = Buffer.from(await blob.arrayBuffer());
+    await sure(await person.mac(`/api/spaces/${space.id}/blobs/${fid}/${f.hash}`, { method: "PUT", headers: { "content-type": "text/markdown" }, body: bytes }), `storing ${f.path}`);
+    files[fid] = { ...f, path: kind === "folder" ? f.path.slice(prefix.length) : f.path.slice(dir === "" ? 0 : dir.length + 1) };
+    delete parent.files[fid];
+    parent.tombstones[fid] = { path: f.path, rev: f.rev + 1, ts: Date.now(), by: person.id, to: space.id };
+  }
+  if (Object.keys(files).length === 0) throw new Error(`sharing ${at}: nothing is there`);
+  // The manifest's version is My files' own: the one this worker writes.
+  const filled = { version: parent.version, name, seq: 1, files, tombstones: {}, public: {} };
+  await sure(await person.mac(`/api/spaces/${space.id}/manifest`, { method: "PUT", headers: { "x-base-etag": space.etag }, json: filled }), "the share's manifest");
+  parent.seq += 1;
+  await sure(await person.mac(`/api/spaces/${mine}/manifest`, { method: "PUT", headers: { "x-base-etag": got.headers.get("x-manifest-etag") }, json: parent }), "My files' manifest");
+  return space;
+}
 
 /**
  * A change made on a Mac: blobs, then the manifest by compare-and-swap — the
@@ -421,13 +497,13 @@ await check("help: the overview lists every command; each topic and each command
   const agent = (await doklin(nobody, ["help", "agent"])).out;
   facts["no help mentions a plain file"] = !/plain file/.test(overview.out + documents + agent);
   facts["the overview says every path starts with its section"] =
-    /Every path starts with the\nsection it is in, and a path with no section is refused:\n  Library\/… +everyone in the workspace sees it\n  Private\/… +only your person sees it\n  Restricted\/<folder>\/… +only the people in that folder\n/.test(overview.out);
+    /Every path starts with the\nsection it is in, and a path with no section is refused:\n  Library\/… +everyone in the workspace sees it\n  My files\/… +your person's own; what they share of it stays there\n  Shared with me\/<name>\/… +what other people shared with your person\nA name with a space goes in quotes: doklin ls "My files\/Launch plans"\.\n/.test(overview.out);
   facts["the agent's brief says where new work goes, in the app's words"] = agent
     .replace(/\s+/g, " ")
     .includes(
-      "You see what the person who gave you this sees. Every path starts with its section: Library/ is what everyone sees, Private/ only them, Restricted/<folder>/ that folder's people. Put anything new under Private/ unless they tell you where it goes",
+      "You see what the person who gave you this sees. Every path starts with its section: Library/ is what everyone sees, My files/ is theirs, Shared with me/ is what others shared with them. Put anything new under My files/ unless they tell you where it goes, and put a path with a space in quotes",
     );
-  facts["no example path lacks its section"] = !/doklin (read|write|rm|comments?|reply|publish|unpublish|mv) (?!Library\/|Private\/|Restricted\/|rm\b|<)/.test(
+  facts["no example path lacks its section"] = !/doklin (read|write|rm|comments?|reply|publish|unpublish|mv) (?!Library\/|"My files\/|"Shared with me\/|rm\b|<)/.test(
     [documents, agent, ...(await Promise.all(["comments", "publishing", "sections"].map(async (t) => (await doklin(nobody, ["help", t])).out)))].join("\n"),
   );
   facts["an unknown topic is exit 2"] = refused(await doklin(nobody, ["help", "nonsense"]), 2, /no help on "nonsense"/);
@@ -668,8 +744,8 @@ await check("whoami: the workspace, the agent, what it may do, the sections it s
     "exit 0": piped.code === 0 && flagged.code === 0,
     who: same(me.agent, { id: editor.id, name: "Editor bot" }) && me.workspace.name === "Notes",
     "what it may do": same(me.scopes, ALL_SCOPES) && same(readerMe.scopes, ["read"]) && readerMe.agent.name === "Reader bot",
-    // Sherin's Private is a section of hers, so her agents see it too.
-    "the sections it sees, Library first": same(me.sections, ["Library", "Private"]) && same(readerMe.sections, me.sections),
+    // Sherin's My files is a section of hers, so her agents see it too. Nothing is shared with her yet.
+    "the sections it sees, Library first": same(me.sections, ["Library", "My files"]) && same(readerMe.sections, me.sections),
     "the worker": Number.isInteger(me.version),
     "the domain's limits come with it": Number.isInteger(me.limits?.cliDaily) && me.limits.plan === "free",
     "the fleet's sum is a number": Number.isInteger(me.limits?.fleetToday),
@@ -690,8 +766,8 @@ await check("ls: the sections at the top; in a folder, its folders, and document
   const home = doc(root, "Library/Home");
   const plan = doc(projects, "Library/Projects/plan");
   return {
-    // Sherin's Private is a section of hers, so her agents see it too.
-    "the top is the sections, and no document": same(top, { dir: "", folders: ["Library", "Private"], documents: [] }),
+    // Sherin's My files is a section of hers, so her agents see it too.
+    "the top is the sections, and no document": same(top, { dir: "", folders: ["Library", "My files"], documents: [] }),
     "Library's folders": same(root.folders, ["Library/Projects"]) && root.dir === "Library",
     "Library's documents": same(root.documents.map((d) => d.path), ["Library/Comments", "Library/Diagram", "Library/Home", "Library/Ideas", "Library/Scratch", "Library/Sizes"]),
     "a listing is folders and documents, nothing else": same(Object.keys(root).sort(), ["dir", "documents", "folders"]),
@@ -703,7 +779,7 @@ await check("ls: the sections at the top; in a folder, its folders, and document
     "slashes around a folder are forgiven": same(slashed, projects),
     "a section's name in any case": same(lower.documents, projects.documents),
     "--deep is folders and documents too": same(Object.keys(deepProjects).sort(), ["dir", "documents", "folders"]) && deepProjects.documents.some((d) => d.path === "Library/Projects/Roadmap/Paint it"),
-    "--deep at the top lists every section's documents and folders": deep.documents.some((d) => d.path === "Library/Projects/Roadmap/Launch") && deep.folders.includes("Library/Projects/Roadmap") && deep.folders.includes("Private"),
+    "--deep at the top lists every section's documents and folders": deep.documents.some((d) => d.path === "Library/Projects/Roadmap/Launch") && deep.folders.includes("Library/Projects/Roadmap") && deep.folders.includes("My files"),
     "no sidecar anywhere": !JSON.stringify(deep).includes(".meta.jsonl"),
   };
 });
@@ -802,7 +878,7 @@ await check("read: what is not there is exit 3 and says which half is missing; a
 });
 
 await check("a path with no section is refused by every command that names one — exit 2, with the sentence that says which to use — and nothing changes", async () => {
-  const said = /^Projects\/plan is in no section\. Say which: Library\/Projects\/plan \(everyone\), Private\/Projects\/plan \(only your person\) or Restricted\/<folder>\/Projects\/plan\.$/;
+  const said = /^Projects\/plan is in no section\. Say which: Library\/Projects\/plan \(everyone\), "My files\/Projects\/plan" \(only your person\) or "Shared with me\/<name>\/…" \(something shared with them\)\.$/;
   const facts = {};
   for (const args of [
     ["read", "Projects/plan"], ["info", "Projects/plan"], ["comments", "Projects/plan"],
@@ -1209,7 +1285,7 @@ await check("publish: an address already taken is a conflict (exit 5); one that 
     // In the order of their addresses, and the page's own is a random one.
     "a document in it has two addresses now": same([...addresses].sort(), [alphaPage.url, `${WORKER}/drive/alpha`].sort()),
     "the address inside the folder answers": (await fetch(`${WORKER}/drive/beta`)).status === 200,
-    "Library/ is every document everyone sees, and nothing of Private's": whole.code === 0 && whole.json.kind === "folder" && whole.json.path === "Library" && whole.json.written === false && whole.json.documents.includes("Library/Home") && inFolder.every((d) => whole.json.documents.includes(d)) && whole.json.documents.every((d) => d.startsWith("Library/")),
+    "Library/ is every document everyone sees, and nothing of My files'": whole.code === 0 && whole.json.kind === "folder" && whole.json.path === "Library" && whole.json.written === false && whole.json.documents.includes("Library/Home") && inFolder.every((d) => whole.json.documents.includes(d)) && whole.json.documents.every((d) => d.startsWith("Library/")),
     "…and a person reads it as the folder it is": /Would publish the folder Library at http:\S+ — \d+ documents would be public:\n  Library\/Comments\n/.test(wholeWords),
   };
 });
@@ -1252,20 +1328,20 @@ await check("mv: into another section, a document keeps its link — a link from
   const fileOf = (link) => new URLSearchParams(new URL(link).hash.slice(1)).get("f");
   const made = await doklin(editorBox, ["write", "Library/Drive/linked"], { input: "# Linked\n" });
   const before = (await doklin(editorBox, ["info", "Library/Drive/linked"])).json.link;
-  const dry = await doklin(editorBox, ["mv", "Library/Drive/linked", "Private/", "--dry-run"]);
-  const words = (await doklin(editorBox, ["mv", "Library/Drive/linked", "Private/"], { tty: true })).out;
+  const dry = await doklin(editorBox, ["mv", "Library/Drive/linked", "My files/", "--dry-run"]);
+  const words = (await doklin(editorBox, ["mv", "Library/Drive/linked", "My files/"], { tty: true })).out;
   const stale = await doklin(editorBox, ["read", before]);
-  const after = (await doklin(editorBox, ["info", "Private/linked"])).json.link;
+  const after = (await doklin(editorBox, ["info", "My files/linked"])).json.link;
   const opened = await doklin(editorBox, ["read", after]);
-  const renamed = await doklin(editorBox, ["mv", "Private/linked", "Private/kept"]);
-  const kept = (await doklin(editorBox, ["info", "Private/kept"])).json.link;
-  const back = await doklin(editorBox, ["mv", "Private/kept", "Library/"]);
+  const renamed = await doklin(editorBox, ["mv", "My files/linked", "My files/kept"]);
+  const kept = (await doklin(editorBox, ["info", "My files/kept"])).json.link;
+  const back = await doklin(editorBox, ["mv", "My files/kept", "Library/"]);
   const home = (await doklin(editorBox, ["info", "Library/kept"])).json.link;
   return {
     "written, with a link": made.code === 0 && typeof before === "string",
     "a dry run says nothing of links": dry.code === 0 && dry.json.newLinks === undefined && dry.json.moved === false,
     "nor does the move": !/\blinks?\b/i.test(words),
-    "a link from before still opens it": stale.code === 0 && stale.out === "# Linked\n" && stale.meta.path === "Private/linked",
+    "a link from before still opens it": stale.code === 0 && stale.out === "# Linked\n" && stale.meta.path === "My files/linked",
     "info names its section now, under the same file": after !== before && /&s=p-[0-9a-f]+&/.test(after) && fileOf(after) === fileOf(before) && opened.code === 0 && opened.out === "# Linked\n",
     "a move inside the section keeps it": renamed.code === 0 && kept === after,
     "back in Library, it is the link it had": back.code === 0 && back.json.to === "Library/kept" && home === before,
@@ -1276,7 +1352,7 @@ await check("mv: onto something that is there is a conflict (exit 5); nothing to
   "onto a document": refused(await doklin(editorBox, ["mv", "Library/Drive/Old/gamma", "Library/Drive/Old/alpha2"]), 5, /already/),
   "a plain file is no document to move": refused(await doklin(editorBox, ["mv", "Library/Drive/data.csv", "Library/Drive/Old"]), 2, /Doklin syncs markdown and html documents only — "data\.csv" is neither/),
   "nothing there": refused(await doklin(editorBox, ["mv", "Library/Nope", "Library/Somewhere"]), 3, /nothing at "Library\/Nope"/),
-  "a section itself": refused(await doklin(editorBox, ["mv", "Library", "Private/Library"]), 2, /^Library is a section of this workspace, not a folder to move/),
+  "a section itself": refused(await doklin(editorBox, ["mv", "Library", "My files/Library"]), 2, /^Library is a section of this workspace, not a folder to move/),
   "a folder into itself": refused(await doklin(editorBox, ["mv", "Library/Drive/Old", "Library/Drive/Old/Inner"]), 2, /inside itself/),
   "to a hidden place": refused(await doklin(editorBox, ["mv", "Library/Drive/Old/gamma", "Library/.hidden/gamma"]), 2, /hidden/),
   "nothing moved": same((await doklin(editorBox, ["ls", "Library/Drive/Old"])).json.documents.map((d) => d.path), ["Library/Drive/Old/alpha2", "Library/Drive/Old/gamma"]),
@@ -1636,11 +1712,11 @@ if (!canTty) {
     const json = await t(["whoami", "--json"]);
     return {
       login: login.code === 0 && login.out.includes(`Logged in to Notes (${DOMAIN}) as Terminal bot. It may read, comment, edit and publish.`) && login.out.includes("doklin help agent") && !login.out.includes("dka_") &&
-        login.out.includes("Every path starts with its section: Library/, Private/ or Restricted/<folder>/.\nPut new work under Private/ unless you are told where it goes."),
+        login.out.includes("Every path starts with its section: Library/, My files/ or Shared with me/.\nPut new work under My files/ unless you are told where it goes, and put a path with a space in quotes."),
       whoami:
         whoami.out.includes(`Terminal bot, Sherin's agent on Notes (${DOMAIN})`) &&
         whoami.out.includes("It may read, comment, edit and publish.") &&
-        whoami.out.includes("It sees Library/ and Private/.") &&
+        whoami.out.includes("It sees Library/ and My files/.") &&
         /Worker version \d+\./.test(whoami.out),
       ls: ls.out.includes("Library/Projects/Roadmap/\n") && ls.out.includes("Library/Projects/plan  [md · html]\n") && ls.out.includes("Library/Projects/status  [md]") && !ls.out.includes("http"),
       info: info.out.includes("Library/Projects/plan — a document") && /markdown\s+plan\.md  revision 2 · \d+ B · changed .* by Editor bot/.test(info.out) && /comments\s+none/.test(info.out) && /link\s+https:\/\/doklin\.cc\/open#/.test(info.out) && /public\s+http/.test(info.out),
@@ -1718,7 +1794,7 @@ if (!canTty) {
       unpublish: unpublish.out.includes(`Stopped publishing ${WORKER}/pair-page.`),
       "a plain file, refused in a sentence": file.code === 2 && file.out.includes('doklin: Doklin syncs markdown and html documents only — "pic.png" is neither. Name a document: plan, plan.md or plan.html.'),
       "nothing found": nothing.code === 0 && nothing.out.includes('Nothing has "qqzzxxqq" in its name or its text.'),
-      "a search that waits says why, then answers": waited.out.includes("Reading the workspace into its search index") && waited.out.includes("60 documents match; these are the first 20 — narrow it with --in <folder>, or raise --limit."),
+      "a search that waits says why, then answers": waited.out.includes("Reading the workspace into its search index") && waited.out.includes("60 documents match; 20 of them are shown — narrow it with --in <folder>, or raise --limit."),
       "found by its name": byName.out.includes("Library/Flock/bird-07 — in its name\n1 document."),
     };
   });
@@ -1736,7 +1812,7 @@ if (!canTty) {
     return {
       "not found": missing.code === 3 && missing.out.includes('doklin: there is no document at "Library/Nope"') && !missing.out.includes('{"'),
       "a path with no section, refused in a sentence that says which to use":
-        noSection.code === 2 && noSection.out.includes("doklin: Projects/plan is in no section. Say which: Library/Projects/plan (everyone), Private/Projects/plan (only your person) or Restricted/<folder>/Projects/plan."),
+        noSection.code === 2 && noSection.out.includes('doklin: Projects/plan is in no section. Say which: Library/Projects/plan (everyone), "My files/Projects/plan" (only your person) or "Shared with me/<name>/…" (something shared with them).'),
       "bad usage": usage.code === 2 && usage.out.includes("doklin: say which document — doklin read <doc>"),
       "write with nothing piped in is refused, not waited for": noPipe.code === 2 && noPipe.out.includes("doklin: pipe the new content in, or name a file with --from <file>"),
       "a conflict says how to go on": conflict.code === 5 && conflict.out.includes("--if-rev 1"),
@@ -1748,7 +1824,152 @@ if (!canTty) {
 }
 
 /* ====================================================================== */
-/* 14 — logout                                                            */
+/* 14 — sharing: what is shared stays where it is                         */
+/* ====================================================================== */
+
+// An agent shares nothing: Sherin's Mac and Dave's do (`macShares`, the sync
+// API). What is driven is what their sharing looks like from a terminal — to
+// the agent of the person who shared, and to the agent of the person it was
+// shared with.
+const sherin = { id: OWNER_ID, mac: owner };
+const dave = await joins("dave@example.com", "Dave", "d-dave");
+const daveBot = await addAgent("Dave's bot", ALL_SCOPES, { as: dave.mac });
+const daveBox = machine("dave");
+
+await check("sharing: a shared document stays where it is — its owner's agent finds it in My files, marked shared, and the person it is shared with under Shared with me; an agent renames it, and its owner's moves it within My files; deleting it or moving it elsewhere is refused (exit 5) in the worker's sentence", async () => {
+  const FORECAST = "# Forecast\n\nRain on the regatta.\n";
+  const wrote = [
+    await doklin(editorBox, ["write", "My files/Work/Forecast"], { input: FORECAST }),
+    await doklin(editorBox, ["write", "My files/Work/budget"], { input: "# Budget\n" }),
+  ];
+  const login = await doklin(daveBox, ["login", BASE, daveBot.code]);
+  const before = (await doklin(daveBox, ["whoami"])).json.sections;
+  await macShares(sherin, "Work/Forecast", { kind: "document", members: [dave.id] });
+
+  const mine = (await doklin(editorBox, ["ls", "My files/Work"])).json;
+  const deep = (await doklin(editorBox, ["ls", "My files/Work", "--deep"])).json;
+  const read = await doklin(editorBox, ["read", "My files/Work/Forecast"]);
+  const his = (await doklin(daveBox, ["whoami"])).json.sections;
+  const top = (await doklin(daveBox, ["ls"])).json;
+  const shared = (await doklin(daveBox, ["ls", "Shared with me"])).json;
+  const hisRead = await doklin(daveBox, ["read", "shared with me/forecast.md"]);
+  const notHis = await doklin(daveBox, ["read", "My files/Work/Forecast"]);
+
+  const dry = await doklin(daveBox, ["mv", "Shared with me/Forecast", "Shared with me/Outlook", "--dry-run"]);
+  const renamed = await doklin(daveBox, ["mv", "Shared with me/Forecast", "Shared with me/Outlook"]);
+  const forSherin = await doklin(editorBox, ["read", "My files/Work/Outlook"]);
+  const rm = await doklin(editorBox, ["rm", "My files/Work/Outlook"]);
+  const hisRm = await doklin(daveBox, ["rm", "Shared with me/Outlook"]);
+  const out = await doklin(editorBox, ["mv", "My files/Work/Outlook", "Library/"]);
+  const hisOut = await doklin(daveBox, ["mv", "Shared with me/Outlook", "My files/Outlook"]);
+  const within = await doklin(editorBox, ["mv", "My files/Work/Outlook", "My files/Archive/"]);
+  const still = await doklin(daveBox, ["read", "Shared with me/Outlook"]);
+  const facts = {
+    "two documents are written, and Dave's agent logs in": wrote.every((r) => r.code === 0) && login.code === 0,
+    "before anything is shared with him, Dave's agent sees two sections": same(before, ["Library", "My files"]),
+    "its owner's agent lists it where it is: shared, and not opened": same(mine.documents.map((d) => [d.path, d.shared === true, d.md !== undefined]), [["My files/Work/budget", false, true], ["My files/Work/Forecast", true, false]]),
+    "--deep opens it": same(deep.documents.map((d) => [d.path, d.md?.file, d.shared]), [["My files/Work/budget", "budget.md", undefined], ["My files/Work/Forecast", "Forecast.md", undefined]]),
+    "…and reads it there": read.out === FORECAST && read.meta.path === "My files/Work/Forecast",
+    "the person it is shared with gains a section": same(his, ["Library", "My files", "Shared with me"]) && same(top, { dir: "", folders: ["Library", "My files", "Shared with me"], documents: [] }),
+    "…and finds it there, under its own name": same(shared, { dir: "Shared with me", folders: [], documents: [{ path: "Shared with me/Forecast", shared: true }] }),
+    "…and reads it, the section's name in any case": hisRead.out === FORECAST && hisRead.meta.path === "Shared with me/Forecast",
+    "where its owner keeps it is nowhere to him": refused(notHis, 3, /there is no document at "My files\/Work\/Forecast"/),
+    "a rename's dry run": dry.code === 0 && same(dry.json, { kind: "document", from: "Shared with me/Forecast", to: "Shared with me/Outlook", shared: true, moved: false }),
+    "renamed by somebody it is shared with": renamed.code === 0 && same(renamed.json, { kind: "document", from: "Shared with me/Forecast", to: "Shared with me/Outlook", shared: true }),
+    "…for its owner too, where it sits": forSherin.out === FORECAST && forSherin.meta.path === "My files/Work/Outlook",
+    "an agent does not delete something shared": refused(rm, 5, /^"My files\/Work\/Outlook" is shared with people — an agent does not delete something shared\./) && rm.problem.code === "shared",
+    "…whoever's agent it is": refused(hisRm, 5, /Its person deletes it, or leaves it, in Doklin\.$/) && hisRm.problem.code === "shared",
+    "or move it to where other people open it": refused(out, 5, /changes who can open it: its person does that in Doklin\.$/) && refused(hisOut, 5, /changes who can open it/),
+    "its owner's agent moves it within My files": within.code === 0 && same(within.json, { kind: "document", from: "My files/Work/Outlook", to: "My files/Archive/Outlook", shared: true }),
+    "…and the person it is shared with sees no move": still.out === FORECAST,
+  };
+  if (canTty) {
+    const row = (await doklin(editorBox, ["ls", "My files/Archive"], { tty: true })).out;
+    const back = (await doklin(daveBox, ["mv", "Shared with me/Outlook", "Shared with me/Forecast"], { tty: true })).out;
+    const nowhere = await doklin(daveBox, ["mv", "Shared with me/Forecast", "Shared with me/Forecast"], { tty: true });
+    const no = await doklin(daveBox, ["rm", "Shared with me/Forecast"], { tty: true });
+    const sees = (await doklin(daveBox, ["whoami"], { tty: true })).out;
+    facts["a person reads that it is shared, in place of its versions"] = row.includes("My files/Archive/Outlook  (shared)\n");
+    facts["…and what a rename did"] = back.includes("Moved the shared document Shared with me/Outlook to Shared with me/Forecast.");
+    facts["…and that a move to where it is moved nothing"] = nowhere.code === 0 && nowhere.out.includes("The document Shared with me/Forecast is already there — nothing was moved.");
+    facts["…and the refusal, as the worker says it"] = no.code === 5 && no.out.includes('doklin: "Shared with me/Forecast" is shared with people — an agent does not delete something shared. Its person deletes it, or leaves it, in Doklin.');
+    facts["…and the sections, a name with spaces among them"] = sees.includes("It sees Library/, My files/ and Shared with me/.");
+  }
+  return facts;
+});
+
+await check("a path under a section's old name is refused (exit 2) with the worker's sentence, which names the one to use — and nothing is written", async () => {
+  const from = calls.length;
+  const read = await doklin(editorBox, ["read", "Private/notes"]);
+  const write = await doklin(editorBox, ["write", "private/notes"], { input: "# Lost\n" });
+  const ls = await doklin(editorBox, ["ls", "Restricted/Finance"]);
+  const search = await doklin(editorBox, ["search", "boat", "--in", "Restricted"]);
+  const wire = asked(from);
+  return {
+    "what was Private": refused(read, 2, /^Private is called "My files" now — use "My files\/…"\.$/) && refused(write, 2, /^Private is called "My files" now/),
+    "what was Restricted": refused(ls, 2, /^There is no Restricted any more: what is shared stays where it was shared from — under "My files\/…" for its owner, and under "Shared with me\/…" for the people it is shared with\.$/) && refused(search, 2, /^There is no Restricted any more/),
+    "each was the domain's to refuse": same(wire, ["GET doc → 400", "PUT doc → 400", "GET tree → 400", "GET search → 400"]),
+    "nothing was made": refused(await doklin(editorBox, ["info", "My files/notes"]), 3),
+  };
+});
+
+await check("many sections: everything shared is a section, and a request opens only so many — a deep listing, a search, what links to a document and the public pages each ask again from where the answer stopped, and print one answer with no cursor in it", async () => {
+  const home = (await doklin(editorBox, ["info", "Library/Home"])).json.link;
+  const names = Array.from({ length: 14 }, (_, i) => `n${String(i).padStart(2, "0")}`);
+  const paths = names.map((n) => `My files/many/${n}`);
+  const wrote = [];
+  for (const n of names) wrote.push(await doklin(editorBox, ["write", `My files/many/${n}`], { input: `# ${n}\n\nThe tide table. See [home](${home}).\n` }));
+  // Twelve of the fourteen shared, with nobody yet: each is a section of its own from the moment it is shared.
+  for (const n of names.slice(0, 12)) await macShares(sherin, `many/${n}`, { kind: "document" });
+
+  const flat = (await doklin(editorBox, ["ls", "My files/many"])).json;
+  let from = calls.length;
+  const deep = await doklin(editorBox, ["ls", "My files/many", "--deep"]);
+  const deepPages = pagesRead(from);
+  from = calls.length;
+  const top = await doklin(editorBox, ["ls", "--deep"]);
+  const topPages = pagesRead(from);
+  from = calls.length;
+  const found = await doklin(editorBox, ["search", "tide table", "--in", "My files/many"]);
+  const foundPages = pagesRead(from);
+  from = calls.length;
+  const linked = await doklin(editorBox, ["links", "Library/Home", "--to"]);
+  const linkedPages = pagesRead(from);
+  // Nine of them public: with Library, more sections hold a page than one request opens.
+  const made = [];
+  for (const n of names.slice(0, 9)) made.push(await doklin(editorBox, ["publish", `My files/many/${n}`, "--slug", `tide-${n}`]));
+  from = calls.length;
+  const pages = await doklin(editorBox, ["published"]);
+  const pagesPages = pagesRead(from);
+
+  const inOrder = (list) => list.every((x, i) => i === 0 || list[i - 1].toLowerCase() <= x.toLowerCase());
+  const topDocs = top.json.documents.map((d) => d.path);
+  const linkers = linked.json.to.map((l) => l.path);
+  const slugs = pages.json.pages.map((p) => p.slug);
+  const facts = {
+    "fourteen notes, twelve of them shared, nine of those public": wrote.every((r) => r.code === 0) && made.every((r) => r.code === 0),
+    "not deep, a listing opens none of them": same(flat.documents.map((d) => d.path), paths) && flat.documents.filter((d) => d.shared === true).length === 12 && flat.documents.filter((d) => d.md).length === 2,
+    "a deep listing is read in two pages": deepPages === 2,
+    "…and is one listing: every note with its version, in order, and no cursor": deep.code === 0 && same(Object.keys(deep.json).sort(), ["dir", "documents", "folders"]) && same(deep.json.documents.map((d) => [d.path, d.md?.rev]), paths.map((p) => [p, 1])),
+    "the whole workspace, deep, is two pages too": topPages === 2,
+    "…each folder said once, each list in one order": inOrder(top.json.folders) && new Set(top.json.folders.map((f) => f.toLowerCase())).size === top.json.folders.length && ["Library", "My files", "My files/many"].every((f) => top.json.folders.includes(f)) && inOrder(topDocs),
+    "…and nothing left out": top.json.next === undefined && topDocs.includes("Library/Home") && topDocs.includes("My files/Archive/Forecast") && paths.every((p) => topDocs.includes(p)),
+    "a search is read in two pages": foundPages === 2,
+    "…and adds them up": found.code === 0 && found.json.total === 14 && found.json.next === undefined && found.json.truncated === undefined && same(found.json.results.map((r) => r.path), paths),
+    "what links to a document is looked for in every section": linkedPages === 2 && linked.json.next === undefined && paths.every((p) => linkers.includes(p)) && inOrder(linkers),
+    "the public pages of every section": pagesPages === 2 && pages.json.next === undefined && names.slice(0, 9).every((n) => slugs.includes(`tide-${n}`)) && ["home", "plan", "projects"].every((s) => slugs.includes(s)) && inOrder(slugs),
+  };
+  if (canTty) {
+    const row = (await doklin(editorBox, ["ls", "My files/many"], { tty: true })).out;
+    const words = (await doklin(editorBox, ["search", "tide table", "--in", "My files/many"], { tty: true })).out;
+    facts["a person reads which are shared"] = row.includes("My files/many/n00  (shared)\n") && row.includes("My files/many/n13  [md]\n");
+    facts["…and one count for the whole search"] = words.includes("My files/many/n13\n  3: The tide table.") && /\n14 documents\.\s*$/.test(words);
+  }
+  return facts;
+});
+
+/* ====================================================================== */
+/* 15 — logout                                                            */
 /* ====================================================================== */
 
 await check("logout: --dry-run only says; logout revokes this machine's token on the domain and forgets it here; a login the domain already forgot is still a logout", async () => {
@@ -1780,7 +2001,7 @@ await check("logout: --dry-run only says; logout revokes this machine's token on
 });
 
 /* ====================================================================== */
-/* 15 — the CLI's own allowance                                           */
+/* 16 — the CLI's own allowance                                           */
 /* ====================================================================== */
 
 await check("allowance: every request is counted beside the credentials; the count rides a signed-in request at most every 15 minutes; past the domain's cliDaily nothing is sent and it is exit 8", async () => {
@@ -1813,7 +2034,7 @@ await check("allowance: every request is counted beside the credentials; the cou
 });
 
 /* ====================================================================== */
-/* 16 — a worker that is behind                                           */
+/* 17 — a worker that is behind                                           */
 /* ====================================================================== */
 
 // Not the real worker: a stand-in that answers login and `me` and knows no
@@ -1851,7 +2072,7 @@ await check("a worker that is behind: a route it does not know, or a method, is 
 });
 
 /* ====================================================================== */
-/* 17 — a doklin older than the domain answers                            */
+/* 18 — a doklin older than the domain answers                            */
 /* ====================================================================== */
 
 // A stand-in again: the real worker turns nobody away until a release is
@@ -1874,7 +2095,7 @@ await check("a domain that needs a newer doklin: every command, a login included
 });
 
 /* ====================================================================== */
-/* 18 — the whole run                                                     */
+/* 19 — the whole run                                                     */
 /* ====================================================================== */
 
 await check("the whole run: every exit code was seen; the CLI asked only the document API, and always said which client it is", async () => {

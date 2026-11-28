@@ -14,6 +14,7 @@ use tempfile::TempDir;
 use tokio::time::{Duration, Instant};
 
 use crate::cloud::scan::MAX_SYNC_ENTRIES;
+use crate::cloud::space::Reach;
 use crate::cloud::status::Events;
 use crate::cloud::versions::{snapshot_id, VersionsEntry};
 
@@ -619,8 +620,9 @@ fn edit_bus_routes_a_touch_to_the_versioner_whose_root_holds_it() {
     let bus = VersionBus::default();
     let (a_tx, mut a_rx) = tokio::sync::mpsc::unbounded_channel();
     let (b_tx, mut b_rx) = tokio::sync::mpsc::unbounded_channel();
-    bus.register(std::path::PathBuf::from("/ws/a"), a_tx);
-    bus.register(std::path::PathBuf::from("/ws/b"), b_tx);
+    let data = Path::new("/data");
+    bus.register(Store::open(data, "r-a", Path::new("/ws/a")), a_tx);
+    bus.register(Store::open(data, "r-b", Path::new("/ws/b")), b_tx);
 
     assert!(bus.touch(Path::new("/ws/a/notes/x.md")));
     match a_rx.try_recv() {
@@ -635,7 +637,7 @@ fn edit_bus_routes_a_touch_to_the_versioner_whose_root_holds_it() {
     assert!(!bus.touch(Path::new("/ws/a")), "the root itself is not a file");
     assert!(a_rx.try_recv().is_err());
 
-    bus.unregister(Path::new("/ws/a"));
+    bus.unregister("r-a");
     assert!(!bus.touch(Path::new("/ws/a/notes/x.md")));
 }
 
@@ -1100,6 +1102,76 @@ fn restore_subset_touches_only_those_paths() {
     assert_eq!(f.on_disk("a.md").as_deref(), Some("one\n"));
     assert_eq!(f.on_disk("new.md").as_deref(), Some("made since\n"), "an unticked file is untouched");
     assert!(!f.root.path().join("notes/b.md").exists(), "and an unticked deletion stays deleted");
+}
+
+/// What was shared from inside a section is that share's from then on: the
+/// section's own history neither lists it as deleted nor brings it back.
+#[test]
+fn what_was_shared_from_inside_a_section_is_not_deleted_from_it() {
+    let mut f = fixture(T0);
+    f.write("a.md", "one\n");
+    f.write("Work/Finance/q1.md", "quarter 1\n");
+    f.write("Work/Plan.md", "the plan\n");
+    f.write("Work/Plan.html", "<p>plan</p>\n");
+    f.write("Work/other.md", "other\n");
+    f.capture(Reason::Seed);
+    // Finance and Plan are shared: this section's walk leaves them out.
+    f.versioner.store.reach = Reach { dirs: vec!["Work/Finance".into()], docs: vec!["Work/Plan".into()], only: None };
+    f.at(T0 + 60_000);
+    f.remove("Work/other.md");
+    f.capture(Reason::Interval);
+
+    let gone = f.versioner.deleted().expect("read the deleted files");
+    assert_eq!(gone.iter().map(|d| d.path.as_str()).collect::<Vec<_>>(), ["Work/other.md"], "only what was deleted");
+    let diff = f.versioner.snapshot_diff(T0).expect("diff the seed against now");
+    assert_eq!(diff.missing, ["Work/other.md"]);
+    assert!(diff.added.is_empty() && diff.changed.is_empty(), "{diff:?}");
+
+    // Putting that moment back leaves the share's files as the share has them.
+    f.write("Work/Finance/q1.md", "quarter 1, as the share has it now\n");
+    f.at(T0 + 120_000);
+    let report = f.restore_all(T0, None);
+    assert_eq!((report.written, report.trashed), (1, 0));
+    assert_eq!(f.on_disk("Work/other.md").as_deref(), Some("other\n"));
+    assert_eq!(f.on_disk("Work/Finance/q1.md").as_deref(), Some("quarter 1, as the share has it now\n"));
+}
+
+/// A shared document's own store starts when it is shared. For somebody who
+/// has the store of the section it was shared from, its history reads on
+/// into that one: one list, and the moment of sharing is one row.
+#[test]
+fn a_shared_documents_history_reads_on_into_the_section_it_came_from() {
+    let mut mine = fixture(T0);
+    mine.write("Work/Plan.md", "one\n");
+    mine.capture(Reason::Seed);
+    mine.at(T0 + 60_000);
+    mine.write("Work/Plan.md", "two\n");
+    mine.capture(Reason::Interval);
+    let earlier = history::FileHistory { root: "mine".into(), current_hash: Some(hash_full(b"two\n")), versions: mine.history("Work/Plan.md") };
+    assert_eq!(earlier.versions.len(), 2);
+
+    let mut share = fixture(T0 + 120_000);
+    share.write("Plan.md", "two\n");
+    share.capture(Reason::Seed);
+    share.at(T0 + 180_000);
+    share.write("Plan.md", "three\n");
+    share.capture(Reason::Interval);
+    let mut history = history::FileHistory { root: "share".into(), current_hash: Some(hash_full(b"three\n")), versions: share.history("Plan.md") };
+    history::carry_on(&mut history, earlier);
+
+    let rows: Vec<(u64, String)> = history.versions.iter().map(|v| (v.ts, v.hash.clone())).collect();
+    assert_eq!(
+        rows,
+        [(T0 + 180_000, hash_full(b"three\n")), (T0 + 120_000, hash_full(b"two\n")), (T0, hash_full(b"one\n"))],
+        "newest first, and what it was when it was shared is listed once"
+    );
+    assert_eq!(history.versions.iter().filter(|v| v.current).map(|v| v.ts).collect::<Vec<_>>(), [T0 + 180_000]);
+
+    // With no version of its own yet, what is on disk is found in what came before.
+    let mut fresh = history::FileHistory { root: "share".into(), current_hash: Some(hash_full(b"two\n")), versions: Vec::new() };
+    let earlier = history::FileHistory { root: "mine".into(), current_hash: None, versions: mine.history("Work/Plan.md") };
+    history::carry_on(&mut fresh, earlier);
+    assert_eq!(fresh.versions.iter().map(|v| (v.ts, v.current)).collect::<Vec<_>>(), [(T0 + 60_000, true), (T0, false)]);
 }
 
 #[test]

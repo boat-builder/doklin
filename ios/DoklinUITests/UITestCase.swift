@@ -24,9 +24,11 @@ class UITestCase: XCTestCase {
         line = try ask("line")
     }
 
-    /// Ask the drive for something only the domain's side can do: `line`, or
+    /// Ask the drive for something only the domain's side can do: `line`;
     /// `editing?path=<path in Library, without its name>` — another device
-    /// editing it now.
+    /// editing it now; `shared?name=<name>` — somebody else sharing a folder
+    /// with this person; `deleted?name=<name>` — a folder this person shares
+    /// deleted on another device of theirs.
     /// What the drive could not do fails the journey there, in its words,
     /// rather than later as something else.
     @discardableResult
@@ -81,22 +83,69 @@ class UITestCase: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
     }
 
-    /// Scroll a list until something further down it is on screen, clear
-    /// of the tab bar and the bar over it along the bottom edge. A row
-    /// half under the tab bar counts as hittable, and a tap on it lands on
-    /// the tab bar.
+    /// Scroll a list until something in it is on screen, clear of the bars:
+    /// the navigation bar over its top, and the tab bar and the bar over it
+    /// along the bottom edge. A row half under a bar counts as hittable,
+    /// and a tap or a swipe on it lands on the bar. Most things are further
+    /// down. What an earlier scroll left under the navigation bar is pulled
+    /// out from under it, and what is no longer drawn is looked for back up
+    /// the list.
     @discardableResult
     func reveal(_ element: XCUIElement, _ what: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
-        for _ in 0..<8 where !reachable(element) {
-            app.swipeUp()
+        scroll(to: element, tries: 8)
+        if !element.exists {
+            for _ in 0..<8 {
+                if element.exists { break }
+                app.swipeDown()
+            }
+            scroll(to: element, tries: 4)
         }
         return expect(element, what, timeout: 5, file: file, line: line)
     }
 
-    private func reachable(_ element: XCUIElement) -> Bool {
-        guard element.exists, element.isHittable else { return false }
+    /// Scroll until something is in reach, and no further: each look asks
+    /// the app several questions, and a look that changes nothing is time
+    /// a journey has little of. A swipe that moved nothing ends it too: the
+    /// list has no further to go, as under its last row.
+    private func scroll(to element: XCUIElement, tries: Int) {
+        var before: CGRect?
+        for _ in 0..<tries {
+            let frame = element.exists ? element.frame : nil
+            guard let under = covered(element, at: frame) else { return }
+            if under > 0 {
+                // Out from under the navigation bar, with no fling to carry it past.
+                let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+                from.press(forDuration: 0.1, thenDragTo: from.withOffset(CGVector(dx: 0, dy: min(max(under + 16, 48), 480))))
+                before = nil
+            } else {
+                if let frame, frame == before { return }
+                before = frame
+                app.swipeUp()
+            }
+        }
+    }
+
+    /// Nil when something, drawn at `frame`, is in reach. Otherwise how far
+    /// it is under the navigation bar, or 0 when it is further down, under
+    /// the bars along the bottom edge, or not drawn.
+    private func covered(_ element: XCUIElement, at frame: CGRect?) -> CGFloat? {
+        guard let frame else { return 0 }
+        let roof = self.roof
+        if frame.minY < roof { return roof - frame.minY }
+        guard element.isHittable else { return 0 }
         let bar = app.tabBars.firstMatch
-        return !bar.exists || !bar.isHittable || element.frame.maxY < bar.frame.minY - 64
+        return !bar.exists || !bar.isHittable || frame.maxY < bar.frame.minY - 64 ? nil : 0
+    }
+
+    /// The bottom edge of the navigation bar over the screen in front: the
+    /// last one, since a sheet's comes after the screen's it covers. None,
+    /// or one that is covered, is no edge at all.
+    private var roof: CGFloat {
+        let bars = app.navigationBars
+        let count = bars.count
+        guard count > 0 else { return 0 }
+        let bar = bars.element(boundBy: count - 1)
+        return bar.isHittable ? bar.frame.maxY : 0
     }
 
     /* ---------- Getting around ---------- */
@@ -112,19 +161,24 @@ class UITestCase: XCTestCase {
     }
 
     /// A tab, by its name: Browse, Recent, Search. A document hides the tab
-    /// bar, so it is backed out of first.
+    /// bar, so it is backed out of first. A list scrolled down shrinks the
+    /// bar to the tab in front, which a tap opens out again, as scrolling
+    /// back up does.
     func tab(_ name: String) {
         let button = app.tabBars.buttons[name]
-        for _ in 0..<6 where !button.waitForExistence(timeout: 2) {
-            if !backIfAny() { break }
+        backTo(button)
+        if !button.exists {
+            let shrunk = app.tabBars.buttons.matching(NSPredicate(format: "value == %@", "Collapsed")).firstMatch
+            if shrunk.exists { shrunk.tap() }
+            if !button.waitForExistence(timeout: 3) { app.swipeDown() }
         }
         expect(button, "the \(name) tab").tap()
     }
 
     /// Back until `root` shows: the top of a tab.
     private func backTo(_ root: XCUIElement) {
-        for _ in 0..<6 where !root.waitForExistence(timeout: 2) {
-            if !backIfAny() { break }
+        for _ in 0..<6 {
+            if root.waitForExistence(timeout: 2) || !backIfAny() { return }
         }
     }
 
@@ -221,12 +275,13 @@ class UITestCase: XCTestCase {
         return editor
     }
 
-    /// Make a note with New, which opens it in the editor as Untitled with
-    /// the caret in its title, and name it: the file takes the name, and
-    /// Return goes into the note, whose text view this answers.
+    /// Make a note with New — Browse's own, which makes it in Library, or the
+    /// plus on another heading (`new-mine`) — which opens it in the editor as
+    /// Untitled with the caret in its title, and name it: the file takes the
+    /// name, and Return goes into the note, whose text view this answers.
     @discardableResult
-    func newNote(named name: String) -> XCUIElement {
-        marked("new").tap()
+    func newNote(named name: String, from menu: String = "new") -> XCUIElement {
+        marked(menu).tap()
         expect(app.buttons["New note"], "New note in the menu").tap()
         expect(text(containing: "other devices see it view-only"), "the new note, open to edit")
         let title = expect(app.webViews.textViews["Title"], "the new note's title")

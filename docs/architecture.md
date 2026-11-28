@@ -14,7 +14,10 @@
   commands), macOS open events (`RunEvent::Opened`), single-instance argv
   forwarding, the window session.
 - `src-tauri/src/edits.rs` — every write command ends with `edits::touched`,
-  which pokes the cloud engine and the versioner (the edit bus).
+  which pokes the cloud engine and the versioner (the edit bus); a command
+  that renames or moves says which file or folder went where first
+  (`edits::moved`), and the engine reads it as the same one
+  ([cloud.md](cloud.md) *Inputs*, *Sections*).
 - `engine/` — the sync engine and the version store, a crate with no Tauri
   in it, shared with the iPhone app. `src-tauri/src/engine.rs` is the Mac
   app's side of it; `cloud.rs` and `versions.rs` are its Tauri commands.
@@ -65,13 +68,13 @@
   its status, what changed, who edits what, a page's link, publishing. A
   command that takes a copy of the workspace on the device (`setup`,
   `sync`), the domain's upkeep (`domain`), who may open the workspace
-  (`access`: people, devices, agents) or its restricted folders (`spaces`)
+  (`access`: people, devices, agents) or sharing (`shares`)
   goes in that group, never in `cloud` with a refusal behind it. An event a
-  backend never raises is in a group it has not got. A restricted folder's
-  screens list people too, so they are offered only where both `spaces` and
-  `access` are answered. A folder put straight under `Restricted` becomes a
-  restricted folder of its name on every backend that has `spaces`: the
-  engine finds it there on a Mac, and `Documents.move` makes it in a browser.
+  backend never raises is in a group it has not got. Sharing lists people
+  too, so it is offered only where both `shares` and `access` are answered.
+  Something shared that is renamed or moved is still that share on every
+  backend: the engine is told on a Mac (`edits::moved`), and
+  `Documents.move` asks the worker in a browser (`Saving.moveShare`).
 - Where platforms differ in kind and not in ability, the backend says so as
   data: `home` (the one workspace it is for, which the app opens at start in
   place of the last one), `htmlFrame` (a page that arbitrary html is shown
@@ -131,11 +134,14 @@ Its sign-in and the worker's routes: [cloud-people-agents.md](cloud-people-agent
 - `workspace.ts` holds every section's manifest and derives from them what
   the engine tells the UI on a Mac: one `CloudStatus`, the tree, what changed
   elsewhere. A path is the workspace's name as a root, then where the Mac
-  app would put the same file: `/<Name>/Library/…` for the shared section
-  (`LIBRARY_FOLDER`, `cloud-worker/src/layout.ts`), `/<Name>/Private/…`,
-  `/<Name>/Restricted/<name>/…`. **A path outside the three is in no
-  section** (`place` answers null), and so is one under `Library/Library`,
-  `Library/Private` or `Library/Restricted`; the browser changes nothing there. What it sends
+  app would put the same file (`settle`): `/<Name>/Library/…`
+  (`LIBRARY_FOLDER`, `cloud-worker/src/layout.ts`), `/<Name>/My files/…`,
+  and something shared where it sits — in the folder its parent's manifest
+  names, or under `/<Name>/Shared with me/` for somebody who cannot open
+  that parent. A shared document's files are in the folder it sits in,
+  under the name it wears there (`At`, `cloud-worker/src/mount.ts`). **A
+  path in none of them is in no section** (`place` answers null), and the
+  browser changes nothing there. What it sends
   is a section's id and the path inside it, never a UI path. It asks the
   worker by attention with the engine's numbers (`poll_gap`): change both.
 - It reads the worker's answers with the worker's own types:
@@ -158,13 +164,15 @@ Its sign-in and the worker's routes: [cloud-people-agents.md](cloud-people-agent
   here was read once, when the page opened: the People view asks again each
   time it opens (`Workspace.probe`), and so does adding or changing an agent,
   which is how a new role or a new name reaches the rest of the page.
-- `spaces` in a browser is the worker's routes too, and the picture held is
-  changed as each answers, not at the next poll: a folder made here is held
+- `shares` in a browser is the worker's routes too, and the picture held is
+  changed as each answers, not at the next poll: a share made here is held
   until a poll lists it (`entering`), because a poll asked before it was made
-  says nothing of it, which would read as this person having been taken out.
-  A folder that becomes a restricted one is a move to the new folder's top
-  (`Saving.restrict`): [cloud-people-agents.md](cloud-people-agents.md) *A
-  browser* says what that leaves when it stops part of the way.
+  says nothing of it, which would read as it no longer being shared.
+  Sharing is making the share, then a move of the item's files to it
+  (`Saving.share`): [cloud-people-agents.md](cloud-people-agents.md) *A
+  browser* says what that leaves when it stops part of the way. A share
+  that sits somewhere else after an answer is said as `cloud-space-moved`,
+  and what waits for its documents is theirs where they are now.
 - A folder moved between sections goes 16 files a request (`remaining`,
   `cloud-worker/src/changes.ts`): `Saving.carry` asks until none is left.
 - Search is the worker's (`GET /api/web/search`): it does not see what this

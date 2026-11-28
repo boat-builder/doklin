@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::cloud::scan::write_atomic;
+use crate::cloud::space::Reach;
 
 /// The format of `index.json` and of a snapshot file.
 pub const STORE_VERSION: u32 = 1;
@@ -167,12 +168,19 @@ pub struct Snapshot {
 
 #[derive(Clone, Debug)]
 pub struct Store {
-    /// `r-<16 hex>`, from the folder's path.
+    /// `r-<16 hex>`, from the folder's path — or, for a section of a
+    /// connected workspace, from the workspace and the section
+    /// (`section_key`): a shared folder moves, and a shared document has no
+    /// folder of its own.
     pub key: String,
-    /// The display root this store versions.
+    /// The folder this store versions — for a shared document, the one the
+    /// document sits in.
     pub root: PathBuf,
     /// `<app_data>/versions/<key>`.
     pub dir: PathBuf,
+    /// What of that folder it versions: all of it, for a folder that is no
+    /// workspace; a section's own part of it otherwise.
+    pub reach: Reach,
 }
 
 /// `<app_data>/versions` — every store, and the settings beside them.
@@ -215,9 +223,44 @@ pub fn digest_of(files: &BTreeMap<String, FileEntry>) -> String {
     hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// The key of the store of one section of a connected workspace: `""` is
+/// Library.
+pub fn section_key(ws_id: &str, section: &str) -> String {
+    format!("{}-{}", ws_id, if section.is_empty() { "library" } else { section })
+}
+
 impl Store {
     pub fn open(data_dir: &Path, key: &str, root: &Path) -> Store {
-        Store { key: key.to_string(), root: root.to_path_buf(), dir: versions_dir(data_dir).join(key) }
+        Store::open_section(data_dir, key, root, &Reach::default())
+    }
+
+    /// The store of a section: `reach` is what of `root` it is.
+    pub fn open_section(data_dir: &Path, key: &str, root: &Path, reach: &Reach) -> Store {
+        Store { key: key.to_string(), root: root.to_path_buf(), dir: versions_dir(data_dir).join(key), reach: reach.clone() }
+    }
+
+    /// What this store is called to everything that names one: its folder —
+    /// or, for a shared document's, the document's path without an extension.
+    pub fn display(&self) -> String {
+        match &self.reach.only {
+            Some(name) => self.root.join(&name.local).to_string_lossy().to_string(),
+            None => self.root.to_string_lossy().to_string(),
+        }
+    }
+
+    /// Where a path of this store is on disk.
+    pub fn abs(&self, rel: &str) -> PathBuf {
+        self.root.join(self.reach.local(rel))
+    }
+
+    /// A file on disk as this store names it, when it is one it versions.
+    pub fn rel_of(&self, abs: &Path) -> Option<String> {
+        let rel = crate::cloud::scan::rel_for_touch(&self.root, abs)?;
+        if let Some(name) = &self.reach.only {
+            let mine = !rel.contains('/') && crate::cloud::space::split_name(&rel).0.eq_ignore_ascii_case(&name.local);
+            return mine.then(|| self.reach.stored(&rel));
+        }
+        self.reach.holds(&rel).then_some(rel)
     }
 
     pub fn index_path(&self) -> PathBuf {

@@ -269,7 +269,7 @@ export async function findSuperadmin(env: Env): Promise<{ id: string; name: stri
  * seen. A name that comes with it wins, so re-inviting someone is also how
  * they get renamed; the role of an existing row is left alone, because
  * inviting an owner must not demote them. A removed person's row is here
- * again: the same person, a member, with the Private they had.
+ * again: the same person, a member, with the My files they had.
  */
 export async function upsertMember(
   env: Env,
@@ -421,8 +421,9 @@ export async function setMemberRole(env: Env, id: string, role: StoredRole): Pro
  * Remove a person: everything they can sign in with goes, atomically, and
  * their row stays, marked `disabled` and a member again. Keeping the row is
  * what keeps their name on what they wrote, and what makes inviting the same
- * address later the same person — with the Private they had. The restricted
- * folders they were in they leave: somebody in each adds them again. Their
+ * address later the same person — with the My files they had, and what
+ * they shared from it, which stays open to the people it is shared with.
+ * What was shared with them they leave: somebody on each adds them again. Their
  * agents go with them, machines and all — an agent is its person's way in,
  * and comes back only by being connected again.
  * Their presence and their leases go with them, so nobody keeps seeing — or
@@ -465,7 +466,7 @@ export async function removeMember(env: Env, id: string): Promise<true | Refusal
         .prepare(
           `DELETE FROM space_members
             WHERE member_id = ? AND member_id ${here}
-              AND space_id IN (SELECT id FROM spaces WHERE kind = 'restricted')`,
+              AND space_id IN (SELECT id FROM spaces WHERE kind <> 'private')`,
         )
         .bind(id),
       db

@@ -24,8 +24,8 @@
 //   · an address the change adds to the public map is claimed before the
 //     manifest is stored, and one it drops is let go after (addresses.ts).
 //
-// An agent's change is made under the names its person uses (`mount`,
-// mount.ts): the transaction sees `Private/notes/plan.md`, and what is
+// An agent's change is made under the names its person uses (`at`,
+// mount.ts): the transaction sees `My files/notes/plan.md`, and what is
 // checked and stored is the section's own `notes/plan.md`. A browser names a
 // section's paths as the section stores them: its changes are mounted at "".
 //
@@ -39,8 +39,8 @@ import { randomHex, sha256Hex } from "./crypto";
 import type { Env } from "./env";
 import { MANIFEST_KEY, MAX_FILE_BYTES, MAX_MANIFEST_BYTES, blobKey } from "./layout";
 import { validateManifest, withoutUnsynced, type Manifest, type ManifestFile } from "./manifest";
-import { mounted, unmounted } from "./mount";
-import { noteEtag, spaceOf } from "./spaces";
+import { mounted, unmounted, type At } from "./mount";
+import { kindOf, noteEtag, spaceOf } from "./spaces";
 
 const JSON_OBJECT = { httpMetadata: { contentType: "application/json" } };
 
@@ -174,6 +174,16 @@ export class Tx {
   }
 }
 
+/** What somebody a document is shared with is told when a write of theirs
+ *  would leave its section without it. */
+export const NOT_YOURS_TO_TAKE =
+  "This document is shared with you: only the people of the folder it sits in can move or delete it. You can leave it instead.";
+
+/** Whether a write would take a shared document out of its section by
+ *  somebody who cannot open the folder it sits in. `env` is that section's. */
+export const takesShared = (env: Env, next: Pick<Manifest, "files">): boolean =>
+  env.SPACE?.kind === "document" && !env.SPACE.placed && Object.keys(next.files).length === 0;
+
 /** A fresh file id, as the engine mints one (`random_id("f")`, scan.rs). */
 export const newFileId = (): string => `f-${randomHex(6)}`;
 
@@ -194,16 +204,16 @@ export type Committed<T> = { value: T; etag: string; over: string; manifest: Man
  * from the `Tx` it is given and nothing from an earlier run.
  *
  * With `dryRun` the change is applied and checked and then thrown away: the
- * value says what would have happened. `mount` is the folder the space is
- * at, as the caller names paths: the change sees every path under it.
+ * value says what would have happened. `at` is the folder the space is at,
+ * as the caller names paths: the change sees every path under it.
  */
 export async function commit<T>(
   env: Env,
   by: string,
   change: (tx: Tx) => Promise<T | Refusal>,
-  opts: { dryRun?: boolean; mount?: string } = {},
+  opts: { dryRun?: boolean; at?: At } = {},
 ): Promise<Committed<T> | Refusal> {
-  const mount = opts.mount ?? "";
+  const at: At = opts.at ?? { mount: "" };
   /** Blobs this call created, as opposed to found already stored. */
   const created = new Set<string>();
   const stored = new Set<string>();
@@ -218,6 +228,7 @@ export async function commit<T>(
     new Set(Object.entries(m.files).map(([fid, f]) => blobKey(fid, f.hash)));
 
   const inSpace = spaceOf(env) !== "";
+  const of = kindOf(env);
   let lastSeen = new Set<string>();
   for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
     const obj = await env.DATA.get(MANIFEST_KEY);
@@ -229,10 +240,10 @@ export async function commit<T>(
       raw = null;
     }
     const parsed = withoutUnsynced(raw);
-    if (validateManifest(parsed, inSpace) !== null) {
+    if (validateManifest(parsed, of) !== null) {
       return new Refusal(409, "this workspace's manifest is not one this worker can change — open it in Doklin first");
     }
-    const tx = new Tx(env, mounted(parsed as Manifest, mount), by);
+    const tx = new Tx(env, mounted(parsed as Manifest, at), by);
     const before = named(tx.m);
     lastSeen = before;
     // As stored: a page left out above is an address this write gives up.
@@ -248,10 +259,10 @@ export async function commit<T>(
       return { value, etag: obj.etag, over: obj.etag, manifest: parsed as Manifest, wrote: false };
     }
 
-    const next = unmounted(tx.m, mount);
+    const next = unmounted(tx.m, at);
     if ("outside" in next) {
       await sweep(before);
-      return new Refusal(400, `"${next.outside}" would not be in ${mount} — name a place inside ${mount}/`);
+      return new Refusal(400, `"${next.outside}" would not be in ${at.mount} — name a place inside ${at.mount}/`);
     }
     next.seq += 1;
     if (next.tombstones) {
@@ -261,12 +272,14 @@ export async function commit<T>(
     }
     // The change itself was well-formed — what it adds up to may not be: one
     // file too many, a name that collides, a path too deep.
-    const problem = validateManifest(next, inSpace);
+    const problem = validateManifest(next, of);
     const body = JSON.stringify(next);
     const blobs = tx.blobs();
     const refusal = problem
       ? new Refusal(409, `that can't be done here: ${problem.error}`)
-      : body.length > MAX_MANIFEST_BYTES
+      : takesShared(env, next)
+        ? new Refusal(409, NOT_YOURS_TO_TAKE)
+        : body.length > MAX_MANIFEST_BYTES
         ? new Refusal(413, "this workspace's manifest is full — remove some files first")
         : [...blobs.values()].some((b) => b.bytes.byteLength > MAX_FILE_BYTES)
           ? new Refusal(413, "that is too large — a file may be 25 MB")
@@ -308,7 +321,7 @@ export async function commit<T>(
     if (put) {
       await sweep(named(next));
       if (claim) await releaseAddresses(env, claim.stale);
-      await noteEtag(env, put.etag);
+      await noteEtag(env, put.etag, next);
       return { value, etag: put.etag, over: obj.etag, manifest: next, wrote: true };
     }
   }

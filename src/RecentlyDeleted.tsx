@@ -8,9 +8,15 @@
 // another Mac, one deleted before the Trash was emptied, or a mass-delete
 // confirmed at the sync's prompt. The store is not the Trash, so emptying
 // the Trash changes nothing here.
+//
+// A section's list covers what is shared from inside it. Each shared folder
+// keeps a history of its own, so its deleted files are listed here with the
+// section's and come back in their own folder. And something shared that
+// was deleted for everyone is listed whole, for whoever can restore it: it
+// is the domain that keeps it, thirty days, with its people and its history.
 
 import { useCallback, useMemo, useState } from "react";
-import { timeAgo } from "./cloud";
+import { timeAgo, type CloudSpace } from "./cloud";
 import { type DeletedFile } from "./versions";
 import { backend, type Versions } from "./backend";
 import { HTML_EXT_RE, MD_EXT_RE, META_SUFFIX, stemOf } from "./metaFile";
@@ -86,40 +92,77 @@ export async function restoreTargets(root: string, doc: DeletedDocument): Promis
   return at(Date.now());
 }
 
+/** One folder's deleted files: the folder is its store's root, where a
+ *  file comes back. */
+export type DeletedIn = { root: string; files: DeletedFile[] };
+
+/** How long the domain keeps something shared that was deleted
+ *  (`DELETED_KEPT_MS`, cloud-worker/src/sweep.ts; `DeletedShare.keptDays`
+ *  on the iPhone, which words a deleted share's row the same — change all
+ *  three). */
+const SHARE_KEPT_DAYS = 30;
+
 export default function RecentlyDeleted({
   store,
   root,
-  files,
+  folders,
+  shares = [],
   onBackToFiles,
   onOpen,
   onRestored,
+  onRestoreShare,
   onError,
 }: {
-  /** The version store: what this reads and restores from. */
-  store: Versions;
-  /** The folder whose history this is — the store's root, where a file
-   *  comes back. */
+  /** The version store: what this reads and restores from. Null where the
+   *  platform keeps none (a browser): then only what was shared and deleted
+   *  is listed, which the domain keeps. */
+  store: Versions | null;
+  /** The folder this list is of: Library's, or a section's. */
   root: string;
-  /** What `versions_deleted` answered. The app owns the list: the sidebar's
-   *  row needs the same count, and reading it costs a walk of the retained
-   *  snapshots — so it is read once, not once per surface. */
-  files: DeletedFile[];
+  /** What `versions_deleted` answered, for `root` and for each shared
+   *  folder inside it. The app owns the lists: the sidebar's row needs the
+   *  same count, and reading one costs a walk of the retained snapshots —
+   *  so it is read once, not once per surface. */
+  folders: DeletedIn[];
+  /** What was shared from here and deleted for everyone, that this person
+   *  can still restore. */
+  shares?: CloudSpace[];
   onBackToFiles: () => void;
   /** Show the last content, read-only, in the version preview. */
-  onOpen: (file: DeletedFile) => void;
+  onOpen: (file: DeletedFile, root: string) => void;
   /** A file came back, at this absolute path. */
   onRestored: (path: string) => void;
+  /** Bring a deleted share back; resolves once it is. */
+  onRestoreShare?: (share: CloudSpace) => Promise<void>;
   onError?: (message: string) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
-  const documents = useMemo(() => deletedDocuments(files), [files]);
+  const documents = useMemo(
+    () => folders.flatMap((folder) => deletedDocuments(folder.files).map((doc) => ({ ...doc, root: folder.root }))),
+    [folders],
+  );
+
+  const restoreShare = useCallback(
+    async (share: CloudSpace) => {
+      if (busy || !onRestoreShare) return;
+      setBusy(share.id);
+      try {
+        await onRestoreShare(share);
+      } catch (e) {
+        onError?.(errText(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, onRestoreShare, onError],
+  );
 
   // The sidecar first, as a save writes it: a note on disk always finds the
   // records it uses.
   const restore = useCallback(
-    async (doc: DeletedDocument) => {
-      if (busy) return;
-      setBusy(doc.primary.path);
+    async (doc: DeletedDocument, root: string) => {
+      if (busy || !store) return;
+      setBusy(`${root}/${doc.primary.path}`);
       try {
         const targets = await restoreTargets(root, doc);
         const order = [...targets].sort(([a], [b]) => Number(!isSidecar(a.path)) - Number(!isSidecar(b.path)));
@@ -133,8 +176,13 @@ export default function RecentlyDeleted({
         setBusy(null);
       }
     },
-    [busy, root, onRestored, onError, store],
+    [busy, onRestored, onError, store],
   );
+  // Where a row's file was, as this list's folder names it.
+  const where = (folder: string, path: string) => {
+    const within = folder === root ? "" : folder.slice(root.length + 1);
+    return [within, dirname(path)].filter(Boolean).join("/") || basename(root);
+  };
 
   return (
     <aside className="sidebar ws-deleted" aria-label="Recently deleted" data-testid="recently-deleted">
@@ -146,36 +194,65 @@ export default function RecentlyDeleted({
       </div>
 
       <div className="sidebar-body ws-deleted-body">
-        {documents.length === 0 && (
+        {documents.length === 0 && shares.length === 0 && (
           <div className="sidebar-message" data-testid="deleted-empty">
-            Nothing has been deleted from this folder.
+            {store ? "Nothing has been deleted from this folder." : "Nothing shared from here has been deleted."}
           </div>
         )}
-        {documents.length > 0 && (
+        {(documents.length > 0 || shares.length > 0) && (
           <ul className="ws-deleted-list">
-            {documents.map(({ primary: file, files: all }) => (
-              <li className="ws-deleted-row" key={file.path} data-testid="deleted-row" data-path={file.path}>
-                <div className="ws-deleted-name" title={file.path}>
-                  {stripDocExt(basename(file.path))}
-                </div>
-                <div className="ws-deleted-sub">
-                  {[dirname(file.path) || basename(root), `last seen ${timeAgo(file.lastSeenMs)}`].join(" · ")}
-                </div>
-                <div className="ws-deleted-actions">
-                  <button
-                    className="modal-btn"
-                    data-testid="deleted-restore"
-                    disabled={busy === file.path}
-                    onClick={() => void restore({ primary: file, files: all })}
-                  >
-                    {busy === file.path ? "Bringing it back…" : "Restore"}
-                  </button>
-                  <button className="modal-btn" data-testid="deleted-open" onClick={() => onOpen(file)}>
-                    Open
-                  </button>
-                </div>
-              </li>
-            ))}
+            {shares.map((share) => {
+              const left = Math.max(1, Math.ceil(SHARE_KEPT_DAYS - (Date.now() - (share.deletedAt ?? 0)) / 86_400_000));
+              return (
+                <li className="ws-deleted-row" key={share.id} data-testid="deleted-share" data-share={share.id}>
+                  <div className="ws-deleted-name">{share.name}</div>
+                  <div className="ws-deleted-sub">
+                    {[
+                      `shared ${share.kind === "folder" ? "folder" : "document"}`,
+                      `deleted ${timeAgo(share.deletedAt ?? 0)}`,
+                      `kept ${left} more ${left === 1 ? "day" : "days"}`,
+                    ].join(" · ")}
+                  </div>
+                  <div className="ws-deleted-actions">
+                    <button
+                      className="modal-btn"
+                      data-testid="deleted-share-restore"
+                      disabled={busy === share.id || !onRestoreShare}
+                      title="It comes back for everyone it was shared with, with its history"
+                      onClick={() => void restoreShare(share)}
+                    >
+                      {busy === share.id ? "Bringing it back…" : "Restore"}
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+            {documents.map(({ primary: file, files: all, root: folder }) => {
+              const key = `${folder}/${file.path}`;
+              return (
+                <li className="ws-deleted-row" key={key} data-testid="deleted-row" data-path={file.path}>
+                  <div className="ws-deleted-name" title={file.path}>
+                    {stripDocExt(basename(file.path))}
+                  </div>
+                  <div className="ws-deleted-sub">
+                    {[where(folder, file.path), `last seen ${timeAgo(file.lastSeenMs)}`].join(" · ")}
+                  </div>
+                  <div className="ws-deleted-actions">
+                    <button
+                      className="modal-btn"
+                      data-testid="deleted-restore"
+                      disabled={busy === key}
+                      onClick={() => void restore({ primary: file, files: all }, folder)}
+                    >
+                      {busy === key ? "Bringing it back…" : "Restore"}
+                    </button>
+                    <button className="modal-btn" data-testid="deleted-open" onClick={() => onOpen(file, folder)}>
+                      Open
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>

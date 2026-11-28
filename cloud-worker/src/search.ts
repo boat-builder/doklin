@@ -14,7 +14,8 @@
 // There is one mirror per section — the shared workspace's, and one for each
 // space — so a search scans the text of the sections its caller's person can
 // see and of no other. Searching the workspace itself covers every one of
-// them, up to what a request can open (`sectionsNotSearched` names the rest).
+// them, as many a request as one can open (`left` is the rest, and the
+// caller asks again for those).
 //
 // A mirror is derived and lazy:
 //
@@ -48,9 +49,9 @@ import { Refusal, type Committed } from "./commit";
 import { Index, nameOf, type Entry } from "./documents";
 import type { Env } from "./env";
 import { textOf } from "./htmlText";
-import { LIBRARY_FOLDER, SEARCH_LIMIT_MAX, blobKey } from "./layout";
+import { LIBRARY_FOLDER, MY_FILES_FOLDER, SEARCH_LIMIT_MAX, SHARED_FOLDER, blobKey } from "./layout";
 import type { Manifest } from "./manifest";
-import { PRIVATE_FOLDER, RESTRICTED_FOLDER } from "./agentPlace";
+import { shownPath } from "./mount";
 import { linksIn } from "./noteLinks";
 import { ensureSchema, withDb } from "./schema";
 import { MAX_SECTIONS_READ, sharedEnv, spaceOf, type Where } from "./spaces";
@@ -150,10 +151,9 @@ function lowerPaths(m: Manifest): Map<string, string> {
  * A link with a record names its file; so does a *Copy link* to a page of
  * this workspace. A link without either goes by its path, under rule 3 of
  * what a save writes (`linksToSave`, src/docLinks.ts): only into the note's
- * own section or into Library, never from outside into a Private or a
- * restricted folder. A restricted folder's name is each person's own
- * (agentPlace.ts), so a path that names one, the note's own included, is
- * not followed.
+ * own section or into Library, never from outside into a My files or
+ * something shared. Where a share is is each person's own (agentPlace.ts),
+ * so a path that names one, the note's own included, is not followed.
  */
 function targetsOf(
   space: string,
@@ -165,7 +165,7 @@ function targetsOf(
   workspace: string | null,
 ): string[] {
   const records = metaText === null ? [] : parseEntityMeta(metaText).links;
-  const mount = space === "" ? LIBRARY_FOLDER : space.startsWith("p-") ? PRIVATE_FOLDER : `${RESTRICTED_FOLDER}/\u0000`;
+  const mount = space === "" ? LIBRARY_FOLDER : space.startsWith("p-") ? MY_FILES_FOLDER : `${SHARED_FOLDER}/\u0000`;
   const out = new Set<string>();
   for (const link of linksIn(text)) {
     const page = pageLinkOf(link.href);
@@ -553,9 +553,6 @@ function matchingLines(path: string, text: string, needle: string): { matches: M
   return { matches, total };
 }
 
-/** A path in a section, as the caller names it. */
-const under = (mount: string, path: string): string => (mount ? `${mount}/${path}` : path);
-
 /** Whether a document is called something holding the needle: its file name
  *  without the extension, as the sidebar shows it — not its folders'. */
 const isCalled = (path: string, needle: string): boolean => basename(nameOf(path).stem).toLowerCase().includes(needle);
@@ -651,7 +648,7 @@ export async function searchIn(
   const found = (section: Where, fid: string, doc: Searchable): Found => {
     const k = `${section.space}/${fid}`;
     let f = docs.get(k);
-    if (!f) docs.set(k, (f = { doc, section, path: under(section.mount, doc.text.file.path), named: false, row: null, tagged: false }));
+    if (!f) docs.set(k, (f = { doc, section, path: shownPath(section, doc.text.file.path), named: false, row: null, tagged: false }));
     return f;
   };
   for (const { section, want } of open) {
@@ -740,7 +737,7 @@ export async function linkersOf(
     const from = bySpace.get(r.space_id);
     const doc = from?.want.get(r.fid);
     if (!from || !doc || targets.includes(r.fid)) continue;
-    paths.push(under(from.section.mount, doc.text.file.path));
+    paths.push(shownPath(from.section, doc.text.file.path));
   }
   paths.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
   return { paths, left };

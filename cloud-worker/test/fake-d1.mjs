@@ -13,6 +13,11 @@
 // isolate migrates once and then stops asking.
 import { DatabaseSync } from "node:sqlite";
 
+/** Whether a statement only reads: a SELECT, or one behind a WITH that
+ *  writes nothing. D1 answers the rows of either. */
+export const reads = (sql) =>
+  /^\s*SELECT/i.test(sql) || (/^\s*WITH/i.test(sql) && !/\b(INSERT INTO|UPDATE|DELETE FROM)\b/i.test(sql));
+
 class FakeD1Statement {
   constructor(db, sql, params) {
     this.db = db;
@@ -85,7 +90,7 @@ export class FakeD1 {
       try {
         const out = [];
         for (const statement of statements) {
-          out.push(await (/^\s*SELECT/i.test(statement.sql) ? statement.all() : statement.run()));
+          out.push(await (reads(statement.sql) ? statement.all() : statement.run()));
         }
         this.db.exec("COMMIT");
         return out;

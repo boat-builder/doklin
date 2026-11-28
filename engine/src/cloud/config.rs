@@ -182,7 +182,7 @@ pub struct Marker {
     pub domain: String,
     pub ws_id: String,
     /// Absent: the folder's files are not in Library yet — connect writes
-    /// the marker before its move begins. `"moving"`, then `"library"`: the
+    /// the marker before its move begins. `"moving"`, then `"my-files"`: the
     /// move (layout.rs). Anything else is a layout a later build made, which
     /// this one does not know.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,9 +190,10 @@ pub struct Marker {
 }
 
 impl Marker {
-    /// Whether the folder is in the Library layout.
+    /// Whether the folder is in the layout this build syncs: Library, My
+    /// files and Shared with me, side by side.
     pub fn moved(&self) -> bool {
-        self.layout.as_deref() == Some(super::layout::LIBRARY)
+        self.layout.as_deref() == Some(super::layout::MY_FILES)
     }
 }
 

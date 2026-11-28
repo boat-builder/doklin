@@ -1,5 +1,5 @@
-//! A unit: one section of a workspace — the shared part, a person's Private,
-//! one restricted folder — kept in step with its own manifest.
+//! A unit: one section of a workspace — Library, a person's My files,
+//! something shared — kept in step with its own manifest.
 //!
 //! Every section is a workspace-shaped thing on the domain: a manifest
 //! updated by compare-and-swap, content-addressed blobs, a version store.
@@ -19,8 +19,8 @@ use serde_json::json;
 use super::engine::{PublishRequest, Trash};
 use super::manifest::{
     clean_text, dedupe_paths, files_under, random_slug, unique_slug, valid_rel_path, valid_slug, Manifest,
-    ManifestFile, PublicEntry, PublicKind, Target, Tombstone, MANIFEST_VERSION, MAX_DESC_LEN, MAX_NAME_LEN,
-    MAX_TITLE_LEN,
+    ManifestFile, Mount, PublicEntry, PublicKind, SpaceKind, Target, Tombstone, MANIFEST_VERSION, MAX_DESC_LEN,
+    MAX_NAME_LEN, MAX_TITLE_LEN,
 };
 use super::merge::{conflict_copy_path, merge_texts, MergeOutcome};
 use crate::sidecar::sidecar_of;
@@ -30,7 +30,7 @@ use super::scan::{
     content_type_for, hash16, now_ms, random_id, read_file_checked, read_json, rel_path, scan_local, stat_pair,
     write_atomic, write_json, ScanEntry,
 };
-use super::space::{reserved_top, RESERVED_DIRS, SHARED};
+use super::space::{split_name, Reach, LIBRARY};
 use super::status::{Events, PublicPage, RecentFile, EV_ADDRESS_TAKEN, EV_CONFLICT, EV_PENDING_DELETES};
 use super::tags::{self as tag_list, TagDef, TagOp, TAGS_MAX};
 // The cloud half of versioning. `crate::versions` is the local versioner —
@@ -140,6 +140,11 @@ pub struct WorkspaceState {
     /// deleted, until they have arrived.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub owed: BTreeSet<String>,
+    /// Where a share that sits in this section now is, by its id: the folder
+    /// of this section its item was moved to on this device. Owed to the
+    /// manifest (`Manifest::mounts`) until a won write carries it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mount_ops: BTreeMap<String, String>,
 }
 
 /* ---------- What a cycle decides ---------- */
@@ -226,12 +231,17 @@ pub(crate) struct Ctx<'a> {
     /// person's own edits, which never wait behind a bulk job.
     pub touched: &'a HashSet<String>,
     /// What the app itself moved in this unit since the last pass that went
-    /// through, in order: (from, to), a file or a folder. Tips, used only
-    /// where the folder agrees (`stage_local`).
+    /// through, in order: (from, to), a file or a folder. Then what the
+    /// engine renamed here (`Unit::renamed`). Tips, used only where the
+    /// folder agrees (`stage_local`).
     pub app_moves: &'a [(String, String)],
     /// The many-new-documents valve is holding: files no manifest has
     /// carried stay on this device until the person says.
     pub hold_new: bool,
+    /// Where a conflict copy of this unit's document goes when it cannot go
+    /// beside it: a shared document under `Shared with me` is in no folder
+    /// of this person's, so its copy is made in their My files.
+    pub copies_in: Option<&'a Path>,
 }
 
 impl Ctx<'_> {
@@ -243,7 +253,7 @@ impl Ctx<'_> {
 /// Where a file that left this unit went.
 #[derive(Clone, Debug)]
 pub(crate) struct MovedOut {
-    /// The unit it is in now (`SHARED` for the shared workspace).
+    /// The unit it is in now (`LIBRARY` for Library).
     pub to: String,
     /// That unit's manifest holds it. Until it does, the file is not
     /// removed here: the section it is going to is written first.
@@ -264,20 +274,26 @@ pub(crate) struct Survey {
 
 /// What a unit is made from.
 pub(crate) struct UnitConfig {
-    /// The space's id; `SHARED` for the shared workspace.
+    /// The space's id; `LIBRARY` for Library.
     pub id: String,
     /// What a manifest this unit starts is called.
     pub name: String,
-    /// The folder it keeps in step.
+    /// The folder it keeps in step: its own, or — for a shared document —
+    /// the one the document sits in.
     pub root: PathBuf,
-    /// That folder inside the workspace: `Library`, `Private` or
-    /// `Restricted/<folder>`, as the disk spells it.
+    /// That folder inside the workspace, as the disk spells it: `Library`,
+    /// `My files`, `My files/Work/Plans`, `Shared with me/Finance`.
     pub prefix: String,
+    /// A shared document's unit keeps that document's files and no others.
+    pub document: Option<super::space::DocName>,
     /// `state.json` + `base/`.
     pub state_dir: PathBuf,
-    /// `<app_data>`, for this folder's version store — read, to mirror it.
+    /// `<app_data>`, for this section's version store — read, to mirror it.
     pub data_dir: PathBuf,
     pub device_id: String,
+    /// The workspace it is a section of: with its own id, what its version
+    /// store is kept under.
+    pub ws_id: String,
 }
 
 pub(crate) struct Unit<R: Remote> {
@@ -285,9 +301,14 @@ pub(crate) struct Unit<R: Remote> {
     pub name: String,
     pub root: PathBuf,
     pub prefix: String,
+    /// What of `root` this section is: everything but the shares that sit
+    /// inside it — which the engine says before every pass — or, for a
+    /// shared document, that document alone.
+    pub reach: Reach,
     state_dir: PathBuf,
     data_dir: PathBuf,
     device_id: String,
+    ws_id: String,
     /// Aimed at this unit's section (`Remote::space`).
     remote: Arc<R>,
     pub state: WorkspaceState,
@@ -320,6 +341,10 @@ pub(crate) struct Unit<R: Remote> {
     pub owes: bool,
     /// How many changes that work is.
     pub waiting: u32,
+    /// Files of this unit the engine knows were renamed on this device, as
+    /// (from, to): a shared document that was given a new name. The next
+    /// cycle reads each as the same file (`Ctx::app_moves`).
+    pub renamed: Vec<(String, String)>,
 }
 
 impl<R: Remote> Unit<R> {
@@ -334,9 +359,11 @@ impl<R: Remote> Unit<R> {
             name: cfg.name,
             root: cfg.root,
             prefix: cfg.prefix,
+            reach: Reach { only: cfg.document, ..Reach::default() },
             state_dir: cfg.state_dir,
             data_dir: cfg.data_dir,
             device_id: cfg.device_id,
+            ws_id: cfg.ws_id,
             remote,
             state,
             incoming: None,
@@ -351,21 +378,37 @@ impl<R: Remote> Unit<R> {
             last_mirror_ms: None,
             owes: false,
             waiting: 0,
+            renamed: Vec::new(),
         }
     }
 
-    pub(crate) fn is_shared(&self) -> bool {
-        self.id == SHARED
+    pub(crate) fn is_library(&self) -> bool {
+        self.id == LIBRARY
     }
 
-    /// What this unit's walk leaves out: for the shared section, the two
-    /// names it keeps at its own top (`RESERVED_DIRS`).
-    fn skip(&self) -> &'static [&'static str] {
-        if self.is_shared() {
-            &RESERVED_DIRS
+    /// A shared document's unit: its folder is the one the document sits in.
+    pub(crate) fn is_document(&self) -> bool {
+        self.reach.only.is_some()
+    }
+
+    pub(crate) fn kind(&self) -> SpaceKind {
+        if self.is_document() {
+            SpaceKind::Document
+        } else if self.id.starts_with("p-") {
+            SpaceKind::Private
         } else {
-            &[]
+            SpaceKind::Folder
         }
+    }
+
+    /// This section's files on disk, as its manifest names them.
+    fn scan(&self) -> Result<BTreeMap<String, ScanEntry>, String> {
+        scan_local(&self.root, &self.reach)
+    }
+
+    /// Where a path of this unit is on disk.
+    pub(crate) fn abs(&self, rel: &str) -> PathBuf {
+        self.root.join(self.reach.local(rel))
     }
 
     /// A path of this unit as the workspace spells it.
@@ -373,13 +416,23 @@ impl<R: Remote> Unit<R> {
         if rel.is_empty() {
             self.prefix.clone()
         } else {
-            format!("{}/{}", self.prefix, rel)
+            format!("{}/{}", self.prefix, self.reach.local(rel))
+        }
+    }
+
+    /// Where this unit's item is, as the workspace spells it: a section's or
+    /// a shared folder's own folder, a shared document without an extension.
+    pub(crate) fn item(&self) -> String {
+        match &self.reach.only {
+            Some(name) => format!("{}/{}", self.prefix, name.local),
+            None => self.prefix.clone(),
         }
     }
 
     /// A workspace-relative path as this unit spells it, when it is this
-    /// unit's: `Some("")` is the unit's own folder. Inside the shared
-    /// section, a section's name at its top is nobody's.
+    /// unit's: `Some("")` is the unit's own folder. What is another
+    /// section's inside that folder is not, and of a shared document's
+    /// folder only the document's own files are.
     pub(crate) fn in_unit(&self, ws_rel: &str) -> Option<String> {
         // The folder's own name compares the way the disk does.
         let head = ws_rel.get(..self.prefix.len()).filter(|head| head.eq_ignore_ascii_case(&self.prefix))?;
@@ -387,10 +440,21 @@ impl<R: Remote> Unit<R> {
             "" => "",
             rest => rest.strip_prefix('/')?,
         };
-        if self.is_shared() && reserved_top(rest).is_some() {
-            return None;
+        if let Some(name) = &self.reach.only {
+            let mine = !rest.is_empty() && !rest.contains('/') && split_name(rest).0.eq_ignore_ascii_case(&name.local);
+            return mine.then(|| self.reach.stored(rest));
         }
-        Some(rest.to_string())
+        self.reach.holds(rest).then(|| rest.to_string())
+    }
+
+    /// A file on disk as this unit names it, when it is this unit's.
+    pub(crate) fn rel_of(&self, abs: &Path) -> Option<String> {
+        let rel = rel_path(&self.root, abs)?;
+        if let Some(name) = &self.reach.only {
+            let mine = !rel.contains('/') && split_name(&rel).0.eq_ignore_ascii_case(&name.local);
+            return mine.then(|| self.reach.stored(&rel));
+        }
+        self.reach.holds(&rel).then_some(rel)
     }
 
     pub(crate) fn base_path(&self, file_id: &str) -> PathBuf {
@@ -425,7 +489,7 @@ impl<R: Remote> Unit<R> {
     /// same file arriving in another.
     pub(crate) fn survey(&self) -> Survey {
         let mut out = Survey::default();
-        let Ok(scan) = scan_local(&self.root, self.skip()) else {
+        let Ok(scan) = self.scan() else {
             out.dirty = true; // the cycle is what reports why
             return out;
         };
@@ -462,7 +526,7 @@ impl<R: Remote> Unit<R> {
     /// it: the next cycle reads the file as changed here and pushes it, with
     /// `base` as the ancestor a merge would need.
     pub(crate) fn plant(&mut self, fid: &str, rf: &ManifestFile, base: Option<&[u8]>) {
-        let (size, mtime_ms) = stat_pair(&self.root.join(&rf.path));
+        let (size, mtime_ms) = stat_pair(&self.abs(&rf.path));
         self.state.files.insert(
             fid.to_string(),
             FileState {
@@ -487,12 +551,84 @@ impl<R: Remote> Unit<R> {
         self.deferred.remove(fid);
     }
 
+    /// Forget everything this unit has synced: its item is gone from this
+    /// device, and that is never a deletion — the next cycle brings it back
+    /// whole. What it still owes the domain (a page, a place) stays owed.
+    pub(crate) fn forget_synced(&mut self) {
+        for fid in self.state.files.keys().cloned().collect::<Vec<_>>() {
+            let _ = std::fs::remove_file(self.base_path(&fid));
+        }
+        self.state.files.clear();
+        self.state.owed.clear();
+        self.state.pending_new.clear();
+        self.state.manifest = Manifest::default();
+        self.state.manifest_etag = None;
+        self.deferred.clear();
+        self.held_deletes.clear();
+        self.poke = true;
+        self.persist_state();
+    }
+
+    /// What a shared document is called, as the freshest manifest this unit
+    /// has seen names its files; None while it holds none.
+    pub(crate) fn document_name(&self) -> Option<String> {
+        let files = &self.view().files;
+        let named = files.values().find(|f| !crate::sidecar::is_sidecar(&f.path)).or_else(|| files.values().next())?;
+        Some(split_name(&named.path).0.to_string())
+    }
+
+    /// A shared document was renamed on another device: its files here take
+    /// the name `local`, and what this unit has synced is under `stored`, as
+    /// the manifest now has it — so the cycle that follows finds every file
+    /// where the manifest says, and moves nothing itself. A file whose new
+    /// name is taken stays where it is, and is this unit's still.
+    pub(crate) fn follow_document_name(&mut self, stored: &str, local: &str) {
+        let Some(was) = self.reach.only.clone() else { return };
+        for file in super::space::document_files(&self.root, &was.local) {
+            let Some(name) = file.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+            let to = self.root.join(format!("{}{}", local, split_name(&name).1));
+            if to != file && std::fs::symlink_metadata(&to).is_err() {
+                let _ = std::fs::rename(&file, &to);
+            }
+        }
+        let renamed = |path: &str| format!("{}{}", stored, split_name(path).1);
+        for st in self.state.files.values_mut() {
+            st.path = renamed(&st.path);
+        }
+        self.state.pending_new = std::mem::take(&mut self.state.pending_new).into_iter().map(|(p, fid)| (renamed(&p), fid)).collect();
+        self.reach.only = Some(super::space::DocName { local: local.to_string(), stored: stored.to_string() });
+        self.persist_state();
+    }
+
+    /// Queue "the share `id` sits in the folder `dir` of this section now".
+    pub(crate) fn queue_mount(&mut self, id: &str, dir: &str) {
+        if self.state.manifest.mounts.get(id).is_some_and(|m| m.dir == dir) {
+            self.state.mount_ops.remove(id);
+        } else if self.state.mount_ops.get(id).map(String::as_str) != Some(dir) {
+            self.state.mount_ops.insert(id.to_string(), dir.to_string());
+            self.poke = true;
+        }
+        self.persist_state();
+    }
+
+    /// The folder of this section the share `id` sits in, as this device
+    /// last knew: what it has queued, else what the freshest manifest says,
+    /// else the section's top.
+    pub(crate) fn mount_dir(&self, id: &str) -> String {
+        self.state
+            .mount_ops
+            .get(id)
+            .cloned()
+            .or_else(|| self.view().mounts.get(id).map(|m| m.dir.clone()))
+            .unwrap_or_default()
+    }
+
     /* ----- the cycle ----- */
 
     /// One reconcile of this section: pull remote reality, apply what only
     /// changed there, work out what changed here, merge where both moved,
     /// then CAS our view in. Loops on a lost CAS with fresh remote state.
-    /// Answers the paths it wrote, relative to this unit.
+    /// Answers the paths it wrote, as the workspace spells them.
     ///
     /// Every fallible step of a cycle lives in here, so every way out of one
     /// reaches the engine's single status report.
@@ -522,7 +658,7 @@ impl<R: Remote> Unit<R> {
             changed_paths.extend(applied);
 
             // 3. What changed locally — and of that, what goes this cycle.
-            let scan = scan_local(&self.root, self.skip()).map_err(RemoteError::Other)?;
+            let scan = self.scan().map_err(RemoteError::Other)?;
             let mut staged = self.stage_local(&scan, &remote_manifest, ctx).await?;
             let held = self.pace_pushes(&mut staged, ctx, &mut batch);
             self.waiting = held + self.state.owed.len() as u32;
@@ -538,7 +674,7 @@ impl<R: Remote> Unit<R> {
                 next.public.remove(slug);
             }
             folded.tags = self.fold_tags(&mut next);
-            let public_changed = next.public != remote_manifest.public;
+            let public_changed = next.public != remote_manifest.public || next.mounts != remote_manifest.mounts;
             let tags_changed = next.tags != remote_manifest.tags;
             // A manifest from before the md + html rule still names files
             // nobody syncs, and one of an older format is one the worker's
@@ -550,6 +686,7 @@ impl<R: Remote> Unit<R> {
                 // Ops that resolved to exactly what the manifest already says
                 // are spent — a CAS carrying no change would be pure waste.
                 self.clear_folded(&folded);
+                self.state.mount_ops.retain(|id, dir| remote_manifest.mounts.get(id).map(|m| &m.dir) != Some(dir));
                 self.state.manifest = remote_manifest;
                 self.state.manifest_etag = Some(remote_etag);
                 self.persist_state();
@@ -587,8 +724,9 @@ impl<R: Remote> Unit<R> {
                     // ones (a page for a file that hasn't landed yet) stay
                     // pending for a later cycle.
                     self.clear_folded(&folded);
+                    self.state.mount_ops.retain(|id, dir| next.mounts.get(id).map(|m| &m.dir) != Some(dir));
                     self.commit_staged(&staged, &next, new_etag);
-                    changed_paths.extend(staged.pushes.iter().map(|p| p.path.clone()));
+                    changed_paths.extend(staged.pushes.iter().map(|p| self.ws_rel(&p.path)));
                     return Ok(changed_paths);
                 }
                 Err(RemoteError::Conflict) if attempt + 1 < CAS_ATTEMPTS => {
@@ -665,9 +803,9 @@ impl<R: Remote> Unit<R> {
     /// time, with no hash until it syncs. Comment files are not documents,
     /// and what is not on this device is not listed.
     pub(crate) fn recent(&self, me: &str) -> Vec<RecentFile> {
-        let section = (!self.is_shared()).then(|| self.id.clone());
+        let section = (!self.is_library()).then(|| self.id.clone());
         let is_document = |path: &str| !path.to_ascii_lowercase().ends_with(".meta.jsonl");
-        let disk = scan_local(&self.root, self.skip()).unwrap_or_default();
+        let disk = self.scan().unwrap_or_default();
         let mut listed: HashSet<&str> = HashSet::new();
         let mut out = Vec::new();
         for (fid, file) in &self.state.manifest.files {
@@ -751,6 +889,11 @@ impl<R: Remote> Unit<R> {
 
     /* ----- the version store's mirror ----- */
 
+    /// This section's version store on this device, opened to read.
+    pub(crate) fn version_store(&self) -> crate::versions::store::Store {
+        crate::versions::store_for_section(&self.data_dir, &self.ws_id, &self.id, &self.root, &self.reach)
+    }
+
     /// Put this device's captured history of this folder in the bucket, and
     /// once a day thin what is up there. History is not the document: a
     /// mirror that cannot finish leaves the sync's phase alone and tries
@@ -758,7 +901,7 @@ impl<R: Remote> Unit<R> {
     /// change that is lost. True when a pass finished. `budget` is the bulk
     /// lane's: what it does not cover goes up on a later pass.
     pub(crate) async fn mirror_versions(&mut self, budget: &mut usize) -> bool {
-        let store = crate::versions::store_for_root(&self.data_dir, &self.root);
+        let store = self.version_store();
         let remote = self.remote.clone();
         let mut swept = self.state.last_cloud_sweep_ms;
         let result =
@@ -805,8 +948,7 @@ impl<R: Remote> Unit<R> {
     }
 
     pub(crate) async fn version_snapshot(&self, id: &str) -> Option<VersionSnapshot> {
-        let store = crate::versions::store_for_root(&self.data_dir, &self.root);
-        version_store::snapshot(self.remote.as_ref(), &store, id).await
+        version_store::snapshot(self.remote.as_ref(), &self.version_store(), id).await
     }
 
     pub(crate) async fn version_blob(&self, hash: &str) -> RemoteResult<Vec<u8>> {
@@ -935,7 +1077,8 @@ impl<R: Remote> Unit<R> {
     }
 
     /// Bring the local tree up to date with what changed remotely since the
-    /// last applied manifest. Returns relative paths it touched. Files the
+    /// last applied manifest. Returns the paths it touched, as the workspace
+    /// spells them. Files the
     /// user also edited locally are merged here (that's the one both-sides
     /// case); everything else is plain download/rename/trash.
     ///
@@ -974,7 +1117,7 @@ impl<R: Remote> Unit<R> {
                 self.deferred.insert(fid);
                 continue;
             }
-            let abs = self.root.join(&fstate.path);
+            let abs = self.abs(&fstate.path);
             let local = read_file_checked(&abs);
             match local {
                 Some(bytes) if hash16(&bytes) != fstate.hash => {
@@ -985,7 +1128,7 @@ impl<R: Remote> Unit<R> {
                 Some(_) => {
                     // Clean local copy — honor the deletion, recoverably.
                     self.delete_local(&abs, ctx.trash.as_ref());
-                    touched.push(fstate.path.clone());
+                    touched.push(self.ws_rel(&fstate.path));
                 }
                 None => {}
             }
@@ -1029,8 +1172,9 @@ impl<R: Remote> Unit<R> {
             (Vec::new(), fresh.into_iter().chain(owed).collect())
         };
 
-        // Conflict copies made in this pass, beside the document each is of.
-        let mut copies: Vec<(String, String)> = Vec::new();
+        // Conflict copies made in this pass: the document each is of, and
+        // where the copy is.
+        let mut copies: Vec<(String, PathBuf)> = Vec::new();
         for (fid, rf) in express {
             if !self.apply_file(&fid, &rf, remote, ctx, &mut touched, &mut copies).await? {
                 self.state.owed.insert(fid);
@@ -1060,13 +1204,14 @@ impl<R: Remote> Unit<R> {
         // sidecar, so the copy gets one of its own: the document's, as this
         // pass left it, which holds both sides' records.
         for (doc, copy) in copies {
-            let (from, to) = (self.root.join(sidecar_of(&doc)), self.root.join(sidecar_of(&copy)));
+            let from = self.abs(&sidecar_of(&doc));
+            let to = PathBuf::from(sidecar_of(&copy.to_string_lossy()));
             if to.exists() {
                 continue;
             }
             if let Some(bytes) = read_file_checked(&from) {
                 if write_atomic(&to, &bytes).is_ok() {
-                    touched.push(sidecar_of(&copy));
+                    touched.extend(rel_path(Path::new(ctx.ws_root), &to));
                 }
             }
         }
@@ -1083,10 +1228,10 @@ impl<R: Remote> Unit<R> {
         remote: &Manifest,
         ctx: &Ctx<'_>,
         touched: &mut Vec<String>,
-        copies: &mut Vec<(String, String)>,
+        copies: &mut Vec<(String, PathBuf)>,
     ) -> RemoteResult<bool> {
         let (fid, rf) = (fid.to_string(), rf.clone());
-        let target = self.root.join(&rf.path);
+        let target = self.abs(&rf.path);
         let prior = self.state.files.get(&fid).cloned();
 
         // A rename: the copy here goes to the new name first. Of the same
@@ -1096,13 +1241,13 @@ impl<R: Remote> Unit<R> {
         // second document.
         if let Some(p) = &prior {
             if p.path != rf.path {
-                let from = self.root.join(&p.path);
+                let from = self.abs(&p.path);
                 if from.exists() && !target.exists() {
                     if let Some(parent) = target.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
                     if std::fs::rename(&from, &target).is_ok() {
-                        touched.push(rf.path.clone());
+                        touched.push(self.ws_rel(&rf.path));
                         if p.hash == rf.hash {
                             // A rename moves no bytes, so the snapshot from
                             // before it still says whether the file was
@@ -1154,7 +1299,7 @@ impl<R: Remote> Unit<R> {
             if safe {
                 if let Some(p) = &prior {
                     if p.path != rf.path {
-                        let old_abs = self.root.join(&p.path);
+                        let old_abs = self.abs(&p.path);
                         if old_abs.exists()
                             && read_file_checked(&old_abs)
                                 .map(|b| hash16(&b) == p.hash)
@@ -1167,7 +1312,7 @@ impl<R: Remote> Unit<R> {
                 let written = write_atomic(&target, &bytes)
                     .map_err(|e| RemoteError::Other(format!("write {}: {}", rf.path, e)))?;
                 self.record_synced(&fid, &rf, Some(&bytes), written);
-                touched.push(rf.path.clone());
+                touched.push(self.ws_rel(&rf.path));
             }
             return Ok(safe);
         }
@@ -1201,7 +1346,7 @@ impl<R: Remote> Unit<R> {
                 // content (≠ theirs) now reads as a local edit and gets
                 // pushed as rev+1 by stage_local in this same cycle.
                 self.record_synced_content(&fid, &rf, &theirs);
-                touched.push(rf.path.clone());
+                touched.push(self.ws_rel(&rf.path));
             }
             MergeOutcome::Conflicted => {
                 // Keep ours as the live document; their version lands
@@ -1210,21 +1355,30 @@ impl<R: Remote> Unit<R> {
                 // The filename carries a name, so the id is resolved
                 // here rather than shown: a file called
                 // "notes (conflict — m-1a2b3c4d…).md" helps nobody.
+                //
+                // A shared document's section holds that document alone, so
+                // its copy is an ordinary note: beside it, in the folder it
+                // sits in — or in My files, for somebody that folder is not
+                // theirs (`Ctx::copies_in`).
                 let author = ctx.name_of(&rf.by);
-                let copy = conflict_copy_path(&target, if author.is_empty() { "someone" } else { &author });
+                let beside = match ctx.copies_in {
+                    Some(dir) => dir.join(target.file_name().unwrap_or_default()),
+                    None => target.clone(),
+                };
+                let copy = conflict_copy_path(&beside, if author.is_empty() { "someone" } else { &author });
                 write_atomic(&copy, &theirs)
                     .map_err(|e| RemoteError::Other(format!("write conflict copy: {}", e)))?;
                 self.record_synced_content(&fid, &rf, &theirs);
-                let copy_rel = rel_path(&self.root, &copy).unwrap_or_default();
+                let copy_rel = rel_path(Path::new(ctx.ws_root), &copy).unwrap_or_default();
                 touched.push(copy_rel.clone());
-                copies.push((rf.path.clone(), copy_rel.clone()));
+                copies.push((rf.path.clone(), copy));
                 ctx.events.emit_json(
                     EV_CONFLICT,
                     json!({
                         "root": ctx.ws_root,
                         "path": self.ws_rel(&rf.path),
                         "by": author,
-                        "conflictPath": self.ws_rel(&copy_rel),
+                        "conflictPath": copy_rel,
                     }),
                 );
             }
@@ -1510,6 +1664,21 @@ impl<R: Remote> Unit<R> {
             }
         }
 
+        // Where a share that sits here was moved to on this device.
+        for (id, dir) in &self.state.mount_ops {
+            let now = next.mounts.get(id);
+            if now.is_some_and(|m| &m.dir == dir) {
+                continue;
+            }
+            let entry = Mount {
+                dir: dir.clone(),
+                rev: now.map(|m| m.rev).unwrap_or(0) + 1,
+                by: ctx.signature.to_string(),
+                was: now.and_then(|m| m.was.clone()),
+            };
+            next.mounts.insert(id.clone(), entry);
+        }
+
         // Duplicate paths can slip in when two devices raced a create between
         // our fetch and CAS: deterministically suffix the younger id so the
         // manifest stays valid; the loser's device renames on next apply.
@@ -1770,7 +1939,7 @@ impl<R: Remote> Unit<R> {
     /// content (the revision we reconciled against), while the snapshot
     /// fields track the actual disk file so it reads as locally edited.
     fn record_synced_content(&mut self, fid: &str, rf: &ManifestFile, theirs: &[u8]) {
-        let abs = self.root.join(&rf.path);
+        let abs = self.abs(&rf.path);
         let (size, mtime_ms) = stat_pair(&abs);
         self.state.files.insert(
             fid.to_string(),

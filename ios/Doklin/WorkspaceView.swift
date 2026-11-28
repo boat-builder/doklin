@@ -43,6 +43,9 @@ struct WorkspaceView: View {
         .onChange(of: workspace.left) { _, left in
             if let left { close(left) }
         }
+        .onChange(of: workspace.relocated) { _, moved in
+            if let moved { follow(moved) }
+        }
         // A followed link's page opens over Browse.
         .onChange(of: device.opening, initial: true) { _, opening in
             guard let opening, opening.root == workspace.root else { return }
@@ -71,16 +74,13 @@ struct WorkspaceView: View {
         .environment(shell)
     }
 
-    /// A restricted folder left this iPhone: every screen inside it closes,
-    /// and its access screen, as a Mac closes its tabs. The rest stay.
-    private func close(_ left: FolderLeft) {
+    /// Something shared left this iPhone: every screen of it or inside it
+    /// closes, as a Mac closes its tabs. The rest stay.
+    private func close(_ left: ShareLeft) {
         shell.close { route in
             switch route {
-            case .folder(let dir), .document(let dir), .made(let dir), .match(let dir, _, _):
-                return left.holds(dir)
-            case .access(let id):
-                // Still listed when the engine says it left, or listed no more.
-                return workspace.space(id: id).map { left.holds($0.path) } ?? true
+            case .document(let file), .made(let file), .match(let file, _, _):
+                return left.holds(shell.now(file))
             case .history(.note(let note)):
                 return left.holds(note)
             case .history(.version(let opened)):
@@ -89,6 +89,25 @@ struct WorkspaceView: View {
                 return workspace.relative(store).map(left.holds) ?? false
             default:
                 return false
+            }
+        }
+    }
+
+    /// Something shared is somewhere else on this iPhone now, or called
+    /// something else: its history is asked for where it is. A document on
+    /// screen follows by itself, under the screen it was opened in
+    /// (`DocumentView`).
+    private func follow(_ moved: SharesMoved) {
+        shell.rewrite { route in
+            switch route {
+            case .history(.note(let note)):
+                return moved.now(note).map { .history(.note($0)) }
+            case .history(.version(let opened)):
+                return opened.following(moved, in: workspace).map { .history(.version($0)) }
+            case .history(.moment(let store, let moment)):
+                return workspace.store(store, after: moved).map { .history(.moment(store: $0, moment)) }
+            default:
+                return nil
             }
         }
     }
@@ -111,8 +130,6 @@ struct RouteView: View {
 
     var body: some View {
         switch route {
-        case .folder(let dir):
-            FolderView(workspace: workspace, dir: dir, path: $path)
         case .document(let file):
             DocumentView(workspace: workspace, path: file, route: $path)
         case .made(let file):
@@ -133,8 +150,6 @@ struct RouteView: View {
             AgentsView(workspace: workspace)
         case .hereNow:
             HereNowView(workspace: workspace)
-        case .access(let id):
-            SpaceAccessView(workspace: workspace, id: id)
         case .publishedPages:
             PublishedPagesView(workspace: workspace, route: $path)
         case .tags:

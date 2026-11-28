@@ -1,10 +1,8 @@
-// A folder of the workspace, as a screen shows it: what it holds, read off
-// this iPhone's copy, and the changes a person makes from a list — a new
-// note, a new folder, a rename, a move, a removal. Each lands on disk first
-// and reaches every other device through sync.
+// A folder of the workspace, and the changes a person makes in it from the
+// tree — a new note, a new folder, a rename, a move, a removal. Each lands on
+// disk first and reaches every other device through sync.
 
 import Foundation
-import Observation
 
 /// How far a screen has got with what it shows.
 public enum LoadPhase: Equatable, Sendable {
@@ -15,58 +13,37 @@ public enum LoadPhase: Equatable, Sendable {
 }
 
 @MainActor
-@Observable
-public final class FolderModel {
+public struct FolderModel {
     public let workspace: Workspace
-    /// `""` is the workspace's own folder, which holds the sections.
+    /// `""` is the workspace's own folder, which holds the three folders.
     public let dir: String
-    public private(set) var entries: [FolderEntry] = []
-    public private(set) var phase: LoadPhase = .idle
 
     public init(workspace: Workspace, dir: String) {
         self.workspace = workspace
         self.dir = dir
     }
 
-    public var title: String { dir.isEmpty ? workspace.name : DocLinks.name(of: dir) }
-
-    public func load() {
-        do {
-            entries = try workspace.files.list(dir)
-            phase = .loaded
-        } catch let error as DoklinError {
-            entries = []
-            phase = .failed(error.message)
-        } catch {
-            phase = .failed(error.localizedDescription)
-        }
-    }
-
     /// Make a note here, "Untitled" until it is named, and answer its path.
     public func createNote() async throws -> String {
         let path = try workspace.files.createNote(in: dir)
         await workspace.wrote([path])
-        load()
         return path
     }
 
     public func createFolder(named name: String) async throws -> String {
         let path = try workspace.files.createFolder(in: dir, named: name)
         await workspace.wrote([path])
-        load()
         return path
     }
 
     public func rename(_ entry: FolderEntry, to name: String) async throws {
         let (_, moved) = try workspace.files.rename(entry, to: name)
         await workspace.moved(moved)
-        load()
     }
 
     public func move(_ entry: FolderEntry, into folder: String) async throws {
         let (_, moved) = try workspace.files.move(entry, into: folder)
         await workspace.moved(moved)
-        load()
     }
 
     public func remove(_ entry: FolderEntry) async throws {
@@ -75,36 +52,27 @@ public final class FolderModel {
         try? await Engine.shared.run("versions_flush", ["ms": 2000])
         let gone = try workspace.files.remove(entry)
         await workspace.wrote(gone)
-        load()
     }
 
-    /// Who will see something made here, in words — nil where nothing can be.
+    /// Who will see something made here, in words — nil where nothing made
+    /// would sync.
     public var whoSeesNew: String? {
-        switch workspace.audience(of: dir) {
-        case .everyone: return "Everyone in \(workspace.name) will see it."
-        case .onlyYou: return "Only you will see it."
-        case .folder(let name): return "The people of “\(name)” will see it."
-        case .folders, .nowhere: return nil
+        switch workspace.place(of: dir) {
+        case .library: return "Everyone in \(workspace.name) will see it."
+        case .mine: return "Only you will see it."
+        case .share(let space): return "Everyone who can open “\(space.name)” will see it."
+        case .nowhere: return nil
         }
     }
 
-    /// Nothing is made at the top of the workspace, which holds the
-    /// sections, or directly in the folder that holds the restricted ones.
-    public var canHoldNotes: Bool { !dir.isEmpty && workspace.audience(of: dir) != .folders }
+    /// Nothing is made at the top of the workspace, which holds the three
+    /// folders, or straight under Shared with me: nobody would have shared it.
+    public var canHoldNotes: Bool { !dir.isEmpty && dir.lowercased() != TreeModel.sharedFolder.lowercased() }
 
-    /// This is Library's own folder: the top of what everyone has.
-    public var isLibrary: Bool { dir.lowercased() == TreeModel.libraryFolder.lowercased() }
-
-    /// A section's own folder is managed, not renamed, moved, removed or
-    /// restricted: Library, Private, Restricted, and each restricted folder.
-    public func isManaged(_ entry: FolderEntry) -> Bool {
-        guard case .folder(let path) = entry, let status = workspace.status else { return false }
-        return TreeModel.isSectionName(path) || status.spaces.contains { $0.path.lowercased() == path.lowercased() }
-    }
-
-    /// Moving `entry` into `folder` lets more people see it: the sentence
-    /// that says who, to confirm first — or nil when nobody new will.
-    public func widening(_ entry: FolderEntry, into folder: String) -> String? {
-        Sections.wider(in: workspace.status, from: entry.path, to: folder)
+    /// Library, My files and Shared with me themselves are never renamed,
+    /// moved, removed or shared.
+    public func isSection(_ entry: FolderEntry) -> Bool {
+        guard case .folder(let path) = entry else { return false }
+        return TreeModel.isSectionFolder(path)
     }
 }

@@ -3,12 +3,18 @@ import {
   addsQuestion,
   cloudForWorkspace,
   cloudNeedsAttention,
+  documentStem,
+  fromLibraryLayout,
+  sectionIdOf,
+  LAYOUT_NOW,
   leaseFor,
   libraryDirOf,
   livePathsOf,
   mayOn,
+  MY_FILES_DIR,
   placeOf,
   relPathIn,
+  shareAt,
   toLibraryLayout,
   widerAudience,
   type CloudPendingAddsEvent,
@@ -16,14 +22,15 @@ import {
   type CloudRemovedEvent,
   type CloudSpace,
   type CloudSpaceLeftEvent,
+  type CloudSpaceMovedEvent,
   type CloudStatus,
   type PublicPage,
 } from "./cloud";
 import CloudPanel from "./CloudPanel";
 import type { AccessTab } from "./CloudPeople";
 import PeopleDialog from "./PeopleDialog";
-import RestrictedFolder, { type RestrictedSource } from "./RestrictedFolder";
-import SpaceAccess from "./SpaceAccess";
+import ShareChip from "./ShareChip";
+import ShareDialog, { type ShareTarget } from "./ShareDialog";
 import { LeaseBanner } from "./LeaseBanner";
 import type {
   DeletedFile,
@@ -45,7 +52,7 @@ import HistoryRail from "./HistoryRail";
 import VersionPreview, { momentLabel } from "./VersionPreview";
 import WorkspaceHistory from "./WorkspaceHistory";
 import VersionsSettings from "./VersionsSettings";
-import RecentlyDeleted, { deletedDocuments } from "./RecentlyDeleted";
+import RecentlyDeleted, { deletedDocuments, type DeletedIn } from "./RecentlyDeleted";
 import { dragWindowFromGap } from "./windowDrag";
 import { keys, type AppShortcut } from "./keys";
 import Editor, { type EditorHandle } from "./Editor";
@@ -54,7 +61,9 @@ import { titleProblem } from "./titleText";
 import type { SearchInfo } from "./searchPlugin";
 import Sidebar, {
   forgetTreeView,
+  moveTreeViewFromLibrary,
   moveTreeViewIntoLibrary,
+  moveTreeViewPath,
   pruneNestedSelection,
   type SidebarSelection,
 } from "./Sidebar";
@@ -117,9 +126,9 @@ import { tableWidthsKey } from "./tableWidths";
 import {
   indexDocuments,
   linkTargetPath,
-  sectionOf,
   splitLinkRecords,
   type DocumentIndex,
+  type ShareNamed,
   type WorkspaceDocument,
 } from "./docLinks";
 import type { LinkContext } from "./linkMark";
@@ -675,8 +684,8 @@ function forgetStoredSession(root: string) {
 
 /* ---------- A folder connected: its files into Library ----------
    Connecting a folder, or resuming one whose files are not in Library yet,
-   moves the files at its top into `Library/`, beside `Private/` and
-   `Restricted/` (the engine's move, engine/src/cloud/layout.rs). What is
+   moves the files at its top into `Library/`, beside `My files/` and
+   `Shared with me/` (the engine's move, engine/src/cloud/layout.rs). What is
    stored about paths in that folder follows, by the move's rule
    (`toLibraryLayout`): the tabs kept for every folder (`doklin:session`)
    and how its tree was left (`doklin:sidebar-tree`). */
@@ -687,12 +696,10 @@ const intoLibrary = (root: string) => (path: string) => {
   return rel === null ? path : `${root}/${toLibraryLayout(rel)}`;
 };
 
-/** The stored tabs and tree of the folder at `root`, moved where the move
- *  put their paths. */
-function moveStoredPathsIntoLibrary(root: string): void {
+/** The stored tabs of every folder, each path where `moved` says it is now. */
+function moveStoredTabs(moved: (path: string) => string): void {
   try {
     const all = readAllSessions();
-    const moved = intoLibrary(root);
     for (const entry of Object.values(all.sessions)) {
       entry.tabs = entry.tabs.map((t) => ({ ...t, path: moved(t.path) }));
     }
@@ -703,7 +710,31 @@ function moveStoredPathsIntoLibrary(root: string): void {
   } catch {
     // ignore
   }
+}
+
+/** The stored tabs and tree of the folder at `root`, moved where the move
+ *  put their paths. */
+function moveStoredPathsIntoLibrary(root: string): void {
+  moveStoredTabs(intoLibrary(root));
   moveTreeViewIntoLibrary(root);
+}
+
+/* ---------- ONE-TIME: from Private and Restricted ----------
+   To be deleted with the engine's `from_library`
+   (engine/src/cloud/layout.rs). A workspace folder laid out by the build
+   before sharing in place has its `Private/` renamed `My files/` and what
+   was under `Restricted/` moved under `Shared with me/`, as the app starts
+   (or as the folder is resumed). What is stored about paths in it follows,
+   by the same rule (`fromLibraryLayout`). */
+
+const fromLibrary = (root: string) => (path: string) => {
+  const rel = relPathIn(root, path);
+  return rel === null || rel === "" ? path : `${root}/${fromLibraryLayout(rel)}`;
+};
+
+function moveStoredPathsFromLibrary(root: string): void {
+  moveStoredTabs(fromLibrary(root));
+  moveTreeViewFromLibrary(root);
 }
 
 export default function App() {
@@ -1133,12 +1164,13 @@ export default function App() {
   const [cloudSetup, setCloudSetup] = useState<CloudSetupMode | null>(null);
   const [workerUpdateOpen, setWorkerUpdateOpen] = useState(false);
   // The workspace's own surfaces, reached from its menu and its sections:
-  // who is in it and its agents (one window, a tab each); the dialog that
-  // makes a restricted folder, and what it is being made from; and whose
-  // access is being managed — by id, so the dialog follows the status.
+  // who is in it and its agents (one window, a tab each); and the Share
+  // dialog, with the folder or the document it is open on.
   const [accessTab, setAccessTab] = useState<AccessTab | null>(null);
-  const [restrictedSource, setRestrictedSource] = useState<RestrictedSource | null>(null);
-  const [accessSpaceId, setAccessSpaceId] = useState<string | null>(null);
+  const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
+  // Where something shared was when this window gave it up — left it, or
+  // deleted it — so its going is not told back as news (`leaveSpaceFolder`).
+  const givenUpRef = useRef<Set<string>>(new Set());
   // A question with one safe answer, asked in the app's own chrome and
   // answered once (`askUser`).
   const [question, setQuestion] = useState<Question | null>(null);
@@ -1169,7 +1201,7 @@ export default function App() {
   // A document's files are one row, and one in the count.
   const deletedCount = useMemo(() => deletedDocuments(deletedFiles).length, [deletedFiles]);
   const [deletedFor, setDeletedFor] = useState<string | null>(null);
-  const [sectionDeleted, setSectionDeleted] = useState<DeletedFile[]>([]);
+  const [sectionDeleted, setSectionDeleted] = useState<DeletedIn[]>([]);
   // Every store's status — the settings surface's whole model, the same way
   // the cloud statuses are the Cloud panel's.
   const [versionStatuses, setVersionStatuses] = useState<VersionsStatus[]>([]);
@@ -2883,7 +2915,11 @@ export default function App() {
       cancelled = true;
     };
   }, [libraryDir, treeRefreshToken]);
-  // A section's own deleted files, read while its column is showing.
+  // A section's own deleted files, read while its column is showing — and
+  // those of each shared folder inside it, which keeps a history of its own.
+  const sharedFoldersSaid = JSON.stringify(
+    (cloudForRoot?.spaces ?? []).filter((sp) => sp.kind === "folder" && sp.path !== "").map((sp) => `${cloudForRoot?.root}/${sp.path}`),
+  );
   useEffect(() => {
     const versions = backend.versions;
     if (!deletedFor || !versions) {
@@ -2891,18 +2927,33 @@ export default function App() {
       return;
     }
     let cancelled = false;
-    void versions
-      .deleted(deletedFor)
-      .then((files) => {
-        if (!cancelled) setSectionDeleted(files);
-      })
-      .catch(() => {
-        if (!cancelled) setSectionDeleted([]);
-      });
+    const inside = (JSON.parse(sharedFoldersSaid) as string[]).filter((dir) => dir.startsWith(`${deletedFor}/`));
+    void Promise.all(
+      [deletedFor, ...inside].map((root) =>
+        versions.deleted(root).then(
+          (files): DeletedIn => ({ root, files }),
+          (): DeletedIn => ({ root, files: [] }),
+        ),
+      ),
+    ).then((folders) => {
+      if (!cancelled) setSectionDeleted(folders);
+    });
     return () => {
       cancelled = true;
     };
-  }, [deletedFor, treeRefreshToken]);
+  }, [deletedFor, treeRefreshToken, sharedFoldersSaid]);
+  // What was shared from the section whose column is showing — or from
+  // something shared inside it — and deleted for everyone, that this person
+  // can still restore.
+  const deletedShares = useMemo(() => {
+    if (!deletedFor || !cloudForRoot) return [];
+    const rel = relPathIn(cloudForRoot.root, deletedFor);
+    if (rel === null) return [];
+    const within = cloudForRoot.spaces
+      .filter((sp) => sp.path !== "" && (sp.path.toLowerCase() === rel.toLowerCase() || sp.path.toLowerCase().startsWith(`${rel.toLowerCase()}/`)))
+      .map((sp) => sp.id);
+    return cloudForRoot.spaces.filter((sp) => sp.deletedAt !== null && sp.placed && sp.parent !== null && within.includes(sp.parent));
+  }, [deletedFor, cloudForRoot]);
 
   // The stores' statuses, read when the settings surface opens. The event
   // keeps them current while it is open, and asking at boot would only race
@@ -4067,16 +4118,24 @@ export default function App() {
   const moveIntoLibrary = useCallback(
     async (root: string, move: () => Promise<unknown>) => {
       const markerOf = () => backend.setup?.marker(root).catch(() => null) ?? Promise.resolve(null);
-      const moved = (await markerOf())?.layout === "library";
+      const layoutMoved = () => backend.sync?.layoutMoved().catch(() => [] as string[]) ?? Promise.resolve([] as string[]);
+      const before = (await markerOf())?.layout;
+      const renamedBefore = (await layoutMoved()).includes(root);
       await flushPendingAutosave();
       await flushSidecarWrite();
       try {
         await move();
       } finally {
-        if (!moved && (await markerOf())?.layout === "library") {
+        if (before === undefined && (await markerOf())?.layout === LAYOUT_NOW) {
           await repoint(intoLibrary(root));
           moveStoredPathsIntoLibrary(root);
           // The tree reads how it was left again, from where it is now.
+          setTreeViewEpoch((n) => n + 1);
+        } else if (!renamedBefore && (await layoutMoved()).includes(root)) {
+          // ONE-TIME (`fromLibraryLayout`): a folder resumed from the layout
+          // before sharing in place.
+          await repoint(fromLibrary(root));
+          moveStoredPathsFromLibrary(root);
           setTreeViewEpoch((n) => n + 1);
         }
       }
@@ -4191,11 +4250,12 @@ export default function App() {
   cloudForRootRef.current = cloudForRoot;
 
   // Asked once before anything moves between folders. Three moves change who
-  // can open a thing, and say so first: one that lets more people see it; a
-  // folder put straight under Restricted, which becomes a restricted folder
-  // and leaves everyone else's devices; and one into no section, which stops
-  // it syncing and takes it off every other device. Every other move just
-  // happens.
+  // can open a thing, and say so first: one that lets more people open it;
+  // one that takes something shared into Library, where it is everyone's and
+  // no share of its own; and one into no section, which stops it syncing and
+  // takes it off every other device. Every other move just happens. The
+  // iPhone asks the first two in the same words (`Sections.moveQuestion`,
+  // ios/DoklinKit) — change both.
   const confirmMove = useCallback(
     async (entries: SidebarSelection[], toDir: string): Promise<boolean> => {
       const cloud = cloudForRootRef.current;
@@ -4210,16 +4270,6 @@ export default function App() {
         const rel = relPathIn(cloud.root, en.path);
         return rel === null ? null : placeOf(cloud, rel);
       };
-      if (to.kind === "nowhere" && toRel.toLowerCase() === "restricted") {
-        // Where no restricted folder can be made, the move is refused in its
-        // own words and there is nothing to ask first.
-        if (!backend.spaces) return true;
-        return askUser({
-          title: `Restrict ${what}?`,
-          body: `${one ? "It becomes a restricted folder" : "Each becomes a restricted folder"} only you can open until you add people, and is removed from everyone else’s devices.`,
-          confirm: "Restrict",
-        });
-      }
       if (to.kind === "nowhere") {
         // Only what syncs now has devices to leave.
         if (!entries.some((en) => (from(en)?.kind ?? "nowhere") !== "nowhere")) return true;
@@ -4235,49 +4285,73 @@ export default function App() {
         const who = p === null ? null : widerAudience(cloud, p, to);
         if (who) gains.add(who);
       }
-      if (gains.size === 0) return true;
+      // What is shared among them, or inside a folder among them: in Library
+      // it is everyone's, and nothing is shared separately there.
+      const ending =
+        to.kind === "library"
+          ? cloud.spaces
+              .filter((sp) => sp.kind !== "private" && sp.path !== "")
+              .filter((sp) =>
+                entries.some((en) => {
+                  const rel = relPathIn(cloud.root, en.path);
+                  if (rel === null) return false;
+                  const at = (en.kind === "dir" ? rel : documentStem(rel)).toLowerCase();
+                  const item = sp.path.toLowerCase();
+                  return item === at || (en.kind === "dir" && item.startsWith(`${at}/`));
+                }),
+              )
+              .map((sp) => `“${sp.name}”`)
+          : [];
+      if (gains.size === 0 && ending.length === 0) return true;
+      const sees = gains.size > 0 ? `${[...gains][0]} will be able to open ${one ? "it" : "them"}.` : "";
+      const ends =
+        ending.length === 0
+          ? ""
+          : ending.length === 1
+            ? ` ${ending[0]} stops being shared on its own.`
+            : ` ${ending.slice(0, -1).join(", ")} and ${ending[ending.length - 1]} stop being shared on their own.`;
       return askUser({
-        title: `Move ${what} to ${to.kind === "shared" ? "Library" : `“${to.space.name}”`}?`,
-        body: `${[...gains][0]} will be able to see ${one ? "it" : "them"}.`,
+        title: `Move ${what} to ${to.kind === "library" ? "Library" : to.kind === "mine" ? "My files" : `“${to.space.name}”`}?`,
+        body: `${sees}${ends}`.trim(),
         confirm: "Move",
       });
     },
     [askUser],
   );
 
-  // Make the restricted folder its dialog asked for, and put in it what the
-  // dialog was opened on: a folder becomes it (the backend moves it: on a
-  // Mac the engine, so the people in it keep their copies in place); a note
-  // is moved into it.
-  // Resolves to a sentence when it could not be done.
-  const makeRestricted = useCallback(
-    async (source: RestrictedSource, name: string, members: string[]): Promise<string | null> => {
+  // Something shared with this person, which is not theirs to move, copied
+  // into their own files: an ordinary note or folder there, shared with
+  // nobody, under the first of its names that is free.
+  const copyToMine = useCallback(
+    async (path: string, kind: "file" | "dir") => {
       const cloud = cloudForRootRef.current;
-      const spaces = backend.spaces;
-      if (!cloud || !spaces) return "This workspace isn’t connected.";
+      if (!cloud) return;
+      const mine = cloud.spaces.find((sp) => sp.kind === "private");
+      const dir = `${cloud.root}/${mine?.path || MY_FILES_DIR}`;
+      const name = basename(path);
+      const [stem, ext] = kind === "dir" ? [name, ""] : [basename(documentStem(path)), name.slice(basename(documentStem(path)).length)];
       try {
-        if (source.kind === "folder") {
-          // Land what is being typed inside it before the folder moves.
-          if (pathRef.current?.startsWith(`${source.path}/`)) await flushPendingAutosave();
-          await flushSidecarWrite();
-          const made = await spaces.spaceCreate(cloud.root, name, members, source.path);
-          await repointMoved(source.path, `${cloud.root}/${made.path}`, "dir");
-        } else {
-          const made = await spaces.spaceCreate(cloud.root, name, members);
-          if (source.kind === "note") {
-            const to = `${cloud.root}/${made.path}/${basename(source.path)}`;
-            const failed = await movePath(source.path, to, "file");
-            if (failed) return `The folder was made, but the note could not be moved into it: ${failed}`;
-          }
-          setTreeRefreshToken((t) => t + 1);
+        let to = "";
+        for (let n = 1; !to; n++) {
+          const candidate = `${dir}/${n === 1 ? stem : `${stem} ${n}`}`;
+          const taken = await Promise.all(
+            (kind === "dir" ? [candidate] : [`${candidate}.md`, `${candidate}.html`]).map((p) =>
+              backend.documents.exists(p).catch(() => false),
+            ),
+          );
+          if (!taken.some(Boolean)) to = `${candidate}${ext}`;
         }
-        setRestrictedSource(null);
-        return null;
+        await backend.documents.copy(path, to, kind);
+        setTreeRefreshToken((t) => t + 1);
+        pushToast("info", `Copied to My files as “${kind === "dir" ? basename(to) : basename(documentStem(to))}”.`, {
+          label: kind === "dir" ? "Show" : "Open",
+          run: () => (kind === "dir" ? setRevealRequest({ path: to, kind: "dir" }) : void openTab(to)),
+        });
       } catch (e) {
-        return errText(e);
+        pushToast("warn", errText(e));
       }
     },
-    [flushPendingAutosave, flushSidecarWrite, movePath, repointMoved],
+    [pushToast, openTab],
   );
 
   /* ---------- File clipboard (sidebar Cut/Copy/Paste) ---------- */
@@ -4377,9 +4451,90 @@ export default function App() {
 
   // Trash a whole selection, outermost entries only — deleting a folder
   // already takes its selected children with it.
+  // Deleting something shared is not a trip to the Trash: whoever keeps it
+  // deletes it for everyone it is shared with — it is kept thirty days —
+  // and anyone else leaves it. Each is asked first, naming who loses it.
+  // Resolves to whether it went. The iPhone asks in the same words
+  // (`Sections.deleteQuestion`, `ShareWords`, ios/DoklinKit) — change both.
+  const deleteShare = useCallback(
+    async (space: CloudSpace, inside?: string): Promise<boolean> => {
+      const cloud = cloudForRootRef.current;
+      const shares = backend.shares;
+      if (!cloud || !shares) return false;
+      const others = [...new Set([...space.members, ...space.above])].filter((m) => m !== cloud.meId).length;
+      const people = others === 0 ? "" : ` and from those of the ${others === 1 ? "other person" : `${others} other people`} who can open it`;
+      const sure = space.placed
+        ? await askUser({
+            title: inside ? `“${space.name}” in “${inside}” is shared. Delete it for everyone?` : `Delete “${space.name}” for everyone?`,
+            body: `It is removed from your devices${people}. It stays in Recently deleted for 30 days, where it can be restored with its people and its history.`,
+            confirm: "Delete for everyone",
+          })
+        : await askUser({
+            title: `Leave “${space.name}”?`,
+            body: `It is removed from this ${backend.device} and your other devices. The others keep theirs.`,
+            confirm: "Leave",
+          });
+      if (!sure) return false;
+      try {
+        const at = `${cloud.root}/${space.path}`;
+        if (pathRef.current && (pathRef.current.startsWith(`${at}/`) || documentStem(pathRef.current) === at)) {
+          await flushPendingAutosave();
+          await flushSidecarWrite();
+        }
+        givenUpRef.current.add(at);
+        if (!space.placed) {
+          if (!cloud.meId) throw new Error(`This ${backend.device} does not know who you are here yet — try again in a moment.`);
+          await shares.shareMember(cloud.root, space.id, cloud.meId, false);
+          return true;
+        }
+        await shares.shareDelete(cloud.root, space.id);
+        // Deleted for everyone is the one delete with no Trash behind it:
+        // the way back is offered at once, and stays in Recently deleted.
+        pushToast("done", `“${space.name}” is deleted for everyone, and kept for 30 days.`, {
+          label: "Restore",
+          run: () =>
+            void shares.shareRestore(cloud.root, space.id).then(
+              () => setTreeRefreshToken((t) => t + 1),
+              (e) => pushToast("warn", errText(e)),
+            ),
+        });
+        return true;
+      } catch (e) {
+        pushToast("warn", errText(e));
+        return false;
+      }
+    },
+    [askUser, pushToast, flushPendingAutosave, flushSidecarWrite],
+  );
+
   const deleteEntries = useCallback(
     async (entries: SidebarSelection[]) => {
-      const outer = pruneNestedSelection(entries);
+      const cloud = cloudForRootRef.current;
+      const relOf = (path: string) => (cloud ? relPathIn(cloud.root, path) : null);
+      // Something shared goes its own way; and a folder that holds something
+      // shared is not trashed around it — each is deleted for everyone
+      // first, or the folder stays.
+      const plain: SidebarSelection[] = [];
+      for (const en of pruneNestedSelection(entries)) {
+        const rel = relOf(en.path);
+        const own = rel === null ? null : shareAt(cloud, rel, en.kind === "dir");
+        if (own) {
+          await deleteShare(own);
+          continue;
+        }
+        const held =
+          rel === null || en.kind !== "dir" || !cloud
+            ? []
+            : cloud.spaces.filter((sp) => sp.kind !== "private" && sp.path.toLowerCase().startsWith(`${rel.toLowerCase()}/`));
+        // The outermost of them: what is shared from inside one goes with it.
+        const outermost = held.filter((sp) => !held.some((o) => o !== sp && sp.path.toLowerCase().startsWith(`${o.path.toLowerCase()}/`)));
+        let kept = false;
+        for (const sp of outermost) {
+          if (!(await deleteShare(sp, basename(en.path)))) kept = true;
+        }
+        if (!kept) plain.push(en);
+      }
+      const outer = plain;
       if (outer.length === 0) return;
       // Where a delete cannot be taken back, it is asked first.
       if (!backend.documents.removeUndoes) {
@@ -4399,7 +4554,7 @@ export default function App() {
       }
       for (const s of outer) await deleteEntry(s.path, s.kind);
     },
-    [deleteEntry, askUser],
+    [deleteEntry, askUser, deleteShare],
   );
 
   useEffect(() => {
@@ -4411,6 +4566,13 @@ export default function App() {
       // or its saved tabs, and skips the stored-session restore and
       // pending-open consumption — those belong to the main window.
       const init = backend.windows ? await backend.windows.init() : ONLY_WINDOW;
+      // ONE-TIME (`fromLibraryLayout`): the folders whose `Private` and
+      // `Restricted` were renamed as the app started. What is stored about
+      // paths in them follows before any of it is read; every window asks,
+      // and a path already moved stays as it is.
+      const renamed = (await backend.sync?.layoutMoved().catch(() => [])) ?? [];
+      for (const root of renamed) moveStoredPathsFromLibrary(root);
+      const fromBefore = (path: string) => renamed.reduce((p, root) => fromLibrary(root)(p), path);
       if (!init.isMain) {
         isMainWindow = false;
         if (init.restored) {
@@ -4420,7 +4582,7 @@ export default function App() {
           // sidebar open). Unreadable paths stay visible as ghost tabs and
           // untitled notes come back unsaved, same as the main window's restore.
           if (init.folder) setWorkspaceRoot(init.folder);
-          const restored = await rebuildTabs(sanitizeTabs(init.tabs));
+          const restored = await rebuildTabs(sanitizeTabs(init.tabs).map((t) => ({ ...t, path: fromBefore(t.path) })));
           if (restored.length > 0) {
             const active =
               restored.find((t) => t.id === init.activeId) ?? restored[restored.length - 1];
@@ -5320,9 +5482,9 @@ export default function App() {
   // with the group they call.
   const versionStore = backend.versions;
   const { setup, sync, domain, access } = backend;
-  // A restricted folder is offered where one can be made and where there is
-  // a list of people to put in it.
-  const restricted = access && backend.spaces ? { access, spaces: backend.spaces } : undefined;
+  // Sharing is offered where it can be done and where there is a list of
+  // people to share with.
+  const sharing = access && backend.shares ? { access, shares: backend.shares } : undefined;
   const onJoinWorkspace = setup ? () => setCloudSetup("redeem") : undefined;
   const onNewNote = backend.untitled ? () => void newUntitled() : undefined;
   const onPickFile = backend.localFiles ? openFilePicker : undefined;
@@ -5410,8 +5572,7 @@ export default function App() {
         setPublishedOpen(false);
         setPublishFolder(null);
         setAccessTab(null);
-        setRestrictedSource(null);
-        setAccessSpaceId(null);
+        setShareTarget(null);
         setHistoryRoot(null);
         setDeletedFor(null);
         forgetStoredSession(e.root);
@@ -5427,17 +5588,17 @@ export default function App() {
     },
     [closeGoneTabs, selectSidebarEntries],
   );
-  // A restricted folder left this Mac: this person was taken out of it, or
-  // it was deleted — the engine has already removed its copy. The tabs of
-  // what was in it close; and unless giving it up was done here, a line says
-  // why it is gone.
-  const givenUpRef = useRef<Set<string>>(new Set());
+  // Something shared left this device: it is no longer shared with this
+  // person, or it was deleted — the engine has already removed its copy.
+  // The tabs of what was in it close; and unless giving it up was done
+  // here, a line says why it is gone. `e.path` is a folder, or a document
+  // without its extension.
   const leaveSpaceFolder = useCallback(
     async (e: CloudSpaceLeftEvent) => {
-      const dir = `${e.root}/${e.path}`;
-      const under = (p: string) => p === dir || p.startsWith(`${dir}/`);
+      const at = `${e.root}/${e.path}`;
+      const under = (p: string) => p === at || p.startsWith(`${at}/`) || documentStem(p) === at;
       await closeGoneTabs(under);
-      const mine = givenUpRef.current.delete(dir);
+      const mine = givenUpRef.current.delete(at);
       if (e.root !== sessionWorkspaceRoot) return;
       setHistoryRoot((r) => (r && under(r) ? null : r));
       setDeletedFor((d) => (d && under(d) ? null : d));
@@ -5445,11 +5606,26 @@ export default function App() {
       if (!mine) {
         pushToast(
           "info",
-          `“${e.name}” is no longer on this ${backend.device} — you were taken out of it, or it was deleted.`,
+          `“${e.name}” is no longer on this ${backend.device} — it is no longer shared with you, or it was deleted.`,
         );
       }
     },
     [closeGoneTabs, pushToast],
+  );
+  // Something shared is somewhere else on this device now: sync moved it
+  // where it sits, or renamed it as somebody renamed it. What is open from
+  // where it was is where it is, and so is how its folders were left open.
+  const followSpaceMoved = useCallback(
+    async (e: CloudSpaceMovedEvent) => {
+      for (const move of e.moves) {
+        await repointMoved(`${e.root}/${move.from}`, `${e.root}/${move.to}`, move.dir ? "dir" : "file");
+        if (move.dir) moveTreeViewPath(e.root, move.from, move.to);
+      }
+      if (e.root !== sessionWorkspaceRoot) return;
+      setTreeViewEpoch((n) => n + 1);
+      setTreeRefreshToken((t) => t + 1);
+    },
+    [repointMoved],
   );
   // Sync wrote files: the tree refreshes (open tabs already reload through
   // the file watcher). A merge that left a conflict copy, or a mass
@@ -5487,6 +5663,9 @@ export default function App() {
       }),
       backend.cloud.onSpaceLeft((e) => {
         if (readyRef.current) void leaveSpaceFolder(e);
+      }),
+      backend.cloud.onSpaceMoved((e) => {
+        if (readyRef.current) void followSpaceMoved(e);
       }),
     ];
     // What only a device with a copy of its own hears.
@@ -5549,7 +5728,7 @@ export default function App() {
     return () => {
       for (const un of uns) un();
     };
-  }, [openTab, pushToast, dismissToast, reloadFromDisk, leaveRemovedWorkspace, leaveSpaceFolder]);
+  }, [openTab, pushToast, dismissToast, reloadFromDisk, leaveRemovedWorkspace, leaveSpaceFolder, followSpaceMoved]);
   // Answered somewhere else — the Cloud panel, another window — the question
   // leaves the notice too. A pass runs through "syncing" while it waits.
   const cloudPhase = cloudForRoot?.phase;
@@ -5583,11 +5762,6 @@ export default function App() {
   const hereNow = [
     ...new Set((cloudForRoot?.presence ?? []).filter((p) => p.path === activeRel).map((p) => p.name)),
   ];
-  // The restricted folder whose people are being managed, as the status
-  // lists it now — gone from the list (left, deleted, taken away), the
-  // dialog has nothing to show and closes.
-  const accessSpace: CloudSpace | null =
-    (accessSpaceId && cloudForRoot?.spaces.find((sp) => sp.id === accessSpaceId)) || null;
   // html-only documents render in the iframe alone; there is no markdown
   // version to edit, so the editor never mounts and the MD side is disabled.
   const activeIsHtmlDoc = activeTab?.kind === "file" && isHtmlPath(activeTab.path);
@@ -5616,19 +5790,37 @@ export default function App() {
   // list, so an editor relinks only when one of them changed.
   const workspaceName = cloudForRoot?.name ?? "this workspace";
   const notifyLink = useCallback((message: string) => pushToast("info", message), [pushToast]);
+  // The workspace's sections as the status last listed them: the same
+  // object until one of them changed, where the status itself is a new one
+  // with every pass.
+  const spacesSaid = JSON.stringify(cloudForRoot?.spaces ?? null);
+  const sections = useMemo(() => {
+    const spaces = JSON.parse(spacesSaid) as CloudSpace[] | null;
+    return spaces && { spaces };
+  }, [spacesSaid]);
+  const meId = cloudForRoot?.meId ?? null;
+  const sharesNamed = useMemo(() => {
+    const named = new Map<string, ShareNamed>();
+    for (const sp of sections?.spaces ?? []) {
+      if (sp.kind === "private") continue;
+      named.set(sp.id, { name: sp.name, alone: [...sp.members, ...sp.above].every((person) => person === meId) });
+    }
+    return named;
+  }, [sections, meId]);
   const linkContextOf = useCallback(
     (path: string | null): LinkContext => {
       const rel = path && workspaceRoot ? relPathIn(workspaceRoot, path) : null;
       return {
-        note: rel ? { path: rel, section: workspaceDocs ? sectionOf(rel, workspaceDocs) : null } : null,
+        note: rel ? { path: rel, section: sectionIdOf(sections, rel) } : null,
         docs: workspaceDocs,
         recent: recentDocs,
         workspace: workspaceName,
+        shares: sharesNamed,
         placement: "caret",
         notify: notifyLink,
       };
     },
-    [workspaceRoot, workspaceDocs, recentDocs, workspaceName, notifyLink],
+    [workspaceRoot, workspaceDocs, recentDocs, workspaceName, notifyLink, sections, sharesNamed],
   );
   const activeLinks = useMemo(() => linkContextOf(activeFilePath), [linkContextOf, activeFilePath]);
   const companionPath = split?.doc?.kind === "file" ? split.doc.path : null;
@@ -6279,6 +6471,15 @@ export default function App() {
                 title={`In this note: ${hereNow.join(", ")}`}
                 testid="note-facepile"
               />
+              {/* Who can open it, and sharing it: a document in My files or
+                  in something shared. */}
+              {sharing && cloudForRoot && activeRel !== null && activeTab.kind === "file" && (
+                <ShareChip
+                  cloud={cloudForRoot}
+                  rel={activeRel}
+                  onShare={() => setShareTarget({ path: activeTab.path, kind: "file" })}
+                />
+              )}
               {/* Publishing: a file inside the open workspace only — not an
                   untitled note, not a file from outside (`chipHere`). */}
               {chipHere && activeRel !== null && (
@@ -6342,18 +6543,28 @@ export default function App() {
           tagList={tagList}
         />
       )}
-      {showSidebar && libraryDir && sidebarMode === "deleted" && versionStore && (
+      {showSidebar && libraryDir && sidebarMode === "deleted" && (versionStore || sharing) && (
         <RecentlyDeleted
-          store={versionStore}
+          store={versionStore ?? null}
           // The first list's (Library's, when connected), or one
           // section's: each folder with a history has its own list.
           root={deletedFor ?? libraryDir}
-          files={deletedFor ? sectionDeleted : deletedFiles}
+          folders={deletedFor ? sectionDeleted : [{ root: libraryDir, files: deletedFiles }]}
+          shares={deletedShares}
+          onRestoreShare={
+            backend.shares && cloudForRoot
+              ? async (share) => {
+                  await backend.shares?.shareRestore(cloudForRoot.root, share.id);
+                  setTreeRefreshToken((t) => t + 1);
+                  pushToast("done", `“${share.name}” is back, for everyone it was shared with.`);
+                }
+              : undefined
+          }
           onBackToFiles={() => {
             setSidebarMode("files");
             setDeletedFor(null);
           }}
-          onOpen={(file) => previewDeleted(file, deletedFor ?? libraryDir)}
+          onOpen={(file, root) => previewDeleted(file, root)}
           onRestored={(path) => {
             setTreeRefreshToken((t) => t + 1);
             pushToast("done", `${basename(path)} is back.`, {
@@ -6398,13 +6609,8 @@ export default function App() {
           onOpenPeople={access && cloudForRoot ? () => setAccessTab("people") : undefined}
           onOpenDevices={access && mayOn(cloudForRoot, "devices.own") ? () => setAccessTab("devices") : undefined}
           onOpenAgents={access && mayOn(cloudForRoot, "agents.own") ? () => setAccessTab("agents") : undefined}
-          onNewRestricted={
-            restricted && cloudForRoot
-              ? (from) => setRestrictedSource(from ? { kind: "folder", path: from } : { kind: "new" })
-              : undefined
-          }
-          onManageAccess={restricted ? (space) => setAccessSpaceId(space.id) : undefined}
-          onShareWith={restricted ? (path) => setRestrictedSource({ kind: "note", path }) : undefined}
+          onShare={sharing && cloudForRoot ? (path, kind) => setShareTarget({ path, kind }) : undefined}
+          onCopyToMine={cloudForRoot ? (path, kind) => void copyToMine(path, kind) : undefined}
           onConfirmMove={confirmMove}
           workspaces={myWorkspaces}
           onOpenWorkspace={(root) => void openWorkspace(root)}
@@ -6418,7 +6624,9 @@ export default function App() {
           onWorkspaceHistory={versionStore ? (dir) => setHistoryRoot(dir ?? libraryDir) : undefined}
           deletedCount={deletedCount}
           onRecentlyDeleted={
-            versionStore
+            // Without a version store there are still the deleted shares,
+            // which the domain keeps.
+            versionStore || sharing
               ? (dir) => {
                   setDeletedFor(dir ?? null);
                   setSidebarMode("deleted");
@@ -6445,13 +6653,19 @@ export default function App() {
           onClose={() => setAccessTab(null)}
         />
       )}
-      {restrictedSource && cloudForRoot && restricted && (
-        <RestrictedFolder
-          access={restricted.access}
+      {shareTarget && cloudForRoot && sharing && (
+        <ShareDialog
+          key={`${shareTarget.kind}:${shareTarget.path}`}
+          access={sharing.access}
+          shares={sharing.shares}
           cloud={cloudForRoot}
-          source={restrictedSource}
-          onSubmit={(name, members) => makeRestricted(restrictedSource, name, members)}
-          onClose={() => setRestrictedSource(null)}
+          target={shareTarget}
+          beforeSharing={async () => {
+            await flushPendingAutosave();
+            await flushSidecarWrite();
+          }}
+          onLeaving={(space) => givenUpRef.current.add(`${cloudForRoot.root}/${space.path}`)}
+          onClose={() => setShareTarget(null)}
         />
       )}
       {tagDialog?.kind === "new" && (
@@ -6489,16 +6703,6 @@ export default function App() {
           onEdit={editTag}
           onDelete={deleteTag}
           onClose={() => setTagsPageOpen(false)}
-        />
-      )}
-      {accessSpace && cloudForRoot && restricted && (
-        <SpaceAccess
-          access={restricted.access}
-          spaces={restricted.spaces}
-          cloud={cloudForRoot}
-          space={accessSpace}
-          onLeaving={(space) => givenUpRef.current.add(`${cloudForRoot.root}/${space.path}`)}
-          onClose={() => setAccessSpaceId(null)}
         />
       )}
       {question && (

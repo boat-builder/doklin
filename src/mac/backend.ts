@@ -19,7 +19,7 @@ import {
   type Backend,
   type Cloud,
   type CloudAccess,
-  type CloudSpaces,
+  type CloudShares,
   type CloudDomain,
   type CloudSetup,
   type CloudSync,
@@ -317,6 +317,7 @@ const cloud: Cloud = {
   onApplied: (cb) => on("cloud-applied", cb),
   onConflict: (cb) => on("cloud-conflict", cb),
   onSpaceLeft: (cb) => on("cloud-space-left", cb),
+  onSpaceMoved: (cb) => on("cloud-space-moved", cb),
 
   setActivity: (path) => invoke("cloud_set_activity", { path }),
   takeOver: (root, path) => invoke("cloud_take_over", { root, path }),
@@ -364,6 +365,7 @@ const sync: CloudSync = {
   onAddressTaken: (cb) => on("cloud-address-taken", cb),
   removed: async () => listOf<CloudRemovedEvent>(await invoke<unknown>("cloud_removed")),
   onRemoved: (cb) => on("cloud-removed", cb),
+  layoutMoved: () => invoke<string[]>("cloud_layout_moved"),
   recent: (root, limit = null) => invoke("cloud_recent", { root, limit }),
 };
 
@@ -391,10 +393,11 @@ const access: CloudAccess = {
     invoke("cloud_agent_revoke_machine", { root, agentId, tokenId }),
 };
 
-const spaces: CloudSpaces = {
-  spaceCreate: (root, name, members, from = null) => invoke("cloud_space_create", { root, name, members, from }),
-  spaceMember: (root, id, memberId, add) => invoke("cloud_space_member", { root, id, memberId, add }),
-  spaceDelete: (root, id) => invoke("cloud_space_delete", { root, id }),
+const shares: CloudShares = {
+  share: (root, path, members) => invoke("cloud_share", { root, path, members }),
+  shareMember: (root, id, memberId, add) => invoke("cloud_share_member", { root, id, memberId, add }),
+  shareDelete: (root, id) => invoke("cloud_share_delete", { root, id }),
+  shareRestore: (root, id) => invoke("cloud_share_restore", { root, id }),
 };
 
 /* ---------- Version history (src-tauri/src/versions.rs) ---------- */
@@ -571,7 +574,7 @@ export const macBackend: Backend = {
   sync,
   domain,
   access,
-  spaces,
+  shares,
   versions,
   shows,
   windows,

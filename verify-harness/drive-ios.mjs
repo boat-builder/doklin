@@ -10,6 +10,9 @@
 // environment:
 //
 //   DOKLIN_TEST_DEVICE_LINE   doklin-invite http://localhost:<port> dkln-… — works once
+//   DOKLIN_TEST_DRIVE         where this script answers what only the domain's side
+//                             can do: another person sharing a folder with this one,
+//                             something shared deleted on another device
 //
 // Run (a Mac with Xcode, or any machine with a Swift toolchain, and cargo):
 //
@@ -28,13 +31,15 @@
 // journey per test class through the real screens against this worker
 // (DoklinUITests: join, browse, read, edit, tick a box, search, relaunch,
 // remove from this iPhone; PeopleUITests: people, devices, agents, who is
-// here, restricted folders; HistoryUITests: a note's versions, the
+// here, sharing a folder and a document, what is shared with this person,
+// leaving and deleting for everyone; HistoryUITests: a note's versions, the
 // workspace's moments, recently deleted; CommentsUITests: a thread read,
 // started, answered and removed, a note published and stopped, published
 // pages; TagsUITests: a tag made, set and renamed, a note found by it),
 // each then checked against what it left on the domain. A journey asks this script, at an address it
 // serves, for what only the domain's side can do: its line, another device
-// editing a document, and a restricted folder deleted elsewhere. What was on screen at each step is printed (the
+// editing a document, another person sharing a folder with this one, and
+// something shared deleted elsewhere. What was on screen at each step is printed (the
 // lines that begin `UI>`), and the whole xcodebuild log and the screenshots
 // are left in $DOKLIN_DRIVE_OUT (a temporary folder when unset; the path is
 // printed). DOKLIN_ONLY=<class> runs one class; DOKLIN_SIMULATOR=<udid>
@@ -47,7 +52,7 @@ import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { SEED_FILES } from "../cloud-worker/test/seed.mjs";
+import { SEED_FILES, blobHash, fidOf } from "../cloud-worker/test/seed.mjs";
 
 const ROOT = new URL("../", import.meta.url).pathname;
 /** The superadmin's device sign-in, which serve-worker.mjs traded its key for and printed. */
@@ -113,17 +118,23 @@ const asOwner = { authorization: `Bearer ${OWNER}`, "content-type": "application
 
 if (!OWNER) throw new Error("the harness worker did not print the superadmin's token");
 
+/** A fresh code as an app mints one: what the domain is sent of it, and what a person types. */
+function freshCode() {
+  const canonical = [...randomBytes(20)].map((b) => CROCKFORD[b % 32]).join("");
+  return { hash: sha256(canonical), shown: `dkln-${canonical.match(/.{5}/g).join("-")}` };
+}
+
 // A device is added by a person, for themselves: the code another device of
 // Sherin's — the superadmin, whose Mac this script stands for — joins with.
 async function deviceLine() {
-  const canonical = [...randomBytes(20)].map((b) => CROCKFORD[b % 32]).join("");
+  const code = freshCode();
   const res = await fetch(`${WORKER}/api/auth/devices/code`, {
     method: "POST",
     headers: asOwner,
-    body: JSON.stringify({ codeHash: sha256(canonical), expiresAt: Date.now() + 3_600_000 }),
+    body: JSON.stringify({ codeHash: code.hash, expiresAt: Date.now() + 3_600_000 }),
   });
   if (res.status !== 201) throw new Error(`could not mint a device code: ${res.status} ${await res.text()}`);
-  return `doklin-invite ${WORKER} dkln-${canonical.match(/.{5}/g).join("-")}`;
+  return `doklin-invite ${WORKER} ${code.shown}`;
 }
 
 /** Another device of Sherin's — the Mac this script stands for — editing
@@ -138,19 +149,75 @@ async function editingElsewhere(path) {
   return `editing ${path}`;
 }
 
-/** The restricted folder called `name` deleted for everyone in it, on
- *  another device of Sherin's: she is in
- *  every folder she made. */
+/** The shared folder called `name`, which Sherin keeps in her My files,
+ *  deleted for everyone on another device of hers. One that holds something
+ *  is kept, to be restored; an empty one is erased, a batch at a time. */
 async function deletedElsewhere(name) {
   const listed = await fetch(`${WORKER}/api/spaces`, { headers: asOwner });
-  if (!listed.ok) throw new Error(`could not list the restricted folders: ${listed.status} ${await listed.text()}`);
-  const space = (await listed.json()).spaces.find((s) => s.kind === "restricted" && s.name === name);
-  if (!space) throw new Error(`no restricted folder called ${name}`);
+  if (!listed.ok) throw new Error(`could not list what is shared: ${listed.status} ${await listed.text()}`);
+  const space = (await listed.json()).spaces.find((s) => s.kind === "folder" && s.name === name && !s.deletedAt);
+  if (!space) throw new Error(`nothing shared is called ${name}`);
   for (;;) {
     const res = await fetch(`${WORKER}/api/spaces/${space.id}`, { method: "DELETE", headers: asOwner });
     if (!res.ok) throw new Error(`could not delete ${name}: ${res.status} ${await res.text()}`);
     if (!(await res.json()).remaining) return `deleted ${name}`;
   }
+}
+
+/** Cy, another person of the workspace, signed in on a Mac of his own: Sherin
+ *  invites him as the first journey asks for him, and he trades the code in. */
+let cy;
+async function asCy() {
+  if (cy) return cy;
+  const code = freshCode();
+  const invited = await fetch(`${WORKER}/api/auth/invites`, {
+    method: "POST",
+    headers: asOwner,
+    body: JSON.stringify({ email: "cy@example.com", name: "Cy", codeHash: code.hash, expiresAt: Date.now() + 3_600_000 }),
+  });
+  if (invited.status !== 201) throw new Error(`could not invite Cy: ${invited.status} ${await invited.text()}`);
+  const joined = await fetch(`${WORKER}/api/auth/join`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-doklin-client": "0.0.0-drive" },
+    body: JSON.stringify({ code: code.shown, deviceId: "d-cy", deviceName: "Cy's Mac (drive)" }),
+  });
+  if (joined.status !== 201) throw new Error(`Cy could not join: ${joined.status} ${await joined.text()}`);
+  const { token, member } = await joined.json();
+  cy = {
+    member,
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-doklin-device": "d-cy", "x-doklin-client": "0.0.0-drive" },
+  };
+  return cy;
+}
+
+/** A folder called `name`, holding one note, that Cy keeps in his My files
+ *  and shares with Sherin: what she finds under Shared with me. Made as a Mac
+ *  makes one — the share, its note's bytes, then its manifest. */
+async function sharedWithSherin(name) {
+  const who = await asCy();
+  const call = async (path, init, wanted) => {
+    const res = await fetch(`${WORKER}${path}`, { ...init, headers: { ...who.headers, ...(init?.headers ?? {}) } });
+    if (res.status !== wanted) throw new Error(`Cy could not share ${name} (${init?.method ?? "GET"} ${path}): ${res.status} ${await res.text()}`);
+    return res;
+  };
+  const members = await (await fetch(`${WORKER}/api/auth/members`, { headers: asOwner })).json();
+  const sherin = members.members.find((m) => m.email === "sherin@example.com");
+  if (!sherin) throw new Error("Sherin is not among the workspace's people");
+  const mine = (await (await call("/api/spaces/private", { method: "PUT" }, 200)).json()).space;
+  const id = `s-${randomBytes(4).toString("hex")}`;
+  const share = { id, kind: "folder", name, parent: mine.id, dir: "", was: name, members: [sherin.id] };
+  await call("/api/spaces", { method: "POST", body: JSON.stringify(share) }, 201);
+  const note = Buffer.from(`# Numbers\n\nShared by Cy, in ${name}.\n`, "utf8");
+  const fid = fidOf(`${name}/Numbers.md`);
+  const hash = blobHash(note);
+  await call(`/api/spaces/${id}/blobs/${fid}/${hash}`, { method: "PUT", headers: { "content-type": "text/markdown" }, body: note }, 200);
+  // On top of the manifest the domain made it with, whose version is the domain's own.
+  const empty = await call(`/api/spaces/${id}/manifest`, {}, 200);
+  const manifest = await empty.json();
+  manifest.seq += 1;
+  manifest.files = { [fid]: { path: "Numbers.md", rev: 1, hash, size: note.length, mtime: Date.now(), by: who.member.id } };
+  await call(`/api/spaces/${id}/manifest`, { method: "PUT", headers: { "x-base-etag": empty.headers.get("x-manifest-etag") }, body: JSON.stringify(manifest) }, 200);
+  return `shared ${name}`;
 }
 
 /** Whether the shared workspace's manifest lists a file at `path`. */
@@ -224,10 +291,39 @@ const ON_THE_DOMAIN = {
   },
 };
 
+/** What a run asks of the domain's side, answered at the address this gives:
+ *    /line                 a device line. A line works once, and a person has
+ *                          one code waiting at a time — a new one stops the
+ *                          last — so each journey asks for its own as it starts,
+ *                          rather than every line being minted up front, when
+ *                          only the last would still work.
+ *    /editing?path=<rel>   another device editing a document of the workspace.
+ *    /shared?name=<name>   another person sharing a folder, with a note in it, with Sherin.
+ *    /deleted?name=<name>  a folder Sherin shares deleted for everyone on another device of hers. */
+async function serveAsks() {
+  const server = createHttpServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    const asks = {
+      "/line": () => deviceLine(),
+      "/editing": () => editingElsewhere(url.searchParams.get("path") ?? ""),
+      "/shared": () => sharedWithSherin(url.searchParams.get("name") ?? ""),
+      "/deleted": () => deletedElsewhere(url.searchParams.get("name") ?? ""),
+    };
+    const asked = asks[url.pathname]?.() ?? Promise.reject(new Error(`nothing at ${url.pathname}`));
+    asked.then(
+      (said) => res.writeHead(200, { "content-type": "text/plain" }).end(said),
+      (e) => res.writeHead(500, { "content-type": "text/plain" }).end(String(e)),
+    );
+  });
+  await new Promise((resolve) => server.listen(0, "localhost", resolve));
+  return { at: `http://localhost:${server.address().port}`, close: () => server.close() };
+}
+
 /* ---------- The core: `swift test`, or the command after `--` ---------- */
 
 async function driveCore() {
   const line = await deviceLine();
+  const asks = await serveAsks();
   const split = process.argv.indexOf("--");
   // The package links the engine; `swift test` is told where this machine's is.
   const engine = join(ROOT, "ios/Engine/host");
@@ -237,12 +333,13 @@ async function driveCore() {
   console.log(`running: ${command.join(" ")}`);
   const status = await new Promise((resolve, reject) => {
     const child = spawn(command[0], command.slice(1), {
-      env: { ...process.env, DOKLIN_TEST_DEVICE_LINE: line },
+      env: { ...process.env, DOKLIN_TEST_DEVICE_LINE: line, DOKLIN_TEST_DRIVE: asks.at },
       stdio: "inherit",
     });
     child.on("error", reject);
     child.on("exit", (code) => resolve(code ?? 1));
   });
+  asks.close();
   if (status !== 0) return status;
   // What the engine said it synced, asked of the domain itself: the note
   // made there, under the name EngineLiveTests last gave it.
@@ -278,29 +375,8 @@ function pickSimulator() {
 }
 
 async function driveApp() {
-  // What a journey asks of the domain's side (ios/DoklinUITests/UITestCase.swift):
-  //   /line                 a device line. A line works once, and a person has
-  //                         one code waiting at a time — a new one stops the
-  //                         last — so each class asks for its own as it starts,
-  //                         rather than every line being minted up front, when
-  //                         only the last would still work.
-  //   /editing?path=<rel>   another device editing a document of the workspace.
-  //   /deleted?name=<name>  a restricted folder deleted on another device.
-  const drive = createHttpServer((req, res) => {
-    const url = new URL(req.url, "http://localhost");
-    const asks = {
-      "/line": () => deviceLine(),
-      "/editing": () => editingElsewhere(url.searchParams.get("path") ?? ""),
-      "/deleted": () => deletedElsewhere(url.searchParams.get("name") ?? ""),
-    };
-    const asked = asks[url.pathname]?.() ?? Promise.reject(new Error(`nothing at ${url.pathname}`));
-    asked.then(
-      (said) => res.writeHead(200, { "content-type": "text/plain" }).end(said),
-      (e) => res.writeHead(500, { "content-type": "text/plain" }).end(String(e)),
-    );
-  });
-  await new Promise((resolve) => drive.listen(0, "localhost", resolve));
-  const driveAt = `http://localhost:${drive.address().port}`;
+  // What a journey asks of the domain's side (ios/DoklinUITests/UITestCase.swift).
+  const asks = await serveAsks();
   const out = process.env.DOKLIN_DRIVE_OUT || mkdtempSync(join(tmpdir(), "doklin-drive-ios-"));
   mkdirSync(out, { recursive: true });
   const result = join(out, "DoklinUITests.xcresult");
@@ -327,7 +403,7 @@ async function driveApp() {
       ],
       {
         // xcodebuild hands the test runner every variable named TEST_RUNNER_<name>, as <name>.
-        env: { ...process.env, TEST_RUNNER_DOKLIN_TEST_DRIVE: driveAt },
+        env: { ...process.env, TEST_RUNNER_DOKLIN_TEST_DRIVE: asks.at },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -344,7 +420,7 @@ async function driveApp() {
     child.on("exit", (code) => resolve(code ?? 1));
   });
   await new Promise((resolve) => log.end(resolve));
-  drive.close();
+  asks.close();
 
   // The screenshots out of the result bundle, as files anybody can open. Best effort.
   try {

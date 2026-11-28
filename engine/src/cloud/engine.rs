@@ -1,16 +1,21 @@
 //! The engine: one task per connected workspace, the only code that holds a
 //! token or talks to the worker.
 //!
-//! A workspace is several *sections* — the shared part everyone has, this
-//! person's Private, each restricted folder they are in — and each one is a
-//! unit (unit.rs): its own folder, its own manifest, its own state. The unit
-//! knows how one folder is kept in step with one manifest; this file is what
-//! a workspace has one of: who the domain says this Mac is, the poll and the
-//! beat that rides it, presence and leases, the status that is the
-//! frontend's entire model, and the task that decides when which unit
-//! cycles. It is also the only place two units meet: a space arriving or
-//! leaving (`reconcile_spaces`), a file moving between sections on this Mac
-//! (`pair_moves`) and on another (`relocate`).
+//! A workspace is several *sections* — Library, which everyone has, this
+//! person's My files, and each thing that is shared: a folder, or one
+//! document — and each one is a unit (unit.rs): its own manifest, its own
+//! state, and its own part of a folder. Sections are a tree: something
+//! shared sits where its item is, inside My files or another shared folder
+//! for whoever can open that, under `Shared with me` for the people it is
+//! shared with. The unit knows how one section is kept in step with one
+//! manifest; this file is what a workspace has one of: who the domain says
+//! this Mac is, the poll and the beat that rides it, presence and leases,
+//! the status that is the frontend's entire model, and the task that decides
+//! when which unit cycles. It is also the only place two units meet: a share
+//! arriving, moving or leaving (`reconcile_spaces`), something shared on
+//! this Mac (`share`), a file moving between sections on this Mac
+//! (`pair_moves`) and on another (`relocate`), and what the app said it
+//! renamed or moved (`heed_moves`).
 //!
 //! The engine wakes on four things — the edit bus, the filesystem watcher,
 //! the poll clock, commands — and does one of two: a *pass* (the units with
@@ -35,16 +40,17 @@ use super::manifest::{
 };
 use super::merge::conflict_copy_path;
 use super::pace::{next_midnight_ms, Mode, Pacer, MIN_BATCH};
-use super::remote::{Remote, RemoteError, RemoteResult};
-use super::scan::{hash16, now_ms, read_file_checked, rel_path};
+use super::remote::{NewShare, Remote, RemoteError, RemoteResult};
+use super::scan::{hash16, now_ms, read_file_checked, read_json, rel_path, write_json};
 use super::layout;
-use super::space::{self, SpaceMarker, LIBRARY_DIR, PRIVATE_DIR, SHARED};
+use super::space::{self, split_name, DocName, Reach, SpaceMarker, LIBRARY, LIBRARY_DIR, MY_FILES_DIR, SHARED_DIR};
 use super::status::{
     documents_of, emit_statuses, CloudStatus, DirectoryPerson, Events, LeaseHolder, Phase, PresenceDevice, PublicPage,
-    RecentFiles, SpaceStatus, StatusTable, UsageStatus, VersionsMirror, WorkspaceDocument, EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT,
+    RecentFiles, SectionAt, SectionTable, SpaceStatus, StatusTable, UsageStatus, VersionsMirror, WorkspaceDocument,
+    EV_APPLIED, EV_CONFLICT, EV_PENDING_ADDS, EV_SPACE_LEFT, EV_SPACE_MOVED,
 };
 use super::tags::TagOp;
-use super::unit::{lock, Ctx, MovedOut, PendingPublic, PublicOp, Survey, Unit, UnitConfig};
+use super::unit::{lock, Ctx, FileState, MovedOut, PendingPublic, PublicOp, Survey, Unit, UnitConfig};
 use super::versions::{VersionsIndex, MIRROR_EVERY};
 use crate::versions::store::Snapshot as VersionSnapshot;
 
@@ -116,6 +122,21 @@ pub(crate) const ACTIVITY_FRESH: Duration = Duration::from_secs(5 * 60);
 /// but an id belonging to somebody since removed never resolves, and that
 /// must cost one request every so often rather than one per cycle.
 pub(crate) const DIRECTORY_MIN_GAP: Duration = Duration::from_secs(300);
+
+/// A shared document's place, beside its unit's state.
+const DOC_FILE: &str = "doc.json";
+/// Beside a unit's state: its share is ending (`Engine::ending`).
+const ENDING_FILE: &str = "ending";
+/// What this device was sharing when it last stopped (`PendingShare`).
+const PENDING_SHARE_FILE: &str = "pending-share.json";
+
+/// The spaces this device holds sync state for, by id.
+fn space_states(cfg: &EngineConfig) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(cfg.state_dir.join("spaces")) else { return Vec::new() };
+    let mut ids: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    ids.sort();
+    ids
+}
 
 /* ---------- Commands ---------- */
 
@@ -191,25 +212,29 @@ pub enum EngineCmd {
         hash: String,
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
-    /// Make a restricted folder holding this person and `members` (member
-    /// ids). With `from` — the absolute path of a folder in this workspace —
-    /// that folder becomes it; otherwise it starts empty.
-    MakeSpace {
-        name: String,
+    /// Share the folder or the document at `path` (absolute) with `members`
+    /// (member ids). It stays where it is. Something shared already gets
+    /// those people as well.
+    Share {
+        path: String,
         members: Vec<String>,
-        from: Option<String>,
         reply: oneshot::Sender<Result<SpaceStatus, String>>,
     },
-    /// Add a person to a restricted folder, or take one out — this person
-    /// included, which is leaving it.
-    SpaceMember {
+    /// Share something with one more person, or stop — this person included,
+    /// which is leaving it.
+    ShareMember {
         id: String,
         member: String,
         add: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Delete a restricted folder for everyone in it.
-    DeleteSpace {
+    /// Delete something shared, for everyone: kept thirty days, to restore.
+    DeleteShare {
+        id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Bring a deleted share back, as it was.
+    RestoreShare {
         id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -261,13 +286,53 @@ pub enum Exit {
     Removed,
 }
 
-/// Which folders on this Mac are spaces just changed.
+/// Which sections this Mac holds, or where they are, just changed.
 #[derive(Default)]
 pub struct SpacesChanged {
-    /// Space folders taken off this Mac: where each was, and where its
-    /// version store is — found while the folder still existed, because a
-    /// store's key is the folder's canonical path.
-    pub removed: Vec<(String, PathBuf)>,
+    /// Sections taken off this Mac, by id: their local history goes with
+    /// them — it holds every file's content.
+    pub removed: Vec<String>,
+}
+
+/// Where a shared document is on this device, kept with its unit's state
+/// (`doc.json`): a document carries no marker of its own.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocPlace {
+    /// The folder it sits in, workspace-relative.
+    dir: String,
+    /// The name its files have here, and the one its manifest has.
+    local: String,
+    stored: String,
+    /// The folder of the section it sits in that this Mac last matched it
+    /// to (`Mount::dir`), as a shared folder's marker says of a folder.
+    #[serde(default)]
+    at: String,
+}
+
+/// Something this device was sharing when it last stopped: written down
+/// before the domain is asked, so a share cut short is finished at the next
+/// start rather than left half made.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingShare {
+    id: String,
+    kind: SpaceKind,
+    name: String,
+    parent: String,
+    dir: String,
+    was: String,
+    members: Vec<String>,
+}
+
+/// How a section's copy leaves this device.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Leaving {
+    /// It is not this person's any more: deleted outright, so nothing of it
+    /// stays within their reach.
+    Outright,
+    /// This person deleted it, here: to the Trash, like anything they delete.
+    Trash,
 }
 
 /// Moves a file to the platform's trash; true when it did.
@@ -297,6 +362,10 @@ pub struct EngineConfig {
     /// Called when a space's folder appears on this Mac or leaves it, so the
     /// manager can start and stop what follows a folder — its versioner.
     pub on_spaces: Option<Box<dyn Fn(SpacesChanged) + Send + Sync>>,
+    /// Where every section of every connected workspace is on this device:
+    /// this engine keeps its own row true, for whatever walks a section's
+    /// folder without asking it — the versioners.
+    pub sections: SectionTable,
 }
 
 /// Which units a pass cycles besides the ones whose folder changed.
@@ -338,6 +407,26 @@ impl Adds {
     }
 }
 
+/// Where a share sits, as the section it sits in has it.
+struct Agreed {
+    /// That section.
+    parent: String,
+    /// The folder of it the share sits in, as this Mac last knew: what it
+    /// has queued, else what the manifest says.
+    dir: String,
+    /// What the freshest manifest says, whatever this Mac has queued.
+    said: String,
+    /// Where the item was in that section before it was shared.
+    was: Option<String>,
+}
+
+/// A share's id, as a device mints one: `s-` and eight hex characters.
+fn share_id() -> String {
+    let mut buf = [0u8; 4];
+    let _ = getrandom::getrandom(&mut buf);
+    format!("s-{}", buf.iter().map(|b| format!("{:02x}", b)).collect::<String>())
+}
+
 /// A file that left one unit on this Mac and is the same file in another.
 struct CrossMove {
     from: String,
@@ -357,18 +446,26 @@ pub struct Engine<R: Remote> {
     /// engine and takes its row out (`stop_engine`): a pass still running
     /// then never writes the row back for a workspace that has gone.
     stopped: Arc<AtomicBool>,
-    /// Every section this Mac holds, by id. The shared workspace is `SHARED`
-    /// and always here; a unit is out of the map only while its cycle runs.
+    /// Every section this Mac holds, by id. Library is `LIBRARY` and always
+    /// here; a unit is out of the map only while its cycle runs.
     units: BTreeMap<String, Unit<R>>,
-    /// The spaces this person is in, as the last poll that could say listed
-    /// them. `None` until one has.
+    /// The spaces this person can open — and the deleted shares they can
+    /// restore — as the last poll that could say listed them. `None` until
+    /// one has.
     spaces: Option<Vec<SpaceEntry>>,
-    /// How many times the domain would not make this person a Private. After
-    /// a few it is not asked again until the app restarts.
+    /// How many times the domain would not make this person a My files.
+    /// After a few it is not asked again until the app restarts.
     private_refusals: u8,
-    /// Folders under `Restricted/` the domain would not make a restricted
-    /// folder of, so each is asked about once rather than on every poll.
-    unclaimable: HashSet<PathBuf>,
+    /// Shares whose item this person moved into Library: they end. Their
+    /// files leave them as a move, and then the share is erased.
+    ending: HashSet<String>,
+    /// Sections a file was moved to (`Tombstone::to`) that this device holds
+    /// no unit of, and has not yet heard of from a poll: the file waits for
+    /// the next one to say whether this person can open it there.
+    asked_about: HashSet<String>,
+    /// Those a poll has since answered for: not this person's. A file that
+    /// moved to one is deleted from this device outright.
+    absent: HashSet<String>,
     phase: Phase,
     error: Option<String>,
     last_sync_ms: Option<u64>,
@@ -425,8 +522,9 @@ pub struct Engine<R: Remote> {
     touched: HashSet<String>,
     /// What the app moved since the last pass that went through, in the
     /// order it moved them: (from, to), workspace-relative, a file or a
-    /// folder. Tips for the scan (`Ctx::app_moves`), kept like `touched`
-    /// until a pass has gone through.
+    /// folder. Tips for the scan (`Ctx::app_moves`), and where a share's
+    /// item went (`heed_moves`); kept like `touched` until a pass has gone
+    /// through.
     app_moves: Vec<(String, String)>,
     /// A window of this workspace has focus.
     focused: bool,
@@ -445,18 +543,28 @@ pub struct Engine<R: Remote> {
 impl<R: Remote> Engine<R> {
     pub fn new(cfg: EngineConfig, remote: Arc<R>, events: Arc<dyn Events>, statuses: StatusTable) -> Self {
         let mut units = BTreeMap::new();
-        units.insert(SHARED.to_string(), Self::shared_unit(&cfg, &remote));
-        // The folders that say they are spaces are the record of which spaces
-        // this Mac holds: each one syncs from where it left off. Whether this
-        // person is still in each is the first poll's to say.
+        units.insert(LIBRARY.to_string(), Self::library_unit(&cfg, &remote));
+        // The folders that say they are spaces, and the documents this
+        // device wrote down as shared, are the record of which sections it
+        // holds: each one syncs from where it left off. Whether this person
+        // can still open each is the first poll's to say.
         for held in space::held(&cfg.root, &cfg.ws_id) {
             let marker = held.marker;
             units
                 .entry(marker.space.clone())
-                .or_insert_with(|| Self::space_unit(&cfg, &remote, &marker, held.dir, held.rel));
+                .or_insert_with(|| Self::folder_unit(&cfg, &remote, &marker.space, &marker.name, held.dir, held.rel));
+        }
+        let mut ending = HashSet::new();
+        for id in space_states(&cfg) {
+            let state_dir = Self::space_state_dir(&cfg, &id);
+            if state_dir.join(ENDING_FILE).is_file() {
+                ending.insert(id.clone());
+            }
+            let Some(place) = read_json::<DocPlace>(&state_dir.join(DOC_FILE)) else { continue };
+            units.entry(id.clone()).or_insert_with(|| Self::document_unit(&cfg, &remote, &id, &place));
         }
         let pacer = Mutex::new(Pacer::new(remote.usage().clone()));
-        Engine {
+        let mut engine = Engine {
             cfg,
             remote,
             events,
@@ -465,7 +573,9 @@ impl<R: Remote> Engine<R> {
             units,
             spaces: None,
             private_refusals: 0,
-            unclaimable: HashSet::new(),
+            ending,
+            asked_about: HashSet::new(),
+            absent: HashSet::new(),
             phase: Phase::Idle,
             error: None,
             last_sync_ms: None,
@@ -497,22 +607,26 @@ impl<R: Remote> Engine<R> {
             limited: None,
             adds: Adds::default(),
             last_pass_at: None,
-        }
+        };
+        engine.set_reaches();
+        engine
     }
 
-    /// The shared section's unit: `Library/`, however the disk spells it.
-    fn shared_unit(cfg: &EngineConfig, remote: &Arc<R>) -> Unit<R> {
+    /// Library's unit: `Library/`, however the disk spells it.
+    fn library_unit(cfg: &EngineConfig, remote: &Arc<R>) -> Unit<R> {
         let root = space::top(&cfg.root, LIBRARY_DIR);
         let prefix = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         Unit::new(
             UnitConfig {
-                id: SHARED.to_string(),
+                id: LIBRARY.to_string(),
                 name: cfg.name.clone(),
                 root,
                 prefix,
+                document: None,
                 state_dir: cfg.state_dir.clone(),
                 data_dir: cfg.data_dir.clone(),
                 device_id: cfg.device_id.clone(),
+                ws_id: cfg.ws_id.clone(),
             },
             remote.clone(),
         )
@@ -522,19 +636,92 @@ impl<R: Remote> Engine<R> {
         cfg.state_dir.join("spaces").join(id)
     }
 
-    fn space_unit(cfg: &EngineConfig, remote: &Arc<R>, marker: &SpaceMarker, dir: PathBuf, rel: String) -> Unit<R> {
+    /// The unit of a folder that is a section: My files, or a shared folder.
+    fn folder_unit(cfg: &EngineConfig, remote: &Arc<R>, id: &str, name: &str, dir: PathBuf, rel: String) -> Unit<R> {
         Unit::new(
             UnitConfig {
-                id: marker.space.clone(),
-                name: marker.name.clone(),
+                id: id.to_string(),
+                name: name.to_string(),
                 root: dir,
                 prefix: rel,
-                state_dir: Self::space_state_dir(cfg, &marker.space),
+                document: None,
+                state_dir: Self::space_state_dir(cfg, id),
                 data_dir: cfg.data_dir.clone(),
                 device_id: cfg.device_id.clone(),
+                ws_id: cfg.ws_id.clone(),
             },
-            Arc::new(remote.space(&marker.space)),
+            Arc::new(remote.space(id)),
         )
+    }
+
+    /// The unit of a shared document, where this device wrote down it is.
+    fn document_unit(cfg: &EngineConfig, remote: &Arc<R>, id: &str, place: &DocPlace) -> Unit<R> {
+        Unit::new(
+            UnitConfig {
+                id: id.to_string(),
+                name: place.stored.clone(),
+                root: cfg.root.join(&place.dir),
+                prefix: place.dir.clone(),
+                document: Some(DocName { local: place.local.clone(), stored: place.stored.clone() }),
+                state_dir: Self::space_state_dir(cfg, id),
+                data_dir: cfg.data_dir.clone(),
+                device_id: cfg.device_id.clone(),
+                ws_id: cfg.ws_id.clone(),
+            },
+            Arc::new(remote.space(id)),
+        )
+    }
+
+    /// Where a unit's item is on this device, and for a shared document what
+    /// its files are called here.
+    fn item_at(unit: &Unit<R>) -> (String, Option<String>) {
+        (unit.prefix.clone(), unit.reach.only.as_ref().map(|name| name.local.clone()))
+    }
+
+    /// Tell the app that the item of the unit `id` is not where `was` says
+    /// any more (`EV_SPACE_MOVED`): a folder as one move, a document as one
+    /// for each of its files.
+    fn tell_moved(&self, id: &str, was: &(String, Option<String>)) {
+        let Some(now) = self.units.get(id).map(Self::item_at) else { return };
+        if *was == now {
+            return;
+        }
+        let moves: Vec<serde_json::Value> = match (&was.1, &now.1) {
+            (Some(was_local), Some(now_local)) => space::document_files(&self.cfg.root.join(&now.0), now_local)
+                .into_iter()
+                .filter_map(|file| {
+                    let ext = split_name(&file.file_name()?.to_string_lossy()).1.to_string();
+                    Some(json!({
+                        "from": format!("{}/{}{}", was.0, was_local, ext),
+                        "to": format!("{}/{}{}", now.0, now_local, ext),
+                        "dir": false,
+                    }))
+                })
+                .collect(),
+            _ => vec![json!({ "from": was.0, "to": now.0, "dir": true })],
+        };
+        if !moves.is_empty() {
+            self.events.emit_json(EV_SPACE_MOVED, json!({ "root": self.root_key(), "moves": moves }));
+        }
+    }
+
+    /// Write down where a shared document's unit is (`DocPlace`), as its
+    /// unit now has it. `at` is the folder of the section it sits in that
+    /// this device has matched it to; None keeps what was written.
+    fn note_document(&self, id: &str, at: Option<&str>) {
+        let Some(unit) = self.units.get(id) else { return };
+        let Some(name) = &unit.reach.only else { return };
+        let path = Self::space_state_dir(&self.cfg, id).join(DOC_FILE);
+        let was: Option<DocPlace> = read_json(&path);
+        let place = DocPlace {
+            dir: unit.prefix.clone(),
+            local: name.local.clone(),
+            stored: name.stored.clone(),
+            at: at.map(str::to_string).or_else(|| was.as_ref().map(|w| w.at.clone())).unwrap_or_default(),
+        };
+        if was.as_ref() != Some(&place) {
+            let _ = write_json(&path, &place);
+        }
     }
 
     fn root_key(&self) -> String {
@@ -559,23 +746,88 @@ impl<R: Remote> Engine<R> {
         self.outdated.is_some() || self.too_old
     }
 
-    /// The shared workspace's unit.
-    pub(crate) fn shared(&self) -> &Unit<R> {
-        &self.units[SHARED]
+    /// Library's unit.
+    pub(crate) fn library(&self) -> &Unit<R> {
+        &self.units[LIBRARY]
     }
 
     #[cfg(test)]
-    pub(crate) fn shared_mut(&mut self) -> &mut Unit<R> {
-        self.units.get_mut(SHARED).expect("the shared unit")
+    pub(crate) fn library_mut(&mut self) -> &mut Unit<R> {
+        self.units.get_mut(LIBRARY).expect("Library's unit")
     }
 
     /// Which unit a workspace-relative path is in, and the path as that unit
-    /// spells it. None for a path that is no section's: the workspace's root,
-    /// anything else at its top, `Restricted` itself, a file directly under
-    /// it, a folder there that is not a space yet, and `Private` or
-    /// `Restricted` inside Library.
+    /// spells it: the most specific one — a shared document's before the
+    /// folder it sits in, a shared folder's before the section around it.
+    /// None for a path that is no section's: the workspace's root, anything
+    /// at its top that is not one of the three folders, `Shared with me`
+    /// itself and a file loose in it.
     fn place(&self, ws_rel: &str) -> Option<(String, String)> {
-        self.units.values().find_map(|unit| unit.in_unit(ws_rel).map(|rel| (unit.id.clone(), rel)))
+        self.units
+            .values()
+            .filter_map(|unit| unit.in_unit(ws_rel).map(|rel| (unit, rel)))
+            .max_by_key(|(unit, _)| (unit.is_document(), unit.prefix.len()))
+            .map(|(unit, rel)| (unit.id.clone(), rel))
+    }
+
+    /// The unit whose own files the folder `dir` (absolute) holds: the
+    /// deepest folder section around it, itself included. Never a shared
+    /// document's — that is a document, not a folder.
+    fn section_of_dir(&self, dir: &Path) -> Option<&Unit<R>> {
+        self.units
+            .values()
+            .filter(|unit| !unit.is_document() && dir.starts_with(&unit.root))
+            .max_by_key(|unit| unit.root.as_os_str().len())
+    }
+
+    /// Say what of each unit's folder is its own: everything but the shares
+    /// that sit inside it. Then tell whoever else walks a section (the
+    /// versioners) where each is.
+    fn set_reaches(&mut self) {
+        let mut holes: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
+        for unit in self.units.values() {
+            // What is inside which: a shared folder inside the deepest
+            // section around its parent folder, a shared document inside the
+            // deepest section its folder is in.
+            let inside = if unit.is_document() { Some(unit.root.as_path()) } else { unit.root.parent() };
+            let Some(around) = inside.and_then(|dir| self.section_of_dir(dir)).filter(|a| a.id != unit.id) else { continue };
+            let Some(rel) = rel_path(&around.root, &unit.root) else { continue };
+            let entry = holes.entry(around.id.clone()).or_default();
+            match &unit.reach.only {
+                Some(name) => entry.1.push(if rel.is_empty() { name.local.clone() } else { format!("{}/{}", rel, name.local) }),
+                None => entry.0.push(rel),
+            }
+        }
+        for unit in self.units.values_mut().filter(|unit| !unit.is_document()) {
+            let (mut dirs, mut docs) = holes.remove(&unit.id).unwrap_or_default();
+            dirs.sort();
+            docs.sort();
+            unit.reach = Reach { dirs, docs, only: None };
+        }
+        let sections: Vec<SectionAt> = self
+            .units
+            .values()
+            .filter(|unit| unit.root.is_dir())
+            .map(|unit| SectionAt {
+                ws_id: self.cfg.ws_id.clone(),
+                id: unit.id.clone(),
+                root: unit.root.clone(),
+                reach: unit.reach.clone(),
+                from: self.spaces.iter().flatten().find(|s| s.id == unit.id).and_then(|s| s.parent.clone()).and_then(|parent| {
+                    let was = self.units.get(&parent)?.view().mounts.get(&unit.id)?.was.clone()?;
+                    Some((parent, was))
+                }),
+            })
+            .collect();
+        let changed = match self.cfg.sections.lock() {
+            Ok(mut table) => table.insert(self.root_key(), sections.clone()).as_ref() != Some(&sections),
+            Err(_) => false,
+        };
+        if changed {
+            if let Some(tell) = &self.cfg.on_spaces {
+                tell(SpacesChanged::default());
+            }
+        }
     }
 
     /* ----- links ----- */
@@ -589,14 +841,18 @@ impl<R: Remote> Engine<R> {
         let (id, rel) = self.place(ws_rel)?;
         let unit = self.units.get(&id)?;
         let file = unit.file_id_at(&rel)?;
-        let who = if id == SHARED {
+        let listed = self.spaces.iter().flatten().find(|s| s.id == id);
+        let alone = listed.is_some_and(|s| {
+            s.members.iter().chain(s.above.iter()).all(|person| Some(person.as_str()) == self.me.as_deref())
+        });
+        let who = if id == LIBRARY {
             format!("Everyone in {} can open it.", self.cfg.name)
-        } else if id.starts_with("p-") {
+        } else if id.starts_with("p-") || alone {
             "Only you can open it, on any device of yours.".to_string()
         } else {
-            format!("Only the people in “{}” can open it.", unit.name)
+            format!("Only the people “{}” is shared with can open it.", listed.map(|s| s.name.as_str()).unwrap_or(&unit.name))
         };
-        Some(Linked { space: (id != SHARED).then_some(id), file, who })
+        Some(Linked { space: (id != LIBRARY).then_some(id), file, who })
     }
 
     /// Where the file a link names is here, workspace-relative: only one
@@ -611,10 +867,10 @@ impl<R: Remote> Engine<R> {
     /// The browser looks the same way (`pathOfFile`, src/web/workspace.ts):
     /// change both.
     pub(crate) fn follow(&self, space: Option<&str>, file: &str) -> Option<String> {
-        let named = space.unwrap_or(SHARED);
+        let named = space.unwrap_or(LIBRARY);
         let found = |unit: &Unit<R>| {
             let synced = unit.state.files.get(file)?;
-            unit.root.join(&synced.path).is_file().then(|| unit.ws_rel(&synced.path))
+            unit.abs(&synced.path).is_file().then(|| unit.ws_rel(&synced.path))
         };
         // `units` is in section-id order.
         self.units.get(named).and_then(found).or_else(|| self.units.values().find_map(found))
@@ -658,27 +914,50 @@ impl<R: Remote> Engine<R> {
         pages
     }
 
-    /// The spaces that have a folder on this Mac, as the status lists them.
-    /// A folder says it is one before the domain has said anything this run
-    /// — a Mac that started offline — and is listed by what the folder says:
-    /// where it is, what it is called, and nobody in it that can be named.
+    /// The sections beside Library, as the status lists them: the ones this
+    /// device holds, and the deleted shares this person can restore. A
+    /// folder says it is one before the domain has said anything this run —
+    /// a Mac that started offline — and is listed by what the folder says:
+    /// where it is, what it is called, and nobody that can be named.
     fn space_statuses(&self) -> Vec<SpaceStatus> {
-        self.units
+        let listed = |id: &str| self.spaces.iter().flatten().find(|s| s.id == id);
+        let mut out: Vec<SpaceStatus> = self
+            .units
             .values()
-            .filter(|unit| !unit.is_shared())
+            .filter(|unit| !unit.is_library() && !self.ending.contains(&unit.id))
             .map(|unit| {
-                let listed = self.spaces.iter().flatten().find(|s| s.id == unit.id);
-                let at_top = unit.root.parent() == Some(self.cfg.root.as_path());
+                let entry = listed(&unit.id);
                 SpaceStatus {
                     id: unit.id.clone(),
-                    kind: listed.map(|s| s.kind).unwrap_or(if at_top { SpaceKind::Private } else { SpaceKind::Restricted }),
-                    name: listed.map(|s| s.name.clone()).unwrap_or_else(|| unit.name.clone()),
-                    path: unit.prefix.clone(),
-                    by: listed.map(|s| self.name_of(&s.by)).unwrap_or_default(),
-                    members: listed.map(|s| s.members.clone()).unwrap_or_default(),
+                    kind: entry.map(|s| s.kind).unwrap_or_else(|| unit.kind()),
+                    name: entry.map(|s| s.name.clone()).unwrap_or_else(|| unit.name.clone()),
+                    path: unit.item(),
+                    by: entry.map(|s| self.name_of(&s.by)).unwrap_or_default(),
+                    owner: entry.map(|s| s.owner.clone()).unwrap_or_default(),
+                    parent: entry.and_then(|s| s.parent.clone()),
+                    placed: entry.is_some_and(|s| s.kind == SpaceKind::Private || s.parent.is_some()),
+                    members: entry.map(|s| s.members.clone()).unwrap_or_default(),
+                    above: entry.map(|s| s.above.clone()).unwrap_or_default(),
+                    deleted_at: None,
                 }
             })
-            .collect()
+            .collect();
+        for s in self.spaces.iter().flatten().filter(|s| s.deleted()) {
+            out.push(SpaceStatus {
+                id: s.id.clone(),
+                kind: s.kind,
+                name: s.name.clone(),
+                path: String::new(),
+                by: self.name_of(&s.by),
+                owner: s.owner.clone(),
+                parent: s.parent.clone(),
+                placed: s.parent.is_some(),
+                members: s.members.clone(),
+                above: s.above.clone(),
+                deleted_at: s.deleted_at,
+            });
+        }
+        out
     }
 
     fn set_status(&mut self, phase: Phase, error: Option<String>) {
@@ -689,7 +968,7 @@ impl<R: Remote> Engine<R> {
 
     /// Re-emit the current phase (presence moved, an op was queued).
     fn refresh_status(&self) {
-        let mirror = self.shared().mirror;
+        let mirror = self.library().mirror;
         let status = CloudStatus {
             root: self.root_key(),
             domain: self.cfg.domain.clone(),
@@ -710,11 +989,11 @@ impl<R: Remote> Engine<R> {
             versions: VersionsMirror {
                 mirrored: mirror.map(|m| m.mirrored).unwrap_or(0),
                 cloud: mirror.map(|m| m.cloud).unwrap_or(0),
-                last_mirror_ms: self.shared().last_mirror_ms,
+                last_mirror_ms: self.library().last_mirror_ms,
                 horizon_days: mirror.and_then(|m| m.horizon_days),
             },
             public: self.public_pages(),
-            tags: self.shared().effective_tags(),
+            tags: self.library().effective_tags(),
             presence: self.presence.clone(),
             leases: self.lease_holders(),
             spaces: self.space_statuses(),
@@ -899,32 +1178,38 @@ impl<R: Remote> Engine<R> {
             self.set_status(Phase::Error, Some(why));
             return Ok(());
         }
-        if !self.shared().root.is_dir() && !self.mend_library() {
+        if !self.library().root.is_dir() && !self.mend_library() {
             self.set_status(
                 Phase::Error,
                 Some("Something called “Library” that isn't a folder is at the top of this workspace's folder. Move it away, and Doklin brings Library back.".into()),
             );
             return Ok(());
         }
-        // A folder dropped under `Restricted/` becomes a space before the
-        // section it came from reads its files as gone, so that they leave it
-        // as a move. And a space whose folder was deleted here is made whole
-        // again before its unit could read every file in it as deleted.
-        let lost = self.units.values().any(|u| !u.is_shared() && !u.root.is_dir());
-        if lost || !space::unclaimed(&self.cfg.root, &self.cfg.ws_id).is_empty() {
+        // What the app said it moved comes first: a share's item moved on
+        // this Mac is still that share, wherever it went.
+        self.heed_moves().await;
+        // A shared folder that is not where this Mac had it — moved by hand,
+        // or gone — is found again, or made whole again, before the section
+        // around it could read its files as its own, or as deleted. So is a
+        // shared document: followed by its content, or brought back.
+        if self.units.values().any(|u| self.misplaced(u)) {
             self.reconcile_spaces().await;
         }
+        self.follow_documents();
+        self.set_reaches();
 
-        // What each folder looks like, with no request made: which units
+        // What each section looks like, with no request made: which units
         // have something to push, and which files changed section. A unit
-        // with no folder has nothing to say until it has one again.
+        // with no folder has nothing to say until it has one again — but one
+        // whose share is ending says that every file of it has left.
         let surveys: BTreeMap<String, Survey> = self
             .units
             .values()
-            .filter(|u| !u.gone && u.root.is_dir())
+            .filter(|u| !u.gone && (u.root.is_dir() || self.ending.contains(&u.id)))
             .map(|u| (u.id.clone(), u.survey()))
             .collect();
-        let moves = pair_moves(&surveys);
+        let said = self.said_between();
+        let moves = pair_moves(&surveys, &said);
         self.carry_pages(&moves);
         let hold_new = self.weigh_new(&surveys, &moves);
         let bulk_open = lock(&self.pacer).bulk_open();
@@ -976,7 +1261,11 @@ impl<R: Remote> Engine<R> {
             let ids: Vec<String> = if round == 0 {
                 order.clone()
             } else {
-                self.units.values().filter(|u| u.poke && !u.gone && u.root.is_dir()).map(|u| u.id.clone()).collect()
+                self.units
+                    .values()
+                    .filter(|u| u.poke && !u.gone && (u.root.is_dir() || self.ending.contains(&u.id)))
+                    .map(|u| u.id.clone())
+                    .collect()
             };
             for id in ids {
                 match self.cycle_unit(&id, &moves, hold_new).await {
@@ -984,7 +1273,7 @@ impl<R: Remote> Engine<R> {
                     // A space that answers "not found" is one this person is
                     // not in any more, or one that is gone. Which, the next
                     // poll says; until then it is left exactly as it is.
-                    Err(RemoteError::NotFound) if id != SHARED => {
+                    Err(RemoteError::NotFound) if id != LIBRARY => {
                         if let Some(unit) = self.units.get_mut(&id) {
                             unit.gone = true;
                         }
@@ -1028,6 +1317,7 @@ impl<R: Remote> Engine<R> {
                 // and so have the moves it made.
                 self.touched.clear();
                 self.app_moves.clear();
+                self.end_shares().await;
                 self.set_status(self.settled_phase(), None);
                 if !changed.is_empty() {
                     // Something arrived from another device, so the versioner
@@ -1185,6 +1475,7 @@ impl<R: Remote> Engine<R> {
             unit.fetch().await?;
         }
         self.learn_people(unit.view()).await;
+        self.follow_document_rename(unit);
         let mut touched = self.relocate(unit);
 
         let releasing: HashSet<String> = self.units.values().flat_map(|other| removals(other)).collect();
@@ -1206,13 +1497,21 @@ impl<R: Remote> Engine<R> {
         let ws_root = self.root_key();
         let own_edits: HashSet<String> =
             self.touched.iter().filter_map(|p| unit.in_unit(p)).filter(|rel| !rel.is_empty()).collect();
-        // A move into another section is that section's to pair (`moves`).
-        let app_moves: Vec<(String, String)> = self
+        // What the app moved inside this section, both ends in it: a move
+        // into another section is that one's to pair (`moves`).
+        let mut app_moves: Vec<(String, String)> = self
             .app_moves
             .iter()
             .filter_map(|(from, to)| Some((unit.in_unit(from)?, unit.in_unit(to)?)))
             .filter(|(from, to)| !from.is_empty() && !to.is_empty())
             .collect();
+        // And what the engine itself renamed here.
+        app_moves.append(&mut unit.renamed);
+        // A shared document this person cannot place sits in no folder of
+        // theirs: a conflict copy of it goes to their My files.
+        let unplaced = unit.is_document()
+            && !self.spaces.iter().flatten().any(|s| s.id == unit.id && s.parent.is_some());
+        let my_files = space::top(&self.cfg.root, MY_FILES_DIR);
         let ctx = Ctx {
             signature: &signature,
             people: &self.people,
@@ -1227,9 +1526,10 @@ impl<R: Remote> Engine<R> {
             touched: &own_edits,
             app_moves: &app_moves,
             hold_new,
+            copies_in: unplaced.then_some(my_files.as_path()),
         };
         let written = unit.cycle_inner(&ctx).await?;
-        touched.extend(written.iter().map(|p| unit.ws_rel(p)));
+        touched.extend(written);
         // What the cycle met as moved away on a manifest it refetched.
         touched.extend(self.relocate(unit));
 
@@ -1267,9 +1567,19 @@ impl<R: Remote> Engine<R> {
             })
             .collect();
         let mut touched = Vec::new();
+        let mut kept = false;
         for (fid, to, by) in moved {
             let Some(held) = unit.state.files.get(&fid).cloned() else { continue };
-            let from = unit.root.join(&held.path);
+            let from = unit.abs(&held.path);
+            // A section this device holds no unit of is one this person
+            // cannot open — or one a poll has not told it of yet: something
+            // shared a moment ago on another device of theirs. Only a poll
+            // says which, so the file waits for one rather than be deleted
+            // from under an edit.
+            if !self.units.contains_key(&to) && !self.absent.contains(&to) {
+                self.asked_about.insert(to);
+                continue;
+            }
             if let Some(bytes) = read_file_checked(&from) {
                 let base = std::fs::read(unit.base_path(&fid)).ok();
                 let who = self.name_of(&by);
@@ -1279,6 +1589,12 @@ impl<R: Remote> Engine<R> {
                     }
                     Some(dest) => {
                         match receive(dest, &fid, &from, &bytes, &held.hash, base.as_deref(), &who) {
+                            Received::Kept => {
+                                dest.persist_state();
+                                unit.forget(&fid);
+                                kept = true;
+                                continue;
+                            }
                             Received::Dropped => {}
                             Received::Placed(path) => touched.push(dest.ws_rel(&path)),
                             Received::Beside { path, copy } => {
@@ -1304,7 +1620,7 @@ impl<R: Remote> Engine<R> {
             }
             unit.forget(&fid);
         }
-        if !touched.is_empty() {
+        if !touched.is_empty() || kept {
             unit.persist_state();
         }
         touched
@@ -1369,18 +1685,66 @@ impl<R: Remote> Engine<R> {
         }
     }
 
-    /* ----- spaces coming and going ----- */
+    /* ----- shares coming, moving and going ----- */
 
-    /// Bring this Mac's folders in line with the spaces this person is in:
-    /// the last poll's list on one side, the folders that say they are
-    /// spaces on the other.
+    /// A member's name for a share's second name on disk (`space::candidates`).
+    fn owner_name(&self, entry: &SpaceEntry) -> String {
+        self.people.get(&entry.owner).cloned().unwrap_or_default()
+    }
+
+    /// Whether a shared folder's unit is not where this Mac had it: its
+    /// folder is gone, or is some other folder now.
+    fn misplaced(&self, unit: &Unit<R>) -> bool {
+        if unit.is_library() || unit.is_document() || self.ending.contains(&unit.id) {
+            return false;
+        }
+        !unit.root.is_dir() || space::read_space_marker(&unit.root).is_none_or(|m| m.space != unit.id)
+    }
+
+    /// Take a section's copy off this device, and everything kept for it:
+    /// its sync state, its local history.
+    fn drop_unit(&mut self, id: &str, how: Leaving, changed: &mut SpacesChanged) {
+        let Some(unit) = self.units.remove(id) else { return };
+        let (name, path) = (unit.name.clone(), unit.item());
+        let trash = |path: &Path| how == Leaving::Trash && self.cfg.trash.as_ref().is_some_and(|trash| trash(path));
+        let gone = match &unit.reach.only {
+            Some(doc) => {
+                for file in space::document_files(&unit.root, &doc.local) {
+                    if !trash(&file) {
+                        let _ = std::fs::remove_file(&file);
+                    }
+                }
+                true
+            }
+            None => match space::read_space_marker(&unit.root) {
+                Some(marker) => {
+                    let held = space::Held { dir: unit.root.clone(), rel: unit.prefix.clone(), marker };
+                    trash(&unit.root) || space::remove_space_dir(&self.cfg.root, &held)
+                }
+                // No folder of it here: nothing to take away.
+                None => !unit.root.exists(),
+            },
+        };
+        let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, id));
+        self.ending.remove(id);
+        changed.removed.push(id.to_string());
+        if gone {
+            self.events.emit_json(EV_SPACE_LEFT, json!({ "root": self.root_key(), "name": name, "path": path }));
+        }
+    }
+
+    /// Bring this Mac in line with the sections this person can open: the
+    /// last poll's list on one side, the folders that say they are spaces
+    /// and the documents this Mac wrote down as shared on the other.
     ///
-    /// A space with no folder here gets one, and its unit downloads it. A
-    /// restricted folder this person is no longer in is deleted from this
-    /// Mac outright, with its sync state and its local history; nothing in
-    /// the cloud is touched. A folder made under `Restricted/` by hand
-    /// becomes a restricted folder with only this person in it, and one
-    /// renamed here is renamed for everyone in it.
+    /// A section with nothing here gets its place, and its unit downloads
+    /// it — unless its item is here already, where the section it sits in
+    /// had it: sharing moves nothing. One this person can no longer open is
+    /// deleted from this Mac outright, with its sync state and its local
+    /// history; nothing in the cloud is touched. One found somewhere it
+    /// does not sit is moved there — or, moved on this Mac inside the
+    /// section it sits in, that section is told. A shared folder renamed
+    /// here is renamed for everyone.
     pub(crate) async fn reconcile_spaces(&mut self) {
         let Some(mut list) = self.spaces.clone() else { return };
         let root = self.cfg.root.clone();
@@ -1388,9 +1752,10 @@ impl<R: Remote> Engine<R> {
             return;
         }
         let ws_id = self.cfg.ws_id.clone();
-        let mut changed: Option<SpacesChanged> = None;
+        let mut changed = SpacesChanged::default();
+        let mut moved = false;
 
-        // Everyone has a Private.
+        // Everyone has a My files.
         if !list.iter().any(|s| s.kind == SpaceKind::Private) && self.private_refusals < 3 {
             match self.remote.ensure_private().await {
                 Ok(mine) => list.push(mine),
@@ -1402,136 +1767,94 @@ impl<R: Remote> Engine<R> {
                 Err(_) => self.private_refusals += 1,
             }
         }
-
-        // A folder made under `Restricted/` that is no space yet.
-        for dir in space::unclaimed(&root, &ws_id) {
-            let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            if !space::valid_folder_name(&name) || self.unclaimable.contains(&dir) {
-                continue;
-            }
-            match self.remote.create_space(&name, &[]).await {
-                Ok(made) => {
-                    let marker = SpaceMarker { ws_id: ws_id.clone(), space: made.id.clone(), name: made.name.clone() };
-                    if space::write_space_marker(&dir, &marker).is_ok() {
-                        let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &made.id));
-                        list.push(made);
-                    }
-                }
-                Err(RemoteError::Offline(_)) => break,
-                Err(_) => {
-                    self.unclaimable.insert(dir);
-                }
+        // A share this Mac was making when it last stopped is finished
+        // first: the same id again is the same share.
+        let mut made_in = None;
+        if let Some(made) = self.finish_pending_share().await {
+            made_in = made.parent.clone();
+            if !list.iter().any(|s| s.id == made.id) {
+                list.push(made);
             }
         }
 
-        let listed: HashSet<String> = list.iter().map(|s| s.id.clone()).collect();
-        let mut held = space::held(&root, &ws_id);
-
-        // Folders of spaces this person is no longer in. A Private is its
-        // person's for as long as they are in the workspace, so a list
+        // What this person can no longer open leaves this Mac. My files is
+        // its person's for as long as they are in the workspace, so a list
         // without it is a list to mend (above), never a folder to delete.
-        let mut left: Vec<(String, String)> = Vec::new();
-        held.retain(|folder| {
-            if listed.contains(&folder.marker.space) || folder.dir.parent() == Some(root.as_path()) {
-                return true;
-            }
-            let store = crate::versions::store_for_root(&self.cfg.data_dir, &folder.dir).dir;
-            self.units.remove(&folder.marker.space);
-            if space::remove_space_dir(&root, folder) {
-                let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &folder.marker.space));
-                changed
-                    .get_or_insert_with(SpacesChanged::default)
-                    .removed
-                    .push((folder.dir.to_string_lossy().to_string(), store));
-                left.push((folder.marker.name.clone(), folder.rel.clone()));
-            }
-            false
-        });
-        for (name, path) in left {
-            self.events.emit_json(EV_SPACE_LEFT, json!({ "root": self.root_key(), "name": name, "path": path }));
-        }
-        // A unit whose folder is gone from this Mac: forget what it had
-        // synced, so the folder comes back whole rather than as deletions.
-        let present: HashSet<String> = held.iter().map(|folder| folder.marker.space.clone()).collect();
-        let orphaned: Vec<String> =
-            self.units.keys().filter(|id| id.as_str() != SHARED && !present.contains(*id)).cloned().collect();
-        for id in orphaned {
-            self.units.remove(&id);
-            let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &id));
-            changed.get_or_insert_with(SpacesChanged::default);
+        let live: HashSet<String> = list.iter().filter(|s| !s.deleted()).map(|s| s.id.clone()).collect();
+        let left: Vec<String> = self
+            .units
+            .values()
+            .filter(|u| !u.is_library() && !live.contains(&u.id) && u.kind() != SpaceKind::Private)
+            .map(|u| u.id.clone())
+            .collect();
+        for id in left {
+            self.drop_unit(&id, Leaving::Outright, &mut changed);
         }
 
-        for at in 0..list.len() {
-            let entry = list[at].clone();
-            let maker = self.people.get(&entry.by).cloned().unwrap_or_default();
-            let found = held.iter().find(|folder| folder.marker.space == entry.id).cloned();
-            let mut marker = SpaceMarker { ws_id: ws_id.clone(), space: entry.id.clone(), name: entry.name.clone() };
-            let (dir, rel) = match (entry.kind, found) {
-                (SpaceKind::Private, Some(folder)) => (folder.dir, folder.rel),
-                (SpaceKind::Private, None) => {
-                    // Whatever is at `Private/` already is this person's own:
-                    // it was never shared, and it stays theirs.
-                    let dir = space::top(&root, PRIVATE_DIR);
-                    if std::fs::create_dir_all(&dir).is_err() || space::write_space_marker(&dir, &marker).is_err() {
-                        continue;
+        // Parents before what sits in them: a share is placed against the
+        // folder of the section it sits in.
+        let mut order: Vec<SpaceEntry> = Vec::new();
+        let mut rest: Vec<SpaceEntry> = list.iter().filter(|s| !s.deleted()).cloned().collect();
+        rest.sort_by_key(|s| (s.kind != SpaceKind::Private, s.created_at, s.id.clone()));
+        while !rest.is_empty() {
+            let ready: Vec<SpaceEntry> = rest
+                .iter()
+                .filter(|s| s.parent.as_ref().is_none_or(|p| order.iter().any(|o| &o.id == p) || !rest.iter().any(|r| &r.id == p)))
+                .cloned()
+                .collect();
+            if ready.is_empty() {
+                order.append(&mut rest);
+                break;
+            }
+            rest.retain(|s| !ready.iter().any(|r| r.id == s.id));
+            order.extend(ready);
+        }
+
+        // Where a share sits is the manifest of the section it sits in's to
+        // say: read the one the list speaks of before placing by it.
+        for parent in order.iter().filter(|p| order.iter().any(|s| s.parent.as_deref() == Some(p.id.as_str()))) {
+            if let Some(unit) = self.units.get_mut(&parent.id) {
+                // …and the one a share was just made in, whatever the list said of it.
+                let stale = unit.state.manifest_etag.as_deref() != Some(parent.etag.as_str()) || made_in.as_deref() == Some(parent.id.as_str());
+                if unit.incoming.is_none() && stale {
+                    let _ = unit.fetch().await; // a failure is the cycle's to report
+                }
+            }
+        }
+
+        // The folders that say they are spaces: asked of the disk only when
+        // some folder is not where its unit has it, or has no unit yet.
+        let walk = order.iter().any(|s| s.kind != SpaceKind::Document && self.units.get(&s.id).is_none_or(|u| self.misplaced(u)));
+        let held: Vec<space::Held> = if walk { space::held(&root, &ws_id) } else { Vec::new() };
+
+        for at in 0..order.len() {
+            let entry = order[at].clone();
+            let before = self.units.get(&entry.id).map(|u| (u.root.clone(), u.reach.only.clone()));
+            let was = self.units.get(&entry.id).map(Self::item_at);
+            match entry.kind {
+                SpaceKind::Private => self.place_private(&entry, &held),
+                SpaceKind::Folder => {
+                    if let Some(name) = self.place_folder(&entry, &held).await {
+                        order[at].name = name;
                     }
-                    let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &entry.id));
-                    let rel = space::spelled(&root, &dir);
-                    (dir, rel)
                 }
-                (SpaceKind::Restricted, Some(folder)) => {
-                    let actual = folder.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    let mut dir = folder.dir.clone();
-                    if entry.name != folder.marker.name {
-                        // Renamed by somebody in it: the folder follows.
-                        if !space::names_space(&actual, &entry.name, &maker) {
-                            let to = space::free_restricted_dir(&root, &entry.name, &maker);
-                            if std::fs::rename(&dir, &to).is_ok() {
-                                dir = to;
-                            }
-                        }
-                        let _ = space::write_space_marker(&dir, &marker);
-                    } else if !space::names_space(&actual, &entry.name, &maker) && space::valid_folder_name(&actual) {
-                        // Renamed here: that is the folder's new name, for
-                        // everyone in it.
-                        if self.remote.rename_space(&entry.id, &actual).await.is_ok() {
-                            list[at].name = actual.clone();
-                            marker.name = actual;
-                            let _ = space::write_space_marker(&dir, &marker);
-                        }
-                    }
-                    let rel = space::spelled(&root, &dir);
-                    (dir, rel)
-                }
-                (SpaceKind::Restricted, None) => {
-                    let dir = space::free_restricted_dir(&root, &entry.name, &maker);
-                    if std::fs::create_dir_all(&dir).is_err() || space::write_space_marker(&dir, &marker).is_err() {
-                        continue;
-                    }
-                    let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &entry.id));
-                    let rel = space::spelled(&root, &dir);
-                    (dir, rel)
-                }
-            };
-            match self.units.get_mut(&entry.id) {
-                Some(unit) => {
-                    if unit.root != dir {
-                        changed.get_or_insert_with(SpacesChanged::default);
-                    }
-                    unit.root = dir;
-                    unit.prefix = rel;
-                    unit.name = list[at].name.clone();
-                    unit.gone = false;
-                }
-                None => {
-                    self.units.insert(entry.id.clone(), Self::space_unit(&self.cfg, &self.remote, &marker, dir, rel));
-                    changed.get_or_insert_with(SpacesChanged::default);
-                }
+                SpaceKind::Document => self.place_document(&entry),
+            }
+            let after = self.units.get(&entry.id).map(|u| (u.root.clone(), u.reach.only.clone()));
+            moved |= before != after;
+            if let Some(was) = was {
+                self.tell_moved(&entry.id, &was);
+            }
+        }
+        for entry in &mut list {
+            if let Some(placed) = order.iter().find(|o| o.id == entry.id) {
+                entry.name = placed.name.clone();
             }
         }
 
         self.spaces = Some(list);
-        if let Some(changed) = changed {
+        self.set_reaches();
+        if !changed.removed.is_empty() || moved {
             if let Some(tell) = &self.cfg.on_spaces {
                 tell(changed);
             }
@@ -1539,10 +1862,595 @@ impl<R: Remote> Engine<R> {
         }
     }
 
+    /// My files: `My files/`, with its marker.
+    fn place_private(&mut self, entry: &SpaceEntry, held: &[space::Held]) {
+        let root = self.cfg.root.clone();
+        if self.units.get(&entry.id).is_some_and(|u| !self.misplaced(u)) {
+            return;
+        }
+        let marker = SpaceMarker { ws_id: self.cfg.ws_id.clone(), space: entry.id.clone(), name: entry.name.clone(), dir: String::new() };
+        let found = held.iter().find(|h| h.marker.space == entry.id && h.dir.parent() == Some(root.as_path()));
+        let dir = match found {
+            Some(folder) => folder.dir.clone(),
+            None => {
+                // Whatever is at `My files/` already is this person's own: it
+                // was never shared, and it stays theirs.
+                let dir = space::top(&root, MY_FILES_DIR);
+                if std::fs::create_dir_all(&dir).is_err() || space::write_space_marker(&dir, &marker).is_err() {
+                    return;
+                }
+                let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &entry.id));
+                self.units.remove(&entry.id);
+                dir
+            }
+        };
+        let rel = space::spelled(&root, &dir);
+        match self.units.get_mut(&entry.id) {
+            Some(unit) => {
+                unit.root = dir;
+                unit.prefix = rel;
+                unit.gone = false;
+            }
+            None => {
+                let unit = Self::folder_unit(&self.cfg, &self.remote, &entry.id, &entry.name, dir, rel);
+                self.units.insert(entry.id.clone(), unit);
+            }
+        }
+    }
+
+    /// Where a share's item belongs on this Mac: the folder it sits in, and
+    /// that folder as the section it sits in spells it (`Mount::dir`) — None
+    /// for one this person cannot place, which sits under `Shared with me`.
+    /// `said` is what the domain's manifest says, before anything this Mac
+    /// has queued.
+    fn home_of(&self, entry: &SpaceEntry) -> (PathBuf, Option<Agreed>) {
+        let parent = entry.parent.as_ref().and_then(|p| self.units.get(p)).filter(|p| !p.is_document());
+        match parent {
+            Some(parent) => {
+                let dir = parent.mount_dir(&entry.id);
+                let mount = parent.view().mounts.get(&entry.id);
+                let home = if dir.is_empty() { parent.root.clone() } else { parent.root.join(&dir) };
+                let agreed = Agreed {
+                    parent: parent.id.clone(),
+                    dir,
+                    said: mount.map(|m| m.dir.clone()).unwrap_or_default(),
+                    was: mount.and_then(|m| m.was.clone()),
+                };
+                (home, Some(agreed))
+            }
+            None => (space::top(&self.cfg.root, SHARED_DIR), None),
+        }
+    }
+
+    /// The folder of the section `parent` that `dir` (absolute) is, when it
+    /// is one of that section's own folders.
+    fn dir_in(&self, parent: &str, dir: &Path) -> Option<String> {
+        let unit = self.units.get(parent)?;
+        let rel = rel_path(&unit.root, dir)?;
+        (self.section_of_dir(dir).map(|u| u.id.as_str()) == Some(parent)).then_some(rel)
+    }
+
+    /// A shared folder: found where it sits, moved there, adopted where its
+    /// item already is, or made. Answers its name when this Mac changed it.
+    async fn place_folder(&mut self, entry: &SpaceEntry, held: &[space::Held]) -> Option<String> {
+        let root = self.cfg.root.clone();
+        let owner = self.owner_name(entry);
+        let (home, agreed) = self.home_of(entry);
+        let mut marker = SpaceMarker {
+            ws_id: self.cfg.ws_id.clone(),
+            space: entry.id.clone(),
+            name: entry.name.clone(),
+            dir: agreed.as_ref().map(|a| a.dir.clone()).unwrap_or_default(),
+        };
+        let free = |home: &Path, skip: Option<&Path>| {
+            home.join(space::free_name(&entry.name, &owner, |name| {
+                let at = home.join(name);
+                Some(at.as_path()) != skip && space::name_taken(home, name, false)
+            }))
+        };
+        // Where this Mac has it: its unit, when that still is the folder —
+        // else wherever a folder says it is this space.
+        let known = self.units.get(&entry.id).filter(|u| !self.misplaced(u)).map(|u| u.root.clone());
+        let found = known.or_else(|| held.iter().find(|h| h.marker.space == entry.id).map(|h| h.dir.clone()));
+        let mut renamed = None;
+        let dir = match found {
+            Some(mut dir) => {
+                let was = space::read_space_marker(&dir).unwrap_or_else(|| marker.clone());
+                let actual = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let around = dir.parent().map(Path::to_path_buf).unwrap_or_default();
+                // Where: in the folder it sits in, or to be moved there —
+                // unless this Mac moved it, inside the section it sits in.
+                let here = agreed.as_ref().and_then(|a| self.dir_in(&a.parent, &around));
+                let in_place = match (&agreed, &here) {
+                    (Some(a), Some(here)) if here.eq_ignore_ascii_case(&a.dir) => true,
+                    (Some(a), Some(here)) if a.dir == was.dir => {
+                        // Its marker agrees with its section about where it
+                        // sat, and it is somewhere else in that section: it
+                        // was moved on this Mac, and its section says so
+                        // from now on.
+                        if let Some(parent) = self.units.get_mut(&a.parent) {
+                            parent.queue_mount(&entry.id, here);
+                        }
+                        marker.dir = here.clone();
+                        true
+                    }
+                    (None, _) => around == home,
+                    _ => false,
+                };
+                if !in_place {
+                    let to = free(&home, None);
+                    if std::fs::create_dir_all(&home).is_ok() && std::fs::rename(&dir, &to).is_ok() {
+                        dir = to;
+                    }
+                }
+                // What it is called.
+                let actual = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(actual);
+                if entry.name != was.name {
+                    // Renamed by somebody on it: the folder follows.
+                    if !space::names_item(&actual, &entry.name, &owner) {
+                        let to = free(dir.parent().unwrap_or(&home), Some(&dir));
+                        if std::fs::rename(&dir, &to).is_ok() {
+                            dir = to;
+                        }
+                    }
+                } else if !space::names_item(&actual, &entry.name, &owner) && space::valid_item_name(&actual) {
+                    // Renamed here: that is its new name, for everyone.
+                    if self.remote.rename_space(&entry.id, &actual).await.is_ok() {
+                        marker.name = actual.clone();
+                        renamed = Some(actual);
+                    }
+                }
+                if space::read_space_marker(&dir).as_ref() != Some(&marker) {
+                    let _ = space::write_space_marker(&dir, &marker);
+                }
+                dir
+            }
+            None => {
+                // Not on this Mac as a share. Its item may be here all the
+                // same, where the section it sits in had it: then that
+                // folder is it, and its files stay where they are.
+                let here = agreed
+                    .as_ref()
+                    .and_then(|a| Some((a, a.was.as_ref()?)))
+                    .and_then(|(a, was)| Some(self.units.get(&a.parent)?.root.join(was)))
+                    .filter(|dir| space::is_real_dir(dir) && space::read_space_marker(dir).is_none() && dir.parent() == Some(home.as_path()));
+                let dir = match here {
+                    Some(dir) => {
+                        marker.name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        dir
+                    }
+                    None => free(&home, None),
+                };
+                if std::fs::create_dir_all(&dir).is_err() || space::write_space_marker(&dir, &marker).is_err() {
+                    return None;
+                }
+                // A folder taken for it is asked again what it is called.
+                if marker.name != entry.name {
+                    self.units.remove(&entry.id);
+                } else if let Some(unit) = self.units.get_mut(&entry.id) {
+                    // Its folder was lost: it comes back whole.
+                    unit.forget_synced();
+                } else {
+                    let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &entry.id));
+                }
+                dir
+            }
+        };
+        let rel = space::spelled(&root, &dir);
+        let name = renamed.clone().unwrap_or_else(|| entry.name.clone());
+        match self.units.get_mut(&entry.id) {
+            Some(unit) => {
+                unit.root = dir;
+                unit.prefix = rel;
+                unit.name = name;
+                unit.gone = false;
+            }
+            None => {
+                let unit = Self::folder_unit(&self.cfg, &self.remote, &entry.id, &name, dir, rel);
+                self.units.insert(entry.id.clone(), unit);
+            }
+        }
+        renamed
+    }
+
+    /// A shared document: where this Mac has it, moved to the folder it
+    /// sits in, adopted where its item already is, or given a place to be
+    /// downloaded to. What it is called follows its manifest, in the cycle
+    /// (`follow_document_rename`).
+    fn place_document(&mut self, entry: &SpaceEntry) {
+        let root = self.cfg.root.clone();
+        let owner = self.owner_name(entry);
+        let (home, agreed) = self.home_of(entry);
+        let said = agreed.as_ref().map(|a| a.said.clone());
+        if let Some(unit) = self.units.get(&entry.id) {
+            let Some(name) = unit.reach.only.clone() else { return };
+            let around = unit.root.clone();
+            let here = agreed.as_ref().and_then(|a| self.dir_in(&a.parent, &around));
+            let in_place = match (&agreed, &here) {
+                (Some(a), Some(here)) => here.eq_ignore_ascii_case(&a.dir),
+                (None, _) => around == home,
+                _ => false,
+            };
+            if !in_place && std::fs::create_dir_all(&home).is_ok() {
+                // It sits in another folder now: its files go there, under
+                // the first of its names that is free.
+                let local = space::free_name(&name.stored, &owner, |cand| space::name_taken(&home, cand, true));
+                for file in space::document_files(&around, &name.local) {
+                    let ext = file.file_name().map(|n| split_name(&n.to_string_lossy()).1.to_string()).unwrap_or_default();
+                    let _ = std::fs::rename(&file, home.join(format!("{}{}", local, ext)));
+                }
+                let prefix = space::spelled(&root, &home);
+                if let Some(unit) = self.units.get_mut(&entry.id) {
+                    unit.root = home;
+                    unit.prefix = prefix;
+                    unit.reach.only = Some(DocName { local, stored: name.stored });
+                }
+            }
+            if let Some(unit) = self.units.get_mut(&entry.id) {
+                unit.gone = false;
+            }
+            self.note_document(&entry.id, said.as_deref());
+            return;
+        }
+        // Not on this Mac as a share. Its item may be here all the same,
+        // where the section it sits in had it: then those files are it.
+        let here = agreed
+            .as_ref()
+            .and_then(|a| Some((a, a.was.as_ref()?)))
+            .and_then(|(a, was)| {
+                let at = self.units.get(&a.parent)?.root.join(was);
+                let stem = at.file_name()?.to_string_lossy().to_string();
+                let dir = at.parent()?.to_path_buf();
+                (dir == home && !space::document_files(&dir, &stem).is_empty()).then_some(stem)
+            })
+            .filter(|stem| !self.units.values().any(|u| u.root == home && u.reach.only.as_ref().is_some_and(|n| n.local.eq_ignore_ascii_case(stem))));
+        let name = match here {
+            Some(stem) => DocName { local: stem.clone(), stored: stem },
+            None => {
+                if std::fs::create_dir_all(&home).is_err() {
+                    return;
+                }
+                DocName { local: space::free_name(&entry.name, &owner, |cand| space::name_taken(&home, cand, true)), stored: entry.name.clone() }
+            }
+        };
+        let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &entry.id));
+        let place = DocPlace { dir: space::spelled(&root, &home), local: name.local, stored: name.stored, at: said.clone().unwrap_or_default() };
+        let unit = Self::document_unit(&self.cfg, &self.remote, &entry.id, &place);
+        self.units.insert(entry.id.clone(), unit);
+        self.note_document(&entry.id, said.as_deref());
+    }
+
+    /// A shared document renamed on another device: its manifest names its
+    /// files differently from the one this Mac last applied. Its files here
+    /// take the new name before the cycle looks for them.
+    fn follow_document_rename(&mut self, unit: &mut Unit<R>) {
+        let Some(name) = unit.reach.only.clone() else { return };
+        let Some(now) = unit.document_name() else { return };
+        let applied = unit.state.manifest.files.values().find(|f| !crate::sidecar::is_sidecar(&f.path)).map(|f| split_name(&f.path).0.to_string());
+        if now == name.stored || applied.as_deref() == Some(now.as_str()) {
+            return;
+        }
+        let owner = self.spaces.iter().flatten().find(|s| s.id == unit.id).map(|s| self.owner_name(s)).unwrap_or_default();
+        // A name this Mac gave it stays; one it wore for its old name changes with it.
+        let local = if space::names_item(&name.local, &name.stored, &owner) {
+            space::free_name(&now, &owner, |cand| !cand.eq_ignore_ascii_case(&name.local) && space::name_taken(&unit.root, cand, true))
+        } else {
+            name.local.clone()
+        };
+        let was = Self::item_at(unit);
+        unit.follow_document_name(&now, &local);
+        // The unit is out of the table while it cycles: told from here.
+        let moves: Vec<serde_json::Value> = space::document_files(&unit.root, &local)
+            .into_iter()
+            .filter_map(|file| {
+                let ext = split_name(&file.file_name()?.to_string_lossy()).1.to_string();
+                Some(json!({
+                    "from": format!("{}/{}{}", was.0, was.1.as_deref().unwrap_or_default(), ext),
+                    "to": format!("{}/{}{}", unit.prefix, local, ext),
+                    "dir": false,
+                }))
+            })
+            .collect();
+        if !moves.is_empty() && was.1.as_deref() != Some(local.as_str()) {
+            self.events.emit_json(EV_SPACE_MOVED, json!({ "root": self.root_key(), "moves": moves }));
+        }
+        let place = DocPlace { dir: unit.prefix.clone(), local, stored: now, at: String::new() };
+        let path = Self::space_state_dir(&self.cfg, &unit.id).join(DOC_FILE);
+        let at = read_json::<DocPlace>(&path).map(|was| was.at).unwrap_or_default();
+        let _ = write_json(&path, &DocPlace { at, ..place });
+    }
+
+    /// A shared document with a file that is not where this Mac had it, and
+    /// that the app did not say it deleted: moved, renamed or deleted by
+    /// hand. Followed by its content when the same bytes are now a file of
+    /// the section it sits in — its other files go with it. Otherwise the
+    /// document comes back whole, and whatever was moved or renamed is a
+    /// note of this person's own: by hand, nothing shared is ever deleted.
+    fn follow_documents(&mut self) {
+        let astray: Vec<(String, Vec<FileState>)> = self
+            .units
+            .values()
+            .filter(|u| u.is_document() && !u.gone && !self.ending.contains(&u.id))
+            .filter_map(|u| {
+                let said = |path: &str| self.touched.iter().any(|p| u.in_unit(p).as_deref() == Some(path));
+                // A file this unit is about to say was renamed is where its new name is.
+                let now = |path: &str| u.renamed.iter().find(|(from, _)| from == path).map(|(_, to)| to.clone()).unwrap_or_else(|| path.to_string());
+                let missing: Vec<FileState> = u
+                    .state
+                    .files
+                    .values()
+                    .filter(|st| !crate::sidecar::is_sidecar(&st.path))
+                    .filter(|st| std::fs::symlink_metadata(u.abs(&now(&st.path))).is_err() && !said(&st.path))
+                    .cloned()
+                    .collect();
+                (!missing.is_empty()).then(|| (u.id.clone(), missing))
+            })
+            .collect();
+        for (id, missing) in astray {
+            let parent = self.spaces.iter().flatten().find(|s| s.id == id).and_then(|e| e.parent.clone());
+            // By its content, among the files of the section it sits in that
+            // no section has synced.
+            let found = parent.as_ref().and_then(|p| self.units.get(p)).and_then(|around| {
+                let survey = around.survey();
+                missing.iter().find_map(|lost| {
+                    let ext = split_name(&lost.path).1.to_string();
+                    survey
+                        .news
+                        .iter()
+                        .find(|(path, hash)| *hash == lost.hash && split_name(path).1.eq_ignore_ascii_case(&ext))
+                        .map(|(path, _)| around.abs(path))
+                })
+            });
+            match found {
+                Some(file) => self.claim_document(&id, &file),
+                None => {
+                    if let Some(unit) = self.units.get_mut(&id) {
+                        unit.forget_synced();
+                    }
+                }
+            }
+        }
+    }
+
+    /// The shared document `id` is the file at `file` now: this person moved
+    /// or renamed it, inside the section it sits in. Its other files go with
+    /// it, the section is told where it sits, and a new name is its name.
+    fn claim_document(&mut self, id: &str, file: &Path) {
+        let (Some(dir), Some(file_name)) = (file.parent(), file.file_name().map(|n| n.to_string_lossy().to_string())) else { return };
+        let local = split_name(&file_name).0.to_string();
+        let Some(unit) = self.units.get(id) else { return };
+        let Some(was) = unit.reach.only.clone() else { return };
+        let old_root = unit.root.clone();
+        let item_was = Self::item_at(unit);
+        // Its html and its comments, still where they were.
+        for other in space::document_files(&old_root, &was.local) {
+            let ext = other.file_name().map(|n| split_name(&n.to_string_lossy()).1.to_string()).unwrap_or_default();
+            let to = dir.join(format!("{}{}", local, ext));
+            if std::fs::symlink_metadata(&to).is_err() {
+                let _ = std::fs::rename(&other, &to);
+            }
+        }
+        let entry = self.spaces.iter().flatten().find(|s| s.id == id).cloned();
+        let owner = entry.as_ref().map(|e| self.owner_name(e)).unwrap_or_default();
+        let here = entry.as_ref().and_then(|e| e.parent.clone()).and_then(|p| Some((p.clone(), self.dir_in(&p, dir)?)));
+        let prefix = space::spelled(&self.cfg.root, dir);
+        // A name this Mac would not have given it is one a person typed.
+        let stored = if space::names_item(&local, &was.stored, &owner) || !space::valid_item_name(&local) {
+            was.stored.clone()
+        } else {
+            local.clone()
+        };
+        if let Some(unit) = self.units.get_mut(id) {
+            unit.root = dir.to_path_buf();
+            unit.prefix = prefix;
+            if stored != was.stored {
+                let files: Vec<String> = unit.state.files.values().map(|st| st.path.clone()).collect();
+                unit.renamed.extend(files.into_iter().map(|path| {
+                    let to = format!("{}{}", stored, split_name(&path).1);
+                    (path, to)
+                }));
+            }
+            unit.reach.only = Some(DocName { local, stored });
+            unit.poke = true;
+        }
+        if let Some((parent, here)) = here {
+            if let Some(around) = self.units.get_mut(&parent) {
+                around.queue_mount(id, &here);
+                around.poke = true;
+            }
+            self.note_document(id, Some(&here));
+        } else {
+            self.note_document(id, None);
+        }
+        self.set_reaches();
+        self.tell_moved(id, &item_was);
+    }
+
+    /* ----- what the app said it moved ----- */
+
+    /// What the app said it moved from one section to another, each end as
+    /// its unit spells it: what `pair_moves` reads as the same files.
+    fn said_between(&self) -> Vec<SaidAcross> {
+        self.app_moves
+            .iter()
+            .filter_map(|(from, to)| {
+                // Where it was is asked of the units as they were told: the
+                // section whose state still has a file at or under it.
+                let left = self.units.values().find_map(|unit| {
+                    let rel = unit.in_unit(from)?;
+                    unit.state.files.values().any(|st| rebased(&st.path, &rel, &rel).is_some()).then(|| (unit.id.clone(), rel))
+                })?;
+                let arrived = self.place(to)?;
+                (left.0 != arrived.0).then(|| SaidAcross { from: left.0, from_path: left.1, to: arrived.0, to_path: arrived.1 })
+            })
+            .collect()
+    }
+
+    /// The app renamed or moved something. A share's item is still that
+    /// share wherever it went: its section is told where it sits now, or —
+    /// moved into another section — it sits in that one from now on; moved
+    /// into Library, it is everyone's and the share ends. The app asked the
+    /// person first where that changes who can open it.
+    async fn heed_moves(&mut self) {
+        let said: Vec<(String, String)> = self.app_moves.clone();
+        for (from, to) in said {
+            // Shares whose item is what moved, or inside the folder that did.
+            let inside: Vec<(String, String)> = self
+                .units
+                .values()
+                .filter(|u| !u.is_library() && u.kind() != SpaceKind::Private && !self.ending.contains(&u.id))
+                .filter_map(|u| match &u.reach.only {
+                    // A document: one of its own files was renamed, or the folder it is in.
+                    Some(name) => {
+                        let stem = format!("{}/{}", u.prefix, name.local);
+                        let (dir, file) = from.rsplit_once('/')?;
+                        let own = dir.eq_ignore_ascii_case(&u.prefix) && split_name(file).0.eq_ignore_ascii_case(&name.local);
+                        let now = if own { to.clone() } else { rebased(&stem, &from, &to)? };
+                        Some((u.id.clone(), now))
+                    }
+                    None => rebased(&u.prefix, &from, &to).map(|now| (u.id.clone(), now)),
+                })
+                .collect();
+            for (id, now) in inside {
+                self.moved_share(&id, &now).await;
+            }
+        }
+    }
+
+    /// The item of the share `id` is at `now` (workspace-relative: a folder,
+    /// or one of a document's files) — the app put it there.
+    async fn moved_share(&mut self, id: &str, now: &str) {
+        let abs = self.cfg.root.join(now);
+        let Some(unit) = self.units.get(id) else { return };
+        let document = unit.is_document();
+        let (was_root, was_name) = (unit.root.clone(), unit.reach.only.clone());
+        // It is there: a document's file, or the folder that says it is this share.
+        let there = if document { abs.is_file() } else { space::read_space_marker(&abs).is_some_and(|m| m.space == id) };
+        let Some(around) = abs.parent().map(Path::to_path_buf).filter(|_| there) else { return };
+        let Some(entry) = self.spaces.iter().flatten().find(|s| s.id == id).cloned() else { return };
+        let section = self.section_of_dir(&around).map(|u| (u.id.clone(), rel_path(&u.root, &around).unwrap_or_default()));
+        match (entry.parent.as_deref(), section) {
+            // Inside the section it sits in: that section says where from now on.
+            (Some(parent), Some((at, dir))) if at == parent => self.settle_share(id, &abs, &at, &dir),
+            // Into Library: it is everyone's now, and no share. Its unit
+            // stays where the item was, which is where its files are read
+            // as having left from.
+            (Some(_), Some((at, _))) if at == LIBRARY => {
+                if !document {
+                    space::remove_space_marker(&abs);
+                }
+                let _ = std::fs::write(Self::space_state_dir(&self.cfg, id).join(ENDING_FILE), b"");
+                self.ending.insert(id.to_string());
+                if let Some(unit) = self.units.get_mut(id) {
+                    unit.poke = true;
+                }
+                self.set_reaches();
+            }
+            // Into another folder of this person's, or another shared
+            // folder: it sits there from now on, and that folder's people
+            // open it.
+            (Some(_), Some((at, dir))) => match self.remote.move_space(id, &at, &dir).await {
+                Ok(moved) => {
+                    if let Some(listed) = self.spaces.iter_mut().flatten().find(|s| s.id == id) {
+                        *listed = moved;
+                    }
+                    self.settle_share(id, &abs, &at, &dir);
+                }
+                // Refused, or unreachable: it sits where it sat, so it goes
+                // back there — and what the app has open from it follows.
+                Err(_) => {
+                    let spelled = |path: &Path| rel_path(&self.cfg.root, path).unwrap_or_default();
+                    let mut back: Vec<serde_json::Value> = Vec::new();
+                    match &was_name {
+                        Some(name) => {
+                            let stem = abs.file_name().map(|n| split_name(&n.to_string_lossy()).0.to_string()).unwrap_or_default();
+                            for file in space::document_files(&around, &stem) {
+                                let ext = file.file_name().map(|n| split_name(&n.to_string_lossy()).1.to_string()).unwrap_or_default();
+                                let to = was_root.join(format!("{}{}", name.local, ext));
+                                if std::fs::symlink_metadata(&to).is_err() && std::fs::rename(&file, &to).is_ok() {
+                                    back.push(json!({ "from": spelled(&file), "to": spelled(&to), "dir": false }));
+                                }
+                            }
+                        }
+                        None => {
+                            if std::fs::symlink_metadata(&was_root).is_err() && std::fs::rename(&abs, &was_root).is_ok() {
+                                back.push(json!({ "from": spelled(&abs), "to": spelled(&was_root), "dir": true }));
+                            }
+                        }
+                    }
+                    if !back.is_empty() {
+                        self.events.emit_json(EV_SPACE_MOVED, json!({ "root": self.root_key(), "moves": back }));
+                    }
+                }
+            },
+            // Pinned under Shared with me, a document renamed where it is
+            // has a new name for everyone. Anything else — moved somewhere
+            // that is no section, or by somebody who cannot place it — comes
+            // back at the next look at the folders.
+            (None, _) if document && around == was_root => self.claim_document(id, &abs),
+            _ => {}
+        }
+    }
+
+    /// The item of the share `id` is at `abs`, in the folder `dir` of the
+    /// section `at` it sits in: its unit is there, and that section is told.
+    fn settle_share(&mut self, id: &str, abs: &Path, at: &str, dir: &str) {
+        if self.units.get(id).is_some_and(|u| u.is_document()) {
+            self.claim_document(id, abs);
+            return;
+        }
+        let prefix = space::spelled(&self.cfg.root, abs);
+        if let Some(unit) = self.units.get_mut(id) {
+            unit.root = abs.to_path_buf();
+            unit.prefix = prefix;
+        }
+        if let Some(mut marker) = space::read_space_marker(abs).filter(|m| m.dir != dir) {
+            marker.dir = dir.to_string();
+            let _ = space::write_space_marker(abs, &marker);
+        }
+        if let Some(parent) = self.units.get_mut(at) {
+            parent.queue_mount(id, dir);
+            parent.poke = true;
+        }
+        self.set_reaches();
+    }
+
+    /// A share that is ending has handed every file to Library: it is erased
+    /// on the domain, and forgotten here.
+    async fn end_shares(&mut self) {
+        let done: Vec<String> = self
+            .ending
+            .iter()
+            .filter(|id| self.units.get(*id).is_none_or(|u| u.state.files.is_empty() && u.held_deletes.is_empty()))
+            .cloned()
+            .collect();
+        for id in done {
+            loop {
+                match self.remote.delete_space(&id).await {
+                    Ok(round) if round.remaining => continue,
+                    // Kept: something landed in it meanwhile. It is a share
+                    // still, deleted — its people's to restore.
+                    Ok(_) | Err(RemoteError::NotFound) => break,
+                    Err(_) => return, // tried again after the next pass
+                }
+            }
+            self.units.remove(&id);
+            self.ending.remove(&id);
+            let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &id));
+            if let Some(list) = &mut self.spaces {
+                list.retain(|s| s.id != id);
+            }
+            self.set_reaches();
+            if let Some(tell) = &self.cfg.on_spaces {
+                tell(SpacesChanged { removed: vec![id] });
+            }
+        }
+    }
+
     /// `Library/` is gone from this device — deleted, or renamed in Finder,
-    /// which leaves it at the top in no section. Like a space's missing
+    /// which leaves it at the top in no section. Like a share's missing
     /// folder (`reconcile_spaces`), it is a section to bring back whole, never
-    /// a folder whose every file was deleted: what the shared unit had synced
+    /// a folder whose every file was deleted: what Library's unit had synced
     /// is forgotten, and its next cycle downloads everything into a new one.
     /// False when the folder cannot be made — a file has its name — and then
     /// nothing is forgotten.
@@ -1552,19 +2460,20 @@ impl<R: Remote> Engine<R> {
         }
         let _ = std::fs::remove_file(self.cfg.state_dir.join("state.json"));
         let _ = std::fs::remove_dir_all(self.cfg.state_dir.join("base"));
-        self.units.insert(SHARED.to_string(), Self::shared_unit(&self.cfg, &self.remote));
-        if let Some(tell) = &self.cfg.on_spaces {
-            tell(SpacesChanged::default());
-        }
+        self.units.insert(LIBRARY.to_string(), Self::library_unit(&self.cfg, &self.remote));
+        self.set_reaches();
         true
     }
 
-    /* ----- restricted folders, by hand ----- */
+    /* ----- sharing, by hand ----- */
 
-    /// A failed call about a restricted folder, in a sentence.
+    /// A failed call about a share, in a sentence.
     fn describe_space(&self, e: RemoteError) -> String {
         match e {
-            RemoteError::NotFound => "That folder is not there any more, or you are no longer in it.".to_string(),
+            RemoteError::NotFound => "That is not there any more, or it is no longer shared with you.".to_string(),
+            RemoteError::Forbidden => {
+                "This is shared with you: only the people of the folder it sits in can move or delete it. You can leave it instead.".to_string()
+            }
             other => super::flows::describe(&self.cfg.domain, other.into()),
         }
     }
@@ -1574,83 +2483,161 @@ impl<R: Remote> Engine<R> {
         format!("This {} has not caught up with the workspace yet — try again in a moment.", self.cfg.device_kind)
     }
 
-    /// Make a restricted folder holding this person and `members`. With
-    /// `from` — a folder in this workspace — that folder becomes it: what was
-    /// in it leaves the section it was in as a move, so it is deleted
-    /// outright from the Macs of everyone not chosen and stays in place on
-    /// the Macs of everyone who is. Otherwise the folder starts empty.
-    pub(crate) async fn make_space(
-        &mut self,
-        name: &str,
-        members: &[String],
-        from: Option<&Path>,
-    ) -> Result<SpaceStatus, String> {
-        // The list of this person's spaces is what decides which folders
-        // stay here: a folder is only added to one the domain gave.
+    fn pending_share_path(&self) -> PathBuf {
+        self.cfg.state_dir.join(PENDING_SHARE_FILE)
+    }
+
+    /// Ask the domain for the share this device wrote down it was making.
+    /// The same id from its maker again is the same share, so asking twice
+    /// makes one. None when nothing was pending, or the domain cannot be
+    /// asked yet — then it stays written down.
+    async fn finish_pending_share(&mut self) -> Option<SpaceEntry> {
+        let pending: PendingShare = read_json(&self.pending_share_path())?;
+        let made = self.post_share(&pending).await;
+        match made {
+            Ok(entry) => {
+                let _ = std::fs::remove_file(self.pending_share_path());
+                Some(entry)
+            }
+            Err(RemoteError::Offline(_) | RemoteError::Slowed(_) | RemoteError::DailyLimit) => None,
+            // Refused: the item is not there to share any more, or not this
+            // person's to. Nothing was made, and nothing is owed.
+            Err(_) => {
+                let _ = std::fs::remove_file(self.pending_share_path());
+                None
+            }
+        }
+    }
+
+    /// `POST /api/spaces`, minting another id when the one written down
+    /// turns out to be somebody else's.
+    async fn post_share(&mut self, pending: &PendingShare) -> RemoteResult<SpaceEntry> {
+        let mut ask = NewShare {
+            id: pending.id.clone(),
+            kind: pending.kind,
+            name: pending.name.clone(),
+            parent: pending.parent.clone(),
+            dir: pending.dir.clone(),
+            was: pending.was.clone(),
+            members: pending.members.clone(),
+        };
+        for _ in 0..3 {
+            match self.remote.create_space(&ask).await {
+                Err(RemoteError::IdTaken) => {
+                    ask.id = share_id();
+                    let _ = write_json(&self.pending_share_path(), &PendingShare { id: ask.id.clone(), ..pending.clone() });
+                }
+                other => return other,
+            }
+        }
+        Err(RemoteError::IdTaken)
+    }
+
+    /// Share the folder or the document at `path` with `members`. It stays
+    /// where it is: it becomes a section of its own in place, whose files
+    /// leave the section around it as a move — so they are untouched on the
+    /// devices of everyone who could open them already, and arrive on those
+    /// of the people it is now shared with. What is shared from inside a
+    /// folder that is shared stays its own share, and sits in the new one.
+    /// Something shared already gets those people as well.
+    pub(crate) async fn share(&mut self, path: &Path, members: &[String]) -> Result<SpaceStatus, String> {
+        // The list of what this person can open is what decides which
+        // folders stay here: a share is only added to one the domain gave.
         if self.spaces.is_none() {
             return Err(self.not_caught_up());
         }
-        let name = name.trim();
-        if !space::valid_folder_name(name) {
-            return Err("A folder needs a name that can be a folder's: no slashes, and not starting with a dot.".to_string());
-        }
         let root = self.cfg.root.clone();
-        if let Some(from) = from {
-            // A folder inside Library or inside Private: never a section's
-            // own folder, nor anything in no section.
-            let real = std::fs::symlink_metadata(from).map(|m| m.file_type().is_dir()).unwrap_or(false);
-            let placed = rel_path(&root, from).and_then(|rel| self.place(&rel));
-            let in_section = placed.is_some_and(|(id, rel)| !rel.is_empty() && (id == SHARED || id.starts_with("p-")));
-            if !real || !in_section {
-                return Err("That is not a folder of this workspace that can be restricted.".to_string());
-            }
-            if self.units.values().any(|unit| !unit.is_shared() && unit.root == from) {
-                return Err("That folder is restricted already.".to_string());
-            }
+        let not_shareable = || "Only a folder or a document in My files, or in a folder shared with you, can be shared. Nothing in Library is shared separately: it is everyone's.".to_string();
+        let folder = space::is_real_dir(path);
+        let Some(ws_rel) = rel_path(&root, path) else { return Err(not_shareable()) };
+        if !folder && !crate::syncs(&ws_rel) {
+            return Err("Only markdown and html documents sync, so only they can be shared.".to_string());
         }
-
-        let made = self.remote.create_space(name, members).await.map_err(|e| self.describe_space(e))?;
-        let maker = self.people.get(&made.by).cloned().unwrap_or_default();
-        let dir = space::free_restricted_dir(&root, &made.name, &maker);
-        let marker = SpaceMarker { ws_id: self.cfg.ws_id.clone(), space: made.id.clone(), name: made.name.clone() };
-        let placed = dir
-            .parent()
-            .map(std::fs::create_dir_all)
-            .unwrap_or(Ok(()))
-            .and_then(|_| match from {
-                Some(from) => std::fs::rename(from, &dir),
-                None => std::fs::create_dir_all(&dir),
-            })
-            .map_err(|e| e.to_string())
-            .and_then(|_| space::write_space_marker(&dir, &marker));
-        if let Err(e) = placed {
-            // The domain has the folder; the next poll gives it a folder
-            // here. What was to go into it is where it was.
-            return Err(format!("The folder was made, but this {} could not put it in place: {}.", self.cfg.device_kind, e));
+        self.set_reaches();
+        let Some((at, rel)) = self.place(&ws_rel) else { return Err(not_shareable()) };
+        let around = self.units.get(&at).ok_or_else(not_shareable)?;
+        // Shared already: its people grow.
+        let own_item = if folder { rel.is_empty() && around.kind() == SpaceKind::Folder } else { around.is_document() };
+        if own_item {
+            for member in members {
+                self.change_share_member(&at, member, true).await?;
+            }
+            return self.status_of(&at).ok_or_else(|| self.not_caught_up());
         }
-        let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, &made.id));
-        let rel = space::spelled(&root, &dir);
-        self.units.insert(made.id.clone(), Self::space_unit(&self.cfg, &self.remote, &marker, dir, rel));
+        if at == LIBRARY || rel.is_empty() || around.is_document() {
+            return Err(not_shareable());
+        }
+        let (name, was) = if folder {
+            (rel.rsplit('/').next().unwrap_or(&rel).to_string(), rel.clone())
+        } else {
+            let (dir, file) = rel.rsplit_once('/').map(|(d, f)| (format!("{}/", d), f)).unwrap_or((String::new(), rel.as_str()));
+            let stem = split_name(file).0.to_string();
+            (stem.clone(), format!("{}{}", dir, stem))
+        };
+        if !space::valid_item_name(&name) {
+            return Err("That name can't be shared: it starts with a dot or a space, or holds a slash or a colon. Rename it first.".to_string());
+        }
+        let dir = was.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
+        let pending = PendingShare {
+            id: share_id(),
+            kind: if folder { SpaceKind::Folder } else { SpaceKind::Document },
+            name,
+            parent: at.clone(),
+            dir,
+            was,
+            members: members.to_vec(),
+        };
+        let _ = write_json(&self.pending_share_path(), &pending);
+        let made = self.post_share(&pending).await.map_err(|e| {
+            let _ = std::fs::remove_file(self.pending_share_path());
+            self.describe_space(e)
+        })?;
+        let _ = std::fs::remove_file(self.pending_share_path());
         let id = made.id.clone();
+
+        // The section around it wrote where the share sits: read that again
+        // before anything is placed by it.
+        if let Some(parent) = self.units.get_mut(&at) {
+            let _ = parent.fetch().await;
+            parent.poke = true;
+        }
+        // What was shared from inside the folder sits in the new share now.
+        let inside: Vec<(String, String)> = if folder {
+            self.units
+                .values()
+                .filter(|u| !u.is_library() && u.id != at && u.root.starts_with(path) && self.spaces.iter().flatten().any(|s| s.id == u.id && s.parent.as_deref() == Some(at.as_str())))
+                .filter_map(|u| {
+                    let dir = if u.is_document() { u.root.clone() } else { u.root.parent()?.to_path_buf() };
+                    Some((u.id.clone(), rel_path(path, &dir)?))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.spaces.get_or_insert_with(Vec::new).retain(|s| s.id != id);
         self.spaces.get_or_insert_with(Vec::new).push(made);
-        if let Some(tell) = &self.cfg.on_spaces {
-            tell(SpacesChanged::default());
+        self.reconcile_spaces().await;
+        for (child, dir) in inside {
+            if let Ok(moved) = self.remote.move_space(&child, &id, &dir).await {
+                if let Some(listed) = self.spaces.iter_mut().flatten().find(|s| s.id == child) {
+                    *listed = moved;
+                }
+            }
         }
         self.refresh_status();
-        self.space_statuses()
-            .into_iter()
-            .find(|space| space.id == id)
-            .ok_or_else(|| "The folder was made, and will be here in a moment.".to_string())
+        self.status_of(&id).ok_or_else(|| "It is shared, and will show as shared in a moment.".to_string())
     }
 
-    /// Add a person to a restricted folder, or take one out. Taking this
-    /// person out is leaving it: its folder leaves this Mac with them.
-    pub(crate) async fn change_space_member(&mut self, id: &str, member: &str, add: bool) -> Result<(), String> {
+    fn status_of(&self, id: &str) -> Option<SpaceStatus> {
+        self.space_statuses().into_iter().find(|space| space.id == id)
+    }
+
+    /// Share something with one more person, or stop. Stopping with this
+    /// person is leaving it: its copy leaves this Mac with them.
+    pub(crate) async fn change_share_member(&mut self, id: &str, member: &str, add: bool) -> Result<(), String> {
         if add {
             let now = self.remote.add_space_member(id, member).await.map_err(|e| match e {
-                RemoteError::NotFound => {
-                    "That person is not in this workspace any more, or the folder is gone.".to_string()
-                }
+                RemoteError::NotFound => "That person is not in this workspace any more, or what you are sharing is gone.".to_string(),
                 other => self.describe_space(other),
             })?;
             if let Some(entry) = self.spaces.iter_mut().flatten().find(|s| s.id == id) {
@@ -1658,7 +2645,9 @@ impl<R: Remote> Engine<R> {
             }
         } else {
             self.remote.remove_space_member(id, member).await.map_err(|e| self.describe_space(e))?;
-            if self.me.as_deref() == Some(member) {
+            let mine = self.me.as_deref() == Some(member);
+            let through = self.spaces.iter().flatten().any(|s| s.id == id && s.parent.is_some());
+            if mine && !through {
                 self.forget_space(id).await;
             } else if let Some(entry) = self.spaces.iter_mut().flatten().find(|s| s.id == id) {
                 entry.members.retain(|m| m != member);
@@ -1668,23 +2657,70 @@ impl<R: Remote> Engine<R> {
         Ok(())
     }
 
-    /// Delete a restricted folder for everyone in it: everything it stored
-    /// on the domain, then its folder here. Each other Mac deletes its copy
-    /// when its next poll no longer lists the folder.
-    pub(crate) async fn delete_space(&mut self, id: &str) -> Result<(), String> {
-        loop {
+    /// Delete something shared, for everyone it is shared with. The domain
+    /// keeps it thirty days, and whoever can open the folder it sat in can
+    /// restore it; here it goes to the Trash, like anything this person
+    /// deletes. Each other device deletes its copy when its next poll no
+    /// longer lists it.
+    pub(crate) async fn delete_share(&mut self, id: &str) -> Result<(), String> {
+        let entry = self.spaces.iter().flatten().find(|s| s.id == id).cloned();
+        if entry.as_ref().is_some_and(|s| s.parent.is_none()) {
+            return Err(self.describe_space(RemoteError::Forbidden));
+        }
+        let kept = loop {
             let round = self.remote.delete_space(id).await.map_err(|e| self.describe_space(e))?;
             if !round.remaining {
-                break;
+                break round.kept;
+            }
+        };
+        let mut changed = SpacesChanged::default();
+        // What is shared from inside it went with it.
+        let inside: Vec<String> = self
+            .units
+            .values()
+            .filter(|u| self.units.get(id).is_some_and(|gone| !gone.is_document() && u.id != id && u.root.starts_with(&gone.root)))
+            .map(|u| u.id.clone())
+            .collect();
+        for child in &inside {
+            if let Some(unit) = self.units.remove(child) {
+                drop(unit);
+                let _ = std::fs::remove_dir_all(Self::space_state_dir(&self.cfg, child));
+                changed.removed.push(child.clone());
             }
         }
-        self.forget_space(id).await;
+        self.drop_unit(id, Leaving::Trash, &mut changed);
+        if let Some(list) = &mut self.spaces {
+            list.retain(|s| !inside.contains(&s.id) && (kept || s.id != id));
+            if let Some(entry) = list.iter_mut().find(|s| s.id == id) {
+                entry.deleted_at = Some(now_ms());
+            }
+        }
+        self.set_reaches();
+        if let Some(tell) = &self.cfg.on_spaces {
+            tell(changed);
+        }
         self.refresh_status();
         Ok(())
     }
 
-    /// This person is out of a space, by something done on this Mac: the
-    /// list says so now rather than at the next poll, and the folder goes.
+    /// Bring a deleted share back: its files, its people, its history and
+    /// its pages are as they were, and it is downloaded where it sat.
+    pub(crate) async fn restore_share(&mut self, id: &str) -> Result<(), String> {
+        let back = self.remote.restore_space(id).await.map_err(|e| match e {
+            RemoteError::NotFound => "That can't be restored any more: its thirty days are up, or it was restored already.".to_string(),
+            other => self.describe_space(other),
+        })?;
+        let list = self.spaces.get_or_insert_with(Vec::new);
+        list.retain(|s| s.id != id);
+        list.push(back);
+        // What was deleted with it is listed again by the next poll.
+        self.reconcile_spaces().await;
+        self.refresh_status();
+        Ok(())
+    }
+
+    /// This person is off a share, by something done on this Mac: the list
+    /// says so now rather than at the next poll, and its copy goes.
     async fn forget_space(&mut self, id: &str) {
         if let Some(list) = &mut self.spaces {
             list.retain(|s| s.id != id);
@@ -1776,12 +2812,12 @@ impl<R: Remote> Engine<R> {
             let elsewhere = self
                 .units
                 .values()
-                .any(|unit| !unit.is_shared() && unit.effective_public().contains_key(wanted));
-            if elsewhere && !self.shared().effective_public().contains_key(wanted) {
+                .any(|unit| !unit.is_library() && unit.effective_public().contains_key(wanted));
+            if elsewhere && !self.library().effective_public().contains_key(wanted) {
                 return Err("The home page is chosen from Library.".into());
             }
         }
-        let Some(shared) = self.units.get_mut(SHARED) else { return Err("that workspace isn't connected".into()) };
+        let Some(shared) = self.units.get_mut(LIBRARY) else { return Err("that workspace isn't connected".into()) };
         shared.queue_set_root(slug)?;
         shared.poke = true;
         self.refresh_status();
@@ -1793,7 +2829,7 @@ impl<R: Remote> Engine<R> {
     /// Queue a change of the workspace's tag list, which the shared
     /// workspace's manifest holds.
     pub(crate) fn queue_tag(&mut self, op: TagOp) -> Result<(), String> {
-        let Some(shared) = self.units.get_mut(SHARED) else { return Err("that workspace isn't connected".into()) };
+        let Some(shared) = self.units.get_mut(LIBRARY) else { return Err("that workspace isn't connected".into()) };
         shared.queue_tag(op)?;
         shared.poke = true;
         self.refresh_status();
@@ -1968,7 +3004,7 @@ impl<R: Remote> Engine<R> {
         let key = lease_key(&rel);
         self.leases
             .as_ref()
-            .is_some_and(|all| !all.iter().any(|l| l.path == key && l.space.as_deref().unwrap_or(SHARED) == id))
+            .is_some_and(|all| !all.iter().any(|l| l.path == key && l.space.as_deref().unwrap_or(LIBRARY) == id))
     }
 
     /// When to poll next, after anything that was not itself a poll: the
@@ -1981,6 +3017,11 @@ impl<R: Remote> Engine<R> {
     /// Not after a poll: one that failed leaves its beat owed, and pulling
     /// the next one forward would spin on a domain that is not answering.
     fn next_poll_after_cycle(&self) -> Instant {
+        // A file is waiting to hear whether its new section is this
+        // person's: only a poll says.
+        if !self.asked_about.is_empty() && !self.waiting_on_update() && !self.paused {
+            return Instant::now();
+        }
         let clock = Instant::now() + self.poll_gap();
         if !self.waiting_on_update() && !self.paused {
             clock.min(self.beat_deadline())
@@ -2008,6 +3049,12 @@ impl<R: Remote> Engine<R> {
         &self.cfg.device_name
     }
 
+    /// Where this engine last said each of its sections is.
+    #[cfg(test)]
+    pub(crate) fn sections_for_test(&self) -> Vec<SectionAt> {
+        self.cfg.sections.lock().unwrap().get(&self.root_key()).cloned().unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub(crate) fn me_for_test(&self) -> Option<&str> {
         self.me.as_deref()
@@ -2027,7 +3074,7 @@ impl<R: Remote> Engine<R> {
             let place = self.activity_place();
             let take = place.is_some() && self.take_over.is_some() && self.take_over == self.activity_rel();
             let (space, path) = match place {
-                Some((id, rel)) => ((id != SHARED).then_some(id), Some(rel)),
+                Some((id, rel)) => ((id != LIBRARY).then_some(id), Some(rel)),
                 None => (None, None),
             };
             Beat::Here { name: self.cfg.device_name.clone(), space, path, take, ttl: self.beat_ttl() }
@@ -2073,6 +3120,18 @@ impl<R: Remote> Engine<R> {
         if let Some(spaces) = &poll.spaces {
             self.spaces = Some(spaces.clone());
             self.reconcile_spaces().await;
+            // A file that was moved to a section this device held no unit of
+            // has waited for this: the list says whether the section is this
+            // person's — then it has a unit now — or not, and the file goes.
+            let open: HashSet<&str> = spaces.iter().filter(|s| !s.deleted()).map(|s| s.id.as_str()).collect();
+            self.absent.retain(|id| !open.contains(id.as_str()));
+            let asked = std::mem::take(&mut self.asked_about);
+            if !asked.is_empty() {
+                self.absent.extend(asked.into_iter().filter(|id| !open.contains(id.as_str())));
+                for unit in self.units.values_mut().filter(|u| !u.deferred.is_empty()) {
+                    unit.poke = true;
+                }
+            }
         }
 
         let presence = self.presence_of(&poll);
@@ -2086,8 +3145,8 @@ impl<R: Remote> Engine<R> {
         let leases_changed = self.lease_holders() != holders;
 
         let mut moved: BTreeSet<String> = BTreeSet::new();
-        if Some(poll.manifest_etag.as_str()) != self.shared().state.manifest_etag.as_deref() {
-            moved.insert(SHARED.to_string());
+        if Some(poll.manifest_etag.as_str()) != self.library().state.manifest_etag.as_deref() {
+            moved.insert(LIBRARY.to_string());
         }
         if listed {
             // Read off the list as `reconcile_spaces` left it: a space made a
@@ -2104,7 +3163,7 @@ impl<R: Remote> Engine<R> {
         }
         // The domain answering again after a pass that could not reach it is
         // itself a reason for one: what that pass was carrying is still here.
-        if !moved.is_empty() || self.phase == Phase::Offline {
+        if !moved.is_empty() || self.phase == Phase::Offline || self.units.values().any(|u| u.poke) {
             self.pass(Which::Moved(moved)).await?;
         } else if presence_changed || leases_changed {
             self.refresh_status();
@@ -2126,7 +3185,7 @@ impl<R: Remote> Engine<R> {
             .iter()
             .filter(|l| l.device_id != self.cfg.device_id)
             .filter_map(|l| {
-                let unit = self.units.get(l.space.as_deref().unwrap_or(SHARED))?;
+                let unit = self.units.get(l.space.as_deref().unwrap_or(LIBRARY))?;
                 let own = self.me.as_deref() == Some(l.member_id.as_str());
                 let person = Some(&l.member_id).filter(|_| !own).and_then(|m| self.people.get(m));
                 Some(LeaseHolder {
@@ -2150,7 +3209,7 @@ impl<R: Remote> Engine<R> {
         let key = lease_key(&rel);
         self.leases.as_ref().is_some_and(|all| {
             all.iter().any(|l| {
-                l.path == key && l.space.as_deref().unwrap_or(SHARED) == id && l.device_id == self.cfg.device_id
+                l.path == key && l.space.as_deref().unwrap_or(LIBRARY) == id && l.device_id == self.cfg.device_id
             })
         })
     }
@@ -2170,7 +3229,7 @@ impl<R: Remote> Engine<R> {
                     .filter(|m| Some(*m) != self.me.as_deref())
                     .and_then(|m| self.people.get(m));
                 let path = e.path.as_ref().and_then(|path| {
-                    self.units.get(e.space.as_deref().unwrap_or(SHARED)).map(|unit| unit.ws_rel(path))
+                    self.units.get(e.space.as_deref().unwrap_or(LIBRARY)).map(|unit| unit.ws_rel(path))
                 });
                 PresenceDevice {
                     device_id: id.clone(),
@@ -2361,18 +3420,23 @@ impl<R: Remote> Engine<R> {
                         };
                         let _ = reply.send(got);
                     }
-                    Some(EngineCmd::MakeSpace { name, members, from, reply }) => {
-                        let made = self.make_space(&name, &members, from.as_deref().map(Path::new)).await;
-                        // What a folder brought with it left another section:
+                    Some(EngineCmd::Share { path, members, reply }) => {
+                        let made = self.share(Path::new(&path), &members).await;
+                        // What was shared leaves the section around it:
                         // that is a pass's to carry.
                         cycle_now = made.is_ok();
                         let _ = reply.send(made);
                     }
-                    Some(EngineCmd::SpaceMember { id, member, add, reply }) => {
-                        let _ = reply.send(self.change_space_member(&id, &member, add).await);
+                    Some(EngineCmd::ShareMember { id, member, add, reply }) => {
+                        let _ = reply.send(self.change_share_member(&id, &member, add).await);
                     }
-                    Some(EngineCmd::DeleteSpace { id, reply }) => {
-                        let _ = reply.send(self.delete_space(&id).await);
+                    Some(EngineCmd::DeleteShare { id, reply }) => {
+                        let _ = reply.send(self.delete_share(&id).await);
+                    }
+                    Some(EngineCmd::RestoreShare { id, reply }) => {
+                        let restored = self.restore_share(&id).await;
+                        cycle_now = restored.is_ok();
+                        let _ = reply.send(restored);
                     }
                     Some(EngineCmd::LinkTo { rel, reply }) => {
                         let linked = if !crate::syncs(&rel) {
@@ -2606,15 +3670,56 @@ fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// Something the app said it moved from one unit to another, each end as
+/// its own unit spells it: a file, or a folder.
+struct SaidAcross {
+    from: String,
+    from_path: String,
+    to: String,
+    to_path: String,
+}
+
+/// A path at or under `at`, as it is once `at` is `now`.
+fn rebased(path: &str, at: &str, now: &str) -> Option<String> {
+    if path.eq_ignore_ascii_case(at) {
+        return Some(now.to_string());
+    }
+    let head = path.get(..at.len()).filter(|head| head.eq_ignore_ascii_case(at))?;
+    path[head.len()..].strip_prefix('/').map(|rest| format!("{}/{}", now, rest))
+}
+
 /// Pair each file that vanished from one unit with the same file appearing
-/// in another: same content, same name. That is a move between sections —
-/// made in the sidebar, in Finder, by dropping a folder into `Restricted/` —
-/// and not a deletion and a new file.
-fn pair_moves(surveys: &BTreeMap<String, Survey>) -> Vec<CrossMove> {
+/// in another. That is a move between sections — made in the sidebar, in
+/// Finder, by sharing the folder it is in — and not a deletion and a new
+/// file. What the app said it moved is that file whatever its content now;
+/// anything else is paired by the same content and the same name.
+fn pair_moves(surveys: &BTreeMap<String, Survey>, said: &[SaidAcross]) -> Vec<CrossMove> {
     let mut moves = Vec::new();
     let mut taken: HashSet<(&str, &str)> = HashSet::new();
+    let mut paired: HashSet<(&str, &str)> = HashSet::new();
+    for word in said {
+        let (Some(left), Some(arrived)) = (surveys.get(&word.from), surveys.get_key_value(&word.to)) else { continue };
+        for (fid, _, path) in &left.vanished {
+            let Some(now) = rebased(path, &word.from_path, &word.to_path) else { continue };
+            let Some((new_path, new_hash)) = arrived.1.news.iter().find(|(p, _)| p.eq_ignore_ascii_case(&now)) else { continue };
+            if !taken.insert((arrived.0.as_str(), new_path.as_str())) {
+                continue;
+            }
+            paired.insert((word.from.as_str(), fid.as_str()));
+            moves.push(CrossMove {
+                from: word.from.clone(),
+                fid: fid.clone(),
+                to: word.to.clone(),
+                path: new_path.clone(),
+                hash: new_hash.clone(),
+            });
+        }
+    }
     for (from, survey) in surveys {
         for (fid, hash, path) in &survey.vanished {
+            if paired.contains(&(from.as_str(), fid.as_str())) {
+                continue;
+            }
             let name = file_name(path);
             let arrival = surveys
                 .iter()
@@ -2662,6 +3767,9 @@ fn folder_went(dir: &str, manifest: &Manifest, out: &HashMap<&str, (&str, &str)>
 /// What became of a file another Mac moved into `dest`, a section this Mac
 /// is in.
 enum Received {
+    /// It is where its new section has it already: sharing a folder or a
+    /// document moves nothing on disk.
+    Kept,
     /// The section already has it, or will download it: this Mac's copy from
     /// the old section is gone.
     Dropped,
@@ -2694,7 +3802,7 @@ fn receive<R: Remote>(
     let name = from.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let now = hash16(bytes);
     let clean = now == synced;
-    let rel_of = |dest: &Unit<R>, abs: &Path| rel_path(&dest.root, abs).unwrap_or_default();
+    let rel_of = |dest: &Unit<R>, abs: &Path| dest.rel_of(abs).unwrap_or_default();
     let land = |to: &Path| {
         if let Some(parent) = to.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -2727,7 +3835,18 @@ fn receive<R: Remote>(
         return Received::Placed(rel_of(dest, &to));
     };
 
-    let target = dest.root.join(&theirs.path);
+    let target = dest.abs(&theirs.path);
+    if target == from {
+        // Nothing to move. An edit made here since carries on as an edit of
+        // the file where it was made from exactly what `dest` holds; anything
+        // else is the cycle's to merge, like a file both sides changed.
+        if !clean && now != theirs.hash && synced == theirs.hash {
+            dest.plant(&fid, &theirs, base);
+        } else {
+            dest.poke = true;
+        }
+        return Received::Kept;
+    }
     let there = read_file_checked(&target);
     if clean || now == theirs.hash {
         if there.is_some() {

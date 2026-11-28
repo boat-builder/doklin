@@ -268,6 +268,15 @@ public final class DocumentModel {
         await workspace.moved(moved)
     }
 
+    /// Sync moved this document on this iPhone, or renamed it as somebody
+    /// renamed it: it is read and written where it is now. True when it was
+    /// this one that moved.
+    public func follow(_ moved: SharesMoved) -> Bool {
+        guard let now = moved.now(path) else { return false }
+        path = now
+        return true
+    }
+
     /// Say which document this device is editing — or, with nil, that it is
     /// editing none. Other devices show it as being edited here, and open it
     /// view-only while this one holds it.

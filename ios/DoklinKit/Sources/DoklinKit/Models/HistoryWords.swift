@@ -366,13 +366,15 @@ public struct DeletedDocument: Identifiable, Hashable, Sendable {
 
     /// Where each file comes back, absolute: where it was, unless something
     /// lives there now — then beside it as `name (restored).md`, numbered
-    /// when that is taken too. A document's files stay one name.
-    public func targets(exists: (String) -> Bool) -> [(file: DeletedFile, path: String)] {
+    /// when that is taken too. A document's files stay one name. `place`
+    /// says where a path of the store is on this iPhone
+    /// (`Workspace.path(_:in:)`).
+    public func targets(at place: (String) -> String, exists: (String) -> Bool) -> [(file: DeletedFile, path: String)] {
         func at(_ n: Int) -> [(file: DeletedFile, path: String)] {
             files.map { file in
                 let (stem, ext) = HistoryWords.split(file.path)
                 let name = n == 0 ? file.path : "\(stem) (restored\(n > 1 ? " \(n)" : ""))\(ext)"
-                return (file, "\(store)/\(name)")
+                return (file, place(name))
             }
         }
         for n in 0..<100 {

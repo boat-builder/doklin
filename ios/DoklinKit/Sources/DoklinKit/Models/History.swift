@@ -6,10 +6,12 @@
 // branches. The engine then says `versions-applied`, and every screen of the
 // workspace reads its files again.
 //
-// Each section keeps a store of its own — Library, Private, each restricted
-// folder — and the workspace's root, which holds them, keeps none. What this
-// iPhone's stores hold starts when it joined; a note's versions also include
-// those other devices sent up.
+// Each section keeps a store of its own — Library, My files, each thing
+// shared — and the workspace's root, which holds them, keeps none. A store is
+// called by where its section is: its folder, or, for a shared document's,
+// the document's path without its extension. What this iPhone's stores hold
+// starts when it joined; a note's versions also include those other devices
+// sent up.
 
 import Foundation
 import Observation
@@ -35,6 +37,13 @@ extension Workspaces {
         let library = workspace.libraryStore
         return [library] + versions.map(\.root).filter { $0.hasPrefix(workspace.root + "/") && $0 != library }.sorted()
     }
+
+    /// The stores that keep a folder's moments, for a timeline: Library's,
+    /// My files' and each shared folder's. A shared document's history is
+    /// its own versions, read from the document.
+    public func folderStores(of workspace: Workspace) -> [String] {
+        stores(of: workspace).filter { workspace.documentShare(keptIn: $0) == nil }
+    }
 }
 
 extension Workspace {
@@ -42,16 +51,43 @@ extension Workspace {
     /// history is read, and where its restores land.
     public var libraryStore: String { files.absolute(TreeModel.libraryFolder) }
 
-    /// What a person calls the folder a store keeps: Library, Private, or a
-    /// restricted folder by its name.
-    public func storeName(_ store: String) -> String {
-        let folder = relative(store) ?? store
-        return status?.spaces.first { $0.path.lowercased() == folder.lowercased() }?.name ?? DocLinks.name(of: folder)
+    /// The shared document a store is the history of, when it is one's.
+    func documentShare(keptIn store: String) -> SpaceStatus? {
+        guard let at = relative(store)?.lowercased() else { return nil }
+        return status?.spaces.first { $0.kind == .document && !$0.path.isEmpty && $0.path.lowercased() == at }
     }
 
-    /// A store-relative path as a path of this workspace.
+    /// What a person calls what a store keeps: Library, My files, or
+    /// something shared by its name.
+    public func storeName(_ store: String) -> String {
+        let at = relative(store) ?? store
+        guard !TreeModel.isSectionFolder(at) else { return DocLinks.name(of: at) }
+        return status?.spaces.first { $0.path.lowercased() == at.lowercased() }?.name ?? DocLinks.name(of: at)
+    }
+
+    /// A store-relative path as a path of this workspace. A shared
+    /// document's store holds that document's files alone, by the name its
+    /// section calls it: here they are beside each other in the folder it
+    /// sits in, under the name it has on this iPhone.
     public func path(_ path: String, in store: String) -> String {
-        relative("\(store)/\(path)") ?? path
+        if let document = documentShare(keptIn: store) { return document.path + HistoryWords.split(path).ext }
+        return relative("\(store)/\(path)") ?? path
+    }
+
+    /// What `store` is called now, when sync moved its section.
+    public func store(_ store: String, after moved: SharesMoved) -> String? {
+        relative(store).flatMap(moved.nowItem).map(files.absolute)
+    }
+}
+
+extension OpenVersion {
+    /// The same version where sync moved its document, or nil when it did
+    /// not move.
+    @MainActor
+    public func following(_ moved: SharesMoved, in workspace: Workspace) -> OpenVersion? {
+        let path = moved.now(self.path), store = workspace.store(self.store, after: moved)
+        guard path != nil || store != nil else { return nil }
+        return OpenVersion(store: store ?? self.store, path: path ?? self.path, version: version, newer: newer, deleted: deleted)
     }
 }
 
@@ -415,7 +451,10 @@ extension DeletedDocument {
     /// workspace-relative path it opens as now.
     @MainActor
     public func bringBack(in workspace: Workspace) async throws -> String {
-        let targets = targets { FileManager.default.fileExists(atPath: $0) }
+        let store = store
+        let targets = targets(at: { workspace.files.absolute(workspace.path($0, in: store)) }) {
+            FileManager.default.fileExists(atPath: $0)
+        }
         // The sidecar first, as a save writes it: the note on disk always
         // finds the records it uses.
         let sidecarFirst = targets.filter { $0.path.lowercased().hasSuffix(".meta.jsonl") }

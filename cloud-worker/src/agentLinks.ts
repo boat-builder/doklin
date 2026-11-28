@@ -16,9 +16,9 @@
 // The rules of a link — its key, its record, its words — are
 // src/docLinks.ts's; where a link is in a note's text is noteLinks.ts's.
 //
-//   GET /api/agent/links?path=&from=1&to=1
+//   GET /api/agent/links?path=&from=1&to=1[&after=]
 
-import { inSection, notBound, openTree, refuse, type Call } from "./agentCall";
+import { cursorOf, inSection, notBound, openTree, refuse, type Call } from "./agentCall";
 import type { Section } from "./agentPlace";
 import { readWorkspace } from "./bucket";
 import { Refusal } from "./commit";
@@ -327,12 +327,14 @@ export async function getLinks(c: Call): Promise<Response> {
     const all = await c.places.all();
     if (all === null) return json({ error: "this domain's database is not answering — try again in a moment" }, 503);
     const targets = [doc.md?.fid, doc.html?.fid].filter((f): f is string => f !== undefined);
-    const found = await linkersOf(c.env, all, targets);
+    const after = cursorOf(c.url);
+    const sections = all.slice(after);
+    const found = await linkersOf(c.env, sections, targets);
     if (found instanceof Refusal) return refuse(found);
     if ("indexing" in found) return json({ indexing: true, pending: found.indexing }, 202);
     answer.to = found.paths.map((p) => ({ path: nameOf(p).stem }));
-    // More sections than one request opens: their documents are not counted.
-    if (found.left.length > 0) answer.sectionsNotSearched = found.left.map((s) => s.mount);
+    // More sections than one request opens: the rest are the next request's.
+    if (found.left.length > 0) answer.next = after + sections.length - found.left.length;
   }
   if (from || !to) {
     const links = await linksFrom(c, doc, tree.manifest.files);

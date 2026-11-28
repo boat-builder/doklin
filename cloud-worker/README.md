@@ -86,32 +86,62 @@ that was stored more than a day ago (`SWEEP_MIN_AGE_MS` ⇄ `UPLOADED_TTL_MS`,
 `engine/src/cloud/unit.rs`, which must stay inside it). Listing first, manifest after. A manifest
 that can't be read leaves its section alone; no manifest names nothing; a file outside `syncs`
 is not named. At most `SWEEP_CALLS` (40) bucket calls a run (Free: 50 an invocation); each day
-starts at another section. `versions/` is not its: the engine collects the version store.
+starts `SWEEP_STRIDE` (10) sections further round, since every shared document is a section and a
+bucket soon holds more than a run goes through. `versions/` is not its: the engine collects the
+version store.
 
-## Spaces (`src/spaces.ts`, `src/api.ts`)
+The same run first ends what is over (`sweepShares`): a share deleted `DELETED_KEPT_MS` (30 days)
+ago is erased — what it stored, its rows, its place in the manifest of the section it sat in —
+and so is a shared document that still holds no file a day after it was made (`eraseUnfilled`).
 
-A space is a restricted folder (`s-` + 8 hex) or one person's Private
-(`p-` + their member id's hex). Any person may call these. `space` =
-`{id, kind: restricted|private, name, by, createdAt, etag, members: [memberId]}`;
-`etag` is its manifest's. **Everything under `/api/spaces/<id>` is `404
-{"error":"not found"}` to anyone not in it, owners included** — the same
-body an unknown id gets. Malformed id `400`.
+## Spaces (`src/spaces.ts`, `src/mounts.ts`, `src/api.ts`)
+
+A space is one person's My files (`p-` + their member id's hex, kind `private`) or a share:
+a folder or one document (`s-` + 8 hex, minted by the device that shares it; kind `folder` |
+`document`). **Sections are a tree**: a share sits in a My files or in a shared folder
+(`parent`, never Library, never a shared document), and whoever can open the section it sits in
+can open it; the people it is shared with are `space_members`. Any person may call these.
+
+`space` = `{id, kind, name, by, createdAt, etag, parent, owner, members: [memberId], above:
+[memberId], deletedAt?}` (`Space`, `wire.ts`). `etag` is its manifest's. `owner` is whose My
+files it is in, in the end. `members` is who it is shared with; `above` is everyone else who
+can open it, through the section it sits in. `parent` is `null` for a My files — and to
+somebody who cannot open that section, who is told nothing of where it sits. `deletedAt` only
+on a deleted share, told only to somebody who can restore it.
+
+**Everything under `/api/spaces/<id>` is `404 {"error":"not found"}` to anyone who cannot open
+it, owners included** — the same body an unknown id gets. Malformed id `400`.
 
 ```
-GET    /api/spaces  {spaces} — the caller's
-POST   /api/spaces  {name, members?: [memberId]} → 201 {space}; the caller is always in it;
-       400 {unknown: [id]} for ids that are not people here; name = one folder name (no "/",
-       no leading ".", ≤ 80)
-PUT    /api/spaces/private  {space} — the caller's Private, created on first call
-PATCH  /api/spaces/<id>  {name} → {space}
-DELETE /api/spaces/<id>  → {deleted, purged, remaining}; batched like the wipe, repeat while remaining
+GET    /api/spaces  {spaces} — the ones the caller can open, and the deleted shares they can restore
+POST   /api/spaces  {id, kind: folder|document, name, parent, dir?, was?, members?: [memberId]} →
+       201 {space}: a share in the section `parent`, in its folder `dir` ("" its top), which the
+       worker writes into that section's manifest (`mounts`) with `was`, the item's path there
+       before (a document's without its extension). The same `id` from its maker again answers
+       the same share; one shared twice at once from two devices (same parent, was, dir, name,
+       kind) is the first, with the people added. 409 {code: "id_taken"} somebody else's id;
+       400 {unknown: [id]} for ids that are not people here; name = one file name (no "/" or
+       ":", no leading ".", ≤ 200)
+PUT    /api/spaces/private  {space} — the caller's My files, made on first asking
+PATCH  /api/spaces/<id>  {name} → {space}, a shared folder (a shared document is renamed by renaming
+       its file, and `name` follows its manifest); or {parent, dir?} → {space}: it sits there from
+       now on, both manifests' `mounts` written here; 400 inside itself or into Library
+DELETE /api/spaces/<id>  one that holds something is kept: {deleted, kept: true}, `deleted_at` on it
+       and on everything inside it. One that holds nothing is erased, batched like the wipe:
+       {deleted, kept: false, purged, remaining}, repeat while remaining
+POST   /api/spaces/<id>/restore  → {space}, as it was; 409 while the folder it sat in is deleted too;
+       404 once its thirty days are up
 PUT    /api/spaces/<id>/members/<memberId>  → {space}; 404 not a person here
-DELETE /api/spaces/<id>/members/<memberId>  204 (self = leave); 404 not in it; 409 the last one
+DELETE /api/spaces/<id>/members/<memberId>  204 (self = leave); 404 not on it; 409 somebody who
+       opens it through the section it sits in
 *      /api/spaces/<id>/manifest · /blobs/… · /versions/…  the engine routes above, on that space
 ```
 
-`409`: PATCH, DELETE or members on a Private. A space's manifest may not name
-a `root` page (`400`).
+Anyone who can open a share changes who it is shared with, and renames it. Moving it (`PATCH
+{parent}`), `DELETE` and `restore` are for somebody who can open the section it sits in: `403`
+with a sentence for anyone else. All of them are `409` on a My files. A deleted share answers `restore` alone. A space's manifest may not name a `root`
+page (`400`); a shared document's holds that one document at its root, and a write from somebody
+who cannot open its parent that would leave it without its document is `409`.
 
 ## Every public address (`src/everyPage.ts`; `pages.manage`)
 
@@ -150,7 +180,7 @@ GET    /api/auth/members  any person; everyone not removed, with role (`superadm
 PATCH  /api/auth/members/<id>  {role: owner|member} → {member}; owner → member withdraws every
        pending invite
 DELETE /api/auth/members/<id>  the row stays with disabled = 1, role member; their invite, tokens,
-       presence, leases, restricted-folder memberships and agents go (their Private stays); token
+       presence, leases, what was shared with them and agents go (their My files stays); token
        hashes go to removed_tokens; removing an owner withdraws every pending invite
 POST   /api/auth/devices/code  anyone; {codeHash, expiresAt ≤ 24 h} → 201 {code: {id, createdAt, expiresAt}}:
        a code for a device of the caller's own, stored as their pending invite (replacing it) and
@@ -182,24 +212,26 @@ document bytes; refusals `{error, code?, …}`. `dry=1` / `dryRun: true`
 validates without writing (`written: false`). Commit lost 5 times → `503`.
 
 Every path is literal, as on the disk of the agent's person, and starts with
-its section (`src/agentPlace.ts`): `Library/…` is the shared section,
-`Private/…` their Private, `Restricted/<folder>/…` a restricted folder they
-are in. Section names match in any case. Any other path is in no section →
-`400 "Projects/plan is in no section. Say which: Library/Projects/plan
-(everyone), Private/Projects/plan (only your person) or
-Restricted/<folder>/Projects/plan."`, with the path as sent. A route is
-answered in the section its path names, with that section's manifest
-mounted at its folder (`src/mount.ts`): the stored paths stay relative to
-the section, and every answer carries the mounted path. A folder the person
-is not in → `404`. `Library/Library/…`, `Library/Private/…` and
-`Library/Restricted/…` are refused by the shared manifest (`409`). `""` is the workspace itself, for
-`tree` and `search` only: its listing is the sections the person has
-(`Library`, `Private`, `Restricted` when they are in a folder) and no
-document. `tree` (`deep=1`), `search` and `pages` at the top cover every
-section, Library among them, opening at most 8 spaces a request beside it
-(`notListed`, `sectionsNotSearched`). A restricted folder's name is the
-Mac's (`candidates`, `engine/src/cloud/space.rs`, **change both**), given
-out in creation order.
+its section (`src/agentPlace.ts`): `Library/…`, `My files/…`, or
+`Shared with me/<item>/…` for what others shared with them. Section names
+match in any case. A path is answered in the deepest section that holds it,
+so `My files/Work/Plan` reaches a shared document where it sits. Any other
+path is in no section → `400 "Projects/plan is in no section. Say which:
+Library/Projects/plan (everyone), "My files/Projects/plan" (only your
+person) or "Shared with me/<name>/…" (something shared with them)."`, with
+the path as sent; `Private/…` and `Restricted/…` are told what they are
+called now. A route is answered with its section's manifest mounted where
+the section is (`src/mount.ts`): the stored paths stay relative to the
+section, and every answer carries the mounted path. A shared document whose
+name is taken where it is shown wears another (`named {stored, shown}`).
+Something the person cannot open → `404`. `""` is the workspace itself, for
+`tree` and `search` only: its listing is `Library`, `My files` and `Shared
+with me`, and no document. `tree` (`deep=1`), `search`, `links` and `pages`
+cover every section, Library among them, opening at most 8 spaces a request
+beside it; an answer that left sections out carries `next`, and the same
+request with `after=<next>` goes on. Something shared is called what a Mac
+calls it (`free_name`, `engine/src/cloud/space.rs`, **change both**), the
+names given out in creation order.
 
 ```
 POST   login  no bearer; {code, host?} → 201 {token, agent: {id, name}, scopes, workspace: {id,
@@ -208,8 +240,9 @@ DELETE login  revoke this token (204)
 GET    me     {agent, person: {id, name}|null, scopes, sections: [folder] (Library first),
        workspace, version, limits}
 read:
-GET tree?dir=&deep=1[&where=]  {dir, folders, documents: [{path, md?, html?, htmlBehind?,
-    tags?: [{name, value, known}]}], tagsBehind?}; a version is {file, rev, size, changed, by};
+GET tree?dir=&deep=1[&where=][&after=]  {dir, folders, documents: [{path, md?, html?, htmlBehind?,
+    tags?: [{name, value, known}]} | {path, shared: true}], tagsBehind?, next?}; a version is
+    {file, rev, size, changed, by}; a listing that is not deep names a shared document, and no more;
     404 empty. where=name:value | name (repeatable, ≤ 8, listed names) → only those notes, no
     folders, `where` said back; 202 {indexing, pending} while the index catches up
 GET doc?path=&v=md|html[&clean=1][&info=1]  bytes + x-doklin-kind: document, -path, -file, -rev,
@@ -217,31 +250,35 @@ GET doc?path=&v=md|html[&clean=1][&info=1]  bytes + x-doklin-kind: document, -pa
     row + {kind, comments, tags?, public?, linkTo: {workspace, space, file}}, byName. Markdown with link
     records: each such link where its document is now, as this agent's person can open it
 GET comments?path=  {path, threads: [{id, version, on, line?|tag?, orphaned?, comments: [{author, at, body}]}]}
-GET find?workspace=&space=&file=  {path}: where a link to a page leads (space "" = shared), the
-    document by its stem. 404 for every page this agent cannot open, alike
-GET search?q=&dir=&limit=[&where=]  {query, dir, where?, results: [{path, version, matches: [{line?, text}],
-    moreLines?, inName?, inComments?}], total, truncated?, notSearched?, sectionsNotSearched?} | 202
+GET find?workspace=&space=&file=  {path}: where a link to a page leads (space "" = Library), the
+    document by its stem; a file that moved to another section is followed there. 404 for every
+    page this agent cannot open, alike
+GET search?q=&dir=&limit=[&where=][&after=]  {query, dir, where?, results: [{path, version, matches: [{line?, text}],
+    moreLines?, inName?, inComments?}], total, truncated?, notSearched?, next?} | 202
     {indexing, pending}; limit ≤ 30; named documents first. where as tree's; q may then be empty:
     every such note, no lines, no limit
-GET links?path=[&from=1][&to=1]  {path, from?: [{words, path} | {words, closed: true}], to?: [{path}],
-    sectionsNotSearched?} | 202 {indexing, pending}; neither flag = both. from: the markdown's links to
+GET links?path=[&from=1][&to=1][&after=]  {path, from?: [{words, path} | {words, closed: true}], to?: [{path}],
+    next?} | 202 {indexing, pending}; neither flag = both. from: the markdown's links to
     documents; to: the documents this agent's person can open that link here (D1 `links`)
-GET pages  {pages: [{slug, url, kind: document|folder, path, title?, desc?, home?, by?, byName?,
-    at, missing?}], notListed?}
-GET tags  {tags: [{name, values, desc?}]}: the shared manifest's list
+GET pages[?after=]  {pages: [{slug, url, kind: document|folder, path, title?, desc?, home?, by?, byName?,
+    at, missing?}], next?}
+GET tags  {tags: [{name, values, desc?}]}: Library's manifest's list
 edit:
 PUT    doc?path=&v=[&force=1][&dry=1]  bytes; if-rev: <n> | * (create only) → {kind, path, version,
        file, rev, size, created, unchanged?, htmlBehind?}; 409 {rev}; 413 > 25 MB. Markdown: the
        sidecar's link records in the same commit (cloud-people-agents.md, *Links between documents*)
-DELETE doc?path=&v=[&dry=1]  document, or one version → {kind, path, versions, stillPublic, threadsRemoved?}
+DELETE doc?path=&v=[&dry=1]  document, or one version → {kind, path, versions, stillPublic, threadsRemoved?};
+       409 {code: "shared"} a shared document whole: it is its owner's to delete
 POST   tag {path, set: {<tag>: value | null}, dryRun?} → {path, version, rev, tags, unchanged?}; a
        note's markdown
 POST   tags {name, values, dryRun?} → {tag, added, created?, unchanged?}: a new tag at the end of the
        list, or values at the end of a tag's; one it has, in any case, is left. Never a rename or
        a removal
 POST   move {from, to, dryRun?}  document/folder; to ending in /, or a section's own folder,
-       = into → {kind, from, to, files, unpublished?}. A section's own folder
-       (`Library`, `Private`, `Restricted/<f>`) never moves → 400. Between two sections:
+       = into → {kind, from, to, files?, unpublished?}. `Library`, `My files` and `Shared with
+       me` never move → 400. Something shared is renamed, and moved inside the section it sits
+       in (its `mounts` entry; no `files`); to another section → 409 {code: "shared"}, and so
+       is a folder that holds shares. Between two sections:
        ≤ 16 files,
        written where they go (the ids they had) before they are removed with a tombstone `to`;
        pages re-claimed after, and `unpublished` lists addresses that could not be
@@ -303,11 +340,11 @@ authenticates (400 days from the app's last start).
   `PUT spaces/private`, `GET pages`, `DELETE pages/<slug>`, `DELETE
   auth/session`, every route under `auth/members`, `auth/invites`,
   `auth/devices` and `auth/agents` (*People*, *Agents*), each by role as for
-  a Mac, and a restricted folder's making, people and deleting (`POST
-  spaces`, `DELETE spaces/<id>`, `PUT|DELETE spaces/<id>/members/<id>`), each
-  for the people in it as for a Mac. Everything else → `403`: a manifest or
-  blob `PUT`, `versions/…`, `workspace`, `settings/plan`, `admin/wipe`, `GET
-  spaces`, `PATCH spaces/<id>`. **A route added to `ALSO` must change nothing
+  a Mac, and sharing (`POST spaces`, `PATCH|DELETE spaces/<id>`, `POST
+  spaces/<id>/restore`, `PUT|DELETE spaces/<id>/members/<id>`), each for the
+  people who can open the share as for a Mac. Everything else → `403`: a
+  manifest or blob `PUT`, `versions/…`, `workspace`, `settings/plan`,
+  `admin/wipe`, `GET spaces`. **A route added to `ALSO` must change nothing
   on `GET`.**
 - Ended: `DELETE /api/auth/session` and `401 {removed: true}` answer a browser
   with `Set-Cookie` (`Max-Age=0`) and `Clear-Site-Data: "cache", "storage"`. A
@@ -315,9 +352,9 @@ authenticates (400 days from the app's last start).
 - `GET blobs/…` → `Cache-Control: private, max-age=31536000, immutable`,
   `Vary: Cookie, Authorization`, for every caller.
 
-A section is its id (`""`/absent the shared workspace, else a space the
-person is in; any other → `404`), a path is as that section stores it, never
-under `Private/` or `Restricted/`. Signed with the person's member id. Every
+A section is its id (`""`/absent Library, else a space the person can open;
+any other → `404`), a path is as that section stores it, never under a
+folder that stands for a section. Signed with the person's member id. Every
 change to documents answers `etag`, the section's manifest once it was made,
 and `over`, the manifest it was made to (a move between sections is more than
 one write and answers neither). Commit lost 5 times → `503`.
@@ -338,13 +375,16 @@ POST   move  {from: {space?, path}, to: {space?, path}, kind: "document"|"folder
        is ≤ 16 files; a folder goes 16 files a request, whole documents at a time, by path:
        `remaining` (files still where they were) until the same request, made again, answers
        without it. `to.path` "" = the top of another section, a folder only: what was in the
-       folder is what is in the section (a folder made into a restricted one)
+       folder is what is in the section (a folder that was just shared)
+PUT    mount?space=&id=  {dir, was?} → {etag, over}: the share `id`, which sits in the section
+       `space`, is in its folder `dir` ("" the top) from now on; 404 not shared from there
 POST   copy  the same body → {kind, from, to, files}: every file written again at `to` as a new
        file (new id, rev 1), in the same section or another; 16 files; 409 a name that is taken.
        A copy takes no page and no link with it
-GET    search?q=&limit=&tag=  every section the person is in → {query, results: [{space, fid, path,
-       matches, moreLines?, inName?, inComments?}], total, truncated?, notSearched?: [{space, path}],
-       sectionsNotSearched?: [space]}; 202 {indexing, pending}. tag=name:value | name (repeatable):
+GET    search?q=&limit=&tag=&after=  every section the person can open, as many as a request opens →
+       {query, results: [{space, fid, path, matches, moreLines?, inName?, inComments?}], total,
+       truncated?, notSearched?: [{space, path}], next?}; `next` is the `after` of the request that
+       goes on. 202 {indexing, pending}. tag=name:value | name (repeatable):
        only those notes; q may then be empty, and every such note is listed
 PUT    pages  {space?, path, kind, slug?, title?, desc?} → 201|200 {slug, url, kind, path, documents,
        created}; path "" + folder = the whole section
@@ -408,7 +448,7 @@ One of those paths that reaches the worker names nothing: a 404, no bucket read.
 
 ```
 workspace.json   {id, name, createdAt, createdBy: {deviceId, deviceName}}; create-only; bound iff present
-manifest.json    manifest v5; CAS on etag
+manifest.json    manifest v6; CAS on etag
 blobs/<fileId>/<hash>   immutable; hash = sha256 hex prefix, 16–64 chars
 versions/index.json     {version, horizonDays, snapshots: [{id, ts, device, reason, files, bytes,
                         digest, pinned?, label?, restoredFrom?}]}; CAS on etag
@@ -423,11 +463,11 @@ Caps: file 25 MB; manifest 4 MB, 5000 files, 10,000 tombstones, 5000 public
 entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
 `^[a-z0-9][a-z0-9_-]{2,63}$`.
 
-## Manifest v5 (`src/manifest.ts` ⇄ `engine/src/cloud/manifest.rs`)
+## Manifest v6 (`src/manifest.ts` ⇄ `engine/src/cloud/manifest.rs`)
 
 ```json
 {
-  "version": 5, "name": "Notes", "seq": 812,
+  "version": 6, "name": "Notes", "seq": 812,
   "files": { "f-3kq8x1": { "path": "Projects/plan.md", "rev": 7, "hash": "9c1e…", "size": 4310,
                             "mtime": 1757000000000, "by": "m-1a2b3c4d" } },
   "tombstones": { "f-old": { "path": "Scratch.md", "rev": 3, "ts": 1756800000000, "by": "m-1a2b3c4d" } },
@@ -438,7 +478,8 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   },
   "tags": [
     { "name": "status", "values": ["Todo", "Doing", "Done"], "desc": "Where a task stands." }
-  ]
+  ],
+  "mounts": { "s-0a1b2c3d": { "dir": "Work", "rev": 2, "by": "m-1a2b3c4d", "was": "Work/Finance" } }
 }
 ```
 
@@ -447,16 +488,21 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   entry `at`.
 - A tombstone may carry `to`: the file was moved to another section, not
   deleted — a space id, or `""` for the shared workspace.
-- The shared manifest holds no file under `Library/`, `Private/` or
-  `Restricted/`, in any case (`RESERVED_FOLDERS`, `layout.ts` ⇄
-  `RESERVED_DIRS`, `space.rs`: **change both**), tombstones included; a
-  space's manifest may. A PUT that names one is `400`, which is what stops a
-  build from before the Library layout that is run on a moved folder: it
-  sends every shared file as moved under `Library/`. A stored manifest that
-  already names one refuses every write until a device takes the path out.
+- A tombstone may carry `to` for a file that became a share's, too: sharing
+  is that move, for every file of the item.
+- `mounts` says where each share that sits in this section is: the folder of
+  it its item is in (`dir`, `""` the top), and where the item was when it was
+  shared (`was`; a document's without its extension), which is how its owner's
+  other devices find the files they already have. **It never decides who can
+  open a share** — that is D1's `parent`. The worker writes an entry when a
+  share is made or moved here and takes it out when one is erased or moved
+  away (`mounts.ts`); a device writes only a new `dir`. No entry is the top.
+  None is taken in Library's manifest, or in a shared document's (`400`).
+- A shared document's manifest holds one document at its root and nothing
+  else: every path is `<name>.<ext>`, one name (`400` with a sentence).
 - PUT checks ids, hashes, relative paths (no traversal), one path per file
   case-insensitively, rev/size ranges, slug grammar and reserved words,
-  reference shape, ≤ 1 `root` (none in a space). Never existence. Merge semantics are the engine's.
+  reference shape, ≤ 1 `root` (none in a space), `mounts`' shape. Never existence. Merge semantics are the engine's.
 - Only documents: every file, tombstone and `file` public entry names a path
   `syncs` takes (`src/layout.ts` ⇄ `engine/src/lib.rs`, **change both**): the
   last segment, ASCII-lowercased, longer than and ending in `.md` `.markdown`
@@ -464,15 +510,15 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   sentence. The worker's own writes (`src/commit.ts`) leave out such entries a
   stored manifest still has — giving up the address of a page they drop — and
   every read (`src/workspace.ts`) treats them as absent.
-- `tags` is the workspace's tag list, in order, the shared manifest's alone (a
-  space's with any → `400`). PUT holds it to the app's rules (`listProblem`,
+- `tags` is the workspace's tag list, in order, Library's manifest's alone
+  (another section's with any → `400`). PUT holds it to the app's rules (`listProblem`,
   `src/tags.ts` ⇄ `engine/src/cloud/tags.rs`, **change both**): each name and
   value, ≥ 1 value, no name or value twice in any case, ≤ 50 tags of ≤ 50
   values, `desc` ≤ 1000 characters. Every writer keeps it as it found it but
   for its own change, over the list as it is then: the later change wins.
 - Other `version` → `426`, sentence names which side is behind.
 
-## D1 (`src/schema.ts`, schema 12)
+## D1 (`src/schema.ts`, schema 13)
 
 ```sql
 meta         (key PK, schema_version)          survives wipe
@@ -494,8 +540,11 @@ tags         ((space_id, fid, name) PK, value, folded)  a note's md file id → 
 superadmin     (id = 1 PK, member_id)   who last traded the key; one row or none
 spent_keys     (hash PK, spent_at)      keys already traded; a wipe keeps it
 removed_tokens (hash PK, removed_at)    credentials an owner took away; emptied by a wipe
-spaces        (id s-…|p-…, kind, name, created_by, created_at, etag)   etag = its manifest's
-space_members ((member_id, space_id) PK, added_by, added_at)
+spaces        (id s-…|p-…, kind private|folder|document, name, created_by, created_at, etag,
+               parent, deleted_at)   etag = its manifest's; parent = the space it sits in (NULL a
+               My files); deleted_at set on a deleted share and all inside it; by parent
+space_members ((member_id, space_id) PK, added_by, added_at)   who a space is shared with; a My
+               files holds its one person
 addresses     (slug PK, space_id)       which space a public address is; '' = shared
 settings      (key PK, value)           key plan: free | paid; a wipe keeps it
 usage         (who PK, day, requests, at)  who = tokenId, day = floor(ms / 86400000); one report a

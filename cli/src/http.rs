@@ -41,9 +41,14 @@ pub struct Reply {
     pub bytes: Vec<u8>,
 }
 
+/// An answer no Doklin worker gives: not JSON, or a cursor that leads nowhere.
+pub fn not_a_worker() -> Failure {
+    Failure::other("the domain's answer was not what a Doklin worker sends")
+}
+
 impl Reply {
     pub fn json(&self) -> Result<Value, Failure> {
-        serde_json::from_slice(&self.bytes).map_err(|_| Failure::other("the domain's answer was not what a Doklin worker sends"))
+        serde_json::from_slice(&self.bytes).map_err(|_| not_a_worker())
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {

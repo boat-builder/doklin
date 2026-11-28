@@ -95,6 +95,9 @@ pub struct Core {
     pub(crate) versions: Mutex<Option<crate::versions::ManagerInner>>,
     pub(crate) edit_bus: EditBus,
     pub(crate) version_bus: VersionBus,
+    /// Where every connected workspace's sections are on this device, as
+    /// each engine last said: what the versioners version by.
+    pub(crate) sections: crate::cloud::status::SectionTable,
 }
 
 impl Core {
@@ -116,6 +119,7 @@ impl Core {
             versions: Mutex::new(None),
             edit_bus: EditBus::default(),
             version_bus: VersionBus::default(),
+            sections: Default::default(),
         })
     }
 
@@ -132,9 +136,10 @@ impl Core {
     /// The app moved a file or a folder from `from` to `to` (absolute), and
     /// touches both ends as well: which file went where, for the cloud engine
     /// whose folder holds them. A document renamed and edited before the
-    /// engine next looks then stays the same document. A tip the scan checks,
-    /// never taken on trust; the versioner keeps history by name, and is not
-    /// told.
+    /// engine next looks then stays the same document, and something shared
+    /// is that share where it went. A tip the engine checks against the
+    /// folder, never taken on trust; the versioner keeps history by name,
+    /// and is not told.
     pub fn moved(&self, from: &str, to: &str) {
         self.edit_bus.moved(Path::new(from), Path::new(to));
     }

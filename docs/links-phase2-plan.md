@@ -47,8 +47,9 @@ docs the way every other rule is kept.
   the one `@` a note keeps (piece 4).
 - **Decided: the note's text decides which links there are.** A sidecar only adds ids,
   and only Doklin writes notes.
-- **Decided: writing back never reveals (rule 4).** A save never puts a Private or
-  restricted document's new name or folder into notes that people outside it read.
+- **Decided: writing back never reveals (rule 4).** A save never puts the new name
+  or folder of a document in My files or in something shared into notes that people
+  who cannot open it read.
 - **Decided (2026-11-26): a mention notifies the person mentioned.** How:
   `notifications-plan.md`, which builds piece 4 with its mention notifications.
 - **Decided: no legacy code.** No compatibility layers or fallback chains; the one
@@ -77,7 +78,7 @@ The device that renames or moves a file rewrites the links to it in the notes
 it holds, as Obsidian's "update internal links" does. Stored text then stays
 current, not just what people and agents are shown.
 
-- **Rule 4 holds:** the rewrite never reveals a Private or restricted document's new name or folder.
+- **Rule 4 holds:** the rewrite never reveals the new name or folder of a document in My files or in something shared.
 - **Leases:** a note another device holds a lease on is skipped.
 - **Open questions:**
   - **Agents' moves:** does the worker rewrite too when an agent moves a file (`moveAcross`)?

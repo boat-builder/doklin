@@ -17,19 +17,39 @@ export type WorkspaceRecord = {
 
 /* ---------- Sections ---------- */
 
-export type SpaceKind = "restricted" | "private";
+/** `private` a person's My files; `folder` and `document` something shared. */
+export type SpaceKind = "private" | "folder" | "document";
 
+/**
+ * A section of the workspace beside Library, as the person asking sees it.
+ * Sections are a tree: a share sits in a My files, or in another share, and
+ * whoever can open the section it sits in can open it.
+ */
 export type Space = {
   id: string;
   kind: SpaceKind;
+  /** A shared folder's name, or a shared document's as its manifest last
+   *  spelled it. */
   name: string;
-  /** Who made it — what tells two folders of one name apart. */
+  /** Who made it. */
   by: string;
   createdAt: number;
   /** Its manifest's etag as of the worker's last write there (`noteEtag`). */
   etag: string;
-  /** Everyone in it, by member id. */
+  /** The section it sits in: null for a My files — and to somebody who
+   *  cannot open that section, who is told nothing of where it is. */
+  parent: string | null;
+  /** Whose My files it is in, in the end: what tells two shares of one name
+   *  apart. "" when the database cannot say. */
+  owner: string;
+  /** The people it is shared with, by member id — a My files holds its one. */
   members: string[];
+  /** Everyone else who can open it, because they can open the section it
+   *  sits in: its owner is one. Named, and nothing more is said of them. */
+  above: string[];
+  /** When it was deleted, for a share that can still be restored. It is
+   *  told only to somebody who can restore it, and holds no manifest to sync. */
+  deletedAt?: number;
 };
 
 /* ---------- The day's limits ---------- */
@@ -108,8 +128,9 @@ export type SearchAnswer = {
   truncated?: true;
   /** Documents too large to search. */
   notSearched?: { space: string; path: string }[];
-  /** Sections beyond what one request opens. */
-  sectionsNotSearched?: string[];
+  /** There are sections beyond what one request opens: ask again with
+   *  `after` set to this. */
+  next?: number;
 };
 
 /** The same, answered `202`: the search's mirror has `pending` documents

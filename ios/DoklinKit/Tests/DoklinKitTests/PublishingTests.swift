@@ -20,7 +20,7 @@ final class PublishingTests: XCTestCase {
     [{"slug":"plan","kind":"file","path":"Library/Projects/plan.md","title":null,"desc":null,"by":"Ada","at":1000,"alive":true,"root":false},
      {"slug":"projects","kind":"dir","path":"Library/Projects","title":"Our projects","desc":null,"by":"Bo","at":1000,"alive":true,"root":false},
      {"slug":"all","kind":"dir","path":"Library","title":null,"desc":null,"by":"","at":1000,"alive":true,"root":true},
-     {"slug":"mine","kind":"dir","path":"Private","title":null,"desc":null,"by":"Ada","at":1000,"alive":true,"root":false},
+     {"slug":"mine","kind":"dir","path":"My files","title":null,"desc":null,"by":"Ada","at":1000,"alive":true,"root":false},
      {"slug":"gone","kind":"file","path":"Library/Old.md","title":null,"desc":null,"by":"Ada","at":1000,"alive":false,"root":false}]
     """
 
@@ -68,8 +68,8 @@ final class PublishingTests: XCTestCase {
             "https://notes.example.com/all/Projects/plan",
         ])
         XCTAssertEqual(Publishing.places(of: "Library/Projects/plan.md", in: s).map(\.nested), [false, true, true])
-        // The whole of Library holds nothing of Private's.
-        XCTAssertEqual(Publishing.places(of: "Private/diary.md", in: s).map(\.url), ["https://notes.example.com/mine/diary"])
+        // The whole of Library holds nothing of My files'.
+        XCTAssertEqual(Publishing.places(of: "My files/diary.md", in: s).map(\.url), ["https://notes.example.com/mine/diary"])
     }
 
     func testHowAPageIsSaid() throws {

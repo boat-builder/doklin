@@ -241,14 +241,6 @@ public struct WorkspaceFiles: Sendable {
         return nil
     }
 
-    /// Why a folder in `dir` cannot be called `name`, or nil when it can: at
-    /// the top of Library a section's own name is in no section, so nothing
-    /// under it would sync.
-    static func folderNameProblem(_ name: String, in dir: String) -> String? {
-        guard dir.lowercased() == TreeModel.libraryFolder.lowercased(), TreeModel.isSectionName(name) else { return nil }
-        return "A folder in Library can't be called Library, Private or Restricted."
-    }
-
     /// Whether any file of a document called `stem` is already in `dir`.
     func stemTaken(_ stem: String, in dir: String) -> Bool {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: absolute(dir))) ?? []
@@ -269,9 +261,7 @@ public struct WorkspaceFiles: Sendable {
 
     public func createFolder(in dir: String, named name: String) throws -> String {
         if let problem = Self.nameProblem(name) { throw DoklinError(problem) }
-        let named = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let problem = Self.folderNameProblem(named, in: dir) { throw DoklinError(problem) }
-        let path = join(dir, named)
+        let path = join(dir, name.trimmingCharacters(in: .whitespacesAndNewlines))
         if exists(path) { throw DoklinError("A file or folder named “\(DocLinks.name(of: path))” already exists.") }
         do {
             try FileManager.default.createDirectory(at: url(path), withIntermediateDirectories: true)
@@ -335,9 +325,7 @@ public struct WorkspaceFiles: Sendable {
         if case .document = entry, FileKind.of(newName) == .markdown || FileKind.of(newName) == .html {
             newName = DocLinks.stem(of: newName)
         }
-        let dir = DocLinks.directory(of: entry.path)
-        if case .folder = entry, let problem = Self.folderNameProblem(newName, in: dir) { throw DoklinError(problem) }
-        let pairs = moves(entry, to: dir, named: newName)
+        let pairs = moves(entry, to: DocLinks.directory(of: entry.path), named: newName)
         return (pairs[0].1, try relocate(pairs))
     }
 
@@ -346,11 +334,51 @@ public struct WorkspaceFiles: Sendable {
         if case .folder(let own) = entry, dir == own || dir.hasPrefix(own + "/") {
             throw DoklinError("A folder can't go inside itself.")
         }
-        if case .folder = entry, let problem = Self.folderNameProblem(entry.name, in: dir) { throw DoklinError(problem) }
         let name: String
         if case .document(let row) = entry { name = DocLinks.stem(of: DocLinks.name(of: row.path)) } else { name = entry.name }
         let pairs = moves(entry, to: dir, named: name)
         return (pairs[0].1, try relocate(pairs))
+    }
+
+    /// Copy into `dir` as a thing of its own — a document with its page and
+    /// its comments, a folder with all it holds — under the first of its
+    /// names that is free there: "Budget", "Budget 2". What says a folder is
+    /// shared stays with that folder (`.doklin`: `MARKER_DIR`,
+    /// engine/src/cloud/config.rs; the Mac's `copy_recursive`,
+    /// src-tauri/src/lib.rs — change both), so the copy is an ordinary
+    /// folder, shared with nobody. Answers the copy's path and what was
+    /// written.
+    public func copy(_ entry: FolderEntry, into dir: String) throws -> (path: String, changed: [String]) {
+        let taken = { (name: String) -> Bool in
+            if case .document = entry { return self.stemTaken(name, in: dir) }
+            return self.exists(self.join(dir, name))
+        }
+        // A document's name is its stem; any other file keeps its extension.
+        var (stem, ext) = (entry.name, "")
+        if case .file(let row) = entry { (stem, ext) = HistoryWords.split(DocLinks.name(of: row.path)) }
+        var number = 1
+        while taken(number == 1 ? stem + ext : "\(stem) \(number)\(ext)") { number += 1 }
+        let name = number == 1 ? stem : "\(stem) \(number)"
+        let pairs = moves(entry, to: dir, named: name + ext)
+        do {
+            for (from, to) in pairs { try copyTree(from, to) }
+        } catch {
+            throw DoklinError("“\(entry.name)” could not be copied: \(error.localizedDescription)")
+        }
+        return (pairs[0].1, pairs.map(\.1))
+    }
+
+    private func copyTree(_ from: String, _ to: String) throws {
+        let fm = FileManager.default
+        var isFolder: ObjCBool = false
+        guard fm.fileExists(atPath: absolute(from), isDirectory: &isFolder), isFolder.boolValue else {
+            try fm.copyItem(at: url(from), to: url(to))
+            return
+        }
+        try fm.createDirectory(at: url(to), withIntermediateDirectories: false)
+        for name in try fm.contentsOfDirectory(atPath: absolute(from)) where name != ".doklin" {
+            try copyTree(join(from, name), join(to, name))
+        }
     }
 
     /// Remove for good from this iPhone, which has no Trash: the history of

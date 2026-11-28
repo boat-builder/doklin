@@ -283,30 +283,39 @@ pub(crate) async fn cloud_remove_tag(app: AppHandle, root: String, name: String)
 }
 
 #[tauri::command]
-pub(crate) async fn cloud_space_create(
-    app: AppHandle,
-    root: String,
-    name: String,
-    members: Vec<String>,
-    from: Option<String>,
-) -> Result<SpaceStatus, String> {
-    cloud::cloud_space_create(&core(&app)?, root, name, members, from).await
+pub(crate) fn cloud_layout_moved(app: AppHandle) -> Result<Vec<String>, String> {
+    cloud::cloud_layout_moved(&core(&app)?)
 }
 
 #[tauri::command]
-pub(crate) async fn cloud_space_member(
+pub(crate) async fn cloud_share(
+    app: AppHandle,
+    root: String,
+    path: String,
+    members: Vec<String>,
+) -> Result<SpaceStatus, String> {
+    cloud::cloud_share(&core(&app)?, root, path, members).await
+}
+
+#[tauri::command]
+pub(crate) async fn cloud_share_member(
     app: AppHandle,
     root: String,
     id: String,
     member_id: String,
     add: bool,
 ) -> Result<(), String> {
-    cloud::cloud_space_member(&core(&app)?, root, id, member_id, add).await
+    cloud::cloud_share_member(&core(&app)?, root, id, member_id, add).await
 }
 
 #[tauri::command]
-pub(crate) async fn cloud_space_delete(app: AppHandle, root: String, id: String) -> Result<(), String> {
-    cloud::cloud_space_delete(&core(&app)?, root, id).await
+pub(crate) async fn cloud_share_delete(app: AppHandle, root: String, id: String) -> Result<(), String> {
+    cloud::cloud_share_delete(&core(&app)?, root, id).await
+}
+
+#[tauri::command]
+pub(crate) async fn cloud_share_restore(app: AppHandle, root: String, id: String) -> Result<(), String> {
+    cloud::cloud_share_restore(&core(&app)?, root, id).await
 }
 
 #[tauri::command]

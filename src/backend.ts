@@ -46,6 +46,7 @@ import type {
   CloudRemovedEvent,
   CloudSpace,
   CloudSpaceLeftEvent,
+  CloudSpaceMovedEvent,
   CloudStatus,
   EveryPage,
 } from "./cloud";
@@ -221,6 +222,9 @@ export interface Cloud {
   onApplied(cb: (e: CloudAppliedEvent) => void): Unsubscribe;
   onConflict(cb: (e: CloudConflictEvent) => void): Unsubscribe;
   onSpaceLeft(cb: (e: CloudSpaceLeftEvent) => void): Unsubscribe;
+  /** Something shared is somewhere else on this device now: what is open
+   *  from where it was is where it is. */
+  onSpaceMoved(cb: (e: CloudSpaceMovedEvent) => void): Unsubscribe;
 
   /** Which document this window is editing (its path), or none: what
    *  presence reports, and the document this device claims the lease on. */
@@ -323,6 +327,11 @@ export interface CloudSync {
    *  yet. */
   removed(): Promise<CloudRemovedEvent[]>;
   onRemoved(cb: (e: CloudRemovedEvent) => void): Unsubscribe;
+  /** ONE-TIME, to be deleted with the engine's `from_library`
+   *  (engine/src/cloud/layout.rs): the workspace folders whose `Private` and
+   *  `Restricted` became `My files` and `Shared with me` since the app
+   *  started. The paths stored about them follow (`fromLibraryLayout`). */
+  layoutMoved(): Promise<string[]>;
   /** What changed lately in the workspace at `root`, at most `limit` documents. */
   recent(root: string, limit?: number | null): Promise<CloudRecentFiles>;
 }
@@ -380,20 +389,26 @@ export interface CloudAccess {
   agentRevokeMachine(root: string, agentId: string, tokenId: string): Promise<void>;
 }
 
-/** Restricted folders: making one, who is in it, deleting it. Who there is
- *  to put in one is `CloudAccess.people`, so what offers these asks for both
- *  groups. */
-export interface CloudSpaces {
-  /** Make a restricted folder holding you and `members` (member ids). With
-   *  `from` (a folder in the workspace) that folder becomes it and leaves
-   *  the device of everyone not chosen. Resolves to the folder as the
-   *  status lists it: `path` is where it is here. */
-  spaceCreate(root: string, name: string, members: string[], from?: string | null): Promise<CloudSpace>;
-  /** Add a person to a restricted folder (`add`), or take one out, yourself
-   *  included, which is leaving it. The last person cannot be taken out. */
-  spaceMember(root: string, id: string, memberId: string, add: boolean): Promise<void>;
-  /** Delete a restricted folder for everyone in it. */
-  spaceDelete(root: string, id: string): Promise<void>;
+/** Sharing: a folder or a document of your own with the people you pick,
+ *  who has it, deleting it for everyone and bringing it back. Who there is
+ *  to share with is `CloudAccess.people`, so what offers these asks for
+ *  both groups. */
+export interface CloudShares {
+  /** Share the folder or the document at `path` with `members` (member
+   *  ids). It stays where it is; the people it is shared with find it under
+   *  Shared with me. Something shared already gets those people as well.
+   *  Resolves to it as the status lists it. */
+  share(root: string, path: string, members: string[]): Promise<CloudSpace>;
+  /** Share it with one more person (`add`), or stop — with yourself, which
+   *  is leaving it. Whoever opens it through the folder it sits in cannot
+   *  be taken off: the refusal says so. */
+  shareMember(root: string, id: string, memberId: string, add: boolean): Promise<void>;
+  /** Delete something shared for everyone it is shared with: for whoever
+   *  can open the folder it sits in. It is kept thirty days. */
+  shareDelete(root: string, id: string): Promise<void>;
+  /** Bring a deleted share back as it was: its files, its people, its
+   *  history. */
+  shareRestore(root: string, id: string): Promise<void>;
 }
 
 /** A sign-in the page itself holds, where there is no copy of the workspace
@@ -628,7 +643,7 @@ export interface Backend {
   readonly sync?: CloudSync;
   readonly domain?: CloudDomain;
   readonly access?: CloudAccess;
-  readonly spaces?: CloudSpaces;
+  readonly shares?: CloudShares;
   readonly session?: Session;
   readonly versions?: Versions;
   readonly shows?: Shows;

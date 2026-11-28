@@ -2,9 +2,14 @@
 // An agent is a bot with no copy of the folder: it works with a
 // workspace through these routes and through nothing else. What it may do
 // here is what its person ticked for it, and where is what that person can
-// see: every path starts with its section — `Library/`, their `Private/`, or
-// a `Restricted/<folder>/` they are in (agentPlace.ts) — and a route is
-// answered in the section its path names. A path with no section is refused.
+// see: every path starts with `Library/`, their `My files/`, or
+// `Shared with me/` (agentPlace.ts) — and a route is answered in the section
+// its path is in. A path that starts with none of them is refused.
+//
+// A route that reads section after section — a deep listing, a search, the
+// pages, what links to a document — opens as many as a request can and
+// answers `next` when there are more: the caller asks again with `after` set
+// to it (`cursorOf`, agentCall.ts).
 //
 //   POST   /api/agent/login       NO BEARER — {code, host?} → 201 {token, agent, workspace,
 //                                 version, limits}; 401 when the code is unknown, used or
@@ -15,13 +20,13 @@
 //
 // `limits` (limits.ts) is what the CLI keeps its daily allowance by.
 //
-//   read       GET    /api/agent/tree?dir=&deep=1[&where=]
+//   read       GET    /api/agent/tree?dir=&deep=1[&where=][&after=]
 //              GET    /api/agent/doc?path=&v=[&clean=1][&info=1]
 //              GET    /api/agent/comments?path=
-//              GET    /api/agent/search?q=&dir=&limit=[&where=]
+//              GET    /api/agent/search?q=&dir=&limit=[&where=][&after=]
 //              GET    /api/agent/find?workspace=&space=&file=
-//              GET    /api/agent/links?path=[&from=1][&to=1]
-//              GET    /api/agent/pages
+//              GET    /api/agent/links?path=[&from=1][&to=1][&after=]
+//              GET    /api/agent/pages[?after=]
 //              GET    /api/agent/tags
 //   edit       PUT    /api/agent/doc?path=&v=[&force=1][&dry=1]      if-rev: <n> | *
 //              DELETE /api/agent/doc?path=&v=[&dry=1]
@@ -183,13 +188,13 @@ export async function handleAgent(
   }
   if (route === "me") {
     if (method !== "GET") return methodNotAllowed();
-    const [person, sections, rest, limits] = await Promise.all([places.who(), places.all(), about(env), readLimits(env)]);
+    const [person, sections, rest, limits] = await Promise.all([places.who(), places.headings(), about(env), readLimits(env)]);
     return json({
       agent: { id: who.id, name: who.name },
       person,
       scopes: who.scopes,
-      // Where it can work, as folders: Library first.
-      sections: (sections ?? []).map((s) => s.mount),
+      // Where it can work, as the folders a path starts with: Library first.
+      sections: sections ?? [],
       ...rest,
       limits,
     });
@@ -214,7 +219,8 @@ export async function handleAgent(
   if (pathIn === "self") return handler(call);
   // The handler reads the request itself: a body is looked at in a copy.
   const typed = pathIn === "query" ? url.searchParams.get("path") : (await readJsonObject(request.clone()))?.path;
-  const section = await places.of(typeof typed === "string" ? typed : "");
+  // A trailing slash names a folder, which a shared document is not.
+  const section = await places.of(typeof typed === "string" ? typed : "", typeof typed === "string" && typed.endsWith("/"));
   if (section instanceof Refusal) return refuse(section);
   return handler(inSection(call, section));
 }

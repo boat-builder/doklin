@@ -99,7 +99,6 @@ struct NoticeBar: View {
 
 /// Where a tap in the app can lead.
 enum Route: Hashable {
-    case folder(String)
     case document(String)
     /// A note just made: it opens to be named, the caret in its title.
     case made(String)
@@ -114,8 +113,6 @@ enum Route: Hashable {
     case devices
     case agents
     case hereNow
-    /// Who can open a restricted folder, by its id.
-    case access(String)
     case publishedPages
     case tags
 }

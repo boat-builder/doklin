@@ -109,7 +109,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "ls",
         usage: "doklin ls [folder] [--deep] [--where <tag>=<value>]…",
-        about: "What a folder holds: its folders and its documents, with their versions and tags. --deep lists everything beneath it; --where only the documents with that tag. With no folder, the sections this agent can see.",
+        about: "What a folder holds: its folders and its documents, with their versions and tags. A document that is shared with people right there says only that it is: --deep, or `doklin info`, shows its versions. --deep lists everything beneath the folder; --where only the documents with that tag. With no folder, the sections this agent can see.",
         accepts: Accepts { values: &["where"], switches: &["deep"] },
         run: commands::ls,
     },
@@ -193,14 +193,14 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "mv",
         usage: "doklin mv <from> <to>",
-        about: "Move or rename a document (both versions and its comments) or a folder. A destination that is a folder or a section means into it. Moving between Library/, Private/ and a restricted folder changes who can see it.",
+        about: "Move or rename a document (both versions and its comments) or a folder. A destination that is a folder or a section means into it. Moving between Library/ and My files/, or into or out of a shared folder, changes who can see it. A folder or a document that is itself shared is renamed, or moved within the section it sits in, and nothing else: where it goes beyond that is its person's to say, in Doklin.",
         accepts: Accepts { values: &[], switches: &[] },
         run: commands::mv,
     },
     Command {
         name: "rm",
         usage: "doklin rm <doc> [--md|--html]",
-        about: "Remove a document, with its comments — or one version of it with --md or --html, never the last.",
+        about: "Remove a document, with its comments — or one version of it with --md or --html, never the last. A document that is itself shared is not removed here: its person deletes it, or leaves it, in Doklin.",
         accepts: Accepts { values: &[], switches: VERSION_FLAGS },
         run: commands::rm,
     },

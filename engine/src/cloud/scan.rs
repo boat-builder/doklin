@@ -10,6 +10,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::manifest::{valid_rel_path, MAX_PATH_DEPTH};
+use super::space::Reach;
 
 /// Mirrors the worker's caps (and the app's own tree caps) so the engine
 /// never builds a workspace the other side would reject.
@@ -30,27 +31,51 @@ pub struct ScanEntry {
     pub mtime_ms: u64,
 }
 
-/// Walk the workspace with the same eyes as the sidebar tree: skip dotfiles
-/// and build junk (`crate::is_hidden_or_ignored` — which also hides the
-/// `.doklin/` marker), bounded depth and entry count, and see only the files
-/// that sync (`crate::syncs`): everything else is invisible to the engine,
-/// the version store and the export alike, so it can never be uploaded,
-/// held as state, or read as deleted. Also invisible: what the worker would
-/// refuse — oversized files and paths outside its grammar.
+/// Walk a section's folder with the same eyes as the sidebar tree: skip
+/// dotfiles and build junk (`crate::is_hidden_or_ignored` — which also hides
+/// the `.doklin/` marker), bounded depth and entry count, and see only the
+/// files that sync (`crate::syncs`): everything else is invisible to the
+/// engine, the version store and the export alike, so it can never be
+/// uploaded, held as state, or read as deleted. Also invisible: what the
+/// worker would refuse — oversized files and paths outside its grammar.
 ///
 /// Two bounds, both an error rather than a partial answer (a partial scan
 /// would read the rest as deleted): more than `MAX_SYNC_ENTRIES` documents,
 /// or more than `MAX_WALK_ENTRIES` entries visited.
 ///
-/// `skip` names folders at the top of `root` the walk never enters, whatever
-/// their case: the shared section passes the two names it keeps at its top
-/// (`space::RESERVED_DIRS`), because a device still in the layout from
-/// before Library would put what is under them in a section of its own.
-pub fn scan_local(root: &Path, skip: &[&str]) -> Result<BTreeMap<String, ScanEntry>, String> {
+/// `reach` is what of the folder the section is: the walk never enters a
+/// folder that is another section's, nor sees another section's document —
+/// and of a shared document's folder it sees that document's files alone,
+/// under the names its manifest has for them.
+pub fn scan_local(root: &Path, reach: &Reach) -> Result<BTreeMap<String, ScanEntry>, String> {
     let mut out = BTreeMap::new();
+    if let Some(name) = &reach.only {
+        for abs in super::space::document_files(root, &name.local) {
+            let Some(file) = abs.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+            if let Some(entry) = scan_file(&abs) {
+                out.insert(reach.stored(&file), entry);
+            }
+        }
+        return Ok(out);
+    }
     let mut walked = MAX_WALK_ENTRIES;
-    scan_dir(root, root, 1, skip, &mut walked, &mut out)?;
+    scan_dir(root, root, 1, reach, &mut walked, &mut out)?;
     Ok(out)
+}
+
+/// One file as a scan sees it — or not at all, when it is too big to sync.
+fn scan_file(abs: &Path) -> Option<ScanEntry> {
+    let meta = std::fs::symlink_metadata(abs).ok()?;
+    if !meta.is_file() || meta.len() > MAX_SYNC_FILE_BYTES {
+        return None;
+    }
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Some(ScanEntry { abs: abs.to_path_buf(), size: meta.len(), mtime_ms })
 }
 
 /// What a scan that gave up says.
@@ -66,7 +91,7 @@ fn scan_dir(
     root: &Path,
     dir: &Path,
     depth: usize,
-    skip: &[&str],
+    reach: &Reach,
     walked: &mut usize,
     out: &mut BTreeMap<String, ScanEntry>,
 ) -> Result<(), String> {
@@ -83,9 +108,6 @@ fn scan_dir(
         if crate::is_hidden_or_ignored(&name) || name.ends_with(TMP_SUFFIX) {
             continue;
         }
-        if depth == 1 && skip.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
-            continue;
-        }
         let ft = match entry.file_type() {
             Ok(ft) => ft,
             Err(_) => continue,
@@ -94,35 +116,23 @@ fn scan_dir(
             continue;
         }
         let path = entry.path();
+        let Some(rel) = rel_path(root, &path) else { continue };
         if ft.is_dir() {
-            if depth < MAX_PATH_DEPTH {
-                scan_dir(root, &path, depth + 1, &[], walked, out)?;
+            if depth < MAX_PATH_DEPTH && !reach.skips_dir(&rel) {
+                scan_dir(root, &path, depth + 1, reach, walked, out)?;
             }
         } else if ft.is_file() {
-            if !crate::syncs(&name) {
-                continue; // stays on this device
+            if !crate::syncs(&name) || reach.skips_file(&rel) {
+                continue; // stays on this device, or is another section's
             }
-            let meta = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if meta.len() > MAX_SYNC_FILE_BYTES {
-                continue; // too big to sync; deliberately invisible to the engine
-            }
-            let Some(rel) = rel_path(root, &path) else { continue };
             if !valid_rel_path(&rel) {
                 continue; // a name the worker's grammar refuses: invisible too
             }
-            let mtime_ms = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+            let Some(found) = scan_file(&path) else { continue }; // too big to sync
             if out.len() == MAX_SYNC_ENTRIES {
                 return Err(too_large_to_sync());
             }
-            out.insert(rel, ScanEntry { abs: path, size: meta.len(), mtime_ms });
+            out.insert(rel, found);
         }
     }
     Ok(())

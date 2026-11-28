@@ -1,5 +1,5 @@
-// A folder with a history of its own as it was, as a modal: Library, a
-// Private, a restricted folder, or a folder that is not connected.
+// A folder with a history of its own as it was, as a modal: Library, My
+// files, a shared folder, or a folder that is not connected.
 // Choosing a moment for a whole folder is a deliberate,
 // occasional act — Dropbox Rewind's shape, not a rail — so it says exactly
 // what a restore would do before anything happens, and confirms with the
