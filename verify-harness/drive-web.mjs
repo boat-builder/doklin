@@ -1888,10 +1888,12 @@ async function driveSharing(name) {
   );
   await boss.at("section-mine-toggle").click({ button: "right" });
   await boss.page.locator(".sidebar-menu-item").filter({ hasText: /^Recently deleted…$/ }).click();
-  await boss.at("deleted-share").waitFor({ timeout: 30_000 });
-  const deletedRow = await dialogText(boss, "deleted-share");
-  await boss.at("deleted-share-restore").click();
-  const restoredHere = await until(async () => (await boss.at("deleted-share").count()) === 0, 30_000);
+  // Its own row: what the engine before this one shared and deleted is kept there too.
+  const deletedPlans = boss.page.locator(`[data-testid="deleted-share"][data-share="${plans.id}"]`);
+  await deletedPlans.waitFor({ timeout: 30_000 });
+  const deletedRow = (await deletedPlans.innerText({ timeout: 15_000 })).replace(/\s+/g, " ").trim();
+  await deletedPlans.locator('[data-testid="deleted-share-restore"]').click();
+  const restoredHere = await until(async () => (await deletedPlans.count()) === 0, 30_000);
   await boss.page.locator('.ws-deleted [title="Back to files"]').click();
   const back = await there(boss, `${MINE}/${PLANS}`, 30_000);
   await again(fo);
