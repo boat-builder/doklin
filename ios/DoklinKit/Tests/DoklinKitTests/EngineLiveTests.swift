@@ -38,6 +38,19 @@ final class EngineLiveTests: XCTestCase {
         XCTFail("the workspace did not finish syncing: \(String(describing: device.status(root)))")
     }
 
+    /// Send what was last written at `root`, and wait until it has gone. A
+    /// pass under way may have looked at the folder before the write and
+    /// ends after it all the same: the pass that counts is one that began
+    /// after another ended.
+    private func sent(_ device: Workspaces, _ root: String) async throws {
+        for _ in 0..<2 {
+            await device.refresh()
+            let last = try XCTUnwrap(device.status(root)?.lastSyncMs)
+            await device.syncNow(root)
+            try await synced(device, root, after: last)
+        }
+    }
+
     /// Ask the drive for something only the domain's side can do
     /// (`serveAsks`, verify-harness/drive-ios.mjs).
     private func ask(_ what: String) async throws {
@@ -536,9 +549,9 @@ final class EngineLiveTests: XCTestCase {
         XCTAssertNil(tagged.problem)
 
         // Synced, the list is the manifest's: what drive-ios.mjs reads back.
-        let tagsMade = try XCTUnwrap(device.status(root)?.lastSyncMs)
-        await device.syncNow(root)
-        try await synced(device, root, after: tagsMade)
+        // Each change to the list began a pass of its own, so one may be
+        // under way.
+        try await sent(device, root)
         XCTAssertEqual(workspace.tagList, [stage.def])
 
         // Leaving ends the sign-in and takes the copy, and the keeper's
