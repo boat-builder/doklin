@@ -30,6 +30,7 @@ import type { Manifest, ManifestFile } from "../../cloud-worker/src/manifest";
 import { shownPath, splitName, storedPath, type At } from "../../cloud-worker/src/mount";
 import type { Limits, MetaAnswer, PollAnswer, Space } from "../../cloud-worker/src/wire";
 import type { DocumentChange, TreeNode, WatchedDocument } from "../backend";
+import { isBoardsFile } from "../boards";
 import type {
   CloudAppliedEvent,
   CloudConflictEvent,
@@ -583,6 +584,7 @@ export class Workspace {
     const all: WorkspaceDocument[] = [];
     for (const section of this.sections.values()) {
       for (const [path, entry] of section.files) {
+        if (isBoardsFile(path)) continue;
         all.push({ path: shownPath(section.at, path), fileId: entry.fid, section: section.id === "" ? null : section.id });
       }
     }
@@ -612,9 +614,15 @@ export class Workspace {
       const markdown = stems(MD_EXT_RE);
       const html = stems(HTML_EXT_RE);
       const files: TreeNode[] = [];
+      let board = false;
       for (const path of row.files) {
         const name = nameIn(path);
         if (name.endsWith(META_SUFFIX)) continue;
+        // How the folder is shown, never a row of its own.
+        if (isBoardsFile(name)) {
+          board = true;
+          continue;
+        }
         // An html file beside a markdown file of its stem is that document's rendition.
         if (HTML_EXT_RE.test(name) && markdown.has(name.replace(HTML_EXT_RE, ""))) continue;
         files.push({
@@ -630,9 +638,50 @@ export class Workspace {
         name: dir === "" ? nameIn(this.root) : nameIn(dir),
         path: join(this.root, dir),
         children: [...row.dirs.map(node).sort(byName), ...files.sort(byName)],
+        ...(board ? { board } : {}),
       };
     };
     return node(top);
+  }
+
+  /* ---------- Boards ---------- */
+
+  /** The `boards.json` a folder holds, whatever its case: in the section
+   *  the folder is in. Null when it holds none. */
+  boardIn(absDir: string): StoredFile | null {
+    const rel = this.relOf(absDir);
+    const place = rel === null ? null : this.placeOf(rel);
+    if (!place) return null;
+    for (const [path, entry] of place.section.files) {
+      if (dirIn(path) === place.path && isBoardsFile(path)) return { space: place.section.id, fid: entry.fid, file: entry.file };
+    }
+    return null;
+  }
+
+  /** What a folder's markdown notes are at, directly in it: a key that
+   *  moves whenever one of them is added, removed or changed. */
+  notesKey(absDir: string): string | null {
+    const rel = this.relOf(absDir);
+    const place = rel === null ? null : this.placeOf(rel);
+    if (!place) return null;
+    const keys: string[] = [];
+    for (const [path, entry] of place.section.files) {
+      if (dirIn(path) === place.path && MD_EXT_RE.test(path)) keys.push(`${entry.fid}:${entry.file.hash}`);
+    }
+    return `${place.section.id}/${keys.sort().join(",")}`;
+  }
+
+  /** Every folder under `abs` that holds a `boards.json`, `abs` itself left
+   *  out, by absolute path. */
+  boardFolders(abs: string): string[] {
+    const top = this.relOf(abs);
+    if (top === null) return [];
+    const out = new Set<string>();
+    for (const path of this.placed()) {
+      const dir = dirIn(path);
+      if (isBoardsFile(path) && dir !== top && (top === "" || dir.startsWith(`${top}/`))) out.add(join(this.root, dir));
+    }
+    return [...out].sort();
   }
 
   /* ---------- What the UI is told ---------- */

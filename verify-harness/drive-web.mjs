@@ -100,7 +100,7 @@
 //   (cd verify-harness && npm install && npx playwright install)   # once
 //   node verify-harness/drive-web.mjs                 # every engine installed
 //   ENGINES=chromium node verify-harness/drive-web.mjs
-//   PARTS=writing node verify-harness/drive-web.mjs   # files, cookie, app, writing, rest, access, sharing, tags, cache
+//   PARTS=writing node verify-harness/drive-web.mjs   # files, cookie, app, writing, rest, access, sharing, tags, boards, cache
 import { chromium, firefox, webkit } from "playwright";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -115,7 +115,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ENGINES = { chromium, firefox, webkit };
 const wanted = (process.env.ENGINES ?? "chromium,firefox,webkit").split(",").map((s) => s.trim()).filter(Boolean);
-const parts = new Set((process.env.PARTS ?? "files,cookie,app,writing,rest,access,sharing,tags,cache").split(",").map((s) => s.trim()));
+const parts = new Set((process.env.PARTS ?? "files,cookie,app,writing,rest,access,sharing,tags,boards,cache").split(",").map((s) => s.trim()));
 
 const results = [];
 const step = (name, ok, detail = "") => {
@@ -2068,6 +2068,143 @@ async function driveTags(name) {
   await browser.close();
 }
 
+/* ---------- Boards ---------- */
+
+// A folder shown as a board in a browser (src/web/boards.ts): its
+// boards.json written through `/api/web/board`, its notes' tags read in one
+// request (`/api/web/tags`) and never one per card, a move between columns
+// written to the note and the board, a write over somebody else's merged by
+// record, and *Show as Folder*.
+async function driveBoards(name) {
+  const say = (what, ok, detail) => step(`${name}, boards: ${what}`, Boolean(ok), detail);
+  const browser = await ENGINES[name].launch();
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 860 } });
+  await context.addInitScript(() => Object.defineProperty(navigator, "platform", { get: () => "Win32" }));
+  const page = await context.newPage();
+  const trouble = [];
+  let stage = "starting";
+  page.on("console", (m) => {
+    if (process.env.DEBUG_DRIVE) console.log(`  [${stage}] console.${m.type()}: ${m.text().slice(0, 200)}`);
+    if (/Content Security Policy|Content-Security-Policy|Refused to/i.test(m.text())) trouble.push(`${stage}: ${m.text().slice(0, 200)}`);
+  });
+  page.on("pageerror", (e) => trouble.push(`${stage}: ${String(e).slice(0, 200)}`));
+
+  const DIR = `Planning in ${name}`;
+  const A = `${DIR}/A.md`;
+  const B = `${DIR}/B.md`;
+  const C = `${DIR}/C.md`;
+  const BOARD = `${DIR}/boards.json`;
+  const other = await elsewhere(browser);
+  const put = async (path, text) =>
+    other.ask(`/api/web/doc?path=${encodeURIComponent(path)}`, { method: "PUT", body: JSON.stringify({ md: { text, ifRev: (await storedAt(path))?.rev ?? null } }) });
+  await other.ask("/api/web/tags", {
+    method: "PUT",
+    body: JSON.stringify({ at: "status", tag: { name: "status", values: ["Todo", "Doing", "Done"] } }),
+  });
+  await put(A, "---\nstatus: Todo\n---\nA.\n");
+  await put(B, "---\nstatus: doing\n---\nB.\n");
+  await put(C, "No tag.\n");
+  await put(`${DIR}/Sub/D.md`, "---\nstatus: Doing\n---\nIn a subfolder.\n");
+
+  const row = (path) => page.locator(`[data-tree-path="${LIBRARY}/${path}"]`);
+  const card = (n) => page.locator(`[data-card="${n}"]`);
+  const columns = () =>
+    page
+      .locator('[data-testid="board-col"]')
+      .evaluateAll((els) => els.map((el) => [el.getAttribute("aria-label"), [...el.querySelectorAll("[data-card]")].map((c) => c.dataset.card)]));
+  const ranks = async () => Object.fromEntries(Object.entries(JSON.parse((await storedAt(BOARD))?.text ?? "{}").cards ?? {}).map(([n, c]) => [n, c.rank]));
+  const drag = async (n, to) => {
+    const from = await card(n).boundingBox();
+    const add = await page.locator(`[data-testid="board-col"][aria-label="${to}"] .board-col-add`).boundingBox();
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(from.x + from.width / 2 + 10, from.y + from.height / 2 + 10, { steps: 3 });
+    await page.mouse.move(add.x + add.width / 2, add.y - 4, { steps: 12 });
+    await sleep(150);
+    await page.mouse.move(add.x + add.width / 2, add.y - 3);
+    await page.mouse.up();
+  };
+
+  await page.goto(`${ORIGIN}/app`);
+  await page.locator('[data-testid="web-invite"]').fill(`doklin-invite ${ORIGIN} ${await deviceCode()}`);
+  await page.click('[data-testid="web-sign-in"]');
+  await row("Home.md").waitFor({ timeout: 60_000 });
+
+  /* 1 — Show as Board…: the file through the board route, then the board,
+         its cards' tags in one request and no note read. */
+  stage = "show as board";
+  await row(DIR).waitFor({ timeout: 30_000 });
+  await row(DIR).click({ button: "right" });
+  await page.locator(".tree-context-menu button", { hasText: "Show as Board…" }).click();
+  let from = answered.length;
+  await page.locator('[data-testid="board-tag-pick"]', { hasText: "status" }).click();
+  const shown = await until(async () => {
+    const cols = await columns().catch(() => []);
+    return cols.some((c) => c[0] === "Doing" && c[1].length > 0) ? cols : null;
+  }, 45_000);
+  const asked = answered.slice(from);
+  const notes = await Promise.all([A, B, C].map(storedAt));
+  const perCard = asked.filter((a) => a.method === "GET" && notes.some((f) => f && a.path.includes(f.fid)));
+  say(
+    "Show as Board… writes boards.json through the board route and opens the board",
+    asked.some((a) => a.method === "PUT" && a.path.startsWith("/api/web/board") && a.status === 200) &&
+      (await storedAt(BOARD))?.text === '{\n  "doklin": "boards",\n  "v": 1,\n  "tag": "status",\n  "cards": {}\n}\n',
+    asked.map((a) => `${a.method} ${a.path} ${a.status}`).join(" "),
+  );
+  say(
+    "the columns are the list's values, a subfolder's notes are not cards",
+    JSON.stringify(shown) === JSON.stringify([["No status", ["C.md"]], ["Todo", ["A.md"]], ["Doing", ["B.md"]], ["Done", []]]),
+    JSON.stringify(shown),
+  );
+  say(
+    "the cards' tags come in one request for the folder, and no note is read for them",
+    asked.filter((a) => a.method === "GET" && a.path.startsWith("/api/web/tags") && a.status === 200).length === 1 && perCard.length === 0,
+    asked.filter((a) => a.method === "GET").map((a) => `${a.path} ${a.status}`).join(" "),
+  );
+
+  /* 2 — a card to another column: the note, then the board. */
+  stage = "a card moved";
+  await drag("A.md", "Doing");
+  const moved = await until(async () => {
+    const [a, r] = await Promise.all([storedAt(A), ranks()]);
+    return a?.text === "---\nstatus: Doing\n---\nA.\n" && r["A.md"] && r["B.md"] ? r : null;
+  }, 30_000);
+  say("a card dragged to another column rewrites its note's tag and ranks the column", moved !== null, JSON.stringify(await ranks()));
+
+  /* 3 — somebody else wrote the board meanwhile: the write is merged. */
+  stage = "a write over somebody else's";
+  const theirs = JSON.parse((await storedAt(BOARD)).text);
+  theirs.cards["C.md"] = { rank: "a5" };
+  const now = await storedAt(BOARD);
+  const wrote = await other.ask(`/api/web/board?space=&path=${encodeURIComponent(DIR)}`, {
+    method: "PUT",
+    body: JSON.stringify({ text: JSON.stringify(theirs, null, 2) + "\n", ifRev: now.rev }),
+  });
+  from = answered.length;
+  await drag("A.md", "Done");
+  const merged = await until(async () => {
+    const r = await ranks();
+    return r["C.md"] === "a5" && (await storedAt(A))?.text.includes("status: Done") ? r : null;
+  }, 30_000);
+  say(
+    "a board write over one somebody else made is merged by record: both changes stay",
+    wrote.status === 200 && merged !== null,
+    `${wrote.status} ${JSON.stringify(await ranks())} ${answered.slice(from).map((a) => `${a.method} ${a.path} ${a.status}`).join(" ")}`,
+  );
+
+  /* 4 — Show as Folder. */
+  stage = "show as folder";
+  await page.locator('[data-testid="board-show-folder"]').click();
+  const gone = await until(async () => ((await storedAt(BOARD)) === null ? true : null), 30_000);
+  say("Show as Folder deletes boards.json and closes the board", gone && (await page.locator('[data-testid="board"]').count()) === 0);
+  say("nothing was refused by the page's policy, and nothing threw", trouble.length === 0, trouble.join(" | "));
+
+  await other.ask(`/api/web/folder?path=${encodeURIComponent(DIR)}`, { method: "DELETE" });
+  await other.ask("/api/web/tags?name=status", { method: "DELETE" });
+  await other.close();
+  await browser.close();
+}
+
 /* ---------- What a browser keeps, and stops keeping ---------- */
 
 /** Over plain http, where Chromium caches as it does on a real domain (and
@@ -2128,6 +2265,7 @@ for (const name of wanted) {
   if (parts.has("access")) await driveAccess(name);
   if (parts.has("sharing")) await driveSharing(name);
   if (parts.has("tags")) await driveTags(name);
+  if (parts.has("boards")) await driveBoards(name);
 }
 if (wanted.includes("chromium") && parts.has("cache")) await driveCache();
 

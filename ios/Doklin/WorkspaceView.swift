@@ -81,8 +81,8 @@ struct WorkspaceView: View {
             switch route {
             case .document(let file), .made(let file), .match(let file, _, _):
                 return left.holds(shell.now(file))
-            case .history(.note(let note)):
-                return left.holds(note)
+            case .board(let dir), .history(.note(let dir)):
+                return left.holds(dir)
             case .history(.version(let opened)):
                 return left.holds(opened.path) || (workspace.relative(opened.store).map(left.holds) ?? false)
             case .history(.moment(let store, _)):
@@ -94,12 +94,14 @@ struct WorkspaceView: View {
     }
 
     /// Something shared is somewhere else on this iPhone now, or called
-    /// something else: its history is asked for where it is. A document on
+    /// something else: a board and its history are asked for where it is. A document on
     /// screen follows by itself, under the screen it was opened in
     /// (`DocumentView`).
     private func follow(_ moved: SharesMoved) {
         shell.rewrite { route in
             switch route {
+            case .board(let dir):
+                return moved.now(dir).map { .board($0) }
             case .history(.note(let note)):
                 return moved.now(note).map { .history(.note($0)) }
             case .history(.version(let opened)):
@@ -132,6 +134,9 @@ struct RouteView: View {
         switch route {
         case .document(let file):
             DocumentView(workspace: workspace, path: file, route: $path)
+        case .board(let dir):
+            BoardView(workspace: workspace, dir: dir, route: $path)
+                .id(dir)
         case .made(let file):
             DocumentView(workspace: workspace, path: file, route: $path, naming: true)
         case .match(let file, let query, let line):

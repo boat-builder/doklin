@@ -30,7 +30,7 @@ use super::scan::{
     content_type_for, hash16, now_ms, random_id, read_file_checked, read_json, rel_path, scan_local, stat_pair,
     write_atomic, write_json, ScanEntry,
 };
-use super::space::{split_name, Reach, LIBRARY};
+use super::space::{of_document, split_name, Reach, LIBRARY};
 use super::status::{Events, PublicPage, RecentFile, EV_ADDRESS_TAKEN, EV_CONFLICT, EV_PENDING_DELETES};
 use super::tags::{self as tag_list, TagDef, TagOp, TAGS_MAX};
 // The cloud half of versioning. `crate::versions` is the local versioner —
@@ -441,7 +441,7 @@ impl<R: Remote> Unit<R> {
             rest => rest.strip_prefix('/')?,
         };
         if let Some(name) = &self.reach.only {
-            let mine = !rest.is_empty() && !rest.contains('/') && split_name(rest).0.eq_ignore_ascii_case(&name.local);
+            let mine = !rest.is_empty() && !rest.contains('/') && of_document(rest, &name.local);
             return mine.then(|| self.reach.stored(rest));
         }
         self.reach.holds(rest).then(|| rest.to_string())
@@ -451,7 +451,7 @@ impl<R: Remote> Unit<R> {
     pub(crate) fn rel_of(&self, abs: &Path) -> Option<String> {
         let rel = rel_path(&self.root, abs)?;
         if let Some(name) = &self.reach.only {
-            let mine = !rel.contains('/') && split_name(&rel).0.eq_ignore_ascii_case(&name.local);
+            let mine = !rel.contains('/') && of_document(&rel, &name.local);
             return mine.then(|| self.reach.stored(&rel));
         }
         self.reach.holds(&rel).then_some(rel)
@@ -800,16 +800,15 @@ impl<R: Remote> Unit<R> {
     /// manifest this device applied says of each — unless the file here has
     /// changed since this device last synced it, or no manifest carries it
     /// yet: then the change is this device's, signed `me`, at the file's own
-    /// time, with no hash until it syncs. Comment files are not documents,
-    /// and what is not on this device is not listed.
+    /// time, with no hash until it syncs. Comment files and boards are not
+    /// documents, and what is not on this device is not listed.
     pub(crate) fn recent(&self, me: &str) -> Vec<RecentFile> {
         let section = (!self.is_library()).then(|| self.id.clone());
-        let is_document = |path: &str| !path.to_ascii_lowercase().ends_with(".meta.jsonl");
         let disk = self.scan().unwrap_or_default();
         let mut listed: HashSet<&str> = HashSet::new();
         let mut out = Vec::new();
         for (fid, file) in &self.state.manifest.files {
-            if !is_document(&file.path) {
+            if !crate::is_document(&file.path) {
                 continue;
             }
             let Some(here) = disk.get(&file.path) else { continue };
@@ -842,7 +841,7 @@ impl<R: Remote> Unit<R> {
             });
         }
         for (rel, here) in &disk {
-            if listed.contains(rel.as_str()) || !is_document(rel) {
+            if listed.contains(rel.as_str()) || !crate::is_document(rel) {
                 continue;
             }
             out.push(RecentFile {
@@ -1329,18 +1328,28 @@ impl<R: Remote> Unit<R> {
         let theirs = self.remote.get_blob(&fid, &rf.hash).await?;
 
         // Both sides changed: three-way merge against the stored base. A
-        // sidecar is merged by its records, and never conflicts.
+        // sidecar and a folder's board are merged by their records, and never
+        // conflict.
         let base = std::fs::read(self.base_path(&fid)).ok();
         let merged = if crate::sidecar::is_sidecar(&rf.path) {
             let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
             let exists = |file: &str| remote.files.contains_key(file) || self.state.files.contains_key(file) || ctx.elsewhere.contains(file);
-            MergeOutcome::Clean(crate::sidecar::merge(base.as_deref().map(text).as_deref(), &text(&ours), &text(&theirs), &exists))
+            MergeOutcome::Clean(crate::sidecar::merge(base.as_deref().map(text).as_deref(), &text(&ours), &text(&theirs), &exists).into_bytes())
+        } else if crate::boards::is_boards(&rf.path) {
+            // A file that isn't text is no board: theirs, as it is.
+            match (std::str::from_utf8(&ours), std::str::from_utf8(&theirs)) {
+                (Ok(o), Ok(t)) => {
+                    let base = base.as_deref().and_then(|b| std::str::from_utf8(b).ok());
+                    MergeOutcome::Clean(crate::boards::merge(base, o, t).into_bytes())
+                }
+                _ => MergeOutcome::Clean(theirs.clone()),
+            }
         } else {
             merge_texts(base.as_deref(), &ours, &theirs)
         };
         match merged {
-            MergeOutcome::Clean(text) => {
-                write_atomic(&target, text.as_bytes())
+            MergeOutcome::Clean(bytes) => {
+                write_atomic(&target, &bytes)
                     .map_err(|e| RemoteError::Other(format!("write {}: {}", rf.path, e)))?;
                 // Adopt their revision as the synced point; the merged
                 // content (≠ theirs) now reads as a local edit and gets
@@ -1999,7 +2008,7 @@ impl<R: Remote> Unit<R> {
         let rel = req.rel.trim_matches('/').to_string();
         match req.kind {
             PublicKind::File if !valid_rel_path(&rel) => return Err("that path can't be published".into()),
-            PublicKind::File if !crate::syncs(&rel) => {
+            PublicKind::File if !crate::is_document(&rel) => {
                 return Err("Only markdown and html documents can be published.".into())
             }
             PublicKind::Dir if !rel.is_empty() && !valid_rel_path(&rel) => {

@@ -1,0 +1,680 @@
+{
+  "about": "Cases a folder's boards.json must answer alike on the Mac and in a browser (src/rank.ts, src/boards.ts, mergeBoards in src/web/merge.ts), on the iPhone (Markdown/Boards.swift) and in the engine (engine/src/boards.rs). The engine reads `canonical` and `merge` only. A board is given as its file's text. Read by verify-harness/boards.test.mjs, ios/DoklinKit/Tests/DoklinKitTests/BoardsTests.swift and engine/src/boards.rs: change all three.",
+  "rank": [
+    {
+      "a": null,
+      "b": null,
+      "out": "a0"
+    },
+    {
+      "a": "a0",
+      "b": null,
+      "out": "a1"
+    },
+    {
+      "a": null,
+      "b": "a0",
+      "out": "Zz"
+    },
+    {
+      "a": "a0",
+      "b": "a1",
+      "out": "a0V"
+    },
+    {
+      "a": "a0",
+      "b": "a0V",
+      "out": "a0G"
+    },
+    {
+      "a": "a0V",
+      "b": "a1",
+      "out": "a0l"
+    },
+    {
+      "a": "Zz",
+      "b": "a0",
+      "out": "ZzV"
+    },
+    {
+      "a": "a1",
+      "b": "a2",
+      "out": "a1V"
+    },
+    {
+      "a": "az",
+      "b": null,
+      "out": "b00"
+    },
+    {
+      "a": "a0",
+      "b": "a01",
+      "out": "a00V"
+    },
+    {
+      "a": "hello",
+      "b": null,
+      "out": "a0"
+    },
+    {
+      "a": "a1",
+      "b": "a0",
+      "out": "a2"
+    },
+    {
+      "a": null,
+      "b": "nope",
+      "out": "a0"
+    },
+    {
+      "a": "a0V",
+      "b": "a0V",
+      "out": "a1"
+    }
+  ],
+  "ranks": [
+    {
+      "a": "a0",
+      "b": "a1",
+      "n": 3,
+      "out": [
+        "a0G",
+        "a0V",
+        "a0l"
+      ]
+    },
+    {
+      "a": null,
+      "b": null,
+      "n": 4,
+      "out": [
+        "Zy",
+        "Zz",
+        "a0",
+        "a1"
+      ]
+    },
+    {
+      "a": "a5",
+      "b": null,
+      "n": 2,
+      "out": [
+        "a5V",
+        "a6"
+      ]
+    },
+    {
+      "a": "a0",
+      "b": null,
+      "n": 0,
+      "out": []
+    }
+  ],
+  "parse": [
+    {
+      "text": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"Fix the login.md\": { \"rank\": \"a0\" },\n    \"Write the docs.md\": { \"rank\": \"a0V\" }\n  }\n}\n",
+      "board": {
+        "tag": "Status",
+        "cards": {
+          "Fix the login.md": {
+            "rank": "a0",
+            "extra": {}
+          },
+          "Write the docs.md": {
+            "rank": "a0V",
+            "extra": {}
+          }
+        },
+        "extra": {}
+      }
+    },
+    {
+      "text": "not json",
+      "board": null
+    },
+    {
+      "text": "[]",
+      "board": null
+    },
+    {
+      "text": "{\"v\":1,\"tag\":\"Status\",\"cards\":{}}",
+      "board": null
+    },
+    {
+      "text": "{\"doklin\":\"meta\",\"v\":1}",
+      "board": null
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":2,\"tag\":\"Status\",\"views\":[]}",
+      "board": "newer"
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":1.5}",
+      "board": null
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":\"1\",\"tag\":\"Status\"}",
+      "board": null
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":0}",
+      "board": null
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":1}",
+      "board": {
+        "tag": "",
+        "cards": {},
+        "extra": {}
+      }
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":1,\"tag\":7,\"cards\":[]}",
+      "board": {
+        "tag": "",
+        "cards": {},
+        "extra": {}
+      }
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":1,\"tag\":\"Status\",\"cards\":{\"a.md\":\"a0\",\"b.md\":{\"rank\":3,\"pin\":true},\"c.md\":{\"rank\":\"a1\",\"color\":\"red\"},\"\":{\"rank\":\"a2\"}}}",
+      "board": {
+        "tag": "Status",
+        "cards": {
+          "b.md": {
+            "rank": null,
+            "extra": {
+              "pin": true
+            }
+          },
+          "c.md": {
+            "rank": "a1",
+            "extra": {
+              "color": "red"
+            }
+          }
+        },
+        "extra": {}
+      }
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":1,\"tag\":\"Status\",\"cards\":{\"a.md\":{\"rank\":\"a1\"},\"A.md\":{\"rank\":\"a0\"}}}",
+      "board": {
+        "tag": "Status",
+        "cards": {
+          "A.md": {
+            "rank": "a0",
+            "extra": {}
+          }
+        },
+        "extra": {}
+      }
+    }
+  ],
+  "canonical": [
+    {
+      "text": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"Fix the login.md\": { \"rank\": \"a0\" },\n    \"Write the docs.md\": { \"rank\": \"a0V\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"Fix the login.md\": { \"rank\": \"a0\" },\n    \"Write the docs.md\": { \"rank\": \"a0V\" }\n  }\n}\n"
+    },
+    {
+      "text": "{\"cards\":{\"Zeta.md\":{\"rank\":\"a1\"},\"alpha.md\":{\"rank\":\"a0\",\"x\":{\"b\":2,\"a\":[1,\"two\",null]}}},\"zoom\":1,\"tag\":\"Status\",\"v\":1,\"doklin\":\"boards\",\"after\":{\"y\":true,\"x\":false}}",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"Zeta.md\": { \"rank\": \"a1\" },\n    \"alpha.md\": { \"rank\": \"a0\", \"x\": {\"a\":[1,\"two\",null],\"b\":2} }\n  },\n  \"after\": {\"x\":false,\"y\":true},\n  \"zoom\": 1\n}\n"
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":1,\"tag\":\"Status\",\"cards\":{\"empty.md\":{},\"kept.md\":{\"note\":\"hi\"}}}",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"kept.md\": { \"note\": \"hi\" }\n  }\n}\n"
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":1,\"tag\":\"Priority\"}",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Priority\",\n  \"cards\": {}\n}\n"
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":1,\"tag\":\"Étape\",\"cards\":{\".md\":{\"rank\":\"a1\"},\"😀.md\":{\"rank\":\"a0\"},\"Ärger.md\":{\"rank\":\"a2\"},\"quote \\\" and \\\\ and \\n.md\":{\"rank\":\"a3\"}}}",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Étape\",\n  \"cards\": {\n    \"quote \\\" and \\\\ and \\n.md\": { \"rank\": \"a3\" },\n    \"Ärger.md\": { \"rank\": \"a2\" },\n    \".md\": { \"rank\": \"a1\" },\n    \"😀.md\": { \"rank\": \"a0\" }\n  }\n}\n"
+    },
+    {
+      "text": "{\"doklin\":\"boards\",\"v\":2}",
+      "out": null
+    },
+    {
+      "text": "nope",
+      "out": null
+    },
+    {
+      "text": "  {\n\"doklin\" : \"boards\" , \"v\" : 1 , \"tag\" : \"Status\" , \"cards\" : { \"a.md\" : { \"rank\" : \"a0\" } } }  ",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" }\n  }\n}\n"
+    }
+  ],
+  "columns": [
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a0\" },\n    \"e.md\": { \"rank\": \"a0\" }\n  }\n}\n",
+      "def": {
+        "name": "Status",
+        "values": [
+          "Todo",
+          "Doing",
+          "Done"
+        ]
+      },
+      "notes": [
+        {
+          "name": "a.md",
+          "value": "Todo"
+        },
+        {
+          "name": "b.md",
+          "value": "doing"
+        },
+        {
+          "name": "c.md",
+          "value": "Doing"
+        },
+        {
+          "name": "d.md",
+          "value": null
+        },
+        {
+          "name": "Page.html",
+          "value": null
+        },
+        {
+          "name": "e.md",
+          "value": "Blocked"
+        },
+        {
+          "name": "f.md",
+          "value": "blocked"
+        },
+        {
+          "name": "g.md",
+          "value": "Archive"
+        },
+        {
+          "name": "h.md",
+          "value": ""
+        },
+        {
+          "name": "B2.md",
+          "value": "Doing"
+        },
+        {
+          "name": "a2.md",
+          "value": "Doing"
+        }
+      ],
+      "columns": [
+        {
+          "value": null,
+          "known": true,
+          "cards": [
+            "d.md",
+            "h.md",
+            "Page.html"
+          ]
+        },
+        {
+          "value": "Todo",
+          "known": true,
+          "cards": [
+            "a.md"
+          ]
+        },
+        {
+          "value": "Doing",
+          "known": true,
+          "cards": [
+            "c.md",
+            "b.md",
+            "a2.md",
+            "B2.md"
+          ]
+        },
+        {
+          "value": "Done",
+          "known": true,
+          "cards": []
+        },
+        {
+          "value": "Archive",
+          "known": false,
+          "cards": [
+            "g.md"
+          ]
+        },
+        {
+          "value": "Blocked",
+          "known": false,
+          "cards": [
+            "e.md",
+            "f.md"
+          ]
+        }
+      ]
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {}\n}\n",
+      "def": {
+        "name": "Status",
+        "values": []
+      },
+      "notes": [
+        {
+          "name": "x.md",
+          "value": "Todo"
+        }
+      ],
+      "columns": [
+        {
+          "value": null,
+          "known": true,
+          "cards": []
+        },
+        {
+          "value": "Todo",
+          "known": false,
+          "cards": [
+            "x.md"
+          ]
+        }
+      ]
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"x.md\": { \"rank\": \"bad rank\" },\n    \"y.md\": { \"rank\": \"a0\" }\n  }\n}\n",
+      "def": {
+        "name": "Status",
+        "values": [
+          "Todo",
+          "Doing",
+          "Done"
+        ]
+      },
+      "notes": [
+        {
+          "name": "X.md",
+          "value": "Todo"
+        },
+        {
+          "name": "y.md",
+          "value": "Todo"
+        },
+        {
+          "name": "w.md",
+          "value": "Todo"
+        }
+      ],
+      "columns": [
+        {
+          "value": null,
+          "known": true,
+          "cards": []
+        },
+        {
+          "value": "Todo",
+          "known": true,
+          "cards": [
+            "y.md",
+            "w.md",
+            "X.md"
+          ]
+        },
+        {
+          "value": "Doing",
+          "known": true,
+          "cards": []
+        },
+        {
+          "value": "Done",
+          "known": true,
+          "cards": []
+        }
+      ]
+    }
+  ],
+  "drop": [
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" }\n  }\n}\n",
+      "column": [
+        "a.md",
+        "b.md"
+      ],
+      "index": 1,
+      "card": "n.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"n.md\": { \"rank\": \"a0V\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" }\n  }\n}\n",
+      "column": [
+        "a.md",
+        "b.md"
+      ],
+      "index": 0,
+      "card": "n.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"n.md\": { \"rank\": \"Zz\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" }\n  }\n}\n",
+      "column": [
+        "a.md",
+        "b.md"
+      ],
+      "index": 2,
+      "card": "n.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"n.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {}\n}\n",
+      "column": [],
+      "index": 0,
+      "card": "n.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"n.md\": { \"rank\": \"a0\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" }\n  }\n}\n",
+      "column": [
+        "a.md",
+        "u.md",
+        "v.md"
+      ],
+      "index": 2,
+      "card": "n.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"n.md\": { \"rank\": \"a0l\" },\n    \"u.md\": { \"rank\": \"a0V\" },\n    \"v.md\": { \"rank\": \"a1\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {}\n}\n",
+      "column": [
+        "u.md",
+        "v.md",
+        "w.md"
+      ],
+      "index": 0,
+      "card": "w.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"u.md\": { \"rank\": \"Zz\" },\n    \"v.md\": { \"rank\": \"a0\" },\n    \"w.md\": { \"rank\": \"Zy\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"Fix.md\": { \"rank\": \"a0\", \"pin\": true },\n    \"z.md\": { \"rank\": \"a1\" }\n  }\n}\n",
+      "column": [
+        "z.md"
+      ],
+      "index": 1,
+      "card": "fix.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"fix.md\": { \"rank\": \"a2\", \"pin\": true },\n    \"z.md\": { \"rank\": \"a1\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "column": [
+        "a.md",
+        "c.md"
+      ],
+      "index": 1,
+      "card": "b.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" }\n  }\n}\n",
+      "column": [
+        "a.md",
+        "b.md"
+      ],
+      "index": 9,
+      "card": "n.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"n.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    }
+  ],
+  "rename": [
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" }\n  }\n}\n",
+      "from": "a.md",
+      "to": "c.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a0\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" }\n  }\n}\n",
+      "from": "A.MD",
+      "to": "A.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"A.md\": { \"rank\": \"a0\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" }\n  }\n}\n",
+      "from": "x.md",
+      "to": "y.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" }\n  }\n}\n",
+      "from": "a.md",
+      "to": "B.md",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"B.md\": { \"rank\": \"a0\" }\n  }\n}\n"
+    }
+  ],
+  "prune": [
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"C.md\": { \"rank\": \"a2\" },\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" }\n  }\n}\n",
+      "names": [
+        "a.md",
+        "c.md",
+        "new.md",
+        "sub"
+      ],
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"C.md\": { \"rank\": \"a2\" },\n    \"a.md\": { \"rank\": \"a0\" }\n  }\n}\n"
+    },
+    {
+      "board": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" }\n  }\n}\n",
+      "names": [],
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {}\n}\n"
+    }
+  ],
+  "merge": [
+    {
+      "name": "the same on both sides",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    },
+    {
+      "name": "each side moved another card",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a3\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"Zz\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a3\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"Zz\" }\n  }\n}\n"
+    },
+    {
+      "name": "both moved one card: ours",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a3\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a4\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a3\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    },
+    {
+      "name": "they regrouped, we moved a card",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a3\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Priority\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Priority\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a3\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    },
+    {
+      "name": "both regrouped: ours",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Owner\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Priority\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Owner\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    },
+    {
+      "name": "we dropped a card whose file went, they left it",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    },
+    {
+      "name": "we dropped a card they moved: theirs stays",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a5\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a5\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    },
+    {
+      "name": "they dropped a card we left",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    },
+    {
+      "name": "both added cards",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" },\n    \"d.md\": { \"rank\": \"a3\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" },\n    \"e.md\": { \"rank\": \"a0V\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" },\n    \"d.md\": { \"rank\": \"a3\" },\n    \"e.md\": { \"rank\": \"a0V\" }\n  }\n}\n"
+    },
+    {
+      "name": "no base: both made the board",
+      "base": null,
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Priority\",\n  \"cards\": {\n    \"b.md\": { \"rank\": \"a0\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a0\" }\n  }\n}\n"
+    },
+    {
+      "name": "a newer app's file on their side is kept",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a3\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "theirs": "{\"doklin\":\"boards\",\"v\":2,\"views\":[]}\n",
+      "out": "{\"doklin\":\"boards\",\"v\":2,\"views\":[]}\n"
+    },
+    {
+      "name": "ours unreadable: theirs",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "garbage",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a3\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a3\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    },
+    {
+      "name": "theirs unreadable: theirs",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a3\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "theirs": "{",
+      "out": "{"
+    },
+    {
+      "name": "keys a newer app wrote merge as records",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\", \"pin\": false }\n  },\n  \"zoom\": 1\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\", \"pin\": true }\n  },\n  \"wide\": true,\n  \"zoom\": 1\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a1\", \"pin\": false }\n  },\n  \"zoom\": 2\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\", \"pin\": true }\n  },\n  \"wide\": true,\n  \"zoom\": 2\n}\n"
+    },
+    {
+      "name": "a card renamed in case on our side",
+      "base": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"A.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"A.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a1\" },\n    \"c.md\": { \"rank\": \"a2\" }\n  }\n}\n"
+    },
+    {
+      "name": "an unreadable base counts as none",
+      "base": "junk",
+      "ours": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" }\n  }\n}\n",
+      "theirs": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a1\" },\n    \"b.md\": { \"rank\": \"a0\" }\n  }\n}\n",
+      "out": "{\n  \"doklin\": \"boards\",\n  \"v\": 1,\n  \"tag\": \"Status\",\n  \"cards\": {\n    \"a.md\": { \"rank\": \"a0\" },\n    \"b.md\": { \"rank\": \"a0\" }\n  }\n}\n"
+    }
+  ]
+}

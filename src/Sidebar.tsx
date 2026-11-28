@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDismiss } from "./dismiss";
+import { BoardIcon } from "./Board";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { Facepile } from "./Avatar";
 import {
@@ -108,6 +109,17 @@ type Props = {
   refreshToken: number;
   onSelect: (sels: SidebarSelection[]) => void;
   onOpenFile: (path: string) => void;
+  // A board folder's name clicked: its board (src/Board.tsx). Its chevron
+  // still opens the folder, whose notes list as any folder's do.
+  onOpenBoard?: (dir: string) => void;
+  // A folder's menu: *Show as Board…*, or on a board folder *Show as Folder*.
+  onShowAsBoard?: (dir: string) => void;
+  onShowAsFolder?: (dir: string) => void;
+  // A card right-clicked on a board: this menu for its file, at the
+  // pointer, with its row brought into view. `onMenuTaken` says it opened;
+  // the app then clears it.
+  menuAt?: { path: string; x: number; y: number } | null;
+  onMenuTaken?: () => void;
   // A document just made here: opened with the caret in its title.
   onOpenNewDocument: (path: string) => void;
   // This computer's own files and folders: absent where the platform has no
@@ -359,6 +371,11 @@ export default function Sidebar({
   refreshToken,
   onSelect,
   onOpenFile,
+  onOpenBoard,
+  onShowAsBoard,
+  onShowAsFolder,
+  menuAt = null,
+  onMenuTaken,
   onOpenNewDocument,
   onOpenFolder,
   onOpenFilePicker,
@@ -582,6 +599,18 @@ export default function Sidebar({
     setScrollTarget(null);
     row.scrollIntoView({ block: "nearest" });
   }, [scrollTarget, tree, openDirs, folded]);
+
+  // Every folder that is shown as a board.
+  const boardDirs = useMemo(() => {
+    const out = new Set<string>();
+    const walk = (node: TreeNode) => {
+      if (node.kind !== "dir") return;
+      if (node.board) out.add(node.path);
+      node.children.forEach(walk);
+    };
+    if (tree) walk(tree);
+    return out;
+  }, [tree]);
 
   /* ---------- Selection (single, ⌘-toggle, ⇧-range) ---------- */
 
@@ -1176,6 +1205,24 @@ export default function Sidebar({
     [selection, onSelect, shareOf],
   );
 
+  // A card's menu, asked for from its board: the file's row is opened to
+  // and selected, as a right-click on it would, so Rename has its row.
+  useEffect(() => {
+    if (!menuAt || !tree) return;
+    onMenuTaken?.();
+    const { path, x, y } = menuAt;
+    if (!path.startsWith(`${root}/`)) return;
+    openFolders(
+      foldersDownTo(root, dirname(path)).filter((dir) => !(sectioned && [libraryDir, mineDir, sharedDir].includes(dir))),
+    );
+    unfoldSectionOf(path);
+    setScrollTarget(path);
+    selectionAnchorRef.current = path;
+    onSelect([{ path, kind: "file" }]);
+    const target = { path, kind: "file" as const, openable: true };
+    setCtxMenu({ x, y, target: { ...target, space: shareOf(target) ?? undefined } });
+  }, [menuAt, tree, root, sectioned, libraryDir, mineDir, sharedDir, openFolders, unfoldSectionOf, onMenuTaken, onSelect, shareOf]);
+
   const rootName = useMemo(() => basename(root), [root]);
 
   // Who else is editing what, by absolute path — the faces on a file's row.
@@ -1225,6 +1272,13 @@ export default function Sidebar({
         { label: "New Document", onClick: () => void newDocument(createDirFor(target)) },
         { label: "New Folder…", onClick: () => startNewFolder(createDirFor(target)) },
       );
+    }
+    // How a folder is shown, for everyone who can open it. A list's own
+    // folder is never a board: its heading isn't a row.
+    if (target.kind === "dir") {
+      const dir = target.path;
+      if (boardDirs.has(dir) && onShowAsFolder) items.push({ label: "Show as Folder", onClick: () => onShowAsFolder(dir) });
+      else if (!boardDirs.has(dir) && onShowAsBoard) items.push({ label: "Show as Board…", onClick: () => onShowAsBoard(dir) });
     }
     if (onRevealInFinder) {
       items.push({
@@ -1388,6 +1442,9 @@ export default function Sidebar({
     onCopyAgentPath,
     onShare,
     onCopyToMine,
+    boardDirs,
+    onShowAsBoard,
+    onShowAsFolder,
   ]);
 
   // Right-edge drag handle: the app owns the width (grid CSS variable);
@@ -1450,6 +1507,7 @@ export default function Sidebar({
       synced={sectioned}
       onToggle={toggleOpen}
       onOpenFile={onOpenFile}
+      onOpenBoard={onOpenBoard}
       onRowClick={handleRowSelect}
       onRowMenu={openRowMenu}
       onCommitCreate={commitCreate}
@@ -2005,6 +2063,7 @@ function TreeItem({
   synced,
   onToggle,
   onOpenFile,
+  onOpenBoard,
   onRowClick,
   onRowMenu,
   onCommitCreate,
@@ -2046,6 +2105,7 @@ function TreeItem({
   synced: boolean;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
+  onOpenBoard?: (dir: string) => void;
   // Modifier-aware selection; true = a multi-select gesture the row must not
   // also act on (no open/toggle).
   onRowClick: (e: React.MouseEvent, entry: SidebarSelection) => boolean;
@@ -2168,7 +2228,10 @@ function TreeItem({
           onClick={(e) => {
             if (dnd.suppressClick()) return;
             if (onRowClick(e, { path: node.path, kind: "dir" })) return;
-            onToggle(node.path);
+            // A board folder's name opens its board; its chevron, the folder.
+            const onChevron = (e.target as HTMLElement).closest(".tree-chevron") !== null;
+            if (node.board && onOpenBoard && !onChevron) onOpenBoard(node.path);
+            else onToggle(node.path);
           }}
           // What is shared with this person stays where its owner keeps it.
           onPointerDown={
@@ -2184,6 +2247,11 @@ function TreeItem({
             <ChevronRightIcon />
           </span>
           <span className="tree-label tree-dir-label">{node.name}</span>
+          {node.board && (
+            <span className="tree-board" title="Shown as a board" data-testid="tree-board">
+              <BoardIcon />
+            </span>
+          )}
           {loose && <NowhereMark line={loose} />}
           {share && <SharedMark share={share} />}
           {published.get(node.path)?.kind === "dir" && (
@@ -2230,6 +2298,7 @@ function TreeItem({
               synced={synced}
               onToggle={onToggle}
               onOpenFile={onOpenFile}
+              onOpenBoard={onOpenBoard}
               onRowClick={onRowClick}
               onRowMenu={onRowMenu}
               onCommitCreate={onCommitCreate}

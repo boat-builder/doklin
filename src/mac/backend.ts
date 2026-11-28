@@ -17,6 +17,8 @@ import { check } from "@tauri-apps/plugin-updater";
 import {
   SaveConflict,
   type Backend,
+  type Boards,
+  type CardPair,
   type Cloud,
   type CloudAccess,
   type CloudShares,
@@ -46,6 +48,7 @@ import {
   type WindowInit,
   type Windows,
 } from "../backend";
+import { BOARDS_FILE } from "../boards";
 import type { CloudRemovedEvent, CloudStatus } from "../cloud";
 import { documentsOf, type WorkspaceDocument } from "../docLinks";
 import {
@@ -141,6 +144,26 @@ async function carryParts(
 }
 
 const trash = (path: string) => invoke<string>("trash_file", { path });
+
+/* ---------- Boards ---------- */
+
+// src-tauri/src/boards.rs.
+const boards: Boards = {
+  read: async (dir) => {
+    const r = await invoke<ReadFileResult | null>("board_read", { dir });
+    return r ? { text: r.contents, rev: revOf(r.snapshot) } : null;
+  },
+  write: async (dir, text, base) => {
+    const r = await invoke<ReadFileResult>("board_write", { dir, text, base: base?.text ?? null, over: base?.rev ?? null });
+    return { text: r.contents, rev: revOf(r.snapshot) };
+  },
+  remove: async (dir) => {
+    const found = await invoke<ReadFileResult | null>("board_read", { dir });
+    if (found) await trash(`${dir}/${BOARDS_FILE}`);
+  },
+  folders: async (root) => listOf<string>(await invoke<unknown>("board_folders", { root })),
+  cards: async (dir) => (await invoke<Record<string, CardPair[]> | null>("board_cards", { dir })) ?? {},
+};
 
 // What `watch` was last told is on screen: an event names a file, and this is
 // how it becomes a document and a part of it.
@@ -563,6 +586,7 @@ const updater: Updater = {
 
 export const macBackend: Backend = {
   documents,
+  boards,
   cloud,
   fileClipboard,
   openExternal: (url) => invoke<void>("open_external", { url }),

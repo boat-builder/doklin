@@ -4,9 +4,11 @@
 // stem: `plan.md`, its optional `plan.html` rendition, and `plan.meta.jsonl`
 // holding its comment threads (src/metaFile.ts). The app has always treated
 // them as one thing. Here that becomes the only view an agent gets: one name,
-// up to two *versions* — markdown and html — and never the sidecar. There is
-// nothing else to get: those are the only files Doklin syncs (`syncs`,
-// layout.ts).
+// up to two *versions* — markdown and html — and never the sidecar. Doklin
+// syncs one file more (`syncs`, layout.ts): a folder's `boards.json`
+// (src/boards.ts), which only the apps read. To an agent a board folder is
+// notes with tags: no listing names the file, and it has no document's name,
+// so `locate` refuses it to every route that reads or writes one.
 //
 // Everything in this file is a pure reading of the manifest: which files make
 // up the document a path names, which version a request means, what a folder
@@ -17,6 +19,7 @@ import { UNSYNCED_SENTENCE, validPath } from "./layout";
 import type { Manifest, ManifestFile } from "./manifest";
 import { nestedUrl } from "./publicMap";
 import { MD_EXT_RE, basename, dirOf, isHtmlPath, isMarkdownPath } from "./workspace";
+import { isBoardsFile } from "../../src/boards";
 import { META_SUFFIX } from "../../src/metaFile";
 
 export type Version = "md" | "html";
@@ -349,6 +352,8 @@ export function listTree(m: Manifest, dir: string, deep: boolean): Listing {
   for (const file of Object.values(m.files)) {
     const lower = file.path.toLowerCase();
     if (prefix && !lower.startsWith(prefix)) continue;
+    // A board's file is the apps' alone: not a row, and no folder by itself.
+    if (isBoardsFile(file.path)) continue;
     const rel = file.path.slice(prefix.length);
     const segs = rel.split("/");
     // Each folder between here and the file: all of them when deep, the first otherwise.

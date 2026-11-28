@@ -411,6 +411,43 @@ Writing (`saving.ts`, `merge.ts`, `tabs.ts`):
   opens nothing): a row appearing, or the menu opening and taking focus,
   would move the note, and the click (on a link, say) lands somewhere else.
 
+## Boards
+
+- **A folder whose `boards.json` says so is shown as a board** (`src/boards.ts`
+  has the format and the rules; `src/Board.tsx` draws it). Its tag's values
+  are the columns, and every document directly in the folder is a card in
+  the column of its value. A card moved to another column sets the note's
+  tag; moved within its column, it changes only `boards.json`. Only the apps
+  read the file: no note, frontmatter or agent surface says how a folder is
+  shown, and agents never see the file.
+- **The rules are held to one answer**: `src/boards.ts` and `src/rank.ts`,
+  their iPhone port (`Markdown/Boards.swift`) and the engine's merge
+  (`engine/src/boards.rs`), by `verify-harness/boards-fixture.json`: **change
+  all three**.
+- **The file's bytes are canonical** (`serializeBoards`), and its keys a newer
+  app wrote are kept. A file without the header, with another `v`, or that
+  isn't JSON makes no board, and is never rewritten.
+- **Cards are keyed by file name**, whatever its case. A rename made in the
+  app keeps the card's key (`followCard`); one made elsewhere leaves the card
+  unranked, at the end of its column. Every write drops the keys whose file
+  is gone (`pruneBoard`).
+- **What a board reads costs no read per card**: names are the folder's
+  listing; each note's tags come in one call (`Boards.cards`): the disk on a
+  Mac, one `/api/web/tags` request in a browser, asked again only when the
+  folder's notes changed.
+- **A drop ranks the column's unranked cards first**, in the order shown, so
+  what was seen stays; the note is written before `boards.json`. A board's
+  write never conflicts: over a file that moved on, the two are merged by
+  record (the engine's merge on a Mac, `mergeBoards` in a browser).
+- **A board is a tab of its own** (`kind: "board"`, the folder's path): no
+  document is read, watched or autosaved for it, and it can't be split. A
+  card opens after it, and closing that tab comes back to the board.
+- **A list's heading is never a board** (Library, My files, Shared with me);
+  a shared folder's top is a folder row, and can be.
+- **Renaming a tag rewrites every board grouped by it**, after the notes and
+  before the old name leaves the list. An html-only document has no tags, so
+  its card sits with the notes that have no value and never changes column.
+
 ## Editor traps
 
 - A picture a note names by a path is asked for nowhere (`pictureAddress`,

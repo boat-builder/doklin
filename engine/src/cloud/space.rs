@@ -90,12 +90,12 @@ impl Reach {
         self.dirs.iter().any(|dir| dir.eq_ignore_ascii_case(rel))
     }
 
-    /// Whether the file at `rel` is another section's document.
+    /// Whether the file at `rel` is one of another section's document's.
     pub fn skips_file(&self, rel: &str) -> bool {
-        if self.docs.is_empty() {
+        let (dir, name) = rel.rsplit_once('/').map(|(d, n)| (Some(d), n)).unwrap_or((None, rel));
+        if self.docs.is_empty() || !of_a_document(name) {
             return false;
         }
-        let (dir, name) = rel.rsplit_once('/').map(|(d, n)| (Some(d), n)).unwrap_or((None, rel));
         let (stem, _) = split_name(name);
         let doc = match dir {
             Some(dir) => format!("{}/{}", dir, stem),
@@ -107,7 +107,7 @@ impl Reach {
     /// Whether a path under the folder is this section's.
     pub fn holds(&self, rel: &str) -> bool {
         if let Some(name) = &self.only {
-            return !rel.contains('/') && split_name(rel).0.eq_ignore_ascii_case(&name.stored);
+            return !rel.contains('/') && of_document(rel, &name.stored);
         }
         if self.skips_file(rel) {
             return false;
@@ -155,11 +155,22 @@ pub fn split_name(name: &str) -> (&str, &str) {
     }
 }
 
+/// Whether the file called `name` is one of a document's: the document
+/// itself, markdown or html, or its sidecar. A folder's `boards.json` is
+/// the folder's, whatever a document beside it is called.
+fn of_a_document(name: &str) -> bool {
+    crate::is_document(name) || crate::sidecar::is_sidecar(name)
+}
+
+/// Whether the file called `name` is one of the document called `stem`'s.
+pub fn of_document(name: &str, stem: &str) -> bool {
+    of_a_document(name) && split_name(name).0.eq_ignore_ascii_case(stem)
+}
+
 /// A file's name, said as `to` where its document is called `from`.
 fn renamed(name: &str, from: &str, to: &str) -> String {
-    let (stem, rest) = split_name(name);
-    if stem.eq_ignore_ascii_case(from) {
-        format!("{}{}", to, rest)
+    if of_document(name, from) {
+        format!("{}{}", to, split_name(name).1)
     } else {
         name.to_string()
     }
@@ -372,8 +383,9 @@ pub fn names_item(actual: &str, name: &str, owner: &str) -> bool {
 }
 
 /// Whether the folder `dir` has something called `name`: a folder of that
-/// name for a shared folder, a document of that name — any file of one —
-/// for a shared document.
+/// name for a shared folder, a document of that name — its markdown or its
+/// html — for a shared document (`takenIn`, cloud-worker/src/agentPlace.ts:
+/// change both).
 pub fn name_taken(dir: &Path, name: &str, document: bool) -> bool {
     if !document {
         return std::fs::symlink_metadata(dir.join(name)).is_ok();
@@ -381,21 +393,18 @@ pub fn name_taken(dir: &Path, name: &str, document: bool) -> bool {
     std::fs::read_dir(dir).is_ok_and(|entries| {
         entries.flatten().any(|e| {
             let file = e.file_name().to_string_lossy().to_string();
-            crate::syncs(&file) && split_name(&file).0.eq_ignore_ascii_case(name)
+            crate::is_document(&file) && split_name(&file).0.eq_ignore_ascii_case(name)
         })
     })
 }
 
-/// The files of the document called `stem` in `dir`: every file that syncs
-/// and has its name.
+/// The files of the document called `stem` in `dir`: its markdown, its
+/// html and its sidecar.
 pub fn document_files(dir: &Path, stem: &str) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut files: Vec<PathBuf> = entries
         .flatten()
-        .filter(|e| {
-            let file = e.file_name().to_string_lossy().to_string();
-            crate::syncs(&file) && split_name(&file).0.eq_ignore_ascii_case(stem)
-        })
+        .filter(|e| of_document(&e.file_name().to_string_lossy(), stem))
         .map(|e| e.path())
         .filter(|path| path.is_file())
         .collect();

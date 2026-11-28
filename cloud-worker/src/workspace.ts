@@ -46,8 +46,10 @@ const optText = (v: unknown): string | undefined => (typeof v === "string" ? v :
  * The manifest as the reader trusts it. Every PUT was shape-checked, but a
  * page must never 500 on someone else's bytes: anything unreadable simply
  * reads as absent. So does a file outside `syncs` (layout.ts), and a page of
- * one, should a stored manifest still list it: nothing public, and nothing an
- * agent reads, is ever anything but a document.
+ * one, should a stored manifest still list it. A folder's `boards.json` syncs
+ * and is read here — a move or a copy of its folder carries it (changes.ts)
+ * — yet nothing public, and nothing an agent reads, is ever anything but a
+ * document: each of those reads documents alone (documents.ts).
  */
 function readManifest(v: unknown): Manifest {
   const manifest: Manifest = { version: MANIFEST_VERSION, seq: 0, files: {}, tombstones: {}, public: {} };

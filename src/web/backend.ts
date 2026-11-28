@@ -35,6 +35,7 @@ import type {
   EveryPage,
 } from "../cloud";
 import { followLink, linkTo, ownLink, takeLink } from "./address";
+import { boardsOf } from "./boards";
 import { browserHistory } from "./steps";
 import { mintAgentLogin, mintDeviceCode, mintInvite } from "./codes";
 import { Refused, ask, askJson, deviceId } from "./http";
@@ -396,6 +397,7 @@ export function webBackend(ws: Workspace, saving: Saving): Backend {
   };
   return {
     documents: documentsOf(ws, saving),
+    boards: boardsOf(ws),
     cloud: cloudOf(ws, saving),
     fileClipboard: fileClipboard(),
     // The addresses the Mac agrees to open, and no others (`open_external`,

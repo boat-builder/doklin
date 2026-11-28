@@ -20,6 +20,8 @@
 // leases (presence.ts): a row per device is atomic where one shared object
 // read and rewritten with no CAS is not.
 
+import { isBoardsFile } from "../../src/boards";
+
 export const WORKSPACE_KEY = "workspace.json";
 export const MANIFEST_KEY = "manifest.json";
 export const BLOBS_PREFIX = "blobs/";
@@ -150,14 +152,18 @@ export const MAX_VERSION_SNAPSHOTS = 2000;
 const SYNCED_SUFFIXES = [".md", ".markdown", ".mdown", ".mkd", ".html", ".meta.jsonl"] as const;
 
 /**
- * Whether Doklin syncs the file at `path`. Everything else — a picture, a
- * PDF, a script an agent wrote, a cloned repository's sources — stays on its
- * device: no manifest PUT may name one (manifest.ts), the worker's own writes
- * drop any a stored manifest still lists (commit.ts), and the document API
- * and the public pages never see one (workspace.ts). Mirrored by the engine
- * (`syncs`, engine/src/lib.rs): change both.
+ * Whether Doklin syncs the file at `path`: a document, a document's
+ * comments, or a folder's `boards.json` (src/boards.ts), named exactly that
+ * in any case. Everything else — a picture, a PDF, a script an agent wrote,
+ * a cloned repository's sources — stays on its device: no manifest PUT may
+ * name one (manifest.ts), the worker's own writes drop any a stored
+ * manifest still lists (commit.ts), and the document API and the public
+ * pages never see one (workspace.ts). Mirrored by the engine (`syncs`,
+ * engine/src/lib.rs): change both. A `boards.json` is never a document:
+ * only the apps read it, and no agent surface shows it (documents.ts).
  */
 export function syncs(path: string): boolean {
+  if (isBoardsFile(path)) return true;
   const name = path.slice(path.lastIndexOf("/") + 1).replace(/[A-Z]/g, (c) => c.toLowerCase());
   return SYNCED_SUFFIXES.some((suffix) => name.length > suffix.length && name.endsWith(suffix));
 }
@@ -169,6 +175,7 @@ const CONTENT_TYPES: Record<string, string> = {
   mdown: "text/markdown; charset=utf-8",
   mkd: "text/markdown; charset=utf-8",
   html: "text/html; charset=utf-8",
+  json: "application/json",
   jsonl: "application/json",
 };
 

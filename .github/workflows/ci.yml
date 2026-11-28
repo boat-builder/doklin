@@ -83,6 +83,11 @@ jobs:
       - name: Tag rules against the shared cases
         run: node verify-harness/tags.test.mjs
 
+      # A folder's boards.json, against the cases the iPhone's port and the
+      # engine's merge read too.
+      - name: Board rules against the shared cases
+        run: node verify-harness/boards.test.mjs
+
       # A code made in a browser is hashed there and typed back to the
       # worker: both ends of that, and the bytes the engine's tests hold.
       - name: The codes a browser makes, against the worker's reading of them

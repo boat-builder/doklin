@@ -99,6 +99,63 @@ export function TagShell({
   );
 }
 
+/** *Show as Board…*: which tag the folder's columns are. With no tags yet,
+ *  *New tag…* makes one, and the board is grouped by it. */
+export function ShowAsBoardDialog({
+  folder,
+  list,
+  onPick,
+  onNewTag,
+  onClose,
+}: {
+  folder: string;
+  list: TagDef[];
+  onPick: (tag: string) => Promise<string | null>;
+  onNewTag: () => void;
+  onClose: () => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const pick = async (tag: string) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    const failed = await onPick(tag);
+    setBusy(false);
+    if (failed) setError(failed);
+  };
+  return (
+    <TagShell title="Show as Board" busy={busy} onClose={onClose} testId="board-show-dialog">
+      <p className="cloud-hint">
+        {list.length === 0
+          ? `A board's columns are a tag's values. Make a tag, and ${folder} shows its notes by it.`
+          : `Its columns are the values of the tag you pick, and each note in ${folder} sits in the column of its value. Everyone who can open the folder sees the board.`}
+      </p>
+      {list.length > 0 && (
+        <ul className="board-tag-picks">
+          {list.map((def) => (
+            <li key={def.name}>
+              <button className="board-tag-pick" data-testid="board-tag-pick" onClick={() => void pick(def.name)} disabled={busy}>
+                <span className="board-tag-pick-name">{def.name}</span>
+                <span className="board-tag-pick-values">{def.values.join(", ")}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <div className="modal-error">{error}</div>}
+      <div className="modal-buttons">
+        <button className="modal-btn" onClick={onNewTag} disabled={busy} data-testid="board-new-tag">
+          New tag…
+        </button>
+        <button className="modal-btn" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+      </div>
+    </TagShell>
+  );
+}
+
 export function NewTagForm({
   list,
   forNote,

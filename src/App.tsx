@@ -72,6 +72,7 @@ import {
   docName,
   isUnsaved,
   isUnsupportedTab,
+  holdsNoDocument,
   isUntitled,
   noteHasText,
   remapSteps,
@@ -136,8 +137,10 @@ import { useDismiss } from "./dismiss";
 import { splitFrontmatter } from "./frontmatter";
 import { TAGS_MAX, keyedLines, writeTag, type TagDef, type TagFilter } from "./tags";
 import { TagsRow } from "./TagsRow";
-import { EditTagDialog, NewTagDialog, type TagEdit } from "./TagDialogs";
+import { EditTagDialog, NewTagDialog, ShowAsBoardDialog, type TagEdit } from "./TagDialogs";
 import TagsSettings from "./TagsSettings";
+import Board from "./Board";
+import { newBoard, parseBoards, regroup, renameCard, serializeBoards } from "./boards";
 import {
   backend,
   SaveConflict,
@@ -1924,7 +1927,7 @@ export default function App() {
         },
         view: "md",
       });
-      if (isUnsupportedTab(tab)) {
+      if (holdsNoDocument(tab)) {
         return noDocument(!(await backend.documents.exists(tab.path).catch(() => false)));
       }
       let opened: LoadedDoc;
@@ -2032,7 +2035,7 @@ export default function App() {
     const htmlOnly = tab.kind === "file" && isHtmlPath(tab.path);
     // A file that is not a document is never read: its tab only says so
     // (or, once it is gone, is a ghost like any other).
-    const unsupported = isUnsupportedTab(tab);
+    const unsupported = holdsNoDocument(tab);
 
     let opened: LoadedDoc | null = null;
     let failed = false;
@@ -2156,7 +2159,7 @@ export default function App() {
         if (note) out.push(note);
         continue;
       }
-      const readable = isUnsupportedTab({ kind, path })
+      const readable = holdsNoDocument({ kind, path })
         ? await backend.documents.exists(path).catch(() => false)
         : await backend.documents.read(path).then(
             () => true,
@@ -2246,13 +2249,17 @@ export default function App() {
 
   // Append a freshly-built tab and make it active.
   const appendAndActivate = useCallback(
-    async (tab: Tab) => {
+    async (tab: Tab, after?: string) => {
       captureActiveScroll(); // remember where the outgoing doc was scrolled
       flushPendingAutosave(); // persist the outgoing doc before switching
       // Same-document split: the other pane keeps the outgoing document —
       // give it its own record (see switchTab).
       materializeSameDocSplit();
-      const nextTabs = [...tabsRef.current, tab];
+      // Placed after `after` when it is given (a note opened from a board),
+      // else at the end.
+      const at = after === undefined ? -1 : tabsRef.current.findIndex((t) => t.id === after);
+      const nextTabs =
+        at < 0 ? [...tabsRef.current, tab] : [...tabsRef.current.slice(0, at + 1), tab, ...tabsRef.current.slice(at + 1)];
       tabsRef.current = nextTabs;
       activeIdRef.current = tab.id;
       setTabs(nextTabs);
@@ -2659,6 +2666,10 @@ export default function App() {
   // nothing here moves. Several in a row line up after each other, as a
   // browser's do. One that has a tab already keeps it.
   const besideRef = useRef<{ from: string; last: string } | null>(null);
+  // A note's tab opened from a board's, by the note's tab id: closing it
+  // goes back to the board, as a browser goes back to the tab that opened
+  // another.
+  const openerRef = useRef<Map<string, string>>(new Map());
   const openBeside = useCallback((path: string, fromId: string | null) => {
     const list = tabsRef.current;
     if (list.some((t) => t.path === path)) return;
@@ -3172,7 +3183,7 @@ export default function App() {
       };
       const incomingHtmlOnly = incoming.kind === "file" && isHtmlPath(incoming.path);
       pathRef.current =
-        incoming.missing || incomingHtmlOnly || isUnsupportedTab(incoming) ? null : incoming.path;
+        incoming.missing || incomingHtmlOnly || holdsNoDocument(incoming) ? null : incoming.path;
       snapshotRef.current = incoming.snapshot;
       currentMarkdownRef.current = incomingMd.baselined ? incomingMd.md : incoming.contents;
       lastSavedRef.current = incomingMd.baselined ? incomingMd.baseline : incoming.contents;
@@ -3243,7 +3254,7 @@ export default function App() {
       const id = activeIdRef.current;
       if (!id) return;
       const tab = tabsRef.current.find((t) => t.id === id);
-      if (!tab || tab.missing || isUnsupportedTab(tab)) return;
+      if (!tab || tab.missing || holdsNoDocument(tab)) return;
       const htmlOnly = tab.kind === "file" && isHtmlPath(tab.path);
       let v: DocView = view ?? docViewRef.current;
       if (htmlOnly) v = "html";
@@ -3920,13 +3931,17 @@ export default function App() {
 
       scrollPositionsRef.current.delete(id);
       editorSeqRef.current.delete(id);
+      const opener = openerRef.current.get(id);
+      openerRef.current.delete(id);
       const idx = tabsRef.current.findIndex((t) => t.id === id);
       const remaining = tabsRef.current.filter((t) => t.id !== id);
       const nextActive =
         remaining.length === 0
           ? null
           : isActive
-            ? remaining[Math.min(idx, remaining.length - 1)].id
+            ? opener !== undefined && remaining.some((t) => t.id === opener)
+              ? opener
+              : remaining[Math.min(idx, remaining.length - 1)].id
             : activeIdRef.current;
       tabsRef.current = remaining;
       activeIdRef.current = nextActive;
@@ -3965,7 +3980,7 @@ export default function App() {
       // autosave write and the watcher has already moved to a neighbor tab.
       const affected = tabsRef.current.filter(
         (t) =>
-          t.kind === "file" &&
+          (t.kind === "file" || t.kind === "board") &&
           (t.path === target || (kind === "dir" && t.path.startsWith(target + "/"))),
       );
       for (const t of affected) await closeTab(t.id);
@@ -4143,6 +4158,23 @@ export default function App() {
     [flushPendingAutosave, flushSidecarWrite, repoint],
   );
 
+  // A document renamed in its folder keeps its place on the folder's board:
+  // its card's key follows (`renameCard`). One moved to another folder
+  // arrives there with no rank, at the end of its column.
+  const followCard = useCallback(
+    async (from: string, to: string) => {
+      if (dirname(from) !== dirname(to) || !/\.(md|markdown|mdown|mkd|html)$/i.test(from)) return;
+      const dir = dirname(from);
+      const found = await backend.boards.read(dir).catch(() => null);
+      const read = found ? parseBoards(found.text) : null;
+      if (!found || read === null || read === "newer") return;
+      const next = renameCard(read, basename(from), basename(to));
+      if (next === read) return;
+      await backend.boards.write(dir, serializeBoards(next), found).catch((e) => pushToast("error", errText(e)));
+    },
+    [pushToast],
+  );
+
   // Move or rename a file/folder on disk (the sidebar's drag-and-drop and
   // inline Rename both end here), then repoint the state that keyed off the
   // old path (`repointMoved`). Returns an error message for the caller to
@@ -4174,9 +4206,10 @@ export default function App() {
         window.alert(`Moved "${basename(from)}" but not its ${PART_LABEL[l.part]}.\n${l.error}`);
       }
       await repointMoved(from, to, kind);
+      if (kind === "file") await followCard(from, to);
       return null;
     },
-    [flushPendingAutosave, flushSidecarWrite, repointMoved],
+    [flushPendingAutosave, flushSidecarWrite, repointMoved, followCard],
   );
 
   /* ---------- The title above the note ---------- */
@@ -4190,6 +4223,7 @@ export default function App() {
     const tab = tabsRef.current.find((t) => t.id === id);
     if (!tab) return;
     let next: Tab;
+    if (tab.kind === "board") return;
     if (tab.kind === "untitled") {
       if (tab.title === title) return;
       storeUntitledTitle(tab.path, title);
@@ -4243,6 +4277,92 @@ export default function App() {
     },
     [openTab],
   );
+
+  /* ---------- Boards (src/boards.ts, src/Board.tsx) ---------- */
+
+  // A board folder's board, in its tab: the one it has, or a new one.
+  const openBoard = useCallback(
+    async (dir: string) => {
+      const existing = tabsRef.current.find((t) => t.kind === "board" && t.path === dir);
+      if (existing) {
+        if (existing.id !== activeIdRef.current) await switchTab(existing.id);
+        return;
+      }
+      await appendAndActivate({ id: uuid(), kind: "board", path: dir });
+    },
+    [switchTab, appendAndActivate],
+  );
+
+  // A card clicked on the board in tab `boardId`: its note in a tab right
+  // after the board's, in front — or, with ⌘, behind (`openBeside`). A note
+  // with a tab already has that one come forward.
+  const openFromBoard = useCallback(
+    async (path: string, boardId: string, behind: boolean, titled = false) => {
+      if (behind) {
+        openBeside(path, boardId);
+        return;
+      }
+      const p = await tabPathOf(path);
+      const existing = tabsRef.current.find((t) => t.kind === "file" && t.path === p);
+      if (existing) {
+        await switchTab(existing.id);
+      } else {
+        const tab: DocTab = { id: uuid(), kind: "file", path: p };
+        openerRef.current.set(tab.id, boardId);
+        await appendAndActivate(tab, boardId);
+      }
+      if (titled) setTitleFocus(p);
+    },
+    [openBeside, tabPathOf, switchTab, appendAndActivate],
+  );
+
+  // *Show as Board…* on a folder: the dialog, then the file, then its tab.
+  const [boardDialog, setBoardDialog] = useState<string | null>(null);
+  // *New tag…* from that dialog: the board is grouped by the tag made.
+  const boardAfterTagRef = useRef<string | null>(null);
+  const makeBoard = useCallback(
+    async (dir: string, tag: string): Promise<string | null> => {
+      const found = await backend.boards.read(dir).catch(() => null);
+      const read = found ? parseBoards(found.text) : null;
+      if (found && read === "newer") return "This folder's board was made by a newer version of Doklin. Update Doklin to change it.";
+      const board = read && read !== "newer" ? regroup(read, tag) : newBoard(tag);
+      try {
+        await backend.boards.write(dir, serializeBoards(board), found && read ? found : null);
+      } catch (e) {
+        return errText(e);
+      }
+      setBoardDialog(null);
+      setTreeRefreshToken((t) => t + 1);
+      await openBoard(dir);
+      return null;
+    },
+    [openBoard],
+  );
+
+  // *Show as Folder*: the file goes (the folder's history keeps it), and so
+  // do the folder's board tabs.
+  const showAsFolder = useCallback(
+    async (dir: string) => {
+      for (const t of tabsRef.current.filter((t) => t.kind === "board" && t.path === dir)) await closeTab(t.id);
+      try {
+        await backend.boards.remove(dir);
+      } catch (e) {
+        pushToast("error", errText(e));
+      }
+      setTreeRefreshToken((t) => t + 1);
+    },
+    [closeTab, pushToast],
+  );
+
+  // A board tab whose folder is gone, or no longer a board, is a ghost.
+  const boardGone = useCallback((id: string, gone: boolean) => {
+    const tab = tabsRef.current.find((t) => t.id === id);
+    if (!tab || tab.kind !== "board" || !!tab.missing === gone) return;
+    const nextTabs = tabsRef.current.map((t): Tab => (t.id === id ? { ...tab, missing: gone || undefined } : t));
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+  }, []);
+
 
   /* ---------- Sections: who can open what ---------- */
 
@@ -5243,7 +5363,7 @@ export default function App() {
         const active = tabsRef.current.find((t) => t.id === activeIdRef.current);
         // Find drives the markdown editor; there's nothing to search in the
         // rendered html view.
-        if (active && !active.missing && !isUnsupportedTab(active) && docViewRef.current === "md") {
+        if (active && !active.missing && !holdsNoDocument(active) && docViewRef.current === "md") {
           setFindOpen(true);
           setFindFocusToken((t) => t + 1);
         }
@@ -5474,7 +5594,7 @@ export default function App() {
   // A file that is not a document: its tab says so, with no document loaded.
   const activeUnsupported = activeTab != null && isUnsupportedTab(activeTab);
   // Nothing to edit, find in, publish or split: a ghost, or not a document.
-  const activeNoDoc = activeMissing || activeUnsupported;
+  const activeNoDoc = activeMissing || activeUnsupported || activeTab?.kind === "board";
   const showSidebar = workspaceRoot != null && sidebarOpen;
 
   // Which ways in this platform has. One left undefined is a button or a
@@ -5854,9 +5974,10 @@ export default function App() {
   // Change a note's text where it is. The open note takes the change to its
   // block and saves through the save path, after any write in flight; any
   // other is read and written over the rev that was read, once more on a
-  // conflict. Resolves to a sentence when it couldn't be written.
+  // conflict; with `create`, a note that isn't there yet is made with the
+  // change. Resolves to a sentence when it couldn't be written.
   const rewriteNote = useCallback(
-    async (path: string, change: (text: string) => string): Promise<string | null> => {
+    async (path: string, change: (text: string) => string, create = false): Promise<string | null> => {
       const name = basename(path).replace(/\.(md|markdown|mdown|mkd)$/i, "");
       if (pathRef.current === path) await savingRef.current;
       if (pathRef.current === path) {
@@ -5897,16 +6018,17 @@ export default function App() {
           : `Couldn't save the tags on ${name}.`;
       }
       for (let tries = 0; tries < 2; tries += 1) {
-        let read: DocumentText;
+        let read: DocumentText | null = null;
         try {
           read = await backend.documents.read(path);
         } catch (e) {
-          return `Couldn't read ${name}: ${errText(e)}`;
+          if (!create) return `Couldn't read ${name}: ${errText(e)}`;
         }
-        const next = change(read.text);
-        if (next === read.text) return null;
+        const text = read?.text ?? "";
+        const next = change(text);
+        if (read && next === text) return null;
         try {
-          const saved = await backend.documents.save(path, { text: next }, read.rev);
+          const saved = await backend.documents.save(path, { text: next }, read?.rev ?? null);
           // A note in the other pane follows: a write of this window's own
           // is never reported back to it.
           const s = splitRef.current;
@@ -5936,8 +6058,37 @@ export default function App() {
     [rewriteNote, pushToast],
   );
 
+  // A board's card moved to another column (or made by its "+ New"): the
+  // note's tag, written as a tag chip writes it.
+  const setBoardTag = useCallback(
+    (path: string, tag: string, value: string | null, create = false) =>
+      rewriteNote(path, (text) => writeTag(text, tag, value === null ? null : { name: tag, value }), create),
+    [rewriteNote],
+  );
+
+  // Why a card can't change columns: another device holds its note.
+  const boardHeldBy = useCallback(
+    (path: string): string | null => {
+      const held = leaseFor(cloudStatuses, path);
+      if (!held) return null;
+      return held.lease.own
+        ? `It’s open on your other device, ${held.lease.name}, so it can’t change columns for now.`
+        : `${held.lease.name} is editing it, so it can’t change columns for now.`;
+    },
+    [cloudStatuses],
+  );
+
+  // A card right-clicked: the sidebar's menu for its file, shown in the
+  // files list.
+  const [cardMenu, setCardMenu] = useState<{ path: string; x: number; y: number } | null>(null);
+  const openCardMenu = useCallback((path: string, x: number, y: number) => {
+    setSidebarOpen(true);
+    setSidebarMode("files");
+    setCardMenu({ path, x, y });
+  }, []);
+
   // A note's own *New tag…* and *Edit…*, and Settings' *Tags*.
-  const [tagDialog, setTagDialog] = useState<{ kind: "new"; note: string } | { kind: "edit"; def: TagDef } | null>(null);
+  const [tagDialog, setTagDialog] = useState<{ kind: "new"; note: string | null } | { kind: "edit"; def: TagDef } | null>(null);
   const [tagsPageOpen, setTagsPageOpen] = useState(false);
   const editTagNamed = useCallback((name: string) => {
     const def = tagListRef.current.find((d) => d.name === name);
@@ -5952,10 +6103,20 @@ export default function App() {
     async (def: TagDef, value: string | null, note: string | null): Promise<string | null> => {
       const failed = await changeTagList((root) => backend.cloud.setTag(root, def.name, def));
       if (failed) return failed;
-      if (note && value !== null) return rewriteNote(note, (text) => writeTag(text, def.name, { name: def.name, value }));
+      if (note && value !== null) {
+        const unset = await rewriteNote(note, (text) => writeTag(text, def.name, { name: def.name, value }));
+        if (unset) return unset;
+      }
+      // Made from *Show as Board…*: the folder is grouped by it.
+      const dir = boardAfterTagRef.current;
+      boardAfterTagRef.current = null;
+      if (dir) {
+        const unmade = await makeBoard(dir, def.name);
+        if (unmade) pushToast("error", unmade);
+      }
       return null;
     },
-    [changeTagList, rewriteNote],
+    [changeTagList, rewriteNote, makeBoard, pushToast],
   );
 
   // A notice that counts as it goes: its text changes in place.
@@ -6032,6 +6193,18 @@ export default function App() {
       if (failed) return failed;
       saved();
       const done = await renameInNotes(from, def, renames);
+      // Every board grouped by it, after its notes and before the old name
+      // leaves the list.
+      if (renamedTag && workspaceRoot) {
+        for (const dir of await backend.boards.folders(workspaceRoot).catch(() => [] as string[])) {
+          const found = await backend.boards.read(dir).catch(() => null);
+          const read = found ? parseBoards(found.text) : null;
+          if (!found || read === null || read === "newer" || !same(read.tag, from)) continue;
+          await backend.boards
+            .write(dir, serializeBoards(regroup(read, def.name)), found)
+            .catch((e) => done.failed.push(`The board in ${basename(dir)} still says ${from}: ${errText(e)}`));
+        }
+      }
       const left = await changeTagList(async (root) => {
         if (keepOld) await backend.cloud.removeTag(root, from);
         await backend.cloud.setTag(root, def.name, def);
@@ -6045,7 +6218,7 @@ export default function App() {
       }
       return null;
     },
-    [changeTagList, renameInNotes, pushToast],
+    [changeTagList, renameInNotes, pushToast, workspaceRoot],
   );
 
   const deleteTag = useCallback(
@@ -6072,12 +6245,15 @@ export default function App() {
     const paneMissing = focused ? activeMissing : doc ? doc.missing : activeMissing;
     // A file that is not a document: no editor, no rendition — the pane says so.
     const paneUnsupported = paneTab != null && isUnsupportedTab(paneTab);
+    // A folder shown as a board: the board, and nothing of a document's.
+    const paneBoard = paneTab?.kind === "board" ? paneTab : null;
 
     // A same-document split pane on markdown is a read-only MIRROR of the
     // live editor (see the SplitPane comment).
     const isMirror = !focused && s != null && !s.doc && s.view === "md";
     const showEditorHere =
       !paneUnsupported &&
+      !paneBoard &&
       (focused
         ? activeTab != null && !activeMissing && !activeIsHtmlDoc
         : isMirror
@@ -6347,7 +6523,23 @@ export default function App() {
               }
             />
           )}
-          {paneTab && paneMissing && (
+          {paneBoard && (
+            <Board
+              key={paneBoard.id}
+              dir={paneBoard.path}
+              list={tagList}
+              refreshToken={treeRefreshToken}
+              heldBy={boardHeldBy}
+              onOpen={(path, behind) => void openFromBoard(path, paneBoard.id, behind)}
+              onCardMenu={(path, x, y) => openCardMenu(path, x, y)}
+              onSetTag={setBoardTag}
+              onMade={(path) => void openFromBoard(path, paneBoard.id, false, true)}
+              onShowAsFolder={() => void showAsFolder(paneBoard.path)}
+              onGone={(gone) => boardGone(paneBoard.id, gone)}
+              onError={(sentence) => pushToast("error", sentence)}
+            />
+          )}
+          {paneTab && paneMissing && !paneBoard && (
             <MissingFileState
               path={paneTab.path}
               onRetry={
@@ -6589,6 +6781,11 @@ export default function App() {
           refreshToken={treeRefreshToken}
           onSelect={selectSidebarEntries}
           onOpenFile={(p) => void openTab(p)}
+          onOpenBoard={(dir) => void openBoard(dir)}
+          onShowAsBoard={(dir) => setBoardDialog(dir)}
+          onShowAsFolder={(dir) => void showAsFolder(dir)}
+          menuAt={cardMenu}
+          onMenuTaken={() => setCardMenu(null)}
           onOpenNewDocument={(p) => void openNewDocument(p)}
           onOpenFolder={onPickFolder}
           onOpenFilePicker={onPickFile}
@@ -6671,13 +6868,29 @@ export default function App() {
       {tagDialog?.kind === "new" && (
         <NewTagDialog
           list={tagList}
-          forNote
+          forNote={tagDialog.note !== null}
           onSubmit={async (def, value) => {
             const failed = await createTag(def, value, tagDialog.note);
             if (!failed) setTagDialog(null);
             return failed;
           }}
-          onClose={() => setTagDialog(null)}
+          onClose={() => {
+            boardAfterTagRef.current = null;
+            setTagDialog(null);
+          }}
+        />
+      )}
+      {boardDialog !== null && (
+        <ShowAsBoardDialog
+          folder={basename(boardDialog)}
+          list={tagList}
+          onPick={(tag) => makeBoard(boardDialog, tag)}
+          onNewTag={() => {
+            boardAfterTagRef.current = boardDialog;
+            setBoardDialog(null);
+            setTagDialog({ kind: "new", note: null });
+          }}
+          onClose={() => setBoardDialog(null)}
         />
       )}
       {tagDialog?.kind === "edit" && (

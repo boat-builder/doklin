@@ -13,9 +13,11 @@
 //! https.rs      every HTTPS client the apps build: the OS checks certificates
 //! versions/     the version store, its manager and its commands
 //! sidecar.rs    a document's `.meta.jsonl`, merged by its records
+//! boards.rs     a folder's `boards.json`, merged by its records
 //! command.rs    every command by name, JSON in and JSON out
 //! ```
 
+pub mod boards;
 pub mod cloud;
 pub mod command;
 mod host;
@@ -38,14 +40,22 @@ pub fn is_hidden_or_ignored(name: &str) -> bool {
 }
 
 /// The files Doklin syncs, versions and exports: markdown and html
-/// documents, and a document's comments (`<stem>.meta.jsonl`). Everything
-/// else — a picture, a PDF, a script an agent wrote, a cloned repository's
-/// sources — stays on its device and costs no request. Mirrored by the
-/// worker (`syncs`, cloud-worker/src/layout.ts), which refuses anything
-/// else: change both.
+/// documents, a document's comments (`<stem>.meta.jsonl`), and a folder's
+/// `boards.json` (how the apps show it as a board). Everything else — a
+/// picture, a PDF, a script an agent wrote, a cloned repository's sources —
+/// stays on its device and costs no request. Mirrored by the worker
+/// (`syncs`, cloud-worker/src/layout.ts), which refuses anything else:
+/// change both.
 pub fn syncs(rel: &str) -> bool {
-    let name = rel.rsplit('/').next().unwrap_or(rel).to_ascii_lowercase();
-    SYNCED_SUFFIXES.iter().any(|suffix| name.len() > suffix.len() && name.ends_with(suffix))
+    is_document(rel) || sidecar::is_sidecar(rel) || boards::is_boards(rel)
 }
 
-const SYNCED_SUFFIXES: [&str; 6] = [".md", ".markdown", ".mdown", ".mkd", ".html", ".meta.jsonl"];
+/// Whether `rel` is a document: a markdown or html file. Of the files that
+/// sync, only a document is shared, published or linked to by itself; a
+/// sidecar is its document's, and `boards.json` its folder's.
+pub fn is_document(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel).to_ascii_lowercase();
+    DOCUMENT_SUFFIXES.iter().any(|suffix| name.len() > suffix.len() && name.ends_with(suffix))
+}
+
+const DOCUMENT_SUFFIXES: [&str; 5] = [".md", ".markdown", ".mdown", ".mkd", ".html"];

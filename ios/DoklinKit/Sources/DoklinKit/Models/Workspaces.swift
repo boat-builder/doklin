@@ -680,12 +680,14 @@ public final class Workspace: Identifiable {
     /// A rename or a move made from this device: the engine hears which file
     /// or folder went where, so a note renamed and typed on at once stays the
     /// same document and something shared stays that share, and then that
-    /// both ends were written.
+    /// both ends were written. A card's key follows its document's new name,
+    /// in the same step.
     public func moved(_ moved: WorkspaceFiles.Moved) async {
+        let boards = followCards(moved)
         for (from, to) in moved {
             try? await Engine.shared.run("moved", ["from": .string(files.absolute(from)), "to": .string(files.absolute(to))])
         }
-        await wrote(moved.flatMap { [$0.from, $0.to] })
+        await wrote(moved.flatMap { [$0.from, $0.to] } + boards)
     }
 
     /// `absolute` as a path of this workspace, or nil when it is not in it.

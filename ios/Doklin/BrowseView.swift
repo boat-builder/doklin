@@ -77,9 +77,10 @@ struct BrowseView: View {
                         ForEach(group.rows) { row in
                             TreeRowView(row: row, workspace: workspace, chosen: chosen?.lowercased() == row.id) {
                                 tap(row)
+                            } toggle: {
+                                withAnimation(.snappy(duration: 0.2)) { tree.toggle(row.entry.path) }
                             }
                             .id(row.id)
-                            .accessibilityIdentifier("entry-\(row.entry.name)")
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 EntrySwipes(entry: row.entry, workspace: workspace)
                             }
@@ -150,8 +151,12 @@ struct BrowseView: View {
         Binding(get: { tree.filter }, set: { tree.filter = $0 })
     }
 
+    /// A folder opens in place — or, shown as a board, opens its board; its
+    /// chevron still opens the folder (`toggle`).
     private func tap(_ row: TreeRow) {
         switch row.entry {
+        case .folder(let dir) where row.board:
+            if path.last != .board(dir) { path.append(.board(dir)) }
         case .folder(let dir):
             withAnimation(.snappy(duration: 0.2)) { tree.toggle(dir) }
         case .document, .file:
@@ -226,27 +231,70 @@ struct BrowseView: View {
 
 /// One row of the tree: indented by how deep it is, a folder with its
 /// chevron, a document with when it changed, something shared with its mark.
+/// A folder shown as a board opens its board; its chevron is a button of its
+/// own, which opens the folder.
 struct TreeRowView: View {
     let row: TreeRow
     let workspace: Workspace
     let chosen: Bool
     let tap: () -> Void
+    /// Open or shut the folder, from a board folder's chevron.
+    let toggle: () -> Void
 
     var body: some View {
+        if row.board {
+            HStack(spacing: 0) {
+                Button(action: toggle) {
+                    chevron
+                        .frame(width: 22, height: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(row.open ? "Close the folder \(row.entry.name)" : "Open the folder \(row.entry.name)")
+                .accessibilityIdentifier("chevron-\(row.entry.name)")
+                Button(action: tap) {
+                    label(withChevron: false)
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(.isLink)
+                .accessibilityValue("Board")
+                .accessibilityIdentifier("entry-\(row.entry.name)")
+            }
+            .padding(.leading, CGFloat(row.depth) * 18)
+            .listRowBackground(chosen ? Theme.accentWash : nil)
+        } else {
+            Button(action: tap) {
+                label(withChevron: true)
+                    .padding(.leading, CGFloat(row.depth) * 18)
+            }
+            .buttonStyle(.plain)
+            .listRowBackground(chosen ? Theme.accentWash : nil)
+            .accessibilityAddTraits(row.isFolder ? [] : .isLink)
+            .accessibilityValue(row.isFolder ? (row.open ? "Open" : "Closed") : "")
+            .accessibilityIdentifier("entry-\(row.entry.name)")
+        }
+    }
+
+    private var chevron: some View {
+        Image(systemName: "chevron.right")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(Theme.text3)
+            .rotationEffect(.degrees(row.open ? 90 : 0))
+            .frame(width: 14)
+    }
+
+    private func label(withChevron: Bool) -> some View {
         let share = workspace.share(row.entry)
         let place = workspace.place(of: row.entry.path)
-        Button(action: tap) {
-            HStack(spacing: 8) {
-                if row.isFolder {
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Theme.text3)
-                        .rotationEffect(.degrees(row.open ? 90 : 0))
-                        .frame(width: 14)
-                } else {
-                    Color.clear.frame(width: 14, height: 1)
+        return HStack(spacing: 8) {
+                if withChevron {
+                    if row.isFolder {
+                        chevron
+                    } else {
+                        Color.clear.frame(width: 14, height: 1)
+                    }
                 }
-                EntryIcon(entry: row.entry, synced: place != .nowhere)
+                EntryIcon(entry: row.entry, synced: place != .nowhere, board: row.board)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(row.entry.name)
                         .foregroundStyle(Theme.text1)
@@ -273,13 +321,7 @@ struct TreeRowView: View {
                         .accessibilityLabel("Published")
                 }
             }
-            .padding(.leading, CGFloat(row.depth) * 18)
             .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .listRowBackground(chosen ? Theme.accentWash : nil)
-        .accessibilityAddTraits(row.isFolder ? [] : .isLink)
-        .accessibilityValue(row.isFolder ? (row.open ? "Open" : "Closed") : "")
     }
 
     /// Who something shared is shared with, why a row at the top of a
@@ -301,6 +343,8 @@ struct EntryIcon: View {
     let entry: FolderEntry
     /// In a section: what is in none stays on this iPhone.
     let synced: Bool
+    /// A folder shown as a board.
+    var board = false
 
     var body: some View {
         Image(systemName: symbol)
@@ -313,7 +357,7 @@ struct EntryIcon: View {
     private var symbol: String {
         switch entry {
         case .folder:
-            return synced ? "folder" : "icloud.slash"
+            return synced ? (board ? "rectangle.split.3x1" : "folder") : "icloud.slash"
         case .document(let row):
             return row.isHTML ? "doc.richtext" : "doc.text"
         case .file(let row):

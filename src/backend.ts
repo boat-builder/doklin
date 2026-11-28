@@ -135,10 +135,11 @@ export type DocumentChange = { path: string; part: "text" | DocumentPart };
 /** The tree's rows.
  *  `paired`: a markdown row with an html rendition folded into it.
  *  `supported: false`: a file that is not a document, listed only when every
- *  file is asked for. */
+ *  file is asked for.
+ *  `board`: the folder holds a `boards.json` (src/boards.ts). */
 export type TreeNode =
   | { kind: "file"; name: string; path: string; paired?: boolean; supported?: boolean }
-  | { kind: "dir"; name: string; path: string; children: TreeNode[] };
+  | { kind: "dir"; name: string; path: string; children: TreeNode[]; board?: boolean };
 
 /** `line`: null in a document whose lines are not numbered (html, searched
  *  as the text it shows). */
@@ -194,6 +195,38 @@ export interface Documents {
   search(root: string, query: string, caseSensitive: boolean, tags: TagFilter[]): Promise<SearchResults>;
   /** Whether a search can be told to match case. */
   readonly searchByCase: boolean;
+}
+
+/* ---------- Boards ---------- */
+
+/** A folder's `boards.json` (src/boards.ts) as read: its text, and what it
+ *  was read at. */
+export type BoardsText = { text: string; rev: Rev };
+
+/** A note's tag pair, as its frontmatter spells it: `keyedLines`'s pairs
+ *  (src/tags.ts). */
+export type CardPair = { name: string; value: string };
+
+/** How a folder is shown as a board. Only the apps read this file: it is
+ *  never a document, and agents never see it. */
+export interface Boards {
+  /** The folder's `boards.json`, whatever its case; null when it has none. */
+  read(dir: string): Promise<BoardsText | null>;
+  /** Write `text`, made from `base` (what `read` gave; null: there was no
+   *  file). When the file moved on since, the two are merged by record and
+   *  the merge is written: a board's write never conflicts. Resolves to the
+   *  file as written. Rejects, with a sentence, when the file went since
+   *  it was read: the folder was shown as a folder somewhere else. */
+  write(dir: string, text: string, base: BoardsText | null): Promise<BoardsText>;
+  /** *Show as Folder*: the file goes as a document goes, and the folder's
+   *  history keeps it. */
+  remove(dir: string): Promise<void>;
+  /** Every folder under `root` that holds a `boards.json`: what a tag's
+   *  rename rewrites. */
+  folders(root: string): Promise<string[]>;
+  /** The tag pairs of every markdown note directly in `dir`, by file name:
+   *  never one read or request per note. */
+  cards(dir: string): Promise<Record<string, CardPair[]>>;
 }
 
 /* ---------- The file clipboard ---------- */
@@ -618,6 +651,7 @@ export interface Updater {
 
 export interface Backend {
   readonly documents: Documents;
+  readonly boards: Boards;
   readonly cloud: Cloud;
   readonly fileClipboard: FileClipboard;
   /** Hand a web or mail address to whatever opens those here. */

@@ -113,7 +113,7 @@ struct Meta {
 /// A number as JavaScript writes one (`Number.prototype.toString`): the
 /// shortest digits that read back as it, plainly from 1e-6 to 1e21 and with
 /// an exponent outside that.
-fn js_number(f: f64) -> String {
+pub(crate) fn js_number(f: f64) -> String {
     if f == 0.0 {
         return "0".to_string();
     }
@@ -138,7 +138,7 @@ fn js_number(f: f64) -> String {
 }
 
 /// A string as JSON writes it: escaped as JavaScript escapes it.
-fn js_string(s: &str) -> String {
+pub(crate) fn js_string(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_default()
 }
 
@@ -389,8 +389,9 @@ fn merge_threads(base: &[Thread], mine: &[Thread], theirs: &[Thread]) -> Vec<Thr
 
 /// Whole records, three ways (`mergeKeyed`): one changed on one side is that
 /// side's, one changed on both is this side's, and a deletion sticks unless
-/// the other side changed what was deleted.
-fn merge_keyed<T: Clone + PartialEq>(base: &[T], ours: &[T], theirs: &[T], key: impl Fn(&T) -> &str) -> Vec<T> {
+/// the other side changed what was deleted. A folder's board merges by it
+/// too (boards.rs).
+pub(crate) fn merge_keyed<T: Clone + PartialEq>(base: &[T], ours: &[T], theirs: &[T], key: impl Fn(&T) -> &str) -> Vec<T> {
     let was: HashMap<&str, &T> = base.iter().map(|t| (key(t), t)).collect();
     let mine: HashSet<&str> = ours.iter().map(&key).collect();
     let other: HashMap<&str, &T> = theirs.iter().map(|t| (key(t), t)).collect();

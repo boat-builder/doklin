@@ -23,6 +23,9 @@ final class EntryActing {
     /// Something shared about to be left, or deleted for everyone.
     var question: Question?
     var publishing: PublishTarget?
+    /// A folder whose notes are about to be shown as a board, by a tag
+    /// asked for first.
+    var boarding: String?
     var failure: String?
 
     func newNote(in dir: String) {
@@ -32,6 +35,14 @@ final class EntryActing {
     func newFolder(in dir: String) {
         newName = ""
         creatingFolder = dir
+    }
+
+    /// *Show as Folder*: the folder's `boards.json` goes, and it lists as
+    /// it always did.
+    func showAsFolder(_ dir: String, in workspace: Workspace) {
+        Task {
+            if let failed = await workspace.removeBoard(in: dir) { failure = failed }
+        }
     }
 
     func rename(_ entry: FolderEntry) {
@@ -139,6 +150,14 @@ struct EntryActionsHost: ViewModifier {
             }
             .sheet(item: $acting.sharing) { target in
                 ShareSheet(workspace: workspace, target: target)
+            }
+            .sheet(isPresented: shown(\.boarding)) {
+                if let dir = acting.boarding {
+                    ShowAsBoardSheet(workspace: workspace, dir: dir) {
+                        acting.boarding = nil
+                        open(.board(dir))
+                    }
+                }
             }
             .asking($acting.question)
             .sheet(item: $acting.publishing) { target in
@@ -266,6 +285,21 @@ struct EntryMenu: View {
                 acting.moving = entry
             } label: {
                 Label("Move…", systemImage: "folder")
+            }
+        }
+        if case .folder(let dir) = entry, mayChange {
+            if workspace.files.isBoard(dir) {
+                Button {
+                    acting.showAsFolder(dir, in: workspace)
+                } label: {
+                    Label("Show as Folder", systemImage: "folder")
+                }
+            } else {
+                Button {
+                    acting.boarding = dir
+                } label: {
+                    Label("Show as Board…", systemImage: "rectangle.split.3x1")
+                }
             }
         }
         if let target = ShareTarget(entry), workspace.shareable(target) {

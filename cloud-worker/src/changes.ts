@@ -188,7 +188,7 @@ type Picked = {
 
 /** What a path names, as something that moves: a document whole — both
  *  versions and its comments — whatever extension it was named by, or a
- *  folder. */
+ *  folder: every file under it, its `boards.json` as much as its documents. */
 function pick(index: Index, from: string, what: MoveAsk["what"]): Picked | Refusal {
   const at = what === "folder" ? null : locate(index, from, null);
   if (at instanceof Refusal) return at;

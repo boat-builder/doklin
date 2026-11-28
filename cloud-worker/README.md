@@ -307,7 +307,8 @@ DELETE pages?path= | ?slug= → {stopped: [...]}; a path in no section that is a
 | `no_tag` | 400 | `tag` or `where` names a tag the list lacks; `tags` |
 | `tag_list` | 400 | `tags` would break the list's rules: a name, a value, the most it can hold |
 
-There are no plain files: only documents sync (`syncs`, `src/layout.ts`). A
+There are no plain files: only documents sync (`syncs`, `src/layout.ts`),
+and a folder's `boards.json`, which no route here names (*Boards*). A
 path is a document's stem (`plan`) or a version's full name (`plan.md`,
 `plan.html`); a name with another extension that names no document and no
 folder → `400 {error: "Doklin syncs markdown and html documents only — …"}`,
@@ -369,7 +370,7 @@ PUT    doc?space=&path=  {md?: {text, ifRev}, meta?: {text, ifRev}} → {md?, me
        or anchor check: a thread is a person's to move or remove. An html page is never written
        here (400). The same bytes are no revision: etag = over
 DELETE doc?space=&path=[&v=md|html]  the document, or one version of two (last_version → 409)
-DELETE folder?space=&path=  every file under it → {kind: "folder", path, files}; 404 none
+DELETE folder?space=&path=  every file under it, its board's too → {kind: "folder", path, files}; 404 none
 POST   move  {from: {space?, path}, to: {space?, path}, kind: "document"|"folder"} → {kind, from, to,
        files}; to exactly `to`, never "into it". Across sections: unpublished?; a document
        is ≤ 16 files; a folder goes 16 files a request, whole documents at a time, by path:
@@ -381,6 +382,18 @@ PUT    mount?space=&id=  {dir, was?} → {etag, over}: the share `id`, which sit
 POST   copy  the same body → {kind, from, to, files}: every file written again at `to` as a new
        file (new id, rev 1), in the same section or another; 16 files; 409 a name that is taken.
        A copy takes no page and no link with it
+PUT    board?space=&path=  {text, ifRev} → {file, etag, over}: the folder `path` shown as a board, its
+       `boards.json` written over the revision read (null: none yet) through the commit a save goes
+       through, by anyone who writes documents there; `file` = {fid, …its entry in the manifest};
+       one there in another case keeps its name. 409 {rev: now|null} when it moved on, nothing
+       written. 400: a text `parseBoards` reads as no board or a newer app's; `path` "" anywhere
+       but a shared folder; a folder the section doesn't hold (nothing in it, no share sitting in it)
+DELETE board?space=&path=  → {tombstone, etag, over}: shown as a folder again; the file goes with a
+       tombstone, `tombstone` = {fid, …its tombstone in the manifest}; 404 none
+GET    tags?space=&dir=  {notes: {<fid>: [{name, value}]}}: every markdown note directly in `dir` ("" the
+       top; never one beneath it), keyed by its file id, with its pairs for the listed tags — names as
+       the list spells them, values as the note does, [] for none — from D1 `tags`, caught up first as
+       a search with `tag` is: 202 {indexing, pending}. One request for a whole board
 GET    search?q=&limit=&tag=&after=  every section the person can open, as many as a request opens →
        {query, results: [{space, fid, path, matches, moreLines?, inName?, inComments?}], total,
        truncated?, notSearched?: [{space, path}], next?}; `next` is the `after` of the request that
@@ -399,6 +412,26 @@ DELETE tags?name=  → {tags, etag}; 404 none of that name
 Shared with the document API, never copied: `commit.ts`; `changes.ts`
 (removing a document or a version, moving in and across sections, copying,
 `keepPublic`); `publishing.ts`; `search.ts` (`searchIn`).
+
+## Boards (`boards.json`; `src/boards.ts`, `src/webBoards.ts`)
+
+A folder's `boards.json` (found whatever its case) says how the apps show the
+folder as a board: the listed tag that groups its notes into columns, and
+each card's rank (the format: `src/boards.ts`). It is the one file that
+syncs and is not a document. It is stored, versioned and carried as a
+document is: a folder's move, copy and delete (`changes.ts`, an agent's and
+a browser's, in parts between sections) take every file under the folder.
+Devices merge it by record (`tag`, each card, each unknown key), never as
+text, and never make a conflict copy (`engine/src/boards.rs`, `mergeBoards`
+in `src/web/merge.ts`).
+
+**Agents never see it.** No agent surface shows it: `tree` (a folder holding
+nothing else is no folder), `find`, search and its indexes (`search_text`,
+`links`, `tags`), tags, comments, links, publishing, and a published folder's
+pages. It has no document's name, so every route that reads or writes a
+document refuses it (`400`, the unsynced sentence). A browser writes it
+through `PUT|DELETE /api/web/board` alone. A section's own top holds one only
+in a shared folder, whose top is a folder where it sits.
 
 ## Public routes (`src/public.ts`; no auth; GET/HEAD, else 405)
 
@@ -448,7 +481,7 @@ One of those paths that reaches the worker names nothing: a 404, no bucket read.
 
 ```
 workspace.json   {id, name, createdAt, createdBy: {deviceId, deviceName}}; create-only; bound iff present
-manifest.json    manifest v6; CAS on etag
+manifest.json    the manifest (below); CAS on etag
 blobs/<fileId>/<hash>   immutable; hash = sha256 hex prefix, 16–64 chars
 versions/index.json     {version, horizonDays, snapshots: [{id, ts, device, reason, files, bytes,
                         digest, pinned?, label?, restoredFrom?}]}; CAS on etag
@@ -499,17 +532,20 @@ entries; path 1024 chars, 12 segments; name 80; title 300; desc 600. Ids
   away (`mounts.ts`); a device writes only a new `dir`. No entry is the top.
   None is taken in Library's manifest, or in a shared document's (`400`).
 - A shared document's manifest holds one document at its root and nothing
-  else: every path is `<name>.<ext>`, one name (`400` with a sentence).
+  else: every path is `<name>.<ext>`, one name, never a `boards.json` (`400`
+  with a sentence).
 - PUT checks ids, hashes, relative paths (no traversal), one path per file
   case-insensitively, rev/size ranges, slug grammar and reserved words,
   reference shape, ≤ 1 `root` (none in a space), `mounts`' shape. Never existence. Merge semantics are the engine's.
-- Only documents: every file, tombstone and `file` public entry names a path
-  `syncs` takes (`src/layout.ts` ⇄ `engine/src/lib.rs`, **change both**): the
-  last segment, ASCII-lowercased, longer than and ending in `.md` `.markdown`
-  `.mdown` `.mkd` `.html` or `.meta.jsonl`. Anything else → `400` with a
-  sentence. The worker's own writes (`src/commit.ts`) leave out such entries a
-  stored manifest still has — giving up the address of a page they drop — and
-  every read (`src/workspace.ts`) treats them as absent.
+- Only documents, and boards: every file, tombstone and `file` public entry
+  names a path `syncs` takes (`src/layout.ts` ⇄ `engine/src/lib.rs`, **change
+  both**): the last segment, ASCII-lowercased, longer than and ending in `.md`
+  `.markdown` `.mdown` `.mkd` `.html` or `.meta.jsonl`, or exactly
+  `boards.json`. Anything else → `400` with a sentence. A `file` public entry
+  never names a `boards.json` (`400`): a page shows a document or a folder.
+  The worker's own writes (`src/commit.ts`) leave out such entries a stored
+  manifest still has — giving up the address of a page they drop — and every
+  read (`src/workspace.ts`) treats them as absent.
 - `tags` is the workspace's tag list, in order, Library's manifest's alone
   (another section's with any → `400`). PUT holds it to the app's rules (`listProblem`,
   `src/tags.ts` ⇄ `engine/src/cloud/tags.rs`, **change both**): each name and
