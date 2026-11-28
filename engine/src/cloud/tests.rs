@@ -25,7 +25,7 @@ use super::invite;
 use super::manifest::*;
 use super::pace::{Cause, Limits, Mode, Plan, Usage};
 use super::remote::*;
-use super::scan::{hash16, now_ms, random_id, scan_local};
+use super::scan::{hash16, now_ms, random_id, scan_local, stat_pair, write_atomic};
 use super::space::{self, LIBRARY_DIR, RESERVED_DIRS};
 use super::status::*;
 use super::tags::{list_problem, TagDef, TagOp, TAGS_MAX};
@@ -120,6 +120,10 @@ struct FakeWorker {
     fail_manifest_puts: u32,
     /// The worker's loop catcher: this many requests are answered `429`.
     slowed: u32,
+    /// A save that lands while a device is sending: (absolute path, text),
+    /// written when the next blob or manifest put reaches the worker, as an
+    /// editor's save lands while an upload is on its way.
+    save_while_sending: Option<(PathBuf, String)>,
     /// Agent id -> name. All the engine ever learns of
     /// an agent: `/api/meta` lists them after the people, so an `a-` id in a
     /// manifest gets a name the same way an `m-` id does.
@@ -804,6 +808,9 @@ impl Remote for FakeRemote {
         async move {
             let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
+            if let Some((path, text)) = b.save_while_sending.take() {
+                std::fs::write(path, text).unwrap();
+            }
             if b.fail_manifest_puts > 0 {
                 b.fail_manifest_puts -= 1;
                 return Err(RemoteError::Offline("cut short".into()));
@@ -874,6 +881,9 @@ impl Remote for FakeRemote {
         async move {
             let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
+            if let Some((path, text)) = b.save_while_sending.take() {
+                std::fs::write(path, text).unwrap();
+            }
             b.blob_puts += 1;
             this.section(&mut b, caller)?.blobs.entry(key).or_insert(bytes);
             Ok(())
@@ -1723,6 +1733,59 @@ async fn edit_propagates_and_the_manifest_keeps_no_revisions() {
         json.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),
         vec!["by", "hash", "mtime", "path", "rev", "size"],
     );
+}
+
+/// A save that lands while the one before it is on its way up is an edit of
+/// its own. The file is recorded as the scan saw it before its bytes were
+/// read, so the next pass finds it changed and sends it; recorded as it was
+/// once the upload landed, the save read as synced and stayed on this Mac.
+#[tokio::test]
+async fn a_save_made_while_its_upload_is_on_its_way_goes_up_next() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "first\n");
+    a.cycle().await;
+    b.cycle().await;
+
+    a.write("doc.md", "second\n");
+    be.lock().unwrap().save_while_sending = Some((a.abs("doc.md"), "second, and a line more\n".into()));
+    a.cycle().await;
+    a.cycle().await;
+    b.cycle().await;
+    assert_eq!(b.read("doc.md").as_deref(), Some("second, and a line more\n"));
+    assert_eq!(manifest_of(&be).files.values().next().unwrap().rev, 3);
+}
+
+/// The same for a rename: the file at its new name is recorded as the scan
+/// saw it, so a save made while the move was on its way goes up next.
+#[tokio::test]
+async fn a_save_made_while_its_rename_is_on_its_way_goes_up_next() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("old.md", "kept\n");
+    a.cycle().await;
+    b.cycle().await;
+
+    a.rename("old.md", "new.md");
+    be.lock().unwrap().save_while_sending = Some((a.abs("new.md"), "kept, and edited\n".into()));
+    a.cycle().await;
+    a.cycle().await;
+    b.cycle().await;
+    assert_eq!(b.read("new.md").as_deref(), Some("kept, and edited\n"));
+    assert_eq!(b.read("old.md"), None);
+}
+
+/// What a write answers is the file as written: the rename into place keeps
+/// its size and mtime, which is what a download records it with.
+#[test]
+fn a_write_answers_the_file_as_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("doc.md");
+    let written = write_atomic(&path, b"as written\n").unwrap();
+    assert_eq!(written, stat_pair(&path));
+    assert_eq!(written.0, 11);
 }
 
 #[tokio::test]

@@ -190,8 +190,12 @@ pub fn content_type_for(path: &str) -> &'static str {
 }
 
 /// Atomic-enough write: temp file in the same directory, then rename over.
-/// The editor's watcher never sees a half-written document.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// The editor's watcher never sees a half-written document. It answers the
+/// snapshot (`stat_pair`) of the file as written, taken of the temp file,
+/// whose size and mtime the rename keeps: one taken of `path` afterwards
+/// could be of a save that landed since, which would then read as synced
+/// and never push.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<(u64, u64)> {
     let parent = path.parent().unwrap_or(Path::new(""));
     if !parent.as_os_str().is_empty() {
         std::fs::create_dir_all(parent)?;
@@ -199,7 +203,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let tmp = parent.join(format!("{}{}", name, TMP_SUFFIX));
     std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    let written = stat_pair(&tmp);
+    std::fs::rename(&tmp, path)?;
+    Ok(written)
 }
 
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -208,7 +214,7 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
 }
 
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
-    write_atomic(path, serde_json::to_vec_pretty(value)?.as_slice())
+    write_atomic(path, serde_json::to_vec_pretty(value)?.as_slice()).map(drop)
 }
 
 /// Read a file if it exists and is small enough to sync.
@@ -221,6 +227,9 @@ pub fn read_file_checked(path: &Path) -> Option<Vec<u8>> {
 }
 
 /// (size, mtime in ms) — the cheap snapshot that says "untouched since".
+/// A synced file's is the one that belongs to the bytes its hash is of:
+/// taken before they were read, or of them as written. One taken later can
+/// be of a save made since, which then reads as synced.
 pub fn stat_pair(path: &Path) -> (u64, u64) {
     match std::fs::metadata(path) {
         Ok(meta) => {
