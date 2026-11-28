@@ -283,6 +283,23 @@ final class EngineLiveTests: XCTestCase {
         try await MomentPlan.undo(report, paths: paths, store: library)
         XCTAssertEqual(try workspace.files.text(made), "A second thought.\n")
 
+        // Its title changed and typed on at once, the note stays the same
+        // document: a link to it still leads to it.
+        let restored = try XCTUnwrap(device.status(root)?.lastSyncMs)
+        await device.syncNow(root)
+        try await synced(device, root, after: restored)
+        await workspace.loadDocuments()
+        let id = try XCTUnwrap(workspace.documents.document(at: made)?.fileId)
+        let renaming = try XCTUnwrap(device.status(root)?.lastSyncMs)
+        try await note.rename(to: "Renamed on the phone")
+        XCTAssertEqual(note.path, "Library/Renamed on the phone.md")
+        try await note.save("A second thought, renamed.\n", over: try workspace.files.text(note.path))
+        await device.syncNow(root)
+        try await synced(device, root, after: renaming)
+        await workspace.loadDocuments()
+        XCTAssertEqual(workspace.documents.document(at: note.path)?.fileId, id)
+        XCTAssertNil(workspace.documents.document(at: made))
+
         // A note removed here is under Recently deleted, and comes back where
         // it was: into Library, the store's own folder.
         let ideas = try XCTUnwrap(try workspace.files.list("Library").first { $0.path == "Library/Ideas.md" })

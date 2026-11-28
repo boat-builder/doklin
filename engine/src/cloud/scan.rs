@@ -129,11 +129,17 @@ fn scan_dir(
 }
 
 /// The edit bus's filter: `abs` as a workspace-relative path, or None when
-/// it is not a file the scan would ever see — outside the root, the root
-/// itself, a hidden or ignored segment, one of our own temp files, a file
-/// that does not sync. The cloud's bus and the versioner's share it so they
-/// can't drift.
+/// it is not a file the scan would ever see — a file that does not sync, or
+/// anywhere `rel_in_scan` refuses. The cloud's bus and the versioner's share
+/// it so they can't drift.
 pub fn rel_for_touch(root: &Path, abs: &Path) -> Option<String> {
+    rel_in_scan(root, abs).filter(|rel| crate::syncs(rel))
+}
+
+/// `abs` as a workspace-relative path, a file's or a folder's, or None when
+/// the scan never looks there: outside the root, the root itself, a hidden or
+/// ignored segment, one of our own temp files.
+pub fn rel_in_scan(root: &Path, abs: &Path) -> Option<String> {
     let rel = rel_path(root, abs)?;
     if rel.is_empty() {
         return None;
@@ -141,11 +147,7 @@ pub fn rel_for_touch(root: &Path, abs: &Path) -> Option<String> {
     let bad = rel
         .split('/')
         .any(|seg| crate::is_hidden_or_ignored(seg) || seg.ends_with(TMP_SUFFIX));
-    if bad || !crate::syncs(&rel) {
-        None
-    } else {
-        Some(rel)
-    }
+    (!bad).then_some(rel)
 }
 
 /// `abs` relative to `root` with forward slashes, or None when it lies

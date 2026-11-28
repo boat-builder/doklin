@@ -58,14 +58,14 @@ public final class FolderModel {
     }
 
     public func rename(_ entry: FolderEntry, to name: String) async throws {
-        let (_, changed) = try workspace.files.rename(entry, to: name)
-        await workspace.wrote(changed)
+        let (_, moved) = try workspace.files.rename(entry, to: name)
+        await workspace.moved(moved)
         load()
     }
 
     public func move(_ entry: FolderEntry, into folder: String) async throws {
-        let (_, changed) = try workspace.files.move(entry, into: folder)
-        await workspace.wrote(changed)
+        let (_, moved) = try workspace.files.move(entry, into: folder)
+        await workspace.moved(moved)
         load()
     }
 

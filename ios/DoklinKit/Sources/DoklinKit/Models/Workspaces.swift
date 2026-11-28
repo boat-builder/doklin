@@ -645,6 +645,16 @@ public final class Workspace: Identifiable {
         changed(paths)
     }
 
+    /// A rename or a move made from this device: the engine hears which file
+    /// went where, so a note renamed and typed on at once stays the same
+    /// document, and then that both ends were written.
+    public func moved(_ moved: WorkspaceFiles.Moved) async {
+        for (from, to) in moved {
+            try? await Engine.shared.run("moved", ["from": .string(files.absolute(from)), "to": .string(files.absolute(to))])
+        }
+        await wrote(moved.flatMap { [$0.from, $0.to] })
+    }
+
     /// `absolute` as a path of this workspace, or nil when it is not in it.
     public func relative(_ absolute: String) -> String? {
         if absolute == root { return "" }

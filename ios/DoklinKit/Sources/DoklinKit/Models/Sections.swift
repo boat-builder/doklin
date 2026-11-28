@@ -228,8 +228,8 @@ public final class RestrictedFolderModel {
             let note = (try? workspace.files.list(DocLinks.directory(of: path)))?.first { $0.path == path }
             do {
                 guard let note else { throw DoklinError("“\(DocLinks.name(of: path))” is not there any more.") }
-                let (_, changed) = try workspace.files.move(note, into: made.path)
-                await workspace.wrote(changed)
+                let (_, moved) = try workspace.files.move(note, into: made.path)
+                await workspace.moved(moved)
             } catch {
                 problem = "The folder was made, but the note could not be moved into it: \((error as? DoklinError)?.message ?? error.localizedDescription)"
                 workspace.changed([made.path])

@@ -225,6 +225,10 @@ pub(crate) struct Ctx<'a> {
     /// Paths of this unit the app itself wrote since they last went up: a
     /// person's own edits, which never wait behind a bulk job.
     pub touched: &'a HashSet<String>,
+    /// What the app itself moved in this unit since the last pass that went
+    /// through, in order: (from, to), a file or a folder. Tips, used only
+    /// where the folder agrees (`stage_local`).
+    pub app_moves: &'a [(String, String)],
     /// The many-new-documents valve is holding: files no manifest has
     /// carried stay on this device until the person says.
     pub hold_new: bool,
@@ -1085,22 +1089,31 @@ impl<R: Remote> Unit<R> {
         let target = self.root.join(&rf.path);
         let prior = self.state.files.get(&fid).cloned();
 
-        // A pure rename of an unedited file: move it, no bytes.
+        // A rename: the copy here goes to the new name first. Of the same
+        // content, that is all; with an edit, the copy is brought up to date
+        // at its new name below — replaced if it is unedited here, merged if
+        // it is not. Left at the old name, an edit made here would become a
+        // second document.
         if let Some(p) = &prior {
-            if p.hash == rf.hash && p.path != rf.path {
+            if p.path != rf.path {
                 let from = self.root.join(&p.path);
                 if from.exists() && !target.exists() {
                     if let Some(parent) = target.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
                     if std::fs::rename(&from, &target).is_ok() {
-                        // A rename moves no bytes, so the snapshot from
-                        // before it still says whether the file was
-                        // edited here meanwhile; the fresh stat would
-                        // make that edit read as synced and never push.
-                        self.record_synced(&fid, &rf, None, (p.size, p.mtime_ms));
                         touched.push(rf.path.clone());
-                        return Ok(true);
+                        if p.hash == rf.hash {
+                            // A rename moves no bytes, so the snapshot from
+                            // before it still says whether the file was
+                            // edited here meanwhile; the fresh stat would
+                            // make that edit read as synced and never push.
+                            self.record_synced(&fid, &rf, None, (p.size, p.mtime_ms));
+                            return Ok(true);
+                        }
+                        if let Some(st) = self.state.files.get_mut(&fid) {
+                            st.path = rf.path.clone();
+                        }
                     }
                 }
             }
@@ -1293,6 +1306,27 @@ impl<R: Remote> Unit<R> {
             news.push((path.clone(), bytes, hash, (entry.size, entry.mtime_ms)));
         }
 
+        // Pass 2½: what the app said it moved (`Ctx::app_moves`), where the
+        // folder agrees — the file is gone from its recorded path, and an
+        // unknown file is where the app put it. That file is the same
+        // document whatever was written to it since: a title changed and
+        // typed on in one look keeps its id. The same bytes are a move; other
+        // bytes, one revision that moves and edits it.
+        if !ctx.app_moves.is_empty() {
+            vanished.retain(|fid| {
+                let Some(st) = self.state.files.get(fid) else { return true };
+                let Some(to) = moved_to(&st.path, ctx.app_moves) else { return true };
+                let Some(at) = news.iter().position(|(path, ..)| *path == to) else { return true };
+                let (path, bytes, hash, seen) = news.remove(at);
+                if hash == st.hash {
+                    staged.moves.push(StagedMove { file_id: fid.clone(), to: path, seen });
+                } else {
+                    staged.pushes.push(StagedPush { file_id: fid.clone(), path, hash, bytes, new: false, seen });
+                }
+                false
+            });
+        }
+
         // Pass 3: pair vanished + new with identical content = a move.
         let mut remaining_news = Vec::new();
         for (path, bytes, hash, seen) in news {
@@ -1361,8 +1395,22 @@ impl<R: Remote> Unit<R> {
         // stored their version's state, so this becomes a plain edit push and
         // the merge machinery owns any content difference next cycle.
         //
-        // A new file keeps the id it was first sent under (`pending_new`).
+        // A new file keeps the id it was first sent under (`pending_new`),
+        // and takes it along when the app moves it before a manifest has.
         // While the many-new-documents valve holds, new files stay here.
+        let carried: Vec<(String, String)> = self
+            .state
+            .pending_new
+            .keys()
+            .filter(|path| !scan.contains_key(*path))
+            .filter_map(|path| Some((path.clone(), moved_to(path, ctx.app_moves)?)))
+            .filter(|(_, to)| scan.contains_key(to) && !by_path.contains_key(to))
+            .collect();
+        for (from, to) in carried {
+            if let Some(fid) = self.state.pending_new.remove(&from) {
+                self.state.pending_new.entry(to).or_insert(fid);
+            }
+        }
         self.state.pending_new.retain(|path, _| scan.contains_key(path) && !by_path.contains_key(path));
         for (path, bytes, hash, seen) in remaining_news {
             let existing = remote.files.iter().find(|(_, rf)| rf.path == path);
@@ -1491,10 +1539,20 @@ impl<R: Remote> Unit<R> {
     fn fold_public(&self, next: &mut Manifest, remote: &Manifest, staged: &Staged, ctx: &Ctx<'_>) -> Folded {
         let mut folded = Folded::default();
 
-        // 0. Folder re-point.
-        if !staged.moves.is_empty() {
-            let moves: HashMap<&str, &str> =
-                staged.moves.iter().map(|m| (m.file_id.as_str(), m.to.as_str())).collect();
+        // 0. Folder re-point. A file moved and edited in one revision moved.
+        let moves: HashMap<&str, &str> = staged
+            .moves
+            .iter()
+            .map(|m| (m.file_id.as_str(), m.to.as_str()))
+            .chain(
+                staged
+                    .pushes
+                    .iter()
+                    .filter(|p| remote.files.get(&p.file_id).is_some_and(|f| f.path != p.path))
+                    .map(|p| (p.file_id.as_str(), p.path.as_str())),
+            )
+            .collect();
+        if !moves.is_empty() {
             let dirs: Vec<(String, String)> = next
                 .public
                 .iter()
@@ -1877,6 +1935,21 @@ impl<R: Remote> Unit<R> {
         self.persist_state();
         Ok(())
     }
+}
+
+/// Where the app's own moves took `path`, followed in the order they were
+/// made — a rename of a rename, a file in a folder that moved — or `None`
+/// when none of them did.
+fn moved_to(path: &str, moves: &[(String, String)]) -> Option<String> {
+    let mut at = path.to_string();
+    for (from, to) in moves {
+        if at == *from {
+            at = to.clone();
+        } else if let Some(rest) = at.strip_prefix(from.as_str()).and_then(|rest| rest.strip_prefix('/')) {
+            at = format!("{}/{}", to, rest);
+        }
+    }
+    (at != path).then_some(at)
 }
 
 /// Where folder `dir` went, if every file it held (in `remote`, the manifest

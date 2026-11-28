@@ -124,12 +124,12 @@ final class FilesTests: XCTestCase {
         try put("Projects/plan.html")
         try put("Projects/plan.meta.jsonl")
         let entry = try XCTUnwrap(try files.list("Projects").first)
-        let (path, changed) = try files.rename(entry, to: "Roadmap")
+        let (path, moved) = try files.rename(entry, to: "Roadmap")
         XCTAssertEqual(path, "Projects/Roadmap.md")
-        XCTAssertEqual(Set(changed), [
-            "Projects/plan.md", "Projects/Roadmap.md",
-            "Projects/plan.html", "Projects/Roadmap.html",
-            "Projects/plan.meta.jsonl", "Projects/Roadmap.meta.jsonl",
+        XCTAssertEqual(moved.map { "\($0.from) → \($0.to)" }, [
+            "Projects/plan.md → Projects/Roadmap.md",
+            "Projects/plan.html → Projects/Roadmap.html",
+            "Projects/plan.meta.jsonl → Projects/Roadmap.meta.jsonl",
         ])
         XCTAssertEqual(try files.list("Projects").map(\.path), ["Projects/Roadmap.md"])
         XCTAssertTrue(files.exists("Projects/Roadmap.meta.jsonl"))
