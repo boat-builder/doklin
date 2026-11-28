@@ -519,7 +519,9 @@ final class EngineLiveTests: XCTestCase {
         XCTAssertEqual(try workspace.files.text("Library/Ideas.md"), "---\nStatus: Underway\n---\n" + ideasText)
 
         // The tag renamed: the old name at the end until the notes have the
-        // new — the seed's note with a value the list lacks too.
+        // new — the seed's note with a value the list lacks too — and a
+        // board grouped by it grouped by the new name.
+        try workspace.files.write("Library/Projects/Roadmap/boards.json", Data(Boards.serialize(Board(tag: "Status")).utf8))
         let stage = TagEdit(from: "Status", def: TagDef(name: "Stage", values: underway.def.values, desc: workflow.desc), renames: [])
         let named = await workspace.saveTagEdit(stage)
         XCTAssertNil(named)
@@ -529,6 +531,7 @@ final class EngineLiveTests: XCTestCase {
         XCTAssertEqual(workspace.tagList, [stage.def])
         XCTAssertEqual(try workspace.files.text("Library/Ideas.md"), "---\nStage: Underway\n---\n" + ideasText)
         XCTAssertTrue(try workspace.files.text("Library/Projects/Roadmap/Ship the boat.md").hasPrefix("---\nStage: In progress\nowner: Ada\n"))
+        XCTAssertEqual(try workspace.files.text("Library/Projects/Roadmap/boards.json"), Boards.serialize(Board(tag: "Stage")))
 
         // A tag deleted leaves the list; a note keeps its line, now plain
         // frontmatter.

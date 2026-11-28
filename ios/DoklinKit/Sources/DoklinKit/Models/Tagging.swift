@@ -5,9 +5,10 @@
 // Markdown/Tags.swift's.
 //
 // A rename puts the new name or value in the list beside the old, rewrites
-// every note on this iPhone that has it, and only then takes the old out:
-// one that stops part-way leaves nothing reading as wrong. Removing a value
-// or a tag rewrites nothing.
+// every note on this iPhone that has it — and a tag's rename, every board
+// grouped by it (Board.swift) — and only then takes the old out: one that
+// stops part-way leaves nothing reading as wrong. Removing a value or a tag
+// rewrites nothing.
 
 import Foundation
 
@@ -209,6 +210,9 @@ extension Workspace {
         }
         // Every note at once: one word to the engine and the screens.
         if !wrote.isEmpty { await self.wrote(wrote) }
+        // Every board grouped by it, after its notes and before the old name
+        // leaves the list.
+        if edit.renamesTag { failed += await regroupBoards(from: from, to: def.name) }
         // The old name, when `saveTagEdit` kept it beside the new.
         let oldKept = edit.renamesTag && !Tags.same(from, def.name) && tag(named: from) != nil
         let left = await changeList {

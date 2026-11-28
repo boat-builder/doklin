@@ -343,3 +343,90 @@ struct EditTagSheet: View {
         }
     }
 }
+
+/// *Show as Board…* on a folder: the tag its notes are grouped by, as the
+/// Mac asks (`ShowAsBoardDialog`, src/TagDialogs.tsx). With no tags yet,
+/// *New tag…* makes one, and the board is grouped by it. `shown` hears that
+/// the board was made, to open it.
+struct ShowAsBoardSheet: View {
+    let workspace: Workspace
+    let dir: String
+    let shown: () -> Void
+
+    @State private var failure: String?
+    @State private var busy = false
+    @State private var making = false
+    @Environment(\.dismiss) private var dismiss
+
+    private var folder: String { DocLinks.name(of: dir) }
+
+    var body: some View {
+        let tags = workspace.tagList
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(tags, id: \.name) { tag in
+                        Button {
+                            pick(tag.name)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(tag.name).foregroundStyle(Theme.text1)
+                                Text(tag.values.joined(separator: ", "))
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.text3)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .disabled(busy)
+                        .accessibilityIdentifier("board-tag-\(tag.name)")
+                    }
+                    Button {
+                        making = true
+                    } label: {
+                        Label("New tag…", systemImage: "plus")
+                    }
+                    .disabled(busy)
+                    .accessibilityIdentifier("board-new-tag")
+                } header: {
+                    Intro(
+                        tags.isEmpty
+                            ? "A board’s columns are a tag’s values. Make a tag, and \(folder) shows its notes by it."
+                            : "Its columns are the values of the tag you pick, and each note in \(folder) sits in the column of its value. Everyone who can open the folder sees the board."
+                    )
+                } footer: {
+                    if let failure { Text(failure).foregroundStyle(Theme.errorInk) }
+                }
+            }
+            .navigationTitle("Show as Board")
+            .navigationBarTitleDisplayMode(.inline)
+            .interactiveDismissDisabled(busy)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .disabled(busy)
+                }
+            }
+            .sheet(isPresented: $making) {
+                NewTagSheet(list: tags, forNote: false) { def, _ in
+                    if let failed = await workspace.createTag(def, value: nil, on: nil) { return failed }
+                    return await made(def.name)
+                }
+            }
+        }
+    }
+
+    private func pick(_ tag: String) {
+        guard !busy else { return }
+        Task { failure = await made(tag) }
+    }
+
+    /// The board, grouped by `tag`: nil when it was made, else why not.
+    private func made(_ tag: String) async -> String? {
+        busy = true
+        failure = nil
+        let failed = await workspace.showAsBoard(dir, by: tag)
+        busy = false
+        if failed == nil { shown() }
+        return failed
+    }
+}

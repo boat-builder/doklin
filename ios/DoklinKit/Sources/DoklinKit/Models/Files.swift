@@ -141,7 +141,8 @@ public struct WorkspaceFiles: Sendable {
     }
 
     /// What a folder holds: folders, then documents, then other files, each
-    /// in name order. Hidden names and comment files are left out, and an
+    /// in name order. Hidden names, comment files and the folder's
+    /// `boards.json` (how it is shown: Board.swift) are left out, and an
     /// html file beside its markdown is that document's, not a row.
     public func list(_ dir: String) throws -> [FolderEntry] {
         let fm = FileManager.default
@@ -160,7 +161,7 @@ public struct WorkspaceFiles: Sendable {
             guard let kind = try? fm.attributesOfItem(atPath: absolute(path))[.type] as? FileAttributeType else { continue }
             if kind == .typeDirectory {
                 folders.append(path)
-            } else if kind == .typeRegular {
+            } else if kind == .typeRegular, !Boards.isFile(name) {
                 switch FileKind.of(name) {
                 case .markdown: markdown.append(path)
                 case .html: html[DocLinks.stem(of: name)] = path

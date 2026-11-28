@@ -49,6 +49,9 @@ public struct TreeRow: Identifiable, Hashable, Sendable {
     public let depth: Int
     /// A folder shown open.
     public let open: Bool
+    /// A folder shown as a board (`boards.json`): its name opens the board,
+    /// its chevron the folder.
+    public var board = false
 
     public var id: String { entry.id }
     public var isFolder: Bool {
@@ -203,7 +206,9 @@ public final class TreeModel {
                 if let keep, !keep.contains(entry.id) { continue }
                 let isOpen: Bool
                 if case .folder = entry { isOpen = keep != nil || open.contains(entry.id) } else { isOpen = false }
-                rows.append(TreeRow(entry: entry, depth: depth, open: isOpen))
+                var row = TreeRow(entry: entry, depth: depth, open: isOpen)
+                if case .folder(let path) = entry { row.board = files.isBoard(path) }
+                rows.append(row)
                 if isOpen, case .folder(let path) = entry { rows += flatten((try? files.list(path)) ?? [], depth: depth + 1) }
             }
             return rows

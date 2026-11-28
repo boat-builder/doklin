@@ -35,7 +35,9 @@
 // leaving and deleting for everyone; HistoryUITests: a note's versions, the
 // workspace's moments, recently deleted; CommentsUITests: a thread read,
 // started, answered and removed, a note published and stopped, published
-// pages; TagsUITests: a tag made, set and renamed, a note found by it),
+// pages; TagsUITests: a tag made, set and renamed, a note found by it;
+// BoardUITests: a folder shown as a board, cards moved and made, shown as a
+// folder again),
 // each then checked against what it left on the domain. A journey asks this script, at an address it
 // serves, for what only the domain's side can do: its line, another device
 // editing a document, another person sharing a folder with this one, and
@@ -235,11 +237,13 @@ async function tagsOnTheDomain() {
   return (await res.json()).tags ?? [];
 }
 
-/** Whether the domain holds the tags `want`, and Ideas with `line` above the seed's text. */
-async function tagsAre(want, line) {
+/** Whether the domain holds the tags `want` — `among` others, when another
+ *  journey made some too — and Ideas with `line` above the seed's text. */
+async function tagsAre(want, line, { among = false } = {}) {
   const tags = await tagsOnTheDomain();
   const ideas = await textOnTheDomain("Ideas.md");
-  if (!isDeepStrictEqual(tags, want) || ideas !== `---\n${line}\n---\n${SEED_FILES["Ideas.md"]}`) {
+  const held = among ? want.every((tag) => tags.some((t) => isDeepStrictEqual(t, tag))) : isDeepStrictEqual(tags, want);
+  if (!held || ideas !== `---\n${line}\n---\n${SEED_FILES["Ideas.md"]}`) {
     console.error(`the tags the app made are not on the domain as a Mac would make them:\n${JSON.stringify(tags)}\n${ideas}`);
     return false;
   }
@@ -281,15 +285,49 @@ const ON_THE_DOMAIN = {
     console.log("the comments the app wrote are on the domain");
     return true;
   },
+  // The board's notes with the tags its moves and its "+ New" gave them, in
+  // the bytes a Mac writes, the tag it made in the list, and its
+  // boards.json gone again with Show as Folder.
+  BoardUITests: async () => {
+    const want = {
+      "Sprint/Fix the login.md": "---\nStage: Doing\n---\n",
+      "Sprint/Write the docs.md": "---\nStage: Todo\n---\n",
+      "Sprint/Ship it.md": "---\nStage: Todo\n---\n",
+    };
+    const stage = { name: "Stage", values: ["Todo", "Doing", "Done"] };
+    const tagged = async () => {
+      for (const [path, text] of Object.entries(want)) if ((await textOnTheDomain(path)) !== text) return false;
+      if (!(await tagsOnTheDomain()).some((tag) => isDeepStrictEqual(tag, stage))) return false;
+      return !(await onTheDomain("Sprint/boards.json"));
+    };
+    if (!(await eventually(tagged))) {
+      const got = await Promise.all(Object.keys(want).map(async (path) => `${path}: ${JSON.stringify(await textOnTheDomain(path))}`));
+      console.error(`the board's notes are not on the domain as a Mac would write them, its tag isn't listed, or its boards.json is still there:\n${got.join("\n")}\n${JSON.stringify(await tagsOnTheDomain())}`);
+      return false;
+    }
+    console.log("the board's notes, its tag and its folder are on the domain");
+    return true;
+  },
   // The tag the app made, with the value renamed, and the note that has it
-  // renamed to match — its own text untouched under its block.
+  // renamed to match — its own text untouched under its block. Beside
+  // whatever tag another journey made.
   TagsUITests: async () => {
     const status = { name: "Status", values: ["Todo", "Underway", "Done"], desc: "Where a piece of work is." };
-    if (!(await tagsAre([status], "Status: Underway"))) return false;
+    if (!(await tagsAre([status], "Status: Underway", { among: true }))) return false;
     console.log("the tags the app made are on the domain");
     return true;
   },
 };
+
+/** Asks `check` again for up to a minute, until it holds: what a journey
+ *  did last may still be on its way to the domain as the journey ends. */
+async function eventually(check) {
+  for (let tries = 0; tries < 30; tries += 1) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return check();
+}
 
 /** What a run asks of the domain's side, answered at the address this gives:
  *    /line                 a device line. A line works once, and a person has

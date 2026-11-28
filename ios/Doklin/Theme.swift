@@ -100,6 +100,8 @@ struct NoticeBar: View {
 /// Where a tap in the app can lead.
 enum Route: Hashable {
     case document(String)
+    /// A folder shown as a board (`BoardView`).
+    case board(String)
     /// A note just made: it opens to be named, the caret in its title.
     case made(String)
     /// A note opened at the first place a search's words are in it — or, when
