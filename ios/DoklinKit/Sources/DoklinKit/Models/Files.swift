@@ -299,12 +299,15 @@ public struct WorkspaceFiles: Sendable {
         }
     }
 
-    private func relocate(_ pairs: [(String, String)]) throws -> [String] {
+    /// Each file or folder a rename or a move took somewhere else, and where.
+    public typealias Moved = [(from: String, to: String)]
+
+    private func relocate(_ pairs: [(String, String)]) throws -> Moved {
         let fm = FileManager.default
         for (from, to) in pairs where from.lowercased() != to.lowercased() && exists(to) {
             throw DoklinError("A file or folder named “\(DocLinks.name(of: to))” already exists there.")
         }
-        var changed: [String] = []
+        var moved: Moved = []
         for (from, to) in pairs where from != to {
             do {
                 try fm.createDirectory(at: url(to).deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -319,14 +322,14 @@ public struct WorkspaceFiles: Sendable {
             } catch {
                 throw DoklinError("“\(DocLinks.name(of: from))” could not be moved: \(error.localizedDescription)")
             }
-            changed += [from, to]
+            moved.append((from, to))
         }
-        return changed
+        return moved
     }
 
     /// Rename in place. A document keeps its rendition and its comments; a
-    /// file keeps the extension typed. Answers the new path and what changed.
-    public func rename(_ entry: FolderEntry, to name: String) throws -> (path: String, changed: [String]) {
+    /// file keeps the extension typed. Answers the new path and what went where.
+    public func rename(_ entry: FolderEntry, to name: String) throws -> (path: String, moved: Moved) {
         if let problem = Self.nameProblem(name) { throw DoklinError(problem) }
         var newName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if case .document = entry, FileKind.of(newName) == .markdown || FileKind.of(newName) == .html {
@@ -339,7 +342,7 @@ public struct WorkspaceFiles: Sendable {
     }
 
     /// Move into another folder (`""` is the top of the workspace).
-    public func move(_ entry: FolderEntry, into dir: String) throws -> (path: String, changed: [String]) {
+    public func move(_ entry: FolderEntry, into dir: String) throws -> (path: String, moved: Moved) {
         if case .folder(let own) = entry, dir == own || dir.hasPrefix(own + "/") {
             throw DoklinError("A folder can't go inside itself.")
         }

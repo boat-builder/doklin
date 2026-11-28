@@ -25,7 +25,7 @@ use super::invite;
 use super::manifest::*;
 use super::pace::{Cause, Limits, Mode, Plan, Usage};
 use super::remote::*;
-use super::scan::{hash16, now_ms, random_id, scan_local};
+use super::scan::{hash16, now_ms, random_id, scan_local, stat_pair, write_atomic};
 use super::space::{self, LIBRARY_DIR, RESERVED_DIRS};
 use super::status::*;
 use super::tags::{list_problem, TagDef, TagOp, TAGS_MAX};
@@ -120,6 +120,10 @@ struct FakeWorker {
     fail_manifest_puts: u32,
     /// The worker's loop catcher: this many requests are answered `429`.
     slowed: u32,
+    /// A save that lands while a device is sending: (absolute path, text),
+    /// written when the next blob or manifest put reaches the worker, as an
+    /// editor's save lands while an upload is on its way.
+    save_while_sending: Option<(PathBuf, String)>,
     /// Agent id -> name. All the engine ever learns of
     /// an agent: `/api/meta` lists them after the people, so an `a-` id in a
     /// manifest gets a name the same way an `m-` id does.
@@ -804,6 +808,9 @@ impl Remote for FakeRemote {
         async move {
             let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
+            if let Some((path, text)) = b.save_while_sending.take() {
+                std::fs::write(path, text).unwrap();
+            }
             if b.fail_manifest_puts > 0 {
                 b.fail_manifest_puts -= 1;
                 return Err(RemoteError::Offline("cut short".into()));
@@ -874,6 +881,9 @@ impl Remote for FakeRemote {
         async move {
             let caller = this.ready()?;
             let mut b = this.be.lock().unwrap();
+            if let Some((path, text)) = b.save_while_sending.take() {
+                std::fs::write(path, text).unwrap();
+            }
             b.blob_puts += 1;
             this.section(&mut b, caller)?.blobs.entry(key).or_insert(bytes);
             Ok(())
@@ -1499,6 +1509,15 @@ impl Device {
         std::fs::create_dir_all(to_abs.parent().unwrap()).unwrap();
         std::fs::rename(self.abs(from), to_abs).unwrap();
     }
+    /// The app moved a file or a folder, as `move_path` does: on disk, told
+    /// to the engine, both ends touched.
+    fn move_in_app(&mut self, from: &str, to: &str) {
+        self.rename(from, to);
+        let (from, to) = (self.ws(from), self.ws(to));
+        self.engine.app_moved(from.clone(), to.clone());
+        self.engine.touch_activity(&from);
+        self.engine.touch_activity(&to);
+    }
     /// The shared section's files, by their paths in it.
     fn files(&self) -> Vec<String> {
         scan_local(&self.library(), &RESERVED_DIRS).unwrap().keys().cloned().collect()
@@ -1723,6 +1742,59 @@ async fn edit_propagates_and_the_manifest_keeps_no_revisions() {
         json.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),
         vec!["by", "hash", "mtime", "path", "rev", "size"],
     );
+}
+
+/// A save that lands while the one before it is on its way up is an edit of
+/// its own. The file is recorded as the scan saw it before its bytes were
+/// read, so the next pass finds it changed and sends it; recorded as it was
+/// once the upload landed, the save read as synced and stayed on this Mac.
+#[tokio::test]
+async fn a_save_made_while_its_upload_is_on_its_way_goes_up_next() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "first\n");
+    a.cycle().await;
+    b.cycle().await;
+
+    a.write("doc.md", "second\n");
+    be.lock().unwrap().save_while_sending = Some((a.abs("doc.md"), "second, and a line more\n".into()));
+    a.cycle().await;
+    a.cycle().await;
+    b.cycle().await;
+    assert_eq!(b.read("doc.md").as_deref(), Some("second, and a line more\n"));
+    assert_eq!(manifest_of(&be).files.values().next().unwrap().rev, 3);
+}
+
+/// The same for a rename: the file at its new name is recorded as the scan
+/// saw it, so a save made while the move was on its way goes up next.
+#[tokio::test]
+async fn a_save_made_while_its_rename_is_on_its_way_goes_up_next() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("old.md", "kept\n");
+    a.cycle().await;
+    b.cycle().await;
+
+    a.rename("old.md", "new.md");
+    be.lock().unwrap().save_while_sending = Some((a.abs("new.md"), "kept, and edited\n".into()));
+    a.cycle().await;
+    a.cycle().await;
+    b.cycle().await;
+    assert_eq!(b.read("new.md").as_deref(), Some("kept, and edited\n"));
+    assert_eq!(b.read("old.md"), None);
+}
+
+/// What a write answers is the file as written: the rename into place keeps
+/// its size and mtime, which is what a download records it with.
+#[test]
+fn a_write_answers_the_file_as_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("doc.md");
+    let written = write_atomic(&path, b"as written\n").unwrap();
+    assert_eq!(written, stat_pair(&path));
+    assert_eq!(written.0, 11);
 }
 
 #[tokio::test]
@@ -1981,6 +2053,180 @@ async fn rename_is_metadata_only_and_propagates() {
     b.cycle().await;
     assert!(b.read("old-name.md").is_none());
     assert_eq!(b.read("new-name.md").as_deref(), Some("stable content that does not change\n"));
+}
+
+/* ---------- A move the app made ---------- */
+
+/// A title changed and typed on before the engine looked: the app said
+/// which file moved where, so it is the same document — one revision that
+/// moves and edits it — and the other device gets the edit at the new name.
+#[tokio::test]
+async fn a_note_renamed_and_edited_in_the_app_keeps_its_id() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("old.md", "one\n");
+    a.cycle().await;
+    b.cycle().await;
+    let fid = fid_at(&be, "old.md");
+    let rev = manifest_of(&be).files[&fid].rev;
+
+    a.move_in_app("old.md", "new.md");
+    a.write("new.md", "one\ntwo\n");
+    a.cycle().await;
+    let m = manifest_of(&be);
+    assert_eq!(m.files.len(), 1, "one document");
+    assert_eq!(fid_at(&be, "new.md"), fid, "the same id");
+    assert_eq!(m.files[&fid].rev, rev + 1, "one revision moves and edits it");
+    assert!(!m.tombstones.contains_key(&fid));
+
+    b.cycle().await;
+    assert_eq!(b.read("new.md").as_deref(), Some("one\ntwo\n"));
+    assert_eq!(b.read("old.md"), None);
+    assert_eq!(b.files(), vec!["new.md".to_string()]);
+}
+
+/// The same rename and edit made outside the app (Finder, another editor)
+/// is told to nobody: content is all the engine has to pair by, and the
+/// bytes differ, so the note is a new document and the old one is deleted.
+#[tokio::test]
+async fn renamed_and_edited_outside_the_app_a_note_is_a_new_document() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("old.md", "one\n");
+    a.cycle().await;
+    let fid = fid_at(&be, "old.md");
+
+    a.rename("old.md", "new.md");
+    a.write("new.md", "one\ntwo\n");
+    a.cycle().await;
+    assert_ne!(fid_at(&be, "new.md"), fid);
+    assert!(manifest_of(&be).tombstones.contains_key(&fid));
+}
+
+/// A folder the app renamed takes every file in it along, the one edited
+/// on the way as well, and a page of the folder follows it.
+#[tokio::test]
+async fn a_folder_renamed_in_the_app_with_an_edit_inside_keeps_every_id() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("Plans/a.md", "# a\n");
+    a.write("Plans/b.md", "# b\n");
+    a.engine.probe_worker().await;
+    a.publish_folder("Plans", "plans", "Plans", "What we're building").unwrap();
+    a.cycle().await;
+    b.cycle().await;
+    let (fa, fb) = (fid_at(&be, "Plans/a.md"), fid_at(&be, "Plans/b.md"));
+
+    a.move_in_app("Plans", "Roadmap");
+    a.write("Roadmap/a.md", "# a, edited on the way\n");
+    a.cycle().await;
+    assert_eq!(fid_at(&be, "Roadmap/a.md"), fa);
+    assert_eq!(fid_at(&be, "Roadmap/b.md"), fb);
+    assert!(manifest_of(&be).tombstones.is_empty());
+    assert_eq!(public_of(&be)["plans"].path, "Roadmap");
+
+    b.cycle().await;
+    assert_eq!(b.files(), vec!["Roadmap/a.md".to_string(), "Roadmap/b.md".to_string()]);
+    assert_eq!(b.read("Roadmap/a.md").as_deref(), Some("# a, edited on the way\n"));
+}
+
+/// Renamed twice before the engine looked: one move, from where it was
+/// to where it is.
+#[tokio::test]
+async fn two_renames_before_a_pass_are_one_move() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("a.md", "one\n");
+    a.cycle().await;
+    let fid = fid_at(&be, "a.md");
+    let rev = manifest_of(&be).files[&fid].rev;
+
+    a.move_in_app("a.md", "b.md");
+    a.move_in_app("b.md", "c.md");
+    a.write("c.md", "one\ntwo\n");
+    a.cycle().await;
+    let m = manifest_of(&be);
+    assert_eq!(fid_at(&be, "c.md"), fid);
+    assert_eq!((m.files.len(), m.files[&fid].rev), (1, rev + 1));
+}
+
+/// A tip the folder does not bear out is not taken: when the old name is
+/// there again, or nothing is at the new one, the engine pairs by content
+/// as it always has.
+#[tokio::test]
+async fn a_move_the_folder_contradicts_is_not_taken() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("kept.md", "kept\n");
+    a.write("went.md", "went\n");
+    a.cycle().await;
+    let (kept, went) = (fid_at(&be, "kept.md"), fid_at(&be, "went.md"));
+
+    // Moved, and something wrote the old name again.
+    a.move_in_app("kept.md", "copy.md");
+    a.write("copy.md", "kept, and more\n");
+    a.write("kept.md", "kept\n");
+    // Said to have moved one way, but it went another.
+    a.engine.app_moved(a.ws("went.md"), a.ws("there.md"));
+    a.rename("went.md", "elsewhere.md");
+    a.write("elsewhere.md", "went, and more\n");
+    a.cycle().await;
+
+    assert_eq!(fid_at(&be, "kept.md"), kept, "the old name keeps its id");
+    assert_ne!(fid_at(&be, "copy.md"), kept);
+    assert_ne!(fid_at(&be, "elsewhere.md"), went);
+    assert!(manifest_of(&be).tombstones.contains_key(&went));
+}
+
+/// A new note whose first push was cut short, then renamed and edited in
+/// the app: it goes up under the id it was first sent with.
+#[tokio::test]
+async fn a_note_moved_before_its_first_push_landed_keeps_that_id() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    a.write("seed.md", "seed\n");
+    a.cycle().await;
+    a.write("draft.md", "draft\n");
+    be.lock().unwrap().fail_manifest_puts = 1;
+    assert!(a.engine.cycle().await.is_err());
+    let fid = a.engine.shared().state.pending_new["draft.md"].clone();
+
+    a.move_in_app("draft.md", "plan.md");
+    a.write("plan.md", "draft, and a plan\n");
+    a.cycle().await;
+    assert_eq!(fid_at(&be, "plan.md"), fid);
+    assert!(a.engine.shared().state.pending_new.is_empty());
+}
+
+/// Bob has an edit of a note not synced yet when Alice's rename and edit
+/// of it arrive in one revision: his copy moves to the new name and the two
+/// edits are merged there — one document, nothing left at the old name.
+#[tokio::test]
+async fn an_edit_here_of_a_note_renamed_and_edited_elsewhere_is_merged_into_it() {
+    let be = fake_worker();
+    let mut a = device("Alice", &be);
+    let mut b = device("Bob", &be);
+    a.write("doc.md", "one\ntwo\nthree\n");
+    a.cycle().await;
+    b.cycle().await;
+    let fid = fid_at(&be, "doc.md");
+
+    b.write("doc.md", "one\ntwo\nthree, and Bob's edit\n");
+    a.move_in_app("doc.md", "plan.md");
+    a.write("plan.md", "one, and Alice's edit\ntwo\nthree\n");
+    a.cycle().await;
+    b.cycle().await;
+
+    let merged = "one, and Alice's edit\ntwo\nthree, and Bob's edit\n";
+    assert_eq!(b.read("plan.md").as_deref(), Some(merged));
+    assert_eq!(b.read("doc.md"), None);
+    let m = manifest_of(&be);
+    assert_eq!((m.files.len(), fid_at(&be, "plan.md")), (1, fid.clone()));
+    assert_eq!(m.files[&fid].hash, hash16(merged.as_bytes()), "the merge went up");
+    a.cycle().await;
+    assert_eq!(a.read("plan.md").as_deref(), Some(merged));
 }
 
 #[tokio::test]
@@ -4357,6 +4603,26 @@ fn bus_routes_a_touch_to_the_engine_whose_root_holds_it() {
 
     bus.unregister(std::path::Path::new("/ws/a"));
     assert!(!bus.touch(std::path::Path::new("/ws/a/notes/x.md")));
+}
+
+#[test]
+fn bus_routes_a_move_to_the_engine_whose_root_holds_both_ends() {
+    let bus = EditBus::default();
+    let (a_tx, mut a_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (b_tx, mut b_rx) = tokio::sync::mpsc::unbounded_channel();
+    bus.register(PathBuf::from("/ws/a"), a_tx);
+    bus.register(PathBuf::from("/ws/b"), b_tx);
+    let path = std::path::Path::new;
+
+    assert!(bus.moved(path("/ws/a/Library/Plans"), path("/ws/a/Library/Roadmap")), "a folder too");
+    match a_rx.try_recv() {
+        Ok(EngineCmd::Moved { from, to }) => assert_eq!((from.as_str(), to.as_str()), ("Library/Plans", "Library/Roadmap")),
+        _ => panic!("a must hear its move"),
+    }
+    assert!(!bus.moved(path("/ws/a/Library/x.md"), path("/ws/b/Library/x.md")), "another workspace is not a move");
+    assert!(!bus.moved(path("/ws/a/Library/x.md"), path("/ws/a/.trash/x.md")), "nor somewhere the scan never looks");
+    assert!(!bus.moved(path("/elsewhere/x.md"), path("/ws/a/Library/x.md")));
+    assert!(a_rx.try_recv().is_err() && b_rx.try_recv().is_err());
 }
 
 #[tokio::test(start_paused = true)]

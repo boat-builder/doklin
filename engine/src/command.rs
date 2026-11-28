@@ -173,6 +173,10 @@ pub async fn call(core: &Arc<Core>, name: &str, args: Value) -> Result<Value, St
             core.touched(&a.get::<String>("path")?);
             json(())
         }
+        "moved" => {
+            core.moved(&a.get::<String>("from")?, &a.get::<String>("to")?);
+            json(())
+        }
         "device_name" => json(cloud::device_name(core)),
         "bundled_worker_version" => json(cloud::BUNDLED_WORKER_VERSION),
         "versions_reconcile" => {

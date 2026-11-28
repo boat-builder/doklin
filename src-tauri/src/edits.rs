@@ -15,11 +15,21 @@
 //! the tree and decide from content what actually changed. Either half may
 //! have nothing running for the path; then it is a no-op, as it is before
 //! the engine exists.
+//!
+//! `move_path` also says which file or folder went where (`edits::moved`),
+//! before touching both ends: a document renamed and edited before the cloud
+//! engine next looks stays the same document. A tip the scan checks.
 
 use tauri::AppHandle;
 
 pub fn touched(app: &AppHandle, path: &str) {
     if let Some(core) = crate::engine::try_core(app) {
         core.touched(path);
+    }
+}
+
+pub fn moved(app: &AppHandle, from: &str, to: &str) {
+    if let Some(core) = crate::engine::try_core(app) {
+        core.moved(from, to);
     }
 }

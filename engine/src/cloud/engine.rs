@@ -136,6 +136,8 @@ pub enum EngineCmd {
     Probe,
     /// The edit bus: a workspace-relative path the app just wrote.
     Touched(String),
+    /// The edit bus: the app moved a file or a folder, workspace-relative.
+    Moved { from: String, to: String },
     /// The absolute path the user is editing, or nothing.
     SetActivity(Option<String>),
     /// The user chose *Take over* on a document another Mac holds (absolute
@@ -421,6 +423,11 @@ pub struct Engine<R: Remote> {
     /// Workspace-relative paths the app wrote since they last went up: a
     /// person's own edits, which go before any bulk work.
     touched: HashSet<String>,
+    /// What the app moved since the last pass that went through, in the
+    /// order it moved them: (from, to), workspace-relative, a file or a
+    /// folder. Tips for the scan (`Ctx::app_moves`), kept like `touched`
+    /// until a pass has gone through.
+    app_moves: Vec<(String, String)>,
     /// A window of this workspace has focus.
     focused: bool,
     /// When this device was last used here: an edit, a document opened, a
@@ -482,6 +489,7 @@ impl<R: Remote> Engine<R> {
             take_over: None,
             pacer,
             touched: HashSet::new(),
+            app_moves: Vec::new(),
             focused: true,
             active_at: Instant::now(),
             failures: 0,
@@ -1016,8 +1024,10 @@ impl<R: Remote> Engine<R> {
         match &failure {
             None => {
                 self.last_sync_ms = Some(now_ms());
-                // What the app wrote has gone — the express lane never waits.
+                // What the app wrote has gone — the express lane never waits —
+                // and so have the moves it made.
                 self.touched.clear();
+                self.app_moves.clear();
                 self.set_status(self.settled_phase(), None);
                 if !changed.is_empty() {
                     // Something arrived from another device, so the versioner
@@ -1196,6 +1206,13 @@ impl<R: Remote> Engine<R> {
         let ws_root = self.root_key();
         let own_edits: HashSet<String> =
             self.touched.iter().filter_map(|p| unit.in_unit(p)).filter(|rel| !rel.is_empty()).collect();
+        // A move into another section is that section's to pair (`moves`).
+        let app_moves: Vec<(String, String)> = self
+            .app_moves
+            .iter()
+            .filter_map(|(from, to)| Some((unit.in_unit(from)?, unit.in_unit(to)?)))
+            .filter(|(from, to)| !from.is_empty() && !to.is_empty())
+            .collect();
         let ctx = Ctx {
             signature: &signature,
             people: &self.people,
@@ -1208,6 +1225,7 @@ impl<R: Remote> Engine<R> {
             elsewhere: &elsewhere,
             pacer: &self.pacer,
             touched: &own_edits,
+            app_moves: &app_moves,
             hold_new,
         };
         let written = unit.cycle_inner(&ctx).await?;
@@ -1837,6 +1855,12 @@ impl<R: Remote> Engine<R> {
         }
     }
 
+    /// The app moved `from` to `to` (workspace-relative): a tip for the next
+    /// pass that goes through.
+    pub(crate) fn app_moved(&mut self, from: String, to: String) {
+        self.app_moves.push((from, to));
+    }
+
     /// *Take over*: the document is the one being edited from this moment —
     /// asking for it is touching it — and the next beat claims it from
     /// whoever holds it. A path outside this workspace is not this engine's.
@@ -2254,6 +2278,9 @@ impl<R: Remote> Engine<R> {
                         self.touch_activity(&rel);
                         touch_dirty_at = Some(Instant::now());
                     }
+                    // The app touches both ends as well, which is what brings
+                    // the pass.
+                    Some(EngineCmd::Moved { from, to }) => self.app_moved(from, to),
                     Some(EngineCmd::SetActivity(p)) => {
                         // A new path is owed a beat now; the poll is what
                         // carries it, so the poll comes forward. The frontend

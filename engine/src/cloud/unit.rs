@@ -150,7 +150,7 @@ pub(crate) struct Staged {
     /// fileId -> (relative path, bytes) to upload + point the manifest at.
     pushes: Vec<StagedPush>,
     /// fileId -> new relative path (content unchanged).
-    moves: Vec<(String, String)>,
+    moves: Vec<StagedMove>,
     /// fileIds to tombstone.
     deletes: Vec<String>,
     /// Those of `deletes` that moved to another section, and which one: what
@@ -166,6 +166,18 @@ struct StagedPush {
     hash: String,
     /// A file no manifest has carried yet.
     new: bool,
+    /// The file as the scan saw it, before `bytes` were read: the snapshot
+    /// it is recorded with once the push lands. A save made while the push
+    /// was on its way then differs from it, and goes up next.
+    seen: (u64, u64),
+}
+
+#[derive(Debug)]
+struct StagedMove {
+    file_id: String,
+    to: String,
+    /// As `StagedPush::seen`, of the file at `to`.
+    seen: (u64, u64),
 }
 
 impl Staged {
@@ -213,6 +225,10 @@ pub(crate) struct Ctx<'a> {
     /// Paths of this unit the app itself wrote since they last went up: a
     /// person's own edits, which never wait behind a bulk job.
     pub touched: &'a HashSet<String>,
+    /// What the app itself moved in this unit since the last pass that went
+    /// through, in order: (from, to), a file or a folder. Tips, used only
+    /// where the folder agrees (`stage_local`).
+    pub app_moves: &'a [(String, String)],
     /// The many-new-documents valve is holding: files no manifest has
     /// carried stay on this device until the person says.
     pub hold_new: bool,
@@ -1073,25 +1089,31 @@ impl<R: Remote> Unit<R> {
         let target = self.root.join(&rf.path);
         let prior = self.state.files.get(&fid).cloned();
 
-        // A pure rename of an unedited file: move it, no bytes.
+        // A rename: the copy here goes to the new name first. Of the same
+        // content, that is all; with an edit, the copy is brought up to date
+        // at its new name below — replaced if it is unedited here, merged if
+        // it is not. Left at the old name, an edit made here would become a
+        // second document.
         if let Some(p) = &prior {
-            if p.hash == rf.hash && p.path != rf.path {
+            if p.path != rf.path {
                 let from = self.root.join(&p.path);
                 if from.exists() && !target.exists() {
                     if let Some(parent) = target.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
                     if std::fs::rename(&from, &target).is_ok() {
-                        self.record_synced(&fid, &rf, None);
-                        // A rename moves no bytes, so the snapshot from
-                        // before it still says whether the file was
-                        // edited here meanwhile; the fresh stat would
-                        // make that edit read as synced and never push.
-                        if let Some(st) = self.state.files.get_mut(&fid) {
-                            (st.size, st.mtime_ms) = (p.size, p.mtime_ms);
-                        }
                         touched.push(rf.path.clone());
-                        return Ok(true);
+                        if p.hash == rf.hash {
+                            // A rename moves no bytes, so the snapshot from
+                            // before it still says whether the file was
+                            // edited here meanwhile; the fresh stat would
+                            // make that edit read as synced and never push.
+                            self.record_synced(&fid, &rf, None, (p.size, p.mtime_ms));
+                            return Ok(true);
+                        }
+                        if let Some(st) = self.state.files.get_mut(&fid) {
+                            st.path = rf.path.clone();
+                        }
                     }
                 }
             }
@@ -1108,6 +1130,9 @@ impl<R: Remote> Unit<R> {
             }
         }
 
+        // Looked at before it is read, so that if the bytes read are
+        // recorded as synced, a save made after the read still shows.
+        let seen = stat_pair(&target);
         let local_now = read_file_checked(&target);
         let locally_edited = match (&prior, &local_now) {
             (Some(p), Some(bytes)) => hash16(bytes) != p.hash,
@@ -1139,9 +1164,9 @@ impl<R: Remote> Unit<R> {
                         }
                     }
                 }
-                write_atomic(&target, &bytes)
+                let written = write_atomic(&target, &bytes)
                     .map_err(|e| RemoteError::Other(format!("write {}: {}", rf.path, e)))?;
-                self.record_synced(&fid, &rf, Some(&bytes));
+                self.record_synced(&fid, &rf, Some(&bytes), written);
                 touched.push(rf.path.clone());
             }
             return Ok(safe);
@@ -1153,7 +1178,7 @@ impl<R: Remote> Unit<R> {
         let ours = local_now.unwrap_or_default();
         // The content address settles it before anything is downloaded.
         if hash16(&ours) == rf.hash {
-            self.record_synced(&fid, &rf, Some(&ours));
+            self.record_synced(&fid, &rf, Some(&ours), seen);
             return Ok(true);
         }
         let theirs = self.remote.get_blob(&fid, &rf.hash).await?;
@@ -1253,7 +1278,14 @@ impl<R: Remote> Unit<R> {
                         }
                         continue;
                     }
-                    staged.pushes.push(StagedPush { file_id: fid, path: fstate.path.clone(), hash, bytes, new: false });
+                    staged.pushes.push(StagedPush {
+                        file_id: fid,
+                        path: fstate.path.clone(),
+                        hash,
+                        bytes,
+                        new: false,
+                        seen: (entry.size, entry.mtime_ms),
+                    });
                 }
             }
         }
@@ -1264,28 +1296,49 @@ impl<R: Remote> Unit<R> {
         // will land is that file's: it is merged when it arrives.
         let arriving: HashSet<&str> =
             self.state.owed.iter().filter_map(|fid| remote.files.get(fid)).map(|rf| rf.path.as_str()).collect();
-        let mut news: Vec<(String, Vec<u8>, String)> = Vec::new(); // (path, bytes, hash)
+        let mut news: Vec<(String, Vec<u8>, String, (u64, u64))> = Vec::new(); // (path, bytes, hash, seen)
         for (path, entry) in scan {
             if by_path.contains_key(path) || arriving.contains(path.as_str()) {
                 continue;
             }
             let Some(bytes) = read_file_checked(&entry.abs) else { continue };
             let hash = hash16(&bytes);
-            news.push((path.clone(), bytes, hash));
+            news.push((path.clone(), bytes, hash, (entry.size, entry.mtime_ms)));
+        }
+
+        // Pass 2½: what the app said it moved (`Ctx::app_moves`), where the
+        // folder agrees — the file is gone from its recorded path, and an
+        // unknown file is where the app put it. That file is the same
+        // document whatever was written to it since: a title changed and
+        // typed on in one look keeps its id. The same bytes are a move; other
+        // bytes, one revision that moves and edits it.
+        if !ctx.app_moves.is_empty() {
+            vanished.retain(|fid| {
+                let Some(st) = self.state.files.get(fid) else { return true };
+                let Some(to) = moved_to(&st.path, ctx.app_moves) else { return true };
+                let Some(at) = news.iter().position(|(path, ..)| *path == to) else { return true };
+                let (path, bytes, hash, seen) = news.remove(at);
+                if hash == st.hash {
+                    staged.moves.push(StagedMove { file_id: fid.clone(), to: path, seen });
+                } else {
+                    staged.pushes.push(StagedPush { file_id: fid.clone(), path, hash, bytes, new: false, seen });
+                }
+                false
+            });
         }
 
         // Pass 3: pair vanished + new with identical content = a move.
         let mut remaining_news = Vec::new();
-        for (path, bytes, hash) in news {
+        for (path, bytes, hash, seen) in news {
             let matched = vanished
                 .iter()
                 .position(|fid| self.state.files.get(fid).map(|st| st.hash == hash).unwrap_or(false));
             match matched {
                 Some(idx) => {
                     let fid = vanished.remove(idx);
-                    staged.moves.push((fid, path));
+                    staged.moves.push(StagedMove { file_id: fid, to: path, seen });
                 }
-                None => remaining_news.push((path, bytes, hash)),
+                None => remaining_news.push((path, bytes, hash, seen)),
             }
         }
 
@@ -1342,15 +1395,29 @@ impl<R: Remote> Unit<R> {
         // stored their version's state, so this becomes a plain edit push and
         // the merge machinery owns any content difference next cycle.
         //
-        // A new file keeps the id it was first sent under (`pending_new`).
+        // A new file keeps the id it was first sent under (`pending_new`),
+        // and takes it along when the app moves it before a manifest has.
         // While the many-new-documents valve holds, new files stay here.
+        let carried: Vec<(String, String)> = self
+            .state
+            .pending_new
+            .keys()
+            .filter(|path| !scan.contains_key(*path))
+            .filter_map(|path| Some((path.clone(), moved_to(path, ctx.app_moves)?)))
+            .filter(|(_, to)| scan.contains_key(to) && !by_path.contains_key(to))
+            .collect();
+        for (from, to) in carried {
+            if let Some(fid) = self.state.pending_new.remove(&from) {
+                self.state.pending_new.entry(to).or_insert(fid);
+            }
+        }
         self.state.pending_new.retain(|path, _| scan.contains_key(path) && !by_path.contains_key(path));
-        for (path, bytes, hash) in remaining_news {
+        for (path, bytes, hash, seen) in remaining_news {
             let existing = remote.files.iter().find(|(_, rf)| rf.path == path);
             match existing {
                 Some((fid, _)) if self.state.files.contains_key(fid) => {
                     if self.state.files.get(fid).map(|s| s.hash != hash).unwrap_or(true) {
-                        staged.pushes.push(StagedPush { file_id: fid.clone(), path, hash, bytes, new: false });
+                        staged.pushes.push(StagedPush { file_id: fid.clone(), path, hash, bytes, new: false, seen });
                     }
                 }
                 _ if ctx.hold_new => {}
@@ -1368,7 +1435,7 @@ impl<R: Remote> Unit<R> {
                         .or(kept)
                         .cloned()
                         .unwrap_or_else(|| random_id("f"));
-                    staged.pushes.push(StagedPush { file_id: fid, path, hash, bytes, new: true });
+                    staged.pushes.push(StagedPush { file_id: fid, path, hash, bytes, new: true, seen });
                 }
             }
         }
@@ -1414,7 +1481,7 @@ impl<R: Remote> Unit<R> {
             );
         }
 
-        for (fid, to) in &staged.moves {
+        for StagedMove { file_id: fid, to, .. } in &staged.moves {
             if let Some(f) = next.files.get_mut(fid) {
                 // `mtime` stays: it says when the content last changed, and a
                 // move is not an edit. The document API reads it to tell an
@@ -1472,10 +1539,20 @@ impl<R: Remote> Unit<R> {
     fn fold_public(&self, next: &mut Manifest, remote: &Manifest, staged: &Staged, ctx: &Ctx<'_>) -> Folded {
         let mut folded = Folded::default();
 
-        // 0. Folder re-point.
-        if !staged.moves.is_empty() {
-            let moves: HashMap<&str, &str> =
-                staged.moves.iter().map(|(f, p)| (f.as_str(), p.as_str())).collect();
+        // 0. Folder re-point. A file moved and edited in one revision moved.
+        let moves: HashMap<&str, &str> = staged
+            .moves
+            .iter()
+            .map(|m| (m.file_id.as_str(), m.to.as_str()))
+            .chain(
+                staged
+                    .pushes
+                    .iter()
+                    .filter(|p| remote.files.get(&p.file_id).is_some_and(|f| f.path != p.path))
+                    .map(|p| (p.file_id.as_str(), p.path.as_str())),
+            )
+            .collect();
+        if !moves.is_empty() {
             let dirs: Vec<(String, String)> = next
                 .public
                 .iter()
@@ -1640,12 +1717,14 @@ impl<R: Remote> Unit<R> {
         folded
     }
 
-    /// After a won CAS: make local state mirror what we just published.
+    /// After a won CAS: make local state mirror what we just published. Each
+    /// file is recorded as the scan saw it before its bytes were read, never
+    /// as it is now: a save made while the push was on its way would read as
+    /// synced, and stay on this device.
     fn commit_staged(&mut self, staged: &Staged, next: &Manifest, etag: String) {
         for push in &staged.pushes {
             if let Some(rf) = next.files.get(&push.file_id) {
-                let abs = self.root.join(&rf.path);
-                let (size, mtime_ms) = stat_pair(&abs);
+                let (size, mtime_ms) = push.seen;
                 self.state.files.insert(
                     push.file_id.clone(),
                     FileState { path: rf.path.clone(), rev: rf.rev, hash: rf.hash.clone(), size, mtime_ms },
@@ -1656,14 +1735,11 @@ impl<R: Remote> Unit<R> {
                 self.state.pending_new.remove(&push.path);
             }
         }
-        for (fid, to) in &staged.moves {
-            let abs = self.root.join(to);
-            let (size, mtime_ms) = stat_pair(&abs);
+        for StagedMove { file_id: fid, to, seen } in &staged.moves {
             if let (Some(st), Some(rf)) = (self.state.files.get_mut(fid), next.files.get(fid)) {
                 st.path = to.clone();
                 st.rev = rf.rev;
-                st.size = size;
-                st.mtime_ms = mtime_ms;
+                (st.size, st.mtime_ms) = *seen;
             }
         }
         for fid in &staged.deletes {
@@ -1676,9 +1752,10 @@ impl<R: Remote> Unit<R> {
     }
 
     /// Adopt a remote file's state after applying its content to disk.
-    fn record_synced(&mut self, fid: &str, rf: &ManifestFile, bytes: Option<&[u8]>) {
-        let abs = self.root.join(&rf.path);
-        let (size, mtime_ms) = stat_pair(&abs);
+    /// `seen` is the file's snapshot as it was when it held those bytes —
+    /// as written, or as looked at before it was read (`stat_pair`).
+    fn record_synced(&mut self, fid: &str, rf: &ManifestFile, bytes: Option<&[u8]>, seen: (u64, u64)) {
+        let (size, mtime_ms) = seen;
         self.state.files.insert(
             fid.to_string(),
             FileState { path: rf.path.clone(), rev: rf.rev, hash: rf.hash.clone(), size, mtime_ms },
@@ -1858,6 +1935,21 @@ impl<R: Remote> Unit<R> {
         self.persist_state();
         Ok(())
     }
+}
+
+/// Where the app's own moves took `path`, followed in the order they were
+/// made — a rename of a rename, a file in a folder that moved — or `None`
+/// when none of them did.
+fn moved_to(path: &str, moves: &[(String, String)]) -> Option<String> {
+    let mut at = path.to_string();
+    for (from, to) in moves {
+        if at == *from {
+            at = to.clone();
+        } else if let Some(rest) = at.strip_prefix(from.as_str()).and_then(|rest| rest.strip_prefix('/')) {
+            at = format!("{}/{}", to, rest);
+        }
+    }
+    (at != path).then_some(at)
 }
 
 /// Where folder `dir` went, if every file it held (in `remote`, the manifest

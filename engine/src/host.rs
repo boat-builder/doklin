@@ -129,6 +129,16 @@ impl Core {
         self.version_bus.touch(Path::new(path));
     }
 
+    /// The app moved a file or a folder from `from` to `to` (absolute), and
+    /// touches both ends as well: which file went where, for the cloud engine
+    /// whose folder holds them. A document renamed and edited before the
+    /// engine next looks then stays the same document. A tip the scan checks,
+    /// never taken on trust; the versioner keeps history by name, and is not
+    /// told.
+    pub fn moved(&self, from: &str, to: &str) {
+        self.edit_bus.moved(Path::new(from), Path::new(to));
+    }
+
     /// Where sign-ins are kept: the app's keeper, or cloud.json itself.
     pub(crate) fn secrets(&self) -> Option<&dyn Secrets> {
         self.host.secrets()

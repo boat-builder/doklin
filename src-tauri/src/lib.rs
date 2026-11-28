@@ -957,7 +957,10 @@ fn move_path(app: AppHandle, from: String, to: String) -> Result<(), String> {
             }
         })
         .map_err(|e| format!("move {}: {}", from, e))?;
-    // Both ends: a move can cross from one connected workspace to another.
+    // Which file went where, for the engine that holds both ends (a move to
+    // another workspace is that one's new file). Then both ends: a move can
+    // cross from one connected workspace to another.
+    edits::moved(&app, &from, &to);
     edits::touched(&app, &from);
     edits::touched(&app, &to);
     Ok(())

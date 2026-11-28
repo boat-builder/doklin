@@ -261,11 +261,11 @@ public final class DocumentModel {
             throw DoklinError("There’s already a document called “\(name)” here.")
         }
         let row = DocumentRow(path: path, html: htmlPath, modified: nil)
-        let (to, changed) = try workspace.files.rename(.document(row), to: name)
+        let (to, moved) = try workspace.files.rename(.document(row), to: name)
         // Where it is before anyone hears it moved: a save that lands now
         // writes to the new name.
         path = to
-        await workspace.wrote(changed)
+        await workspace.moved(moved)
     }
 
     /// Say which document this device is editing — or, with nil, that it is

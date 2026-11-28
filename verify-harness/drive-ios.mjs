@@ -244,9 +244,10 @@ async function driveCore() {
     child.on("exit", (code) => resolve(code ?? 1));
   });
   if (status !== 0) return status;
-  // What the engine said it synced, asked of the domain itself.
-  if (!(await onTheDomain("From the phone.md"))) {
-    console.error("the note the engine wrote never reached the domain");
+  // What the engine said it synced, asked of the domain itself: the note
+  // made there, under the name EngineLiveTests last gave it.
+  if (!(await onTheDomain("Renamed on the phone.md")) || (await onTheDomain("From the phone.md"))) {
+    console.error("the note the engine wrote and renamed is not on the domain under its new name alone");
     return 1;
   }
   console.log("the note the engine wrote is on the domain");

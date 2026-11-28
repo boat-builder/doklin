@@ -16,7 +16,7 @@ use super::unit::{FileState, WorkspaceState};
 use super::manifest::{Manifest, ManifestFile};
 use super::remote::{Bound, Remote, RemoteError, WorkspaceRecord};
 use super::scan::{
-    content_type_for, hash16, now_ms, random_id, read_file_checked, scan_local, stat_pair, write_atomic,
+    content_type_for, hash16, now_ms, random_id, read_file_checked, scan_local, write_atomic,
     ScanEntry,
 };
 use super::status::{Events, EV_PROGRESS};
@@ -214,9 +214,11 @@ pub async fn seed_download<R: Remote>(
             other => FlowError::Other(format!("download {}: {}", rf.path, other)),
         })?;
         let abs = dest.join(&rf.path);
-        write_atomic(&abs, &bytes).map_err(|e| FlowError::Other(format!("write {}: {}", rf.path, e)))?;
+        // The file as written, not as it is after the base copy below: a
+        // save made in between would read as synced (`write_atomic`).
+        let (size, mtime_ms) =
+            write_atomic(&abs, &bytes).map_err(|e| FlowError::Other(format!("write {}: {}", rf.path, e)))?;
         let _ = write_atomic(&state_dir.join("base").join(&fid), &bytes);
-        let (size, mtime_ms) = stat_pair(&abs);
         states.insert(
             fid,
             FileState { path: rf.path.clone(), rev: rf.rev, hash: rf.hash.clone(), size, mtime_ms },
